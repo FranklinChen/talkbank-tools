@@ -1,4 +1,10 @@
-"""Immutable local-Pyannote model graph and lazy worker-local loader."""
+"""Immutable local-Pyannote model graph and its loader.
+
+The pipeline is built by the speaker task load (``load_local_pyannote_pipeline``,
+from ``batchalign.worker._model_loading.speaker``) when the worker's plan
+selects local pyannote, and held as a ``LoadedPyannotePipeline`` in worker
+state; a diarization request takes that handle and loads nothing.
+"""
 
 from __future__ import annotations
 
@@ -21,12 +27,15 @@ _COMMIT_REVISION = re.compile(r"[0-9a-f]{40}")
 _HUB_REPOSITORY_ID = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
 )
-_PYANNOTE_PIPELINE: _LoadedPipeline | None = None
 
 
 @dataclass(frozen=True)
-class _LoadedPipeline:
-    """Keep verified private model files alive for lazy backend reads."""
+class LoadedPyannotePipeline:
+    """The local diarization pipeline the speaker task load built.
+
+    Holds the verified private model files the pipeline reads from, so they
+    live exactly as long as the pipeline does.
+    """
 
     pipeline: object
     files: tempfile.TemporaryDirectory[str]
@@ -170,19 +179,6 @@ def _load_pipeline(config: dict[str, Any], *, token: str | None) -> object | Non
         raise _reclassified_access_error(error) from error
 
 
-def _emit_model_download_if_missing(artifact: PinnedHuggingFaceArtifact) -> None:
-    """Import progress reporting lazily to avoid the worker protocol cycle."""
-
-    from batchalign.worker._progress import emit_hf_download_if_missing
-
-    emit_hf_download_if_missing(
-        artifact.repo_id,
-        kind="speaker diarization",
-        artifacts=(artifact.filename,),
-        revision=artifact.revision,
-    )
-
-
 def _download_pinned_artifact(
     artifact: PinnedHuggingFaceArtifact, *, token: str | None
 ) -> str:
@@ -279,28 +275,34 @@ def _pinned_pipeline_config(
     return loaded
 
 
-def _get_pyannote_pipeline() -> object:
-    """Return one lazily loaded, immutable model graph per worker process."""
+def load_local_pyannote_pipeline() -> LoadedPyannotePipeline:
+    """Build the pinned local diarization pipeline, downloading its graph.
 
-    global _PYANNOTE_PIPELINE
+    Called once, by the speaker task load, under ``download_liveness``: the
+    pinned graph's three artifacts download while the config is resolved and
+    the pipeline built, announced when bytes arrive, with their growth
+    re-arming the loading stall window.
+    """
 
-    if _PYANNOTE_PIPELINE is None:
-        graph = load_local_pyannote_model_graph()
-        token = resolve_huggingface_hub_token()
-        for artifact in (graph.pipeline, graph.segmentation, graph.embedding):
-            _emit_model_download_if_missing(artifact)
-        files = tempfile.TemporaryDirectory(prefix="batchalign-model-")
-        try:
+    # Imported here, not at module level, to avoid the worker protocol
+    # import cycle.
+    from batchalign.worker._download_liveness import HfRepo, download_liveness
+
+    graph = load_local_pyannote_model_graph()
+    token = resolve_huggingface_hub_token()
+    files = tempfile.TemporaryDirectory(prefix="batchalign-model-")
+    try:
+        with download_liveness(
+            HfRepo(graph.pipeline.repo_id),
+            what=f"{graph.pipeline.repo_id} for speaker diarization",
+        ):
             pipeline = _load_pipeline(
                 _pinned_pipeline_config(graph, token=token, directory=Path(files.name)),
                 token=token,
             )
-            if pipeline is None:
-                raise RuntimeError(
-                    "pinned local Pyannote model graph could not be loaded"
-                )
-        except BaseException:
-            files.cleanup()
-            raise
-        _PYANNOTE_PIPELINE = _LoadedPipeline(pipeline, files)
-    return _PYANNOTE_PIPELINE.pipeline
+        if pipeline is None:
+            raise RuntimeError("pinned local Pyannote model graph could not be loaded")
+    except BaseException:
+        files.cleanup()
+        raise
+    return LoadedPyannotePipeline(pipeline, files)

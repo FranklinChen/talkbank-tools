@@ -77,6 +77,8 @@
 
 pub mod asr_model;
 pub mod error_envelope;
+pub mod fa_resources;
+pub mod progress;
 pub mod qwen_recognition;
 pub mod requests;
 pub mod responses;
@@ -87,6 +89,8 @@ pub mod whisper_windows;
 
 pub use asr_model::*;
 pub use error_envelope::*;
+pub use fa_resources::*;
+pub use progress::*;
 pub use qwen_recognition::*;
 pub use requests::*;
 pub use responses::*;

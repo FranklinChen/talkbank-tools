@@ -41,6 +41,7 @@ const PROGRESS_STAGE_LABELS: Record<FileProgressStage, string> = {
   resolving_audio: "Resolving audio",
   recovering_utterance_timing: "Recovering utterance timing",
   recovering_timing_fallback: "Recovering timing (fallback)",
+  preparing_alignment: "Preparing alignment",
   aligning: "Aligning",
   transcribing: "Transcribing",
   benchmarking: "Benchmarking",
@@ -60,6 +61,9 @@ const PROGRESS_STAGE_LABELS: Record<FileProgressStage, string> = {
   comparing: "Comparing",
   retry_scheduled: "Retry scheduled",
   waiting_for_worker: "Waiting for a worker",
+  waiting_for_host_memory: "Waiting for host memory",
+  preparing_worker: "Preparing worker",
+  downloading_model: "Downloading model",
 };
 
 /**
@@ -233,7 +237,13 @@ export function formatJsonDisplay(value: unknown): string {
 export function displayProgressLabel(
   stage: FileProgressStage | null | undefined,
   label: string | null | undefined,
+  current: number | null | undefined,
 ): string {
+  // Cache growth has a measured count but no known total. Keep its unit
+  // explicit instead of showing it as inference items or a percentage.
+  if (stage === "downloading_model" && current != null) {
+    return `Downloading model (${current} KiB received)`;
+  }
   if (stage) {
     return PROGRESS_STAGE_LABELS[stage] ?? label ?? "";
   }

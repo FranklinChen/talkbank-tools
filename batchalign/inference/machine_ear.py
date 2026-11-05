@@ -29,7 +29,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, assert_never
+
+if TYPE_CHECKING:
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 SAMPLE_RATE = 16_000
 CALIBRATED_MODEL_ID = "nvidia/audio-flamingo-3-hf"
@@ -86,57 +89,65 @@ def parse_verdict(answer: str) -> EarVerdict:
     return EarVerdict.UNPARSEABLE
 
 
-def load_machine_ear(
-    model_id: str = CALIBRATED_MODEL_ID, device: str = "cpu"
-) -> MachineEarHandle:
-    """Load (processor, model) for a supported audio-LLM family.
+class EarFamily(Enum):
+    """The audio-LLM families this engine can load, each by its own
+    ``transformers`` class and never with remote code.
 
-    Family dispatch by model id, mirroring the calibration pipeline's
-    loader minus its bake-off-only remote-code branch (see the module
-    security invariant).
+    Chosen by the caller, not guessed from a substring of the model id: a
+    fine-tune named without its family's spelling used to be refused, and
+    one whose name merely contained it was loaded with that class.
+    """
+
+    AUDIO_FLAMINGO_3 = "audio-flamingo-3"
+    """The calibrated family (``CALIBRATED_MODEL_ID``)."""
+
+    QWEN2_AUDIO = "qwen2-audio"
+    """Uncalibrated; usable for bake-offs, not for trusted verdicts."""
+
+
+def load_machine_ear(
+    snapshot: TransformersSnapshot, family: EarFamily, device: str = "cpu"
+) -> MachineEarHandle:
+    """Load (processor, model) of ``family`` from a resolved snapshot.
+
+    ``snapshot`` comes from ``pinned_hub.resolve_transformers``, so this
+    reads finished files and never downloads; the calibrated model is
+    ``resolve_transformers(CALIBRATED_MODEL_ID, None, kind=...)`` loaded as
+    ``EarFamily.AUDIO_FLAMINGO_3``.
     """
     # Heavy imports kept local so module import stays cheap for callers
     # that only need the verdict types and prompt.
     import torch
     from transformers import AutoProcessor
 
-    from batchalign.worker._progress import emit_download_event
-
-    emit_download_event(
-        stage="downloading_machine_ear_model",
-        user_message=(
-            f"Downloading machine-ear model {model_id} for placement "
-            "verification (one-time; future runs will use the local cache)…"
-        ),
-    )
     dtype = torch.float16 if device == "mps" else torch.float32
-    lowered = model_id.lower()
     # transformers' AutoProcessor factory is untyped upstream; narrow ignore.
-    processor = AutoProcessor.from_pretrained(model_id)  # type: ignore[no-untyped-call]
+    processor = AutoProcessor.from_pretrained(snapshot.path)  # type: ignore[no-untyped-call]
     model: Any
-    if "qwen2-audio" in lowered:
-        from transformers import Qwen2AudioForConditionalGeneration
+    match family:
+        case EarFamily.QWEN2_AUDIO:
+            from transformers import Qwen2AudioForConditionalGeneration
 
-        model = Qwen2AudioForConditionalGeneration.from_pretrained(
-            model_id, dtype=dtype
-        )
-    elif "audio-flamingo-3" in lowered:
-        try:
-            from transformers import AudioFlamingo3ForConditionalGeneration
-        except ImportError as err:
-            msg = (
-                f"{model_id} needs a transformers release with "
-                "AudioFlamingo3ForConditionalGeneration (the calibration ran "
-                "on transformers 5.x); the installed version lacks it"
+            model = Qwen2AudioForConditionalGeneration.from_pretrained(
+                snapshot.path, dtype=dtype
             )
-            raise ValueError(msg) from err
+        case EarFamily.AUDIO_FLAMINGO_3:
+            try:
+                from transformers import AudioFlamingo3ForConditionalGeneration
+            except ImportError as err:
+                msg = (
+                    "the Audio Flamingo 3 family needs a transformers release "
+                    "with AudioFlamingo3ForConditionalGeneration (the "
+                    "calibration ran on transformers 5.x); the installed "
+                    "version lacks it"
+                )
+                raise ValueError(msg) from err
 
-        model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
-            model_id, dtype=dtype
-        )
-    else:
-        msg = f"no loader for {model_id}; add a family branch (no trust_remote_code)"
-        raise ValueError(msg)
+            model = AudioFlamingo3ForConditionalGeneration.from_pretrained(
+                snapshot.path, dtype=dtype
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
     return MachineEarHandle(
         processor=processor, model=model.to(torch.device(device)), device=device
     )

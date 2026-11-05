@@ -82,7 +82,12 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     eprintln!("  Original error: {}", dump.error_message);
 
     let launch = replay_launch(&dump, args.lang.as_deref())?;
-    let request = captured_request(&dump)?;
+    let mut request = captured_request(&dump)?;
+    // A saved plan belonged to the old worker/host state. Replay prepares
+    // the original immutable inputs again and takes a fresh request lease.
+    if let crate::types::worker_v2::TaskRequestV2::ForcedAlignment(payload) = &mut request.payload {
+        payload.phase = crate::types::worker_v2::FaRequestPhaseV2::Candidate;
+    }
     let python = args
         .python
         .clone()
@@ -91,28 +96,46 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     eprintln!("  Python: {python}");
     eprintln!();
 
-    let loads_on_demand = launch.loads_on_demand();
     // The dump records the launch, not the host; size it as a server on
     // this host would, from the operator's config.
     let server_config =
         crate::config::load_config_from_layout(&crate::config::RuntimeLayout::from_env(), None)?;
     let host = crate::host_facts::HostSnapshot::read(&server_config)?;
-    let config = launch.into_config(python, WorkerRuntimeConfig::local(&host));
-    let ensure_task_timeout = config.ready_timeout_s;
-    let mut worker = WorkerHandle::spawn(config)
+    let config = launch.into_config(
+        python,
+        WorkerRuntimeConfig::local(&host),
+        server_config.worker_startup_stall(),
+    );
+    // What a server's pool would give this load: the host's admission of its
+    // memory lease, and the load's own stall window, not the startup one.
+    let preparation = crate::worker::pool::LoadPreparation {
+        admission: crate::worker::pool::LoadAdmission::new(
+            host.memory_coordinator(),
+            crate::worker::pool::ModelHosting::Models,
+            std::sync::Arc::new(crate::host_memory::NoIdleWorkers),
+        ),
+        stall: server_config.ensure_task_stall(),
+    };
+    // A one-off replay owns no pool: there is nothing idle to retire.
+    let mut worker = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(crate::host_memory::NoIdleWorkers),
+    )
+    .await
+    .map_err(|e| CliError::InvalidArgument(format!("Cannot start the worker: {e}")))?;
+    // Prepared as the pool prepares every worker before a task's first
+    // request, in every bootstrap mode.
+    let loaded = worker
+        .ensure_task(
+            &crate::worker::pool::TaskLoad::for_request(&request),
+            &preparation,
+        )
         .await
-        .map_err(|e| CliError::InvalidArgument(format!("Cannot start the worker: {e}")))?;
-    if loads_on_demand {
-        let (task, overrides) = crate::worker::pool::ensure_task_params(&request)
-            .map_err(|e| CliError::InvalidArgument(format!("Cannot load the task: {e}")))?;
-        worker
-            .ensure_task(task, overrides.as_ref(), ensure_task_timeout)
-            .await
-            .map_err(|e| CliError::InvalidArgument(format!("Cannot load the task: {e}")))?;
-    }
-
+        .map_err(|e| CliError::InvalidArgument(format!("Cannot load the task: {e}")))?;
     eprintln!("Sending original request...");
-    let outcome = worker.execute_v2(&request).await;
+    let outcome = async {
+        crate::worker::pool::dispatch_prepared!(loaded, &preparation.admission, crate::worker::pool::DispatchPreparation::begin(&request)?, permit => worker.execute_v2(&permit))
+    }.await;
     if let Err(error) = worker.shutdown().await {
         eprintln!("(worker shutdown: {error})");
     }
@@ -163,9 +186,12 @@ mod tests {
 
         let replayed = replay_launch(&dump, None)
             .expect("the dump records its launch")
-            .into_config("python3".to_owned(), WorkerRuntimeConfig::for_tests());
+            .into_config(
+                "python3".to_owned(),
+                WorkerRuntimeConfig::for_tests(),
+                crate::worker::LoadingStall::DEFAULT_STARTUP,
+            );
         assert_eq!(WorkerLaunch::of(&replayed), WorkerLaunch::of(&original));
-        assert!(WorkerLaunch::of(&original).loads_on_demand());
         assert_eq!(
             captured_request(&dump)
                 .expect("the captured line")

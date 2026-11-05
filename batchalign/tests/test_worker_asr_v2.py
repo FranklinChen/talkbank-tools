@@ -17,9 +17,9 @@ from batchalign.inference.asr import (
 from batchalign.tests._asr_model_pins import (
     loaded_identity,
     request_models,
-    worker_loaded,
 )
-from batchalign.worker._asr_v2 import AsrExecutionHostV2, execute_asr_request_v2
+from batchalign.tests._loaded_hosts import local_asr, provider_asr
+from batchalign.worker._asr_v2 import execute_asr_request_v2
 from batchalign.worker._types_v2 import (
     AsrBackendV2,
     AsrElementKindV2,
@@ -66,8 +66,8 @@ def test_window_ownership_crosses_the_real_rust_worker_bridge(tmp_path: Path) ->
     )
     response = execute_asr_request_v2(
         _make_request(tmp_path),
-        AsrExecutionHostV2(
-            local_whisper_runner=lambda _audio, lang: WhisperChunkResultPayloadV2(
+        local_asr(
+            lambda _audio, lang: WhisperChunkResultPayloadV2(
                 lang=lang,
                 text="",
                 chunks=observations,
@@ -162,7 +162,7 @@ def test_executes_local_whisper_asr_v2_request(tmp_path: Path) -> None:
 
     response = execute_asr_request_v2(
         _make_request(tmp_path),
-        AsrExecutionHostV2(local_whisper_runner=runner),
+        local_asr(runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -180,7 +180,7 @@ def test_returns_missing_attachment_for_invalid_asr_request(tmp_path: Path) -> N
 
     response = execute_asr_request_v2(
         request,
-        AsrExecutionHostV2(local_whisper_runner=lambda *_args: None),  # type: ignore[arg-type]
+        local_asr(lambda *_args: None),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -206,8 +206,8 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
 
     response = execute_asr_request_v2(
         bad_request,
-        AsrExecutionHostV2(
-            local_whisper_runner=lambda *_args: WhisperChunkResultPayloadV2(
+        local_asr(
+            lambda *_args: WhisperChunkResultPayloadV2(
                 lang="eng",
                 text="unused",
                 chunks=[],
@@ -222,12 +222,16 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
     assert response.result is None
 
 
-def test_returns_model_unavailable_for_unwired_asr_backend(tmp_path: Path) -> None:
-    """Cloud/provider ASR backends should fail explicitly on the live V2 path."""
+def test_a_rev_ai_request_reaching_a_worker_is_refused_by_name() -> None:
+    """Rev.AI runs in the Rust control plane: whatever this worker loaded, a
+    Rev.AI request is refused naming where it runs, and no runner is called."""
+
+    def must_not_run(*_args: object) -> object:
+        raise AssertionError("no worker runner serves Rev.AI")
 
     response = execute_asr_request_v2(
         _make_provider_request(backend=AsrBackendV2.REVAI),
-        AsrExecutionHostV2(),
+        provider_asr(AsrBackendV2.HK_TENCENT, must_not_run),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -235,13 +239,50 @@ def test_returns_model_unavailable_for_unwired_asr_backend(tmp_path: Path) -> No
     assert "Rust control plane" in response.outcome.message
 
 
-@worker_loaded(AsrBackendV2.HK_TENCENT)
+def test_a_request_for_another_backend_than_the_loaded_one_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The executor reads the backend from the host it is handed and refuses a
+    request for a different one, by name, before any runner is called."""
+
+    def must_not_run(*_args: object) -> object:
+        raise AssertionError("the loaded runner serves a different backend")
+
+    response = execute_asr_request_v2(
+        _make_request(tmp_path),
+        provider_asr(AsrBackendV2.HK_TENCENT, must_not_run),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
+    assert "this worker loaded the hk_tencent ASR backend" in response.outcome.message
+    assert "request asks for local_whisper" in response.outcome.message
+
+
+def test_the_provider_identity_is_read_from_the_host_it_is_handed() -> None:
+    """A provider response describes speech, never the model, so the result's
+    identity is the one the host's load recorded."""
+
+    def runner(item) -> MonologueAsrResponse:
+        return MonologueAsrResponse(lang=item.lang, monologues=[])
+
+    response = execute_asr_request_v2(
+        _make_provider_request(),
+        provider_asr(AsrBackendV2.HK_TENCENT, runner),
+    )
+
+    assert isinstance(response.outcome, ExecuteSuccessV2)
+    assert isinstance(response.result, MonologueAsrResultV2)
+    assert response.result.model == loaded_identity(AsrBackendV2.HK_TENCENT)
+
+
 def test_executes_provider_media_asr_v2_request() -> None:
     """Provider-media ASR requests should return typed monologue output.
 
-    Records a loaded identity first, as the real engine loader does: the bridge
-    reads this worker's load record before calling a provider, because the
-    provider's own reply describes speech and never the model behind it.
+    The host carries the identity its load recorded, as the real engine load
+    builds it: the bridge reads it from the host before calling a provider,
+    because the provider's own reply describes speech and never the model
+    behind it.
     """
 
     captured: dict[str, object] = {}
@@ -271,7 +312,7 @@ def test_executes_provider_media_asr_v2_request() -> None:
 
     response = execute_asr_request_v2(
         _make_provider_request(),
-        AsrExecutionHostV2(hk_tencent_runner=runner),
+        provider_asr(AsrBackendV2.HK_TENCENT, runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -321,9 +362,7 @@ class TencentRefusalStage(Enum):
         ),
     ],
 )
-@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_tencent_refusal_crosses_real_adapter_and_rust_bridge(
-    monkeypatch,
     stage: TencentRefusalStage,
     error_code: str,
     expected: ProtocolErrorCodeV2,
@@ -368,10 +407,11 @@ def test_tencent_refusal_crosses_real_adapter_and_rust_bridge(
     recognizer._region = "ap-guangzhou"
     recognizer._bucket = Bucket()
     recognizer._asr_client = Client()
-    monkeypatch.setattr(_tencent_asr, "_recognizer", recognizer)
     response = execute_asr_request_v2(
         _make_provider_request(),
-        AsrExecutionHostV2(hk_tencent_runner=_tencent_asr.infer_tencent_asr_v2),
+        provider_asr(
+            AsrBackendV2.HK_TENCENT, _tencent_asr.TencentAsr(recognizer).transcribe
+        ),
     )
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code is expected
@@ -397,7 +437,7 @@ def test_invalid_local_whisper_host_output_becomes_runtime_failure(
 
     response = execute_asr_request_v2(
         _make_request(tmp_path),
-        AsrExecutionHostV2(local_whisper_runner=runner),  # type: ignore[arg-type]
+        local_asr(runner),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -406,7 +446,6 @@ def test_invalid_local_whisper_host_output_becomes_runtime_failure(
     assert response.result is None
 
 
-@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_invalid_provider_asr_host_output_becomes_runtime_failure() -> None:
     """Malformed provider ASR host output should be classified as runtime failure."""
 
@@ -430,7 +469,7 @@ def test_invalid_provider_asr_host_output_becomes_runtime_failure() -> None:
 
     response = execute_asr_request_v2(
         _make_provider_request(),
-        AsrExecutionHostV2(hk_tencent_runner=runner),
+        provider_asr(AsrBackendV2.HK_TENCENT, runner),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -458,7 +497,7 @@ def test_whisper_chunk_inverted_timestamps_travel_raw(tmp_path: Path) -> None:
 
     response = execute_asr_request_v2(
         _make_request(tmp_path),
-        AsrExecutionHostV2(local_whisper_runner=runner),
+        local_asr(runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)

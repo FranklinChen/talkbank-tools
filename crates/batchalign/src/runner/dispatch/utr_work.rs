@@ -11,6 +11,7 @@ use crate::chat_ops::ChatFile;
 use crate::chat_ops::fa::utr::AsrTimingToken;
 use crate::chat_ops::fa::utr::{PreparedUtrTokens, UtrCancelled, UtrResult, UtrStrategy};
 use crate::error::ServerError;
+use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 
 #[derive(Clone)]
 struct Stop(Arc<AtomicBool>);
@@ -30,6 +31,21 @@ impl WorkControl for Stop {
         } else {
             Ok(())
         }
+    }
+    fn packed_search_cost(
+        &self,
+        cost: &batchalign_transform::dp_align::interleaving::PackedSearchCost,
+    ) {
+        tracing::debug!(
+            status = cost.status().name(),
+            last_stage = cost.last_stage().name(),
+            source_words = cost.source_words(),
+            reference_words = cost.reference_words(),
+            graph_nodes = cost.graph_nodes(),
+            work = ?cost.used(),
+            score_units = cost.reserved_score_units(),
+            "UTR packed correspondence search finished"
+        );
     }
 }
 
@@ -59,7 +75,19 @@ impl<'source> PendingUtr<'source> {
         }
     }
 
-    pub(super) async fn run(self) -> Result<UtrResult, ServerError> {
+    pub(super) async fn run(
+        self,
+        progress: Option<&ProgressSender>,
+    ) -> Result<UtrResult, ServerError> {
+        // ASR-window counts describe completed provider work, not progress
+        // through this CPU proof. Clear them at the consuming search boundary.
+        if let Some(progress) = progress {
+            let _ = progress.send(ProgressUpdate::new(
+                FileStage::RecoveringUtteranceTiming,
+                None,
+                None,
+            ));
+        }
         let cancellation = Stop(Arc::new(AtomicBool::new(false)));
         // Dropping the awaiting future (job cancellation or task abort) stops
         // queued work at entry and started work at its next checkpoint.

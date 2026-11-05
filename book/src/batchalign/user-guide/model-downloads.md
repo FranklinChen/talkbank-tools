@@ -1,7 +1,7 @@
 # Model Downloads and Caching
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:20 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 ## The contract
 
@@ -42,7 +42,7 @@ local cache and the same command runs without any download.
 | `transcribe --asr-engine whisper` (Python Whisper) | Whisper ASR model from Hugging Face; `openai/whisper-large-v3` is ~3.1 GB | 0.5-3.1 GB depending on model size | 1-10 min |
 | `transcribe --asr-engine whisper_hub` | The selected fine-tune; the seeded default (`thennal/whisper-medium-ml`) is ~3.1 GB | varies | 3-10 min |
 | `transcribe --asr-engine funaudio` (SenseVoice) | `FunAudioLLM/SenseVoiceSmall` (~0.9 GB) plus its voice-activity model (a few MB), both from Hugging Face | ~1 GB | 1-5 min |
-| `transcribe --asr-engine paraformer` | The Paraformer checkpoint (~1.0 GB) plus its punctuation model (~0.3 GB) and voice-activity model (a few MB), from **ModelScope**, not Hugging Face; a network that blocks ModelScope blocks this engine | ~1.3 GB | 1-10 min |
+| `transcribe --asr-engine paraformer` | The Paraformer checkpoint (~1.0 GB) plus its punctuation model (~0.3 GB) and voice-activity model (a few MB), from **ModelScope**, not Hugging Face; a network that blocks ModelScope blocks this engine | ~1.3 GB | 1-15 min; ModelScope can be slow from outside China (14 min observed from the US) |
 | `transcribe --asr-engine qwen` | `Qwen/Qwen3-ASR-1.7B-hf` (~4.1 GB; the 0.6B variant is ~1.6 GB) plus `Qwen/Qwen3-ForcedAligner-0.6B-hf` (~1.8 GB), which the worker always pairs with it | ~6 GB | 5-20 min |
 | `align` (Whisper engine) | Whisper FA model from Hugging Face | ~3 GB | 3-10 min |
 | `align` (Wave2Vec engine, default) | Wave2Vec MMS_FA bundle from torchaudio | ~1.2 GB | 1-5 min |
@@ -54,7 +54,6 @@ local cache and the same command runs without any download.
 | `translate --translate-engine seamless` | `facebook/hf-seamless-m4t-medium` from Hugging Face | ~4.8 GB | 5-15 min |
 | `translate` (default `google` engine), `--translate-engine tencent` or `aliyun` | Nothing; these are cloud services, and the text is sent to them | N/A | Provider latency only |
 | `coref` (English) | Stanza English coreference model | ~1.5 GB | 2-5 min |
-| `diarize --speaker-engine nemo` | Three NeMo models (voice activity, speaker embedding, diarization) from NVIDIA | sizes not stated here | several minutes |
 | `transcribe` (utterance segmentation, certain languages) | BERT utterance model from Hugging Face | ~400 MB | 1-3 min |
 
 These sizes are approximate; the Hugging Face figures were read from the
@@ -106,32 +105,61 @@ Example: a brand-new install running `batchalign3 morphotag input/ output/`
 will show a sequence like:
 
 ```text
-Downloading Stanza resource catalog (one-time, ~1 MB; future runs will be instant)…
-Stanza resource catalog ready.
-Downloading Stanza language pack for eng (en) (one-time, ~250-500 MB; future runs will use the local cache)…
-Loading Stanza English…
+Downloading the Stanza resource catalog (~1 MB) (one-time; future runs use the local cache)…
+Downloaded the Stanza resource catalog (~1 MB).
+Loading morphosyntax (eng)…
+Downloading the Stanza language pack for eng (en) (one-time; future runs use the local cache)…
+Downloaded the Stanza language pack for eng (en).
+Loaded morphosyntax (eng) in 41250 ms
 Processing input/file1.cha
-Processing input/file2.cha
 …
 ```
 
-A fresh `transcribe` run:
+A fresh `transcribe --asr-engine whisper` run:
 
 ```text
-Downloading openai/whisper-large-v3 for ASR (one-time, ~3 GB; future runs will use the local cache)…
-Loading Whisper-large-v3 onto GPU…
-Calling Rev.AI for utterance-timing recovery…
+Loading asr (eng)…
+Downloading openai/whisper-large-v3 for ASR (one-time; future runs use the local cache)…
+Downloaded openai/whisper-large-v3 for ASR.
+Loaded asr (eng) in 312000 ms
 Processing recordings/r001.wav
 …
 ```
 
-If you see "Downloading X…" and the run sits there for a while, that is
-expected, the download is running in the background. The libraries also
-print their own progress bars to your terminal stderr.
+(The timings are illustrative.) A download is announced only when bytes
+actually arrive, and while it runs its progress counts the data received so
+far. If that count keeps rising, the download is moving; a download that
+stops arriving for longer than the worker's startup window is stopped and
+retried rather than left to hang. The libraries also print their own
+progress bars to your terminal stderr.
 
 After the first successful run, the same command on the same language runs
 without any download, typically in seconds (for text NLP) to a few minutes
 (for audio passes, dominated by inference, not loading).
+
+## First-run downloads and time limits
+
+A model is downloaded when a worker first loads it, before the first file
+that needs it runs on that worker. A transcription never
+waits on a download: by the time a file is being recognized, the model is
+already on disk and in memory, and the time a file is allowed is spent on
+that file.
+
+How long a download may take depends on your network, so BA3 does not give it
+a fixed time limit. While a model downloads, the worker measures how much has
+arrived every few seconds and reports it. BA3 keeps waiting for as long as the
+download keeps growing, and gives up only when nothing new has arrived for
+`ensure_task_stall_s` (default 120 seconds; `worker_startup_stall_s`,
+default 300, for anything a worker does while it starts). A slow network
+therefore needs no
+setting changed, while a download that has stopped is noticed within those
+few minutes and reported as stalled, and the worker is replaced and tries
+again.
+
+This changed on 2026-11-05. Before, the Paraformer engine's models were
+fetched from ModelScope inside the first transcription, under that file's
+time limit; a slow first download could time the file out, and the retry
+started the download over.
 
 ## Where models are stored
 
@@ -244,7 +272,7 @@ Then copy the cache directories listed above to the offline machine, set
 
 Not covered by that recipe: the torchaudio Wave2Vec bundle (run one `align`
 first), the Paraformer models on ModelScope (run one `--asr-engine
-paraformer` transcription first), and the NeMo diarization models.
+paraformer` transcription first).
 
 ## Disk-space management
 

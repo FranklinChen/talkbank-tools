@@ -19,7 +19,7 @@ use super::WordEndPolicy;
 use super::injection::inject_timings_for_utterance;
 use super::main_bullets::{
     BulletMutability, FaProjection, GivenMutability, ImposedBullets, KeptBullet, KeptBulletError,
-    KeptBulletsHeld, MainBulletAuthority,
+    KeptBulletsHeld, MainBulletAuthority, OwnedImposedBullets,
 };
 use super::origin::Origin;
 use super::postprocess::postprocess_utterance_timings_with_boundary_policy;
@@ -29,6 +29,9 @@ use super::{
     FaGroup, TimeSpan, WordTiming, add_wor_tier, count_alignable_main_words, get_utterance_mut,
     update_utterance_bullet_with_boundary_policy,
 };
+
+mod start_order;
+use start_order::enforce_start_order;
 
 /// What the write phase should do about `%wor`, once monotonicity has
 /// resolved same-speaker overlaps.
@@ -558,18 +561,58 @@ impl FaApplied {
         chat_file: &mut ChatFile,
         repair_policy: BulletRepairPolicy,
     ) -> Result<FaFinalized, KeptBulletError> {
+        self.then_impose(chat_file)?
+            .then_finalize(chat_file, repair_policy)
+    }
+
+    pub(crate) fn then_impose(
+        self,
+        chat_file: &mut ChatFile,
+    ) -> Result<FaImposed, KeptBulletError> {
         let FaApplied {
             mut postprocess,
             end_overlap_policy,
             main_bullets,
             wor_plan,
         } = self;
-        let (imposed, cuts, kept_records) = main_bullets.impose(chat_file)?.into_parts();
+        let (main_bullets, cuts, kept_records) = main_bullets.impose_owned(chat_file)?;
         postprocess.extend(kept_records);
-        // A kept utterance whose main-tier words were cut gets its `%wor`
-        // regenerated from them when a write is requested; under
-        // `Suppressed`, `impose` already clamped the existing `%wor` in place.
-        let wor_plan = wor_plan.also_touched(cuts.into_utterances());
+        Ok(FaImposed {
+            postprocess,
+            end_overlap_policy,
+            main_bullets,
+            wor_plan: wor_plan.also_touched(cuts.into_utterances()),
+        })
+    }
+}
+
+/// Kept source fit has run exactly once; source retries precede repair/order.
+#[must_use]
+pub(crate) struct FaImposed {
+    pub(super) postprocess: Vec<batchalign_transform::decisions::DecisionRecord>,
+    end_overlap_policy: EndOverlapPolicy,
+    main_bullets: OwnedImposedBullets,
+    wor_plan: WorPlan,
+}
+
+impl FaImposed {
+    pub(super) fn retry_touched(&mut self, index: UtteranceIdx) {
+        self.wor_plan =
+            std::mem::replace(&mut self.wor_plan, WorPlan::Suppressed).also_touched([index]);
+    }
+
+    pub(crate) fn then_finalize(
+        self,
+        chat_file: &mut ChatFile,
+        repair_policy: BulletRepairPolicy,
+    ) -> Result<FaFinalized, KeptBulletError> {
+        let Self {
+            postprocess,
+            end_overlap_policy,
+            main_bullets,
+            wor_plan,
+        } = self;
+        let imposed = main_bullets.proof();
         let repair_result = match repair_policy {
             BulletRepairPolicy::Disabled => Default::default(),
             BulletRepairPolicy::Enabled => {
@@ -794,7 +837,7 @@ pub fn apply_fa_results_with_projection_policy(
     // Without stripping, both the old InternalBullet AND the new .bullet
     // are serialized, producing "two timestamps on the main line".
     for (group, _) in groups.iter().zip(responses.iter()) {
-        for &utt_idx in group.utterance_indices() {
+        for utt_idx in group.utterance_indices() {
             if let Some(utt) = get_utterance_mut(chat_file, utt_idx) {
                 strip_internal_bullet_tokens(&mut utt.main.content.content);
             }
@@ -823,7 +866,7 @@ pub fn apply_fa_results_with_projection_policy(
     for (group, timings) in groups.iter().zip(responses.iter()) {
         let mut timing_offset: usize = 0;
 
-        for &utt_idx in group.utterance_indices() {
+        for utt_idx in group.utterance_indices() {
             // Resolved before the mutable borrow. `utt_idx` is an utterance
             // ordinal and `DecisionRecord.line_idx` indexes lines; they never
             // coincide, because every CHAT file opens with headers. This used
@@ -1718,380 +1761,6 @@ pub(super) fn enforce_monotonicity_under(
 }
 
 /// One bulleted utterance as Pass 1 sees it.
-struct StartOrderEntry {
-    line_idx: usize,
-    utterance_idx: UtteranceIdx,
-    speaker: String,
-    start_ms: u64,
-    end_ms: u64,
-    mutability: BulletMutability,
-    /// What the transcriber said about this utterance's relation to the one
-    /// before it: the evidence a start regression is resolved by.
-    overlap: TranscribedOverlap,
-}
-
-/// Whether the transcriber marked an utterance as overlapping the utterance
-/// before it. Read from the parsed model's linkers, where Chatter puts the
-/// `+<` ("lazy overlap precedes") marker; never a flag a caller sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscribedOverlap {
-    /// The main tier begins with `+<`: this turn starts while the previous
-    /// turn is still going.
-    PrecedesMarked,
-    /// No such marker: the transcriber placed this turn after the previous.
-    Unmarked,
-}
-
-impl TranscribedOverlap {
-    fn of(utterance: &Utterance) -> Self {
-        match super::overlaps_previous_utterance(utterance) {
-            true => Self::PrecedesMarked,
-            false => Self::Unmarked,
-        }
-    }
-}
-
-/// Why a start regression was resolved by stripping rather than raising:
-/// named where the choice is made, so the decision record cannot re-derive
-/// it from other facts and drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StripCause {
-    /// The utterance carries no `+<` marker: the transcriber placed it after
-    /// the previous turn, so an earlier measured start is more likely a
-    /// misplaced request than real speech.
-    NoOverlapMarker,
-    /// The utterance is marked `+<`, but nothing of it lies after the
-    /// preceding start: the bullet ends at or before it, or every timed word
-    /// does, so a raise would keep a bullet with no timed word inside it.
-    NothingAfterPrecedingStart,
-    /// The entry's line held no utterance. Unreachable by construction
-    /// (`enforce_start_order` builds entries from utterance lines only);
-    /// named rather than folded into another cause so that, were it ever
-    /// reached, the record would say what happened.
-    NoUtteranceLine,
-}
-
-impl StripCause {
-    /// The `cause=` value in the decision reason.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::NoOverlapMarker => "no_overlap_marker",
-            Self::NothingAfterPrecedingStart => "nothing_after_preceding_start",
-            Self::NoUtteranceLine => "no_utterance_line",
-        }
-    }
-}
-
-/// A revisable bullet whose measured start precedes the greatest start
-/// accepted before it. CHAT's start-order rule forbids writing that start on
-/// this line, so the regression must be resolved before the file is written.
-/// Minted only by [`Self::detect`], which owns the comparison, so holding one
-/// proves the regression; [`Self::resolve`] is the only way out, and which
-/// way it goes is decided by the utterance's own overlap evidence, not by
-/// the caller.
-struct StartRegression<'entries> {
-    /// The regressing utterance.
-    entry: &'entries StartOrderEntry,
-    /// The utterance that supplied the greatest preceding start.
-    previous: &'entries StartOrderEntry,
-}
-
-/// How a [`StartRegression`] was resolved in the file.
-#[derive(Debug)]
-enum StartRegressionResolution {
-    /// The whole utterance's timing was removed, for the named cause.
-    Stripped {
-        /// What the strip removed.
-        timing: StrippedTiming,
-        /// Why a raise was not made.
-        cause: StripCause,
-    },
-    /// The transcriber marked the overlap (`+<`): the bullet now starts at
-    /// the preceding start, words wholly before it lost their timing, the
-    /// word straddling it was cut to begin there, and the rest keep their
-    /// measured times.
-    RaisedToPrecedingStart {
-        /// Words whose measured interval ended at or before the new start.
-        words_dropped: Vec<DroppedWordTiming>,
-        /// Words cut to begin at the new start, with what they lost.
-        words_trimmed: Vec<TrimmedWordTiming>,
-    },
-}
-
-impl<'entries> StartRegression<'entries> {
-    /// `Some` exactly when `entry` starts before `previous`: the one place
-    /// the start-order comparison is made for a revisable bullet.
-    fn detect(
-        entry: &'entries StartOrderEntry,
-        previous: &'entries StartOrderEntry,
-    ) -> Option<Self> {
-        (entry.start_ms < previous.start_ms).then_some(Self { entry, previous })
-    }
-
-    /// Resolve the regression in `chat_file`, by the utterance's own overlap
-    /// evidence. The record of every measured interval removed or cut comes
-    /// back for the effect; nothing else about the file is read or changed.
-    fn resolve(self, chat_file: &mut ChatFile) -> StartRegressionResolution {
-        let stripped = |timing, cause| StartRegressionResolution::Stripped { timing, cause };
-        let Line::Utterance(utterance) = &mut chat_file.lines.as_mut_slice()[self.entry.line_idx]
-        else {
-            return stripped(
-                StrippedTiming {
-                    words_dropped: Vec::new(),
-                },
-                StripCause::NoUtteranceLine,
-            );
-        };
-        let new_start = self.previous.start_ms;
-        match self.entry.overlap {
-            TranscribedOverlap::Unmarked => stripped(
-                strip_utterance_timing(utterance),
-                StripCause::NoOverlapMarker,
-            ),
-            TranscribedOverlap::PrecedesMarked => {
-                // A raise keeps the bullet only if it still has extent past
-                // the new start and, when any word is timed, at least one
-                // timed word ends after it. An utterance with a bullet and no
-                // timed word at all (a transcript carrying bullets alone) is
-                // raised: the raise loses nothing it has.
-                let timed_extent_survives = furthest_word_timing_end(utterance)
-                    .is_none_or(|furthest_end| furthest_end > new_start);
-                if self.entry.end_ms <= new_start || !timed_extent_survives {
-                    return stripped(
-                        strip_utterance_timing(utterance),
-                        StripCause::NothingAfterPrecedingStart,
-                    );
-                }
-                let cut = raise_bullet_start(utterance, new_start);
-                StartRegressionResolution::RaisedToPrecedingStart {
-                    words_dropped: cut.dropped,
-                    words_trimmed: cut.trimmed,
-                }
-            }
-        }
-    }
-}
-
-/// Pass 1: file-order start monotonicity.
-///
-/// Kept starts are a FIXED skeleton. A revisable bullet must start at or
-/// after the greatest start accepted before it and at or before the next kept
-/// start after it; one that falls outside is the one resolved, recorded as a
-/// start regression (below the preceding start; see [`StartRegression`],
-/// which raises an utterance the transcriber marked `+<` and strips any
-/// other) or as having yielded to the next kept start (above it). A kept
-/// start that regresses below an earlier
-/// kept start cannot be fixed without changing a kept bullet, so it is left
-/// and recorded as unresolved; it does not lower the running start, so what
-/// follows is judged as though it had been stripped. With no kept bullet this
-/// is exactly the established rule: strip every start below the greatest
-/// preceding accepted start.
-fn enforce_start_order(
-    chat_file: &mut ChatFile,
-    imposed: ImposedBullets<'_>,
-    decisions: &mut Vec<batchalign_transform::decisions::DecisionRecord>,
-    effects: &mut Vec<MonotonicityEffect>,
-) -> Result<(), KeptBulletError> {
-    use batchalign_transform::decisions::MonotonicityStrategy;
-
-    let mut entries = Vec::new();
-    for (line_idx, utterance_idx, utterance) in super::utterances_indexed(chat_file) {
-        let Some(bullet) = utterance
-            .main
-            .content
-            .bullet
-            .as_ref()
-            .and_then(talkbank_model::BulletState::as_parsed)
-        else {
-            continue;
-        };
-        entries.push(StartOrderEntry {
-            line_idx,
-            utterance_idx,
-            speaker: utterance.main.speaker.as_str().to_string(),
-            start_ms: bullet.timing.start_ms,
-            end_ms: bullet.timing.end_ms,
-            mutability: imposed.mutability(utterance_idx, bullet)?,
-            overlap: TranscribedOverlap::of(utterance),
-        });
-    }
-
-    // The nearest kept entry AFTER each position. Kept bullets are never
-    // stripped here, so the snapshot stays true for the whole pass.
-    let mut next_kept: Vec<Option<usize>> = vec![None; entries.len()];
-    let mut following_kept = None;
-    for position in (0..entries.len()).rev() {
-        next_kept[position] = following_kept;
-        match entries[position].mutability {
-            BulletMutability::ReadOnly(_) => following_kept = Some(position),
-            BulletMutability::Revisable => {}
-        }
-    }
-
-    // Decisions read `entries`, a snapshot taken above, so a stripped line
-    // can be stripped the moment it is decided: the effect then carries the
-    // measured word intervals the strip removed, which exist nowhere else
-    // once the strip has run.
-    let mut last_accepted: Option<usize> = None;
-    let mut last_kept: Option<usize> = None;
-    for (position, entry) in entries.iter().enumerate() {
-        let below = last_accepted
-            .map(|p| &entries[p])
-            .and_then(|previous| StartRegression::detect(entry, previous));
-        match entry.mutability {
-            BulletMutability::ReadOnly(_) => {
-                match last_kept
-                    .map(|p| &entries[p])
-                    .filter(|previous| entry.start_ms < previous.start_ms)
-                {
-                    Some(previous) => decisions.push(start_order_record(
-                        entry,
-                        MonotonicityStrategy::KeptBulletLeftUnresolved,
-                        format!(
-                            "non_monotonic kept_main_bullet start_ms={} previous_start_ms={} \
-                             previous_line_idx={} previous_speaker={}",
-                            entry.start_ms, previous.start_ms, previous.line_idx, previous.speaker
-                        ),
-                    )),
-                    None => {
-                        last_kept = Some(position);
-                        last_accepted = Some(position);
-                    }
-                }
-            }
-            BulletMutability::Revisable => {
-                let above = next_kept[position]
-                    .map(|p| &entries[p])
-                    .filter(|kept| entry.start_ms > kept.start_ms);
-                match (below, above) {
-                    (Some(regression), _) => {
-                        let previous = regression.previous;
-                        let conflict = format!(
-                            "non_monotonic start_ms={} previous_start_ms={} \
-                             previous_line_idx={} previous_speaker={}",
-                            entry.start_ms, previous.start_ms, previous.line_idx, previous.speaker
-                        );
-                        match regression.resolve(chat_file) {
-                            StartRegressionResolution::Stripped {
-                                timing: StrippedTiming { words_dropped },
-                                cause,
-                            } => {
-                                decisions.push(start_order_record(
-                                    entry,
-                                    MonotonicityStrategy::TimingStripped,
-                                    format!("{conflict} cause={}", cause.as_str()),
-                                ));
-                                effects.push(MonotonicityEffect::StartRegressionStripped {
-                                    line_idx: entry.line_idx,
-                                    utterance_idx: entry.utterance_idx,
-                                    speaker: entry.speaker.clone(),
-                                    start_ms: entry.start_ms,
-                                    previous_start_ms: previous.start_ms,
-                                    previous_line_idx: previous.line_idx,
-                                    previous_utterance_idx: previous.utterance_idx,
-                                    previous_speaker: previous.speaker.clone(),
-                                    words_dropped,
-                                });
-                            }
-                            StartRegressionResolution::RaisedToPrecedingStart {
-                                words_dropped,
-                                words_trimmed,
-                            } => {
-                                decisions.push(start_order_record(
-                                    entry,
-                                    MonotonicityStrategy::StartRaisedToPrecedingStart,
-                                    format!(
-                                        "{conflict} overlap_marker=+< words_dropped={} \
-                                         words_trimmed={}",
-                                        words_dropped.len(),
-                                        words_trimmed.len()
-                                    ),
-                                ));
-                                effects.push(MonotonicityEffect::StartRegressionRaised {
-                                    line_idx: entry.line_idx,
-                                    utterance_idx: entry.utterance_idx,
-                                    speaker: entry.speaker.clone(),
-                                    start_ms: entry.start_ms,
-                                    previous_start_ms: previous.start_ms,
-                                    previous_line_idx: previous.line_idx,
-                                    previous_utterance_idx: previous.utterance_idx,
-                                    previous_speaker: previous.speaker.clone(),
-                                    words_dropped,
-                                    words_trimmed,
-                                });
-                                // The raised bullet starts exactly at the
-                                // preceding start, so `last_accepted`, which
-                                // already names that start, stays as it is;
-                                // the snapshot entry still holds the old one.
-                            }
-                        }
-                    }
-                    (None, Some(kept)) => {
-                        decisions.push(start_order_record(
-                            entry,
-                            MonotonicityStrategy::TimingStripped,
-                            format!(
-                                "yielded_to_kept_start start_ms={} kept_start_ms={} \
-                                 kept_line_idx={} kept_speaker={}",
-                                entry.start_ms, kept.start_ms, kept.line_idx, kept.speaker
-                            ),
-                        ));
-                        let StrippedTiming { words_dropped } = strip_entry_timing(chat_file, entry);
-                        effects.push(MonotonicityEffect::YieldedToKeptBullet {
-                            line_idx: entry.line_idx,
-                            utterance_idx: entry.utterance_idx,
-                            speaker: entry.speaker.clone(),
-                            kept_line_idx: kept.line_idx,
-                            kept_utterance_idx: kept.utterance_idx,
-                            kept_speaker: kept.speaker.clone(),
-                            kept_boundary_ms: kept.start_ms,
-                            outcome: KeptBulletYield::Stripped {
-                                start_ms: entry.start_ms,
-                                end_ms: entry.end_ms,
-                                words_dropped,
-                            },
-                        });
-                    }
-                    (None, None) => last_accepted = Some(position),
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Strip the utterance a Pass 1 entry describes. An entry is built only from
-/// an utterance line ([`enforce_start_order`] reads them through
-/// `utterances_indexed`), so the line is one; the record of what the strip
-/// removed is handed back for the effect.
-fn strip_entry_timing(chat_file: &mut ChatFile, entry: &StartOrderEntry) -> StrippedTiming {
-    match &mut chat_file.lines.as_mut_slice()[entry.line_idx] {
-        Line::Utterance(utterance) => strip_utterance_timing(utterance),
-        // Unreachable by construction of `entry`; an empty record is the
-        // truthful answer for a line with no utterance to strip.
-        _ => StrippedTiming {
-            words_dropped: Vec::new(),
-        },
-    }
-}
-
-/// The one record shape Pass 1 writes: every start-order decision needs
-/// review, since each removed timing, moved a start off its measurement, or
-/// left a conflict in place.
-fn start_order_record(
-    entry: &StartOrderEntry,
-    strategy: batchalign_transform::decisions::MonotonicityStrategy,
-    reason: String,
-) -> batchalign_transform::decisions::DecisionRecord {
-    batchalign_transform::decisions::DecisionRecord::new_and_trace(
-        entry.line_idx,
-        entry.speaker.clone(),
-        batchalign_transform::decisions::DecisionStrategy::Monotonicity(strategy),
-        reason,
-        true,
-    )
-}
-
 /// Pass 2a's own sweep (2026-09-01 review, item 15): every speaker's
 /// bulleted utterances, in file order, paired and resolved consecutively
 /// WITHIN that speaker's own stream -- skipping over any intervening

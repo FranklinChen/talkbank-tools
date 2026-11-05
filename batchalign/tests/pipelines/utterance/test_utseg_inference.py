@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from batchalign.inference.utseg import (
+    NoPinnedBoundaryModel,
+    PinnedBoundaryModel,
     UtsegBatchItem,
     UtsegInferenceRequest,
     _assemble,
@@ -129,6 +131,7 @@ class TestBatchInferUtseg:
                 ),
             ),
             _loader(object(), calls),
+            boundary_model=NoPinnedBoundaryModel(),
         )
 
         assert calls == []
@@ -173,6 +176,7 @@ class TestBatchInferUtseg:
                 items=({"words": ["I", "eat", "cookies"], "text": "I eat cookies"},),
             ),
             _loader(_FakePipeline(), loaded),
+            boundary_model=NoPinnedBoundaryModel(),
         )
 
         assert loaded == ["eng"]
@@ -205,7 +209,7 @@ class TestBatchInferUtseg:
                 lambda langs: (_ for _ in ()).throw(
                     AssertionError(f"refusal must skip Stanza load: {langs}")
                 ),
-                utterance_boundary_model=None,
+                boundary_model=NoPinnedBoundaryModel(),
             )
 
         message = str(exc_info.value)
@@ -243,7 +247,7 @@ class TestBatchInferUtseg:
                 items=({"words": ["a", "b"], "text": "a b"},),
             ),
             _loader(_FakePipeline(), loaded),
-            utterance_boundary_model=_UnusedBoundaryModel(),
+            boundary_model=PinnedBoundaryModel(_UnusedBoundaryModel()),
         )
 
         assert loaded == ["spa"]
@@ -287,7 +291,7 @@ class TestBatchInferUtseg:
                 ),
             ),
             _loader(_FakePipeline()),
-            utterance_boundary_model=None,
+            boundary_model=NoPinnedBoundaryModel(),
         )
 
         assert emit_calls == ["spa"], (
@@ -305,11 +309,11 @@ class TestBatchInferUtseg:
 
         emit_count: list[int] = [0]
 
-        def _count_emit(stage: str, user_message: str, **_: object) -> None:
+        def _count_emit(stage, edge, user_message: str) -> None:
             emit_count[0] += 1
 
         monkeypatch.setattr(
-            "batchalign.worker._progress.emit_download_event",
+            "batchalign.worker._progress.emit_phase_event",
             _count_emit,
         )
 
@@ -346,6 +350,7 @@ class TestBatchInferUtseg:
                 ),
             ),
             _loader(_FakePipeline()),
+            boundary_model=NoPinnedBoundaryModel(),
         )
 
         assert seen_texts == ["good path", "boom now"]
@@ -380,6 +385,7 @@ class TestBatchInferUtseg:
                 items=({"words": ["no", "tree"], "text": "no tree"},),
             ),
             _loader(_FakeTreelessPipeline()),
+            boundary_model=NoPinnedBoundaryModel(),
         )
 
         assert response.results[0].result is None
@@ -448,7 +454,7 @@ class TestBatchInferUtseg:
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
             ),
-            utterance_boundary_model=_FakeBoundaryModel(),
+            boundary_model=PinnedBoundaryModel(_FakeBoundaryModel()),
         )
 
         assert response.results[0].result == {
@@ -509,7 +515,7 @@ class TestBatchInferUtseg:
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
             ),
-            utterance_boundary_model=_FakeBoundaryModel(),
+            boundary_model=PinnedBoundaryModel(_FakeBoundaryModel()),
         )
 
         assert response.results[0].result == {
@@ -540,7 +546,7 @@ class TestBatchInferUtseg:
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
             ),
-            utterance_boundary_model=_FailingBoundaryModel(),
+            boundary_model=PinnedBoundaryModel(_FailingBoundaryModel()),
         )
 
         assert response.results[0].result is None
@@ -592,7 +598,7 @@ class TestBatchInferUtseg:
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
             ),
-            utterance_boundary_model=_FakeBoundaryModel(),
+            boundary_model=PinnedBoundaryModel(_FakeBoundaryModel()),
         )
 
         # Three equal spans. The old stamping produced [7.0, 0.0, 0.0] here.
@@ -640,7 +646,7 @@ class TestBatchInferUtseg:
             lambda langs: (_ for _ in ()).throw(
                 AssertionError(f"unexpected Stanza load: {langs}")
             ),
-            utterance_boundary_model=_SecondItemFails(),
+            boundary_model=PinnedBoundaryModel(_SecondItemFails()),
         )
 
         assert response.results[0].error is None

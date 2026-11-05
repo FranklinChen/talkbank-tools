@@ -4,29 +4,69 @@
 //! - Python caller: `batchalign/worker/_fa_v2.py::execute_forced_alignment_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
-use batchalign_types::api::{AudioPositionSeconds, DurationMs};
+use batchalign_types::api::{AudioPositionSeconds, DurationMs, ReportedEngineName};
 use batchalign_types::worker_v2::{
-    ExecuteRequestV2, FaBackendV2, FaTextModeV2, ForcedAlignmentRequestV2,
-    IndexedWordTimingResultV2, IndexedWordTimingV2, TaskRequestV2, TaskResultV2,
-    WhisperAttentionCaptureReceiptV2, WhisperTokenTimingResultV2, WhisperTokenTimingV2,
+    ExecuteRequestV2, FaBackendV2, FaPreparationBindingV2, FaPreparationOutcomeV2,
+    FaPreparationResultV2, FaRequestMemoryV2, FaRequestPhaseV2, FaSampleCountV2, FaTextModeV2,
+    ForcedAlignmentRequestV2, IndexedWordTimingResultV2, IndexedWordTimingV2, TaskRequestV2,
+    TaskResultV2, WhisperAttentionCaptureReceiptV2, WhisperTokenTimingResultV2,
+    WhisperTokenTimingV2,
 };
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 
 use crate::worker_artifacts::{
-    load_prepared_text_json_impl, require_mono_prepared_audio, require_prepared_text_attachment,
+    MonoPreparedAudio, load_prepared_text_json_impl, require_mono_prepared_audio,
+    require_prepared_text_attachment,
 };
 use crate::worker_execute::{
-    ExecuteFailure, ValidatedRequestV2, execute_request_v2, extract_task_payload,
-    parse_host_output, require_runner,
+    ExecuteFailure, LoadedRunner, ValidatedRequestV2, admit_loaded_host, execute_request_v2,
+    extract_task_payload, parse_host_attribute, parse_host_output,
 };
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+/// Once this edge has refused a candidate, the executor can match only the
+/// two legal operations. No later branch rechecks an unprepared wire state.
+enum FaOperation<'a> {
+    Prepare(&'a batchalign_types::worker_v2::WorkerRequestIdV2),
+    Execute {
+        plan: &'a batchalign_types::worker_v2::FaPreparationPlanV2,
+        request_id: &'a batchalign_types::worker_v2::WorkerRequestIdV2,
+    },
+}
+
+impl<'a> FaOperation<'a> {
+    fn admit(
+        phase: &'a FaRequestPhaseV2,
+        request_id: &'a batchalign_types::worker_v2::WorkerRequestIdV2,
+    ) -> Result<Self, ExecuteFailure> {
+        match phase {
+            FaRequestPhaseV2::Prepare {
+                execution_request_id,
+            } => Ok(Self::Prepare(execution_request_id)),
+            FaRequestPhaseV2::Execute { plan } => Ok(Self::Execute { plan, request_id }),
+            FaRequestPhaseV2::Candidate => Err(ExecuteFailure::InvalidPayload(
+                "FA candidate requires preparation and host-memory admission".into(),
+            )),
+        }
+    }
+
+    fn execution_id(&self) -> &batchalign_types::worker_v2::WorkerRequestIdV2 {
+        match self {
+            Self::Prepare(request_id) | Self::Execute { request_id, .. } => request_id,
+        }
+    }
+}
+
+/// The part of the prepared FA payload a worker-side aligner reads: the
+/// words, in order.
+///
+/// The payload also carries each word's id and utterance indices; those are
+/// the control plane's, for placing the timings it gets back, and no aligner
+/// reads them, so they are not parsed here. The Cantonese host used to be
+/// handed the whole payload re-serialized, and read only the words.
+#[derive(Debug, Clone, serde::Deserialize)]
 struct PreparedFaPayloadV2 {
     words: Vec<String>,
-    word_ids: Vec<String>,
-    word_utterance_indices: Vec<i64>,
-    word_utterance_word_indices: Vec<i64>,
 }
 
 fn load_fa_payload(
@@ -157,18 +197,10 @@ fn run_whisper(
     py: Python<'_>,
     request: &ExecuteRequestV2,
     fa_request: &ForcedAlignmentRequestV2,
-    whisper_runner: Option<Py<PyAny>>,
+    payload: PreparedFaPayloadV2,
+    audio: MonoPreparedAudio<'_>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
-    let payload = load_fa_payload(request, fa_request)?;
-    let audio = require_mono_prepared_audio(
-        &request.attachments,
-        fa_request.audio_ref_id.as_ref(),
-        "forced-alignment V2",
-    )?;
-    let runner = require_runner(
-        whisper_runner,
-        "no whisper FA host loaded for worker protocol V2",
-    )?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let text = join_fa_words(&payload.words, fa_request.text_mode);
     let response = if let Some(capture) = &fa_request.attention_capture {
@@ -207,71 +239,23 @@ fn run_whisper(
     Ok(TaskResultV2::WhisperTokenTimingResult(result))
 }
 
-/// Which indexed-timing FA host a request targets.
+/// Run a word-list aligner: Wave2Vec, Cantonese Wave2Vec or Qwen3.
 ///
-/// Replaces a `canto_mode: bool` that travelled beside a separately supplied
-/// unavailable-message: the same fact arrived twice and only the untyped copy
-/// decided the call shape. The flavor now owns both decisions, so a message
-/// cannot be paired with the wrong call shape.
-///
-/// Named for what the hosts have in common (one timing per requested word)
-/// rather than for wave2vec, which stopped being true when the Qwen3 aligner
-/// joined them.
-#[derive(Clone, Copy)]
-enum IndexedFaFlavor {
-    /// The standard wave2vec host: called with the word list.
-    Wave2vec,
-    /// The Cantonese host: called with the serialized payload and request,
-    /// because it re-derives its own tokenization.
-    Cantonese,
-    /// The Qwen3 aligner host: called with the word list, like wave2vec. It
-    /// rebuilds the transcript itself, aligns on its OWN units (CJK characters
-    /// individually), and folds those units back onto the requested words. A
-    /// word it can time nothing of comes back with no interval rather than a
-    /// padded one, so unlike wave2vec its rows can be untimed.
-    Qwen3,
-}
-
-impl IndexedFaFlavor {
-    fn unavailable_message(self) -> &'static str {
-        match self {
-            Self::Wave2vec => "no wave2vec FA host loaded for worker protocol V2",
-            Self::Cantonese => "no Cantonese FA host loaded for worker protocol V2",
-            Self::Qwen3 => "no Qwen3 FA host loaded for worker protocol V2",
-        }
-    }
-}
-
-fn run_indexed_fa(
+/// All three take the requested words and answer one row per word, so they
+/// share one call shape. The Cantonese host used to take the serialized
+/// payload and the whole request, and read only the words; the shape is now
+/// the one the other two always had, and the flavor enum that chose between
+/// call shapes and "not loaded" messages is gone with it. The Qwen3 aligner
+/// may leave a word untimed (it aligns on its own units and folds them back),
+/// which is a row with no interval, never a padded one.
+fn run_word_fa(
     py: Python<'_>,
-    request: &ExecuteRequestV2,
-    fa_request: &ForcedAlignmentRequestV2,
-    runner: Option<Py<PyAny>>,
-    flavor: IndexedFaFlavor,
+    payload: PreparedFaPayloadV2,
+    audio: MonoPreparedAudio<'_>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
-    let payload = load_fa_payload(request, fa_request)?;
-    let audio = require_mono_prepared_audio(
-        &request.attachments,
-        fa_request.audio_ref_id.as_ref(),
-        "forced-alignment V2",
-    )?;
-    let runner = require_runner(runner, flavor.unavailable_message())?;
     let audio_array = audio.samples()?.into_pyarray(py);
-    let response = match flavor {
-        IndexedFaFlavor::Cantonese => {
-            let payload_json = serde_json::to_string(&payload)
-                .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-            let request_json = serde_json::to_string(fa_request)
-                .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-            runner.call1(
-                py,
-                (audio_array, payload_json.as_str(), request_json.as_str()),
-            )?
-        }
-        IndexedFaFlavor::Wave2vec | IndexedFaFlavor::Qwen3 => {
-            runner.call1(py, (audio_array, payload.words.clone()))?
-        }
-    };
+    let response = runner.call1(py, (audio_array, &payload.words))?;
     Ok(TaskResultV2::IndexedWordTimingResult(
         parse_indexed_timings(&response, payload.words.len())?,
     ))
@@ -280,10 +264,7 @@ fn run_indexed_fa(
 fn run_fa(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    whisper_runner: Option<Py<PyAny>>,
-    wave2vec_runner: Option<Py<PyAny>>,
-    canto_runner: Option<Py<PyAny>>,
-    qwen3_runner: Option<Py<PyAny>>,
+    host: &Bound<'_, PyAny>,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let fa_request = extract_task_payload(
         &request,
@@ -293,55 +274,79 @@ fn run_fa(
         },
         "forced-alignment",
     )?;
+    let operation = FaOperation::admit(&fa_request.phase, &request.request_id)?;
     if fa_request.attention_capture.is_some() && fa_request.backend != FaBackendV2::Whisper {
         return Err(ExecuteFailure::InvalidPayload(
             "attention capture requires Whisper FA".into(),
         ));
     }
+    let runner = admit_loaded_host(host, fa_request.backend, "forced-alignment")?;
+    let payload = load_fa_payload(&request, fa_request)?;
+    let audio = require_mono_prepared_audio(
+        &request.attachments,
+        fa_request.audio_ref_id.as_ref(),
+        "forced-alignment V2",
+    )?;
+    let engine: ReportedEngineName = parse_host_attribute(host, "engine", "forced-alignment")?;
+    let descriptor = audio.descriptor();
+    let binding = FaPreparationBindingV2 {
+        execution_request_id: operation.execution_id().clone(),
+        backend: fa_request.backend,
+        engine,
+        payload_ref_id: fa_request.payload_ref_id.clone(),
+        audio_ref_id: fa_request.audio_ref_id.clone(),
+        samples: FaSampleCountV2::try_from(descriptor.frame_count.0)
+            .map_err(|error| ExecuteFailure::InvalidPayload(error.to_string()))?,
+        sample_rate_hz: descriptor.sample_rate_hz,
+        text_mode: fa_request.text_mode,
+        attention_capture: fa_request.attention_capture.clone(),
+    };
+    match operation {
+        FaOperation::Prepare(_) => {
+            let prepare = host.getattr("prepare").map_err(|error| {
+                ExecuteFailure::Runtime(format!("loaded FA host has no preparer: {error}"))
+            })?;
+            let prepare = LoadedRunner::of_host(prepare.unbind());
+            let text = join_fa_words(&payload.words, fa_request.text_mode);
+            let binding_json = serde_json::to_string(&binding)
+                .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
+            let response = prepare.call1(py, (binding_json, &payload.words, text))?;
+            let outcome: FaPreparationOutcomeV2 = parse_host_output(&response, "FA preparation")?;
+            if let FaPreparationOutcomeV2::Prepared { plan } = &outcome
+                && (plan.binding != binding || matches!(plan.memory, FaRequestMemoryV2::NoModel))
+            {
+                return Err(ExecuteFailure::ModelOutputInvalid(
+                    "FA preparer returned unbound or model-free evidence for a loaded model".into(),
+                ));
+            }
+            return Ok(TaskResultV2::FaPreparation(FaPreparationResultV2 {
+                outcome,
+            }));
+        }
+        FaOperation::Execute { plan, .. } => {
+            if plan.binding != binding || matches!(plan.memory, FaRequestMemoryV2::NoModel) {
+                return Err(ExecuteFailure::InvalidPayload(
+                    "FA execution plan does not bind the loaded model and prepared inputs".into(),
+                ));
+            }
+        }
+    }
     match fa_request.backend {
-        FaBackendV2::Whisper => run_whisper(py, &request, fa_request, whisper_runner),
-        FaBackendV2::Wave2vec => run_indexed_fa(
-            py,
-            &request,
-            fa_request,
-            wave2vec_runner,
-            IndexedFaFlavor::Wave2vec,
-        ),
-        FaBackendV2::Wav2vecCanto => run_indexed_fa(
-            py,
-            &request,
-            fa_request,
-            canto_runner,
-            IndexedFaFlavor::Cantonese,
-        ),
-        FaBackendV2::Qwen3 => run_indexed_fa(
-            py,
-            &request,
-            fa_request,
-            qwen3_runner,
-            IndexedFaFlavor::Qwen3,
-        ),
+        FaBackendV2::Whisper => run_whisper(py, &request, fa_request, payload, audio, runner),
+        FaBackendV2::Wave2vec | FaBackendV2::Wav2vecCanto | FaBackendV2::Qwen3 => {
+            run_word_fa(py, payload, audio, runner)
+        }
     }
 }
 
+/// Execute one FA request on `loaded`, the host this worker's FA load built
+/// (`LoadedWhisperFa` or `LoadedWordFa` on the Python side): its `backend`
+/// and `runner` are read from it.
 #[pyfunction]
-#[pyo3(signature = (request, whisper_runner=None, wave2vec_runner=None, canto_runner=None, qwen3_runner=None))]
 pub(crate) fn execute_forced_alignment_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    whisper_runner: Option<Py<PyAny>>,
-    wave2vec_runner: Option<Py<PyAny>>,
-    canto_runner: Option<Py<PyAny>>,
-    qwen3_runner: Option<Py<PyAny>>,
+    loaded: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
-    execute_request_v2(request, |request| {
-        run_fa(
-            py,
-            request,
-            whisper_runner,
-            wave2vec_runner,
-            canto_runner,
-            qwen3_runner,
-        )
-    })
+    execute_request_v2(request, |request| run_fa(py, request, loaded))
 }

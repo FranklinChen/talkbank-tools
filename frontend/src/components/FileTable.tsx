@@ -265,7 +265,7 @@ function FileRow({
     (leftOut?.lines ?? []).length > 0;
   const isExpanded = expandedErr === f.filename;
   const isProcessing = f.status === "processing";
-  const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label);
+  const progressLabel = displayProgressLabel(f.progress_stage, f.progress_label, f.progress_current);
 
   return (
     <>

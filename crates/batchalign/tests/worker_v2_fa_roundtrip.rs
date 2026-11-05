@@ -124,7 +124,8 @@ async fn staged_worker_v2_fa_roundtrip_crosses_rust_and_python() {
         },
     )
     .await
-    .expect("staged V2 FA request should build");
+    .expect("staged V2 FA request should build")
+    .into_request();
 
     let request_path = tempdir.path().join("request.json");
     let response_path = tempdir.path().join("response.json");

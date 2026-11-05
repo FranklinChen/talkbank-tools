@@ -106,17 +106,7 @@ pub(crate) fn gold_chat_path_for_audio(audio_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkFuture, BenchmarkRequest, gold_chat_path_for_audio, process_benchmark};
-
-    #[test]
-    fn composite_future_is_heap_owned_at_its_producer_boundary() {
-        fn require_boxed_producer(_: for<'a> fn(BenchmarkRequest<'a>) -> BenchmarkFuture<'a>) {}
-        require_boxed_producer(process_benchmark);
-        assert_eq!(
-            std::mem::size_of::<BenchmarkFuture<'static>>(),
-            2 * std::mem::size_of::<usize>(),
-        );
-    }
+    use super::gold_chat_path_for_audio;
 
     #[test]
     fn derives_gold_chat_path_from_audio() {

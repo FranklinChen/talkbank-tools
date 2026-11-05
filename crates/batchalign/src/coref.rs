@@ -100,7 +100,13 @@ pub(crate) async fn process_coref_batch(
     cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
     run_coref_batch_impl(files, pool, async move |pool, items| {
-        infer_batch(pool, items, &LanguageCode3::eng(), cancellation).await
+        infer_batch(
+            pool,
+            items,
+            &crate::dispatch_language::COREF_LANGUAGE.code(),
+            cancellation,
+        )
+        .await
     })
     .await
 }
@@ -331,7 +337,7 @@ where
         let mut document = applied.document;
         let stamp = match crate::provenance::result_named_provenance(
             crate::provenance::ResultNamedCommand::Coref,
-            &LanguageCode3::eng(),
+            &crate::dispatch_language::COREF_LANGUAGE.code(),
             [&applied.engine],
         ) {
             TextStamp::Stamped(comment) => {

@@ -1132,7 +1132,8 @@ pub enum UtrSearchBudget {
         /// Edge limit.
         limit: usize,
     },
-    /// Monotonic proof under a fuzzy relation: word-pair comparisons.
+    /// Historical diagnostic for a removed fuzzy work cutoff. Retained for
+    /// recorded evidence compatibility; current monotonic proof cannot emit it.
     FuzzyComparisons {
         /// Comparison limit.
         limit: usize,
@@ -1201,11 +1202,8 @@ impl UtrUnsearchedRegion {
 impl UtrSearchBudget {
     /// The monotonic correspondence producer's named budget.
     pub(super) fn monotonic(budget: batchalign_transform::dp_align::CorrespondenceBudget) -> Self {
-        use batchalign_transform::dp_align::CorrespondenceBudget;
-        let limit = budget.limit();
-        match budget {
-            CorrespondenceBudget::CandidateEdges => Self::CandidateEdges { limit },
-            CorrespondenceBudget::FuzzyComparisons => Self::FuzzyComparisons { limit },
+        Self::CandidateEdges {
+            limit: budget.limit(),
         }
     }
 

@@ -1,7 +1,7 @@
 # utseg
 
 **Status:** Current
-**Last updated:** 2026-10-06 10:48 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Re-segment utterance boundaries in an existing CHAT transcript. Text-only
 , no audio involved. The model selected per language is either a trained
@@ -50,10 +50,7 @@ flowchart TD
     parse --> collect[collect_payloads\nExtract word sequences per utterance]
     collect --> worker[gateway.utseg_batch(&[file], lang)\n→ BERT assignments\nor Stanza constituency trees]
     worker --> apply[Admit source-bound partitions\nSplit at structurally safe boundaries]
-    apply --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Checked construction → serialize .cha output]
+    apply --> serialize[Checked construction → serialize .cha output]
     serialize --> done([Write file's .cha; next file in pool])
 ```
 
@@ -85,7 +82,6 @@ or scheduling.
 | --- | --- | --- |
 | `--lang CODE` | `eng` | 3-letter ISO language code |
 | `--num-speakers N` | `2` | Number of speakers. No short flag; `-n` was removed 2026-08-19. |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
 
 ---
 

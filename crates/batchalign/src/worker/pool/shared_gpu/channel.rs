@@ -7,20 +7,18 @@
 //! so they live here once. [`super::SharedGpuWorker`] (stdio) adds process
 //! ownership; [`super::SharedGpuTcpWorker`] adds the connection.
 
-use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Semaphore, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::api::PositiveSeconds;
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2, TaskTimeoutOverrides};
+use crate::types::worker_v2::{ExecuteResponseV2, TaskTimeoutOverrides};
 use crate::worker::error::{WorkerError, WorkerWait};
 use crate::worker::handle::{
     CapabilitiesRequest, EnsureTaskRequest, ReportedFailure, WorkerRequest,
 };
-use crate::worker::{InferTask, WorkerCapabilities, WorkerPid};
+use crate::worker::{WorkerCapabilities, WorkerPid};
 
 use super::reader::{Routes, spawn_reader};
 use super::routes::{ControlAnswer, Retirement, StreamClosed};
@@ -40,10 +38,11 @@ pub(crate) struct SharedGpuChannel<W> {
     /// slot itself cannot, because the reader must reach it to deliver.
     control_gate: tokio::sync::Mutex<()>,
 
-    /// Tasks known to be loaded, filled by successful `ensure_task` replies,
-    /// so later calls skip the round trip (and the single-slot control
-    /// channel's contention under concurrent dispatch).
-    loaded_tasks: tokio::sync::Mutex<HashSet<InferTask>>,
+    /// This worker's on-demand load states, shared by its concurrent callers:
+    /// filled by successful `ensure_task` replies, so later calls skip the
+    /// round trip (and the single-slot control channel's contention under
+    /// concurrent dispatch) and take no second lease.
+    loads: tokio::sync::Mutex<crate::worker::pool::TaskLoads>,
 
     /// The reader task; aborted when the channel is dropped.
     reader_task: tokio::task::JoinHandle<()>,
@@ -84,7 +83,7 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
             writer: tokio::sync::Mutex::new(writer),
             routes,
             control_gate: tokio::sync::Mutex::new(()),
-            loaded_tasks: tokio::sync::Mutex::new(HashSet::new()),
+            loads: tokio::sync::Mutex::new(crate::worker::pool::TaskLoads::default()),
             reader_task,
             pid,
             task_timeouts,
@@ -120,8 +119,9 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
     /// permit before their timer starts.
     pub(super) async fn execute_v2(
         &self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
+        let request = permit.request();
         self.check_available()?;
         let _permit = self
             .dispatch_semaphore
@@ -151,23 +151,63 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
     }
 
     /// One sequential op's round trip: write the request (armed by the
-    /// caller, which put the armed id in it), then wait up to `limit` for the
-    /// answer. The caller holds the control gate.
-    async fn control_round_trip<T>(
+    /// caller, which put the armed id in it), then wait for the answer under
+    /// `wait`. The caller holds the control gate.
+    ///
+    /// `progress` is the load's own progress (`ArmedLoad`), present for
+    /// `ensure_task` only: each report that advanced re-arms a loading wait
+    /// (`RunningWait::observe_load`), so a load that downloads its models takes as
+    /// long as the download, and only one that goes quiet for its stall
+    /// window is [`WorkerError::Stalled`]. A budget is extended by nothing.
+    async fn round_trip<T>(
         &self,
         request: &WorkerRequest<'_>,
-        answer: oneshot::Receiver<ControlAnswer<T>>,
-        waited_for: WorkerWait,
-        limit: PositiveSeconds,
+        mut answer: oneshot::Receiver<ControlAnswer<T>>,
+        mut progress: Option<
+            tokio::sync::mpsc::UnboundedReceiver<crate::types::worker_v2::LoadProgressV2>,
+        >,
+        wait: crate::worker::ResponseWait,
     ) -> Result<ControlAnswer<T>, WorkerError> {
+        /// What one wait step produced.
+        enum Step<T> {
+            Answer(Result<ControlAnswer<T>, oneshot::error::RecvError>),
+            Progress(crate::types::worker_v2::LoadProgressV2),
+        }
+
+        let loading = super::super::checkout_wait::ObservedModelLoad::for_wait(&wait);
         self.write_request(request).await?;
-        match tokio::time::timeout(limit.duration(), answer).await {
-            Ok(Ok(answer)) => Ok(answer),
-            // Every route out of the slot answers its waiter (a reply, a
-            // failure, or the close reason); a dropped sender means the slot
-            // went away with the reader that owned it.
-            Ok(Err(_)) => Err(StreamClosed::ReaderStopped.to_worker_error()),
-            Err(_) => Err(WorkerError::Timeout { waited_for, limit }),
+        let mut running = crate::worker::RunningWait::start(wait);
+        loop {
+            let next_progress = async {
+                match progress.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let step = running
+                .within(async {
+                    tokio::select! {
+                        answered = &mut answer => Step::Answer(answered),
+                        Some(event) = next_progress => Step::Progress(event),
+                    }
+                })
+                .await;
+            match step {
+                Some(Step::Answer(Ok(answered))) => return Ok(answered),
+                // Every route out of the slot answers its waiter (a reply, a
+                // failure, or the close reason); a dropped sender means the
+                // slot went away with the reader that owned it.
+                Some(Step::Answer(Err(_))) => {
+                    return Err(StreamClosed::ReaderStopped.to_worker_error());
+                }
+                Some(Step::Progress(event)) => {
+                    running.observe_load(&event);
+                    if let Some(loading) = &loading {
+                        loading.report(&event);
+                    }
+                }
+                None => return Err(running.expired()),
+            }
         }
     }
 
@@ -180,49 +220,65 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
                 request_id: &armed.request_id,
             },
         };
-        self.control_round_trip(
+        self.round_trip(
             &request,
             armed.answer,
-            WorkerWait::Capabilities,
-            crate::worker::CAPABILITY_TIMEOUT,
+            None,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Capabilities,
+                limit: crate::worker::CAPABILITY_TIMEOUT,
+            },
         )
         .await?
         .map_err(|failure| failure.into_worker_error(ReportedFailure::into_worker_error))
     }
 
-    /// Load one task's models on demand (`ensure_task`), once per worker.
+    /// Prepare this worker for `load` (`ensure_task`): the `NotLoaded` to
+    /// `Loaded` transition, returning the proof every execute takes.
     ///
-    /// Idempotent on the worker side; the channel also remembers loaded tasks
-    /// so repeated calls skip the round trip. A task is remembered only from
-    /// a reply that names it (the control slot delivers no other).
+    /// Idempotent on the worker side; the channel also records each proof so
+    /// a repeated preparation skips the round trip. A load is recorded only
+    /// from a reply that names its task (the control slot delivers no other).
+    /// The load's host-memory lease is granted under the control gate, after
+    /// the second look, so concurrent first requests for one load take one
+    /// lease, not one each; the proof owns it.
     pub(super) async fn ensure_task(
         &self,
-        task: InferTask,
-        engine_overrides: Option<&BTreeMap<String, String>>,
-        timeout: PositiveSeconds,
-    ) -> Result<(), WorkerError> {
-        if self.loaded_tasks.lock().await.contains(&task) {
-            return Ok(());
+        load: &crate::worker::pool::TaskLoad,
+        preparation: &crate::worker::pool::LoadPreparation,
+    ) -> Result<std::sync::Arc<crate::worker::pool::Loaded>, WorkerError> {
+        if let Some(loaded) = self.loads.lock().await.get(load) {
+            return Ok(loaded);
         }
         let _control_guard = self.control_gate.lock().await;
         // A peer may have completed the load while this call waited.
-        if self.loaded_tasks.lock().await.contains(&task) {
-            return Ok(());
+        if let Some(loaded) = self.loads.lock().await.get(load) {
+            return Ok(loaded);
         }
-        let armed = self.routes.control.arm_ensure_task(task)?;
+        let admitted = preparation.admission.admit(load, self.pid).await?;
+        let task = admitted.load().task();
+        let engine_overrides = admitted.load().wire_overrides();
+        let super::routes::ArmedLoad {
+            request_id,
+            answer,
+            progress,
+        } = self.routes.control.arm_ensure_task(task)?;
         let request = WorkerRequest::EnsureTask {
             request: EnsureTaskRequest {
-                request_id: &armed.request_id,
+                request_id: &request_id,
                 task,
                 engine_overrides,
             },
         };
         let response = self
-            .control_round_trip(
+            .round_trip(
                 &request,
-                armed.answer,
-                WorkerWait::EnsureTask { task },
-                timeout,
+                answer,
+                Some(progress),
+                crate::worker::ResponseWait::Loading {
+                    waited_for: crate::worker::LoadingWait::EnsureTask { task },
+                    stall: preparation.stall,
+                },
             )
             .await?
             .map_err(|failure| {
@@ -235,8 +291,10 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
             elapsed_s = response.elapsed_s.get(),
             "ensure_task completed"
         );
-        self.loaded_tasks.lock().await.insert(response.task);
-        Ok(())
+        // Settled before the lock, so concurrent fast-path lookups never wait
+        // behind the ledger write.
+        let confirmed = admitted.confirm().await;
+        Ok(self.loads.lock().await.record(confirmed))
     }
 
     /// Begin stopping the worker for `why`: refuse new requests, answer the

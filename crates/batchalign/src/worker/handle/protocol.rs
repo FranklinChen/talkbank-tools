@@ -15,7 +15,7 @@ use crate::worker::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::worker::error::{WorkerAfterError, WorkerError};
+use crate::worker::error::WorkerError;
 
 /// Maximum chars of startup stderr to include in error messages.
 pub(super) const STARTUP_STDERR_TAIL_CHARS: usize = 2_000;
@@ -122,23 +122,32 @@ impl NoiseRun {
 /// Maximum bytes of response/error text to include in a failure dump.
 const FAILED_REQUEST_DUMP_MAX_RESPONSE_BYTES: usize = 1_024 * 1_024;
 
-/// Ready signal emitted by the Python worker on stdout.
+/// Ready signal emitted by the Python worker on stdout, after its startup
+/// progress: a stdio worker's and a TCP daemon's alike, read by the one
+/// reader (`WorkerHandle::read_ready_line`).
 #[derive(Debug, Deserialize)]
 pub(super) struct ReadySignal {
     pub ready: bool,
     pub pid: u32,
-    pub transport: Option<String>,
+    /// How the worker serves from now on, and where.
+    #[serde(flatten)]
+    pub transport: ReadyTransport,
     pub runtime: crate::worker::runtime_identity::WorkerRuntimeIdentity,
 }
 
-/// TCP ready signal from stderr: `{"ready": true, "pid": N, "transport": "tcp", "port": P}`.
-#[derive(Debug, Deserialize)]
-pub(super) struct TcpReadySignal {
-    pub ready: bool,
-    pub pid: u32,
-    #[allow(dead_code)]
-    pub transport: Option<String>,
-    pub port: Option<u16>,
+/// The transport a ready worker serves on, named by its ready line.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub(super) enum ReadyTransport {
+    /// Requests on the worker's stdin, replies on the stdout just read.
+    Stdio,
+    /// A daemon listening on `host:port`; its stdout ends at the ready line.
+    Tcp {
+        /// The address it listens on.
+        host: String,
+        /// The port it listens on.
+        port: u16,
+    },
 }
 
 /// Wire-level request envelope sent to a Python worker, over stdio or TCP.
@@ -270,15 +279,23 @@ impl ReportedFailure {
                 message: self.message,
                 worker,
             },
+            WorkerErrorKind::AccessDenied => WorkerError::ModelAccessDenied {
+                message: self.message,
+                worker,
+            },
             WorkerErrorKind::InvalidRequest => WorkerError::RequestRefused(self.message),
         }
     }
 
-    /// The failure as the error of an `ensure_task`, the on-demand model load.
+    /// The failure as the error of an `ensure_task`: the model load, which is
+    /// where every model loads (no worker loads one at startup).
     ///
-    /// Any failure the worker reports while loading is bootstrap-class: the
-    /// same load fails the same way again, so a `runtime` kind is not trusted
-    /// to make it retryable. A refused request stays a refusal.
+    /// Classified as a load failure has always been: a download that failed
+    /// in transit is a download (retried), an exhausted device is memory
+    /// pressure, a refused gated repository is an access denial, and any
+    /// other failure is bootstrap-class, since the same load fails the same
+    /// way again, so a `runtime` kind is not trusted to make it retryable. A
+    /// refused request stays a refusal.
     pub(crate) fn into_ensure_task_error(self) -> WorkerError {
         let worker = self.kind.worker_after();
         match self.kind {
@@ -297,29 +314,13 @@ impl ReportedFailure {
                 message: format!("ensure_task failed: {}", self.message),
                 worker,
             },
+            WorkerErrorKind::AccessDenied => WorkerError::ModelAccessDenied {
+                message: format!("ensure_task failed: {}", self.message),
+                worker,
+            },
             WorkerErrorKind::InvalidRequest => {
                 WorkerError::RequestRefused(format!("ensure_task refused: {}", self.message))
             }
-        }
-    }
-
-    /// The failure as the reason a worker never became ready: it reported
-    /// it in place of its ready line while loading its models, then exited.
-    ///
-    /// Classified as an `ensure_task` failure is (a load that failed), except
-    /// that the worker is gone whatever the kind, so nothing reuses it.
-    pub(crate) fn into_startup_error(self) -> WorkerError {
-        let message = format!("worker startup failed: {}", self.message);
-        let worker = WorkerAfterError::Exits;
-        match self.kind {
-            WorkerErrorKind::Runtime | WorkerErrorKind::Bootstrap => {
-                WorkerError::Bootstrap { message, worker }
-            }
-            WorkerErrorKind::Download => WorkerError::ModelDownload { message, worker },
-            WorkerErrorKind::OutOfMemory => WorkerError::DeviceOutOfMemory { message, worker },
-            // The worker's startup takes no request, so it refuses none; a
-            // refusal here is a protocol disagreement.
-            WorkerErrorKind::InvalidRequest => WorkerError::ReadyParseFailed(message),
         }
     }
 
@@ -393,5 +394,79 @@ pub(super) fn dump_failed_ipc_request(
             }
         }
         Err(e) => debug!(%e, "failed to serialize IPC failure dump"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner::util::classify_worker_error;
+    use crate::types::scheduling::{FailureCategory, Retryability};
+    use crate::worker::error::WorkerAfterError;
+
+    fn ensure_task_failure(kind: WorkerErrorKind) -> WorkerError {
+        ReportedFailure {
+            message: "the load failed".to_owned(),
+            kind,
+        }
+        .into_ensure_task_error()
+    }
+
+    /// Every model now loads in `ensure_task`, so a load that fails there
+    /// must reach the server as the failure it was when models loaded at
+    /// startup: a download that failed in transit is retried on a fresh
+    /// worker, a memory shortfall after a backoff, a refused gated repository
+    /// is an access denial (not retried, its remedy named), and anything
+    /// else is a deterministic bootstrap failure.
+    #[test]
+    fn a_failed_load_keeps_its_classification() {
+        let download = ensure_task_failure(WorkerErrorKind::Download);
+        assert!(matches!(
+            download,
+            WorkerError::ModelDownload {
+                worker: WorkerAfterError::Exits,
+                ..
+            }
+        ));
+        assert_eq!(
+            classify_worker_error(&download).retryability(),
+            Retryability::Retryable
+        );
+
+        let memory = ensure_task_failure(WorkerErrorKind::OutOfMemory);
+        assert_eq!(
+            classify_worker_error(&memory),
+            FailureCategory::MemoryPressure
+        );
+
+        let refused = ensure_task_failure(WorkerErrorKind::AccessDenied);
+        assert!(matches!(
+            refused,
+            WorkerError::ModelAccessDenied {
+                worker: WorkerAfterError::Exits,
+                ..
+            }
+        ));
+        assert_eq!(
+            classify_worker_error(&refused),
+            FailureCategory::ModelAccessDenied
+        );
+        assert_ne!(
+            classify_worker_error(&refused).retryability(),
+            Retryability::Retryable
+        );
+
+        for kind in [WorkerErrorKind::Runtime, WorkerErrorKind::Bootstrap] {
+            let error = ensure_task_failure(kind);
+            assert_eq!(
+                classify_worker_error(&error),
+                FailureCategory::WorkerBootstrap,
+                "{kind:?}"
+            );
+        }
+        assert!(matches!(
+            ensure_task_failure(WorkerErrorKind::InvalidRequest),
+            WorkerError::RequestRefused(_)
+        ));
     }
 }

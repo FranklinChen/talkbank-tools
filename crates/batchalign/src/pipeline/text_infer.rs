@@ -19,7 +19,7 @@ use talkbank_model::model::TranscriptName;
 use talkbank_model::validation::ValidChatFile;
 use tracing::{info, warn};
 
-use crate::error::ServerError;
+use crate::error::{ServerError, SourceRefusal};
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
 
@@ -35,7 +35,7 @@ pub(crate) fn admit_retained_text<'source>(
 ) -> Result<AdmittedSourceChat<'source>, ServerError> {
     parse_source_with_parser(parser, source)
         .admit(name, &talkbank_model::NullErrorSink)
-        .map_err(ServerError::ChatAdmission)
+        .map_err(|error| ServerError::ChatAdmission(SourceRefusal::in_source(error, source)))
 }
 
 /// Where a text command's provenance comment comes from: the responses it
@@ -947,7 +947,9 @@ mod tests {
             "a pre-validation refusal is a validity failure, not a provider failure"
         );
         assert!(
-            failure.to_string().contains("pre-validation failed"),
+            failure
+                .to_string()
+                .contains("the input transcript is not valid CHAT"),
             "the failure must name the admission refusal, got: {failure}"
         );
     }

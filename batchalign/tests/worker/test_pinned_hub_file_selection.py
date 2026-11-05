@@ -16,12 +16,21 @@ import pytest
 
 from batchalign.worker._model_loading import pinned_hub
 from batchalign.worker._model_loading.pinned_hub import (
-    HubFiles,
     PinnedSnapshotError,
-    resolve_pinned_snapshot,
+    WeightLayout,
+    default_weights,
+    resolve_repository,
+    resolve_transformers,
 )
+from batchalign.worker._types_v2 import RequestedCommitV2, RequestedModelV2
 
 COMMIT = "0" * 40
+
+
+def pinned(model_id: str) -> RequestedModelV2:
+    """A request for ``model_id`` at the test commit."""
+    return RequestedModelV2(id=model_id, revision=RequestedCommitV2(commit=COMMIT))
+
 
 WHISPER_REPOSITORY = [
     "config.json",
@@ -56,6 +65,7 @@ def hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             if allow_patterns is None or any(
                 fnmatch.fnmatch(name, pattern) for pattern in allow_patterns
             ):
+                (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
                 (snapshot / name).write_text("")
         return str(snapshot)
 
@@ -73,9 +83,7 @@ def test_a_transformers_model_fetches_one_weights_format_not_the_repository(
     """Whisper's repository holds five weight formats; the loader reads one."""
     repositories, calls = hub
     repositories["openai/whisper-large-v3"] = WHISPER_REPOSITORY
-    resolved = resolve_pinned_snapshot(
-        "openai/whisper-large-v3", COMMIT, HubFiles.TRANSFORMERS
-    )
+    resolved = resolve_transformers(pinned("openai/whisper-large-v3"), kind="test")
     fetched = files_in(resolved.path)
     assert "model.safetensors" in fetched
     assert not fetched & {
@@ -99,9 +107,7 @@ def test_without_safetensors_the_pytorch_weights_are_fetched(hub) -> None:
         "pytorch_model.bin",
         "README.md",
     ]
-    resolved = resolve_pinned_snapshot(
-        "talkbank/CHATUtterance-en", COMMIT, HubFiles.TRANSFORMERS
-    )
+    resolved = resolve_transformers(pinned("talkbank/CHATUtterance-en"), kind="test")
     assert files_in(resolved.path) == {
         "config.json",
         "tokenizer.json",
@@ -113,15 +119,79 @@ def test_without_safetensors_the_pytorch_weights_are_fetched(hub) -> None:
 def test_a_revision_without_default_weights_is_refused(hub) -> None:
     repositories, _ = hub
     repositories["org/configs-only"] = ["config.json", "flax_model.msgpack"]
-    with pytest.raises(PinnedSnapshotError, match="neither safetensors nor PyTorch"):
-        resolve_pinned_snapshot("org/configs-only", COMMIT, HubFiles.TRANSFORMERS)
+    with pytest.raises(PinnedSnapshotError, match="no default-variant"):
+        resolve_transformers(pinned("org/configs-only"), kind="test")
 
 
 def test_a_whole_repository_family_fetches_everything(hub) -> None:
     repositories, calls = hub
     repositories["funasr/fsmn-vad"] = ["am.mvn", "config.yaml", "model.pt"]
-    resolved = resolve_pinned_snapshot(
-        "funasr/fsmn-vad", COMMIT, HubFiles.WHOLE_REPOSITORY
-    )
+    resolved = resolve_repository(pinned("funasr/fsmn-vad"), kind="test")
     assert files_in(resolved.path) == {"am.mvn", "config.yaml", "model.pt"}
     assert calls == [None]
+
+
+AUDIO_FLAMINGO_REPOSITORY = [
+    "config.json",
+    "tokenizer.json",
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors",
+    "think/config.json",
+    "think/adapter_model.safetensors",
+]
+"""``nvidia/audio-flamingo-3-hf``'s shape (read from the hub, 2026-11-05):
+the same weights as one file and as shards, 16.5 GB each."""
+
+
+def test_weights_shipped_twice_are_fetched_once_in_from_pretrained_order(
+    hub,
+) -> None:
+    """``from_pretrained`` reads a single ``model.safetensors`` before an
+    index, so the shards beside it are never read and must not download."""
+    repositories, calls = hub
+    repositories["nvidia/audio-flamingo-3-hf"] = AUDIO_FLAMINGO_REPOSITORY
+    resolved = resolve_transformers(pinned("nvidia/audio-flamingo-3-hf"), kind="test")
+    fetched = files_in(resolved.path)
+    assert "model.safetensors" in fetched
+    assert not fetched & {
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    }
+    assert len(calls) == 1
+
+
+def test_sharded_safetensors_are_fetched_when_there_is_no_single_file(hub) -> None:
+    repositories, _ = hub
+    repositories["org/sharded"] = [
+        name for name in AUDIO_FLAMINGO_REPOSITORY if name != "model.safetensors"
+    ]
+    resolved = resolve_transformers(pinned("org/sharded"), kind="test")
+    fetched = files_in(resolved.path)
+    assert {
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    } <= fetched
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        (["model.safetensors", "pytorch_model.bin"], WeightLayout.SAFETENSORS),
+        (
+            ["model.safetensors.index.json", "model-00001-of-00002.safetensors"],
+            WeightLayout.SAFETENSORS_SHARDED,
+        ),
+        # An index whose shards are absent is not a layout a loader can read.
+        (["model.safetensors.index.json", "pytorch_model.bin"], WeightLayout.PYTORCH),
+        (
+            ["pytorch_model.bin.index.json", "pytorch_model-00001-of-00003.bin"],
+            WeightLayout.PYTORCH_SHARDED,
+        ),
+        (["config.json", "flax_model.msgpack"], None),
+    ],
+)
+def test_default_weights_follows_from_pretrained_precedence(names, expected) -> None:
+    assert default_weights(names) is expected

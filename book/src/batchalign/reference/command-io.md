@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -108,10 +108,10 @@ even if internal alignment evidence contains timings. Utterance bullets are
 not individual word intervals. This does not override `--nowor` or change the
 inherited `Options CA` suppression; see [CHAT options](chat-options.md).
 
-Later cosmetic transforms must preserve the admitted lexical/timing projection.
-An abbreviation merge that changes it is refused before writing, rather than
-publishing stale completion diagnostics. This is a tool-side output refusal,
-not a declaration that the submitted CHAT was invalid.
+Later transforms must preserve the admitted lexical/timing projection. One
+that changes it is refused before writing, rather than publishing stale
+completion diagnostics. This is a tool-side output refusal, not a declaration
+that the submitted CHAT was invalid.
 
 | Aspect | Local CLI | Explicit remote `--server` |
 |--------|-----------|---------------------|
@@ -154,7 +154,7 @@ below.
 | **Extensions filter** | `["mp3", "mp4", "wav"]` | Same |
 | **Output** | New `.cha` files (audio extension replaced: `foo.wav` → `foo.cha`) | Same `.cha` files returned to the client, which writes them locally |
 | **Mutation** | **Never mutates input.** Creates new `.cha` files in `OUT_DIR`. Original audio untouched. If `OUT_DIR = IN_DIR`, the new `.cha` appears alongside the audio. | Same |
-| **Key options** | `--asr-engine`, `--diarization`, `--speaker-engine`, `--wor/--nowor`, `--lang`, `--num-speakers`, `--batch-size` | Same |
+| **Key options** | `--asr-engine`, `--diarization`, `--speaker-engine`, `--wor/--nowor`, `--merge-abbrev`, `--lang`, `--num-speakers`, `--batch-size` | Same |
 
 **Current routing note (Rust CLI):** when `auto_daemon` is enabled (the
 default), `transcribe`-family commands try the local daemon first. Explicit
@@ -204,8 +204,8 @@ should prefer `--diarization` and `--asr-engine`.
 
 Identical to `transcribe` above, except the pipeline may run a dedicated
 speaker diarization stage when separate diarization is needed. The default is
-pyannoteAI Precision-2; `--speaker-engine pyannote` and `nemo` select local
-alternatives. Output
+pyannoteAI Precision-2; `--speaker-engine pyannote` selects the local
+alternative. Output
 `.cha` files have multiple `@Participants` and speaker-attributed utterances.
 Not a separate CLI command, triggered by `batchalign3 transcribe --diarize`.
 
@@ -239,7 +239,7 @@ existing CHAT transcripts.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with `%mor` and `%gra` tiers added/replaced | Same `.cha` returned as text |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. | Same |
-| **Key options** | `--retokenize`, `--skipmultilang`, `--lexicon <CSV>`, `--override-media-cache`, `--merge-abbrev` | All passed. Lexicon CSV is read on the client and injected into typed command options before submission. |
+| **Key options** | `--retokenize`, `--skipmultilang`, `--lexicon <CSV>`, `--override-media-cache` | All passed. Lexicon CSV is read on the client and injected into typed command options before submission. |
 
 **What changes in the `.cha`:** `%mor` tier added/replaced with POS tags and
 lemmas. `%gra` tier added/replaced with dependency relations. Main tier text
@@ -261,7 +261,7 @@ utterance-boundary model pinned for the language.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with utterance boundaries recomputed | Same |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. | Same |
-| **Key options** | `--lang`, `--num-speakers`, `--merge-abbrev`, `--utseg-fallback-stanza` | All passed |
+| **Key options** | `--lang`, `--num-speakers`, `--utseg-fallback-stanza` | All passed |
 
 **What changes in the `.cha`:** Utterance boundaries (`*SPK:` lines) are
 recomputed. Existing `%mor`/`%gra` tiers may be invalidated (would need
@@ -289,7 +289,7 @@ rather than being segmented by a substitute nobody asked for.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with translation tiers | Same |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. | Same |
-| **Key options** | `--merge-abbrev` | Passed |
+| **Key options** | none | |
 
 **What changes in the `.cha`:** Translation tier added to each utterance.
 
@@ -307,7 +307,7 @@ rather than being segmented by a substitute nobody asked for.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with coreference annotations | Same |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. | Same |
-| **Key options** | `--merge-abbrev` | Passed |
+| **Key options** | none | |
 
 **No media involved.**
 
@@ -325,7 +325,7 @@ word error rate (WER and cWER) and inject per-utterance comparison annotations.
 | **Extensions filter** | `["cha"]` | Same |
 | **Output** | `.cha` with `%xsrep` / `%xsmor` tiers + `.compare.csv` metrics | Same, client writes both files to `OUT_DIR` |
 | **Mutation** | If `OUT_DIR = IN_DIR`: **overwrites original `.cha` in place**. Gold files are never modified. | Same |
-| **Key options** | `--lang`, `--merge-abbrev`, `--override-media-cache` | All passed through typed command options |
+| **Key options** | `--lang`, `--override-media-cache` | All passed through typed command options |
 
 **What changes in the `.cha`:** The released output is the projected
 gold/reference transcript written at the main file's output path. BA3
@@ -449,7 +449,7 @@ CHAT mutation.
 
 The output identifies anonymous acoustic tracks (`PAR0`, `PAR1`, ...), not
 semantic CHAT roles. Standalone `diarize` defaults to local Pyannote and can
-explicitly select paid pyannoteAI Precision-2 or local NeMo. Integrated
+explicitly select paid pyannoteAI Precision-2. Integrated
 `transcribe --diarization enabled` is a separate product path whose dedicated
 speaker backend defaults to paid pyannoteAI Precision-2. Both paths share the
 same raw/derived speaker-evidence cache.
@@ -692,48 +692,41 @@ and why.
 
 ---
 
-## `--merge-abbrev` Applies to What the Command WROTE
+## `--merge-abbrev` Is a Transcribe Option
 
-`--merge-abbrev` collapses runs of single letters that name a known
-abbreviation (`F B I` becomes `FBI`). It is a policy applied to a command's
-OUTPUT, so it runs only on a document the command actually modified.
+`--merge-abbrev` collapses runs of single letters that spell a known
+abbreviation (`F B I` becomes `FBI`). Only `transcribe` (and `transcribe_s`)
+has it. The merge runs on the recognizer's words before the transcript is
+built: speakers are already assigned, so letters of different speakers never
+merge, and each letter still carries its recognized timing, so the merged
+word is timed by the union of its letters' intervals. A run with an untimed
+letter is kept as letters. When the merge ran, the output's provenance stamp
+carries `merge_abbrev=true`. See
+[transcribe](../user-guide/commands/transcribe.md#merging-spelled-out-abbreviations---merge-abbrev).
 
-A document the command handed back untouched is written back byte-identical,
-with the merge NOT applied. That covers every declared pass-through:
+Every other command (`align`, `morphotag`, `utseg`, `translate`, `coref`,
+`compare`, `benchmark`) refuses `--merge-abbrev` and `--no-merge-abbrev` at the
+command line. Those commands accepted the flag until the merge moved onto the
+recognizer's words; there it ran on the finished CHAT, where a merged word
+could not be given truthful timing, and `align --merge-abbrev` refused to
+write any file the merge changed, because the merge rewrote words the
+alignment had admitted.
 
-| Case | Commands | Written |
-|------|----------|---------|
-| `@Options: dummy` | align, morphotag, utseg, translate, coref | Unchanged |
-| `@Options: NoAlign` | align | Unchanged |
-| `@Options: CA`, where the command declines to analyze | morphotag | Unchanged apart from the decision-tier strip the command declares |
-| No analyzable payload collected | utseg, translate | Unchanged |
+A job stored by an earlier server with `merge_abbrev` in its options still
+loads. For transcribe the key keeps its meaning. For any other command it is
+dropped when the server loads its job table: `false` (what every such job
+stored by default) changes nothing, and any other value is logged as a
+warning naming the job, its status and its command; the job does not merge.
+A submission from a client built before the change is read the same way, with
+the key ignored.
 
-This is a deliberate narrowing. The merge used to run on the finished TEXT at
-the writer, after any output gate, so it applied to those documents too: a
-dummy file passed through `align --merge-abbrev` came back with its letters
-merged even though the command had otherwise declined to touch it, and the
-bytes written were bytes no gate had judged. The merge is now a transition on
-the typed output proof (`PostValidated::with_abbreviations_merged`), which
-re-runs the same judgement over the merged model and returns a pass-through
-unchanged.
-
-If the MERGED document fails that judgement, the file fails and nothing is
-written, and the error says the merge is what broke it rather than blaming the
-command's own output. The unmerged document was admissible and is deliberately
-not written in its place: a merge that breaks a document that had passed is a
-defect in the merge, and shipping past it would leave nobody looking at it.
-
-The practical consequence for a corpus: running a command with
-`--merge-abbrev` over a directory can no longer alter a file the command
-skipped.
-
-### `compare` and `benchmark` reached that gate on 2026-09-07
+### `compare` and `benchmark` reached the output gate on 2026-09-07
 
 Both write their primary CHAT output through the text writer rather than the
-CHAT writer seam, and both ran the merge over the finished text and wrote its
-result, so nothing had judged what they put on disk. Their two materializers
-build a `ChatFile` and now hand back the same typed proof every other command
-uses, with the merge as a transition on it.
+CHAT writer seam, and both ran a text transform over the finished text and
+wrote its result, so nothing had judged what they put on disk. Their two
+materializers build a `ChatFile` and now hand back the same typed proof every
+other command uses.
 
 Neither command admits its input at any validity level: the gold companion and
 the ASR transcript are both parsed leniently and neither is checked against a

@@ -5,6 +5,9 @@ use super::super::profiles::{MatchCuts, Suffix};
 use super::cost::{BackwardWork, EdgeWork, TracebackWork};
 use super::*;
 
+mod candidates;
+use candidates::PendingCandidates;
+
 struct Cursor {
     slot: usize,
     reference: usize,
@@ -16,6 +19,7 @@ struct PendingProof<'l, 'p, 'g, 's, 'c, C: ?Sized> {
     forward: CompleteForward<'l, 'p, 'g, 's, 'c, C>,
     cursor: Option<Cursor>,
     selected: Vec<Selected>,
+    candidates: PendingCandidates,
 }
 impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, 'c, C> {
     fn new(forward: CompleteForward<'l, 'p, 'g, 's, 'c, C>) -> Self {
@@ -25,6 +29,7 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
             reference: forward.ledger.plan().length(),
         });
         Self {
+            candidates: PendingCandidates::new(forward.ledger.plan()),
             forward,
             cursor,
             selected: Vec::new(),
@@ -38,8 +43,6 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
         let graph = plan.graph();
         let mut backward = Frontier::<SuffixDirection>::new(plan);
         let mut suffixes: HashMap<usize, Suffix> = HashMap::new();
-        let mut candidates = BTreeSet::new();
-        let mut missing = vec![false; plan.source().len()];
         for index in (0..self.forward.snapshots.len()).rev() {
             let block = self.forward.reconstruct(index)?;
             for offset in (0..block.rows.len()).rev() {
@@ -54,7 +57,7 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                         let observed =
                             suffix.observe_edge(prefix, self.forward.optimum.get(), &control)?;
                         if observed.can_be_missing {
-                            missing[word] = true;
+                            self.candidates.observe_missing(word);
                         }
                         let MatchCuts::Domain {
                             first,
@@ -70,20 +73,12 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                             (matched.len() * 64).min(plan.length() - first),
                         );
                         for (at, (&cuts, &mask)) in matched.iter().zip(&mask).enumerate() {
-                            let mut possible = cuts & mask;
-                            while possible != 0 {
-                                control.candidate()?;
-                                let bit = possible.trailing_zeros() as usize;
-                                possible &= possible - 1;
-                                let addressed = (word, first + at * 64 + bit);
-                                if candidates.len() == CANDIDATES
-                                    && !candidates.contains(&addressed)
-                                {
-                                    return Ok(Err(LocalInterleavingRefusal::Budget(
-                                        LocalInterleavingBudget::CandidateBudgetExceeded,
-                                    )));
-                                }
-                                candidates.insert(addressed);
+                            let possible = cuts & mask;
+                            control.candidates(possible.count_ones() as usize);
+                            if let Err(refusal) =
+                                self.candidates.observe(word, first + at * 64, possible)
+                            {
+                                return Ok(Err(refusal));
                             }
                         }
                     }
@@ -123,11 +118,7 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                 for edge in &graph.incoming[graph.order[cursor.slot]] {
                     let parent = graph.rank[edge.to];
                     if let Some(word) = edge.word
-                        && plan
-                            .admitted
-                            .refused()
-                            .relation()
-                            .matches(word, cursor.reference - 1)
+                        && plan.admitted.prepared().matches(word, cursor.reference - 1)
                         && block
                             .score(parent, cursor.reference - 1)
                             .is_some_and(|prefix| Some(prefix + 1) == score)
@@ -167,18 +158,8 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> PendingProof<'l, 'p, 'g, 's, '
                 },
             )));
         }
-        let mut words: Vec<_> = missing
-            .into_iter()
-            .map(|can_be_missing| WordEvidence {
-                candidates: Vec::new(),
-                can_be_missing,
-            })
-            .collect();
-        for (word, reference) in candidates.into_iter().rev() {
-            words[word].candidates.push(reference);
-        }
         Ok(Ok(Observation {
-            words,
+            words: self.candidates.finish(),
             selected: self.selected,
         }))
     }

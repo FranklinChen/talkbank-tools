@@ -13,7 +13,6 @@ fn translate_options() -> CommandOptions {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
         ..TranslateOptions::default()
     })
 }

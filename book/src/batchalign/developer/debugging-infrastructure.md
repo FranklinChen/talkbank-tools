@@ -1,7 +1,7 @@
 # Debugging Infrastructure
 
 **Status:** Current
-**Last updated:** 2026-10-24 21:32 EDT
+**Last updated:** 2026-11-05 21:04 EST
 
 > Release note: this document describes the current source tree. The
 > fail-closed FA/speaker evidence and content-addressed worker identity added in
@@ -230,9 +230,10 @@ against a fresh worker: the worker the dump records. Every dump carries
 `WorkerConfig`: profile or task, language, engine overrides, force-CPU and
 MPS flags, bootstrap mode, concurrent capacity), and the replay turns it back
 into a `WorkerConfig` and spawns through the pool's own `WorkerHandle::spawn`
-and command builder. A worker that loads on demand is asked to load the
-request's task first (`ensure_task`, with the same overrides the pool derives
-in `worker::pool::ensure_task_params`). So a Qwen3 ASR or Cantonese FA dump
+and command builder. The replayed worker is prepared as the pool prepares
+every worker, in every bootstrap mode: asked to load the request's task first
+(`ensure_task`, with the same overrides the pool derives in
+`worker::pool::ensure_task_params`). So a Qwen3 ASR or Cantonese FA dump
 replays on a worker with that engine, not on a default-engine worker for the
 request's task. `--lang` replays under another language, as the operator's
 stated choice. A dump written before the record existed is refused: it

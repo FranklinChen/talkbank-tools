@@ -28,6 +28,7 @@ from batchalign.inference.qwen_timing import (
     WindowAlignment,
 )
 from batchalign.tests._qwen_recognition import (
+    FAKE_QWEN_SNAPSHOTS,
     SEGMENTATION_MODEL_POLICY,
     TAIWANESE_POLICY,
 )
@@ -99,7 +100,6 @@ def test_recognizer_retains_punctuation_and_exact_file_relative_times():
     recognizer = ReadyQwenRecognizer(
         QwenRecognizerConfig(
             lang="nan",
-            model_id="Qwen/Qwen3-ASR-1.7B-hf",
             device="cpu",
             recognition=TAIWANESE_POLICY,
         ),
@@ -129,7 +129,6 @@ def test_a_discarding_profile_keeps_only_the_aligned_units():
     recognizer = ReadyQwenRecognizer(
         QwenRecognizerConfig(
             lang="yue",
-            model_id="Qwen/Qwen3-ASR-1.7B-hf",
             device="cpu",
             recognition=SEGMENTATION_MODEL_POLICY,
         ),
@@ -149,11 +148,12 @@ def test_config_load_transitions_to_a_ready_recognizer(monkeypatch):
 
     loaded = LoadedQwen(processor=object(), model=object(), aligner=object())
     monkeypatch.setattr(LoadedQwen, "load", classmethod(lambda cls, **kwargs: loaded))
-    monkeypatch.setattr(_qwen_asr, "_recognizer", None)
-    _qwen_asr.load_qwen_asr(
-        "nan", {"qwen_model": "Qwen/Qwen3-ASR-1.7B-hf"}, recognition=TAIWANESE_POLICY
-    )
-    ready = _qwen_asr._recognizer
+    ready = _qwen_asr.load_qwen_asr(
+        "nan",
+        None,
+        recognition=TAIWANESE_POLICY,
+        snapshots=FAKE_QWEN_SNAPSHOTS,
+    ).recognizer
     assert isinstance(ready, ReadyQwenRecognizer)
     assert ready.models is loaded
     assert ready.config.profile.recognition_language == "Chinese"
@@ -163,17 +163,23 @@ def test_config_load_transitions_to_a_ready_recognizer(monkeypatch):
         ready.config.lang = "eng"
 
 
-def test_a_failed_load_publishes_no_ready_recognizer(monkeypatch):
+def test_a_failed_load_raises_and_publishes_no_recognizer(monkeypatch):
+    """A failed load raises, so there is no returned recognizer to record, and
+    the module holds no recognizer that could be left half published."""
     from batchalign.inference.languages.cantonese import _qwen_asr
 
     def fail(cls, **kwargs):
         raise RuntimeError("model load failed")
 
     monkeypatch.setattr(LoadedQwen, "load", classmethod(fail))
-    monkeypatch.setattr(_qwen_asr, "_recognizer", None)
     with pytest.raises(RuntimeError, match="model load failed"):
-        _qwen_asr.load_qwen_asr("nan", None, recognition=TAIWANESE_POLICY)
-    assert _qwen_asr._recognizer is None
+        _qwen_asr.load_qwen_asr(
+            "nan",
+            None,
+            recognition=TAIWANESE_POLICY,
+            snapshots=FAKE_QWEN_SNAPSHOTS,
+        )
+    assert not hasattr(_qwen_asr, "_recognizer")
 
 
 def test_the_worker_boundary_requires_the_control_plane_policy():
@@ -209,12 +215,12 @@ def test_worker_context_override_is_part_of_the_ready_profile(monkeypatch, conte
 
     loaded = LoadedQwen(processor=object(), model=object(), aligner=object())
     monkeypatch.setattr(LoadedQwen, "load", classmethod(lambda cls, **kwargs: loaded))
-    monkeypatch.setattr(_qwen_asr, "_recognizer", None)
-    _qwen_asr.load_qwen_asr(
-        "nan", {"qwen_context": context}, recognition=TAIWANESE_POLICY
-    )
-    ready = _qwen_asr._recognizer
-    assert ready is not None
+    ready = _qwen_asr.load_qwen_asr(
+        "nan",
+        {"qwen_context": context},
+        recognition=TAIWANESE_POLICY,
+        snapshots=FAKE_QWEN_SNAPSHOTS,
+    ).recognizer
     assert ready.config.profile.prompt == (context or None)
     assert ready.config.lang == "nan"
 

@@ -374,8 +374,8 @@ although nothing was wrong with it.
 
 **The wait is visible in the file's progress.** The audio-file shell
 (transcribe, align, speaker identification) and benchmark install a
-`CheckoutWaitObserver` around every attempt
-(`checkout_wait::observing_checkout_waits`, carried by a task local
+`PoolWaitObserver` around every attempt
+(`checkout_wait::observing_pool_waits`, carried by a task local
 exactly as `CURRENT_JOB_ID` is, so no dispatch signature changes);
 align's utterance-timing pre-pass, which runs before that shell,
 installs its own, and the text batch commands (morphotag, utseg,
@@ -385,7 +385,11 @@ file in it. Each wait's start and end is recorded on the file
 (`RunnerEventSink::set_file_worker_wait`) as a fact of its own,
 `FileStatus::worker_waits`, beside the stage the pipeline reported.
 The file shows `waiting_for_worker` ("Waiting for a worker") while
-any wait is open, and the reported stage, with its counts, otherwise:
+any checkout wait is open, `waiting_for_host_memory` ("Waiting for host
+memory") while a worker startup or a model load of the file is queued for
+host memory (the same observer, told by
+`checkout_wait::MemoryWaitObserver`; it takes precedence), and the
+reported stage, with its counts, otherwise:
 the display is derived from both facts, so the pipeline's progress
 (a text batch's own reporter included) and the wait observer never
 overwrite each other. A checkout outside an observed task
@@ -529,7 +533,7 @@ forward-looking proposal, not a commitment.
 | `worker/pool/mod.rs` | Worker lifecycle and group management |
 | `worker/pool/eviction.rs` | Idle eviction (`try_evict_idle_from_other_group`, `select_eviction_target`) |
 | `worker/pool/checkout.rs` / `dispatch.rs` | Checkout state machine (saturated wait, `worker_returned` notify) |
-| `worker/pool/checkout_wait.rs` | `SaturatedWait` (report interval, shutdown), `CheckoutWaitObserver` task local |
+| `worker/pool/checkout_wait.rs` | `SaturatedWait` (report interval, shutdown), `PoolWaitObserver` task local |
 | `runner/util/auto_tune.rs` | `compute_job_workers()` planning |
 | `types/runtime.rs` | Re-exports `MemoryTier::from_total_mb` and `estimate_per_worker_peak_mb_with_profile` from `batchalign-types::memory` (Phase β); `command_execution_budget_mb` for legacy callers. `MemoryTier` is the sole canonical source of per-tier per-profile envelopes (Principle 1); `estimate_per_worker_peak_mb_with_profile` is the tier-aware per-command estimator (Principle 2). |
 | `batchalign/runtime_constants.toml` | Per-command base RAM (process and threaded variants), worker caps, command-to-task map. Generated from `batchalign-types/src/command_spec.rs` via `xtask gen-runtime-toml` (Phase β); do not edit directly. No longer holds per-profile worker startup envelopes, those live on `MemoryTier`. |

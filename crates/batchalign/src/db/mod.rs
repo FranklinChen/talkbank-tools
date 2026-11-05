@@ -132,7 +132,6 @@ mod tests {
             pauses: false,
             boundaries: Default::default(),
             wor: true.into(),
-            merge_abbrev: false.into(),
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
@@ -672,6 +671,65 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// The job store's real boundary for the retired `merge_abbrev` key: rows
+    /// written by an earlier version carry it on align (and every other
+    /// CHAT-writing command). Loading them must not fail, an align row loses
+    /// the key, and a transcribe row keeps it with its meaning.
+    #[tokio::test]
+    async fn stored_jobs_written_with_the_retired_merge_abbrev_key_still_load() {
+        let (db, _dir) = test_db().await;
+        db.insert_job(&make_job_record(
+            "old-align",
+            "align",
+            align_options(),
+            vec!["a.cha".into()],
+            vec![true],
+        ))
+        .await
+        .unwrap();
+        db.insert_job(&make_job_record(
+            "old-transcribe",
+            "transcribe",
+            CommandOptions::Transcribe(crate::options::TranscribeOptions {
+                auto_speakers: false,
+                common: CommonOptions::default(),
+                asr_engine: crate::options::AsrEngineName::RevAi,
+                diarize: false,
+                wor: false.into(),
+                merge_abbrev: false.into(),
+                utseg_fallback: false.into(),
+                batch_size: 8,
+            }),
+            vec!["a.mp3".into()],
+            vec![false],
+        ))
+        .await
+        .unwrap();
+        for job_id in ["old-align", "old-transcribe"] {
+            sqlx::query(
+                "UPDATE jobs SET options = json_set(options, '$.merge_abbrev', json('true')) \
+                 WHERE job_id = ?",
+            )
+            .bind(job_id)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        }
+
+        let jobs = db.load_all_jobs().await.expect("legacy rows load");
+        let options = |job_id: &str| {
+            jobs.iter()
+                .find(|job| job.job_id == job_id)
+                .map(|job| job.options.clone())
+                .expect("job loaded")
+        };
+        assert_eq!(options("old-align"), align_options());
+        let CommandOptions::Transcribe(transcribe) = options("old-transcribe") else {
+            panic!("transcribe row read as another command");
+        };
+        assert!(transcribe.merge_abbrev.should_merge());
     }
 
     /// A row whose lease expires no later than its heartbeat names a lease

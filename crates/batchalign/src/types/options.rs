@@ -14,7 +14,6 @@
 //!   "command": "morphotag",
 //!   "retokenize": true,
 //!   "skipmultilang": false,
-//!   "merge_abbrev": false,
 //!   "override_media_cache": false,
 //!   "engine_overrides": {}
 //! }
@@ -259,7 +258,11 @@ pub struct TranscribeOptions {
     #[serde(default)]
     pub wor: WorTierPolicy,
 
-    /// Merge abbreviated forms during processing.
+    /// Merge single letters that spell a known abbreviation (`F B I`) into
+    /// one word on the recognizer's tokens, before CHAT is built, timed by
+    /// the union of the letters' intervals. Transcribe is the only command
+    /// with this option; see [`report_retired_merge_abbrev`] for how a stored
+    /// job of another command that still carries the key is read.
     #[serde(default)]
     pub merge_abbrev: MergeAbbrevPolicy,
 
@@ -318,10 +321,6 @@ pub struct MorphotagOptions {
     #[serde(default)]
     pub skipmultilang: bool,
 
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
-
     /// Opt-out: if `true`, suppress the default L2 dispatch and emit
     /// `L2|xxx` placeholders for `@s` (code-switched) words. Default
     /// `false`: L2 dispatch is on.
@@ -365,10 +364,6 @@ pub struct TranslateOptions {
     /// Requested translation target. Older stored jobs retain English.
     #[serde(default = "crate::api::LanguageCode3::eng")]
     pub target: crate::api::LanguageCode3,
-
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
 }
 
 impl Default for TranslateOptions {
@@ -377,7 +372,6 @@ impl Default for TranslateOptions {
             common: CommonOptions::default(),
             translate_engine: default_translate_engine(),
             target: crate::api::LanguageCode3::eng(),
-            merge_abbrev: MergeAbbrevPolicy::default(),
         }
     }
 }
@@ -404,10 +398,6 @@ pub struct CorefOptions {
     /// Shared options.
     #[serde(flatten)]
     pub common: CommonOptions,
-
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
 }
 
 /// Options for the `utseg` command.
@@ -416,10 +406,6 @@ pub struct UtsegOptions {
     /// Shared options.
     #[serde(flatten)]
     pub common: CommonOptions,
-
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
 
     /// Operator opt-in to the legacy Stanza constituency-parser
     /// fallback for utseg when no language-specific TalkBank BERT
@@ -449,10 +435,6 @@ pub struct BenchmarkOptions {
     /// Mirrors `AlignOptions::wor`, not `TranscribeOptions::wor`.
     #[serde(default = "default_wor_tier_include")]
     pub wor: WorTierPolicy,
-
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
 }
 
 impl BenchmarkOptions {
@@ -619,10 +601,6 @@ pub struct CompareOptions {
     /// Shared options.
     #[serde(flatten)]
     pub common: CommonOptions,
-
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
 }
 
 /// Options for the `avqi` command.
@@ -652,6 +630,9 @@ pub struct ConvertOptions {
 /// Each variant holds a struct with all options for that command. The `command`
 /// tag in the JSON matches the job submission command name, enabling
 /// deserialization from the wire format without a separate `command` field.
+///
+/// A stored document of a command that no longer has `merge_abbrev` is read
+/// by the job store's stated rule ([`report_retired_merge_abbrev`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "lowercase")]
 pub enum CommandOptions {
@@ -726,34 +707,6 @@ impl CommandOptions {
         }
     }
 
-    /// Abbreviation-merging policy for this command.
-    ///
-    /// Commands without this option use [`MergeAbbrevPolicy::Keep`].
-    pub fn merge_abbrev_policy(&self) -> MergeAbbrevPolicy {
-        match self {
-            Self::Align(o) => o.merge_abbrev,
-            Self::Transcribe(o) | Self::TranscribeS(o) => o.merge_abbrev,
-            Self::Translate(o) => o.merge_abbrev,
-            Self::Morphotag(o) => o.merge_abbrev,
-            Self::Coref(o) => o.merge_abbrev,
-            Self::Utseg(o) => o.merge_abbrev,
-            Self::Benchmark(o) => o.merge_abbrev,
-            Self::Compare(o) => o.merge_abbrev,
-            // Never merges: this command does not write CHAT at all, so
-            // there is no document for the policy to apply to.
-            Self::Opensmile(_)
-            | Self::Avqi(_)
-            | Self::Diarize(_)
-            | Self::SpeakerIdentify(_)
-            | Self::Convert(_) => MergeAbbrevPolicy::Keep,
-        }
-    }
-
-    /// Whether abbreviation merging is enabled for this command.
-    pub fn merge_abbrev(&self) -> bool {
-        self.merge_abbrev_policy().should_merge()
-    }
-
     /// Operator opt-in to the Stanza utseg fallback for this command.
     ///
     /// Commands without an utseg surface return
@@ -810,6 +763,8 @@ impl CommandOptions {
 // ---------------------------------------------------------------------------
 
 mod align;
+mod legacy;
+pub(crate) use legacy::report_retired_merge_abbrev;
 mod media_root;
 pub use align::AlignOptions;
 pub use media_root::{AbsoluteMediaRoot, MediaRootDeclaration, MediaRootRefusal};

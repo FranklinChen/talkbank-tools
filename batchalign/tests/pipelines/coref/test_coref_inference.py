@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +12,22 @@ from batchalign.inference.coref import (
     CorefBatchItem,
     CorefRawAnnotation,
     CorefRawResponse,
+    PreparedCoref,
     batch_infer_coref,
+    prepare_coref,
 )
 from batchalign.providers import BatchInferRequest
+
+
+def _loaded_with(monkeypatch, pipeline_class: type) -> PreparedCoref:
+    """Install a fake ``stanza`` and run the real coref preparation against
+    it, so the handle a request takes is always one ``prepare_coref`` built."""
+    monkeypatch.setitem(
+        sys.modules,
+        "stanza",
+        SimpleNamespace(Pipeline=pipeline_class, __version__="1.99.0"),
+    )
+    return prepare_coref()
 
 
 class TestCorefModels:
@@ -38,10 +52,14 @@ class TestCorefModels:
         assert back.annotations[0].words[0][0].chain_id == 1
 
 
-def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
+def test_residency_is_scoped_to_the_batch_and_sparse_annotations_come_back(
     monkeypatch,
 ) -> None:
-    """One batch should initialize Stanza once and only emit sentences with chains."""
+    """Preparing builds the pipeline once to fetch its files, then releases
+    it; each batch builds its own from those files and releases it at the
+    end, so no handle keeps the model resident. Only chains are emitted, as
+    sparse annotations.
+    """
 
     pipeline_inits: list[dict[str, object]] = []
     seen_texts: list[str] = []
@@ -84,11 +102,13 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
                 )
             return SimpleNamespace(sentences=[_FakeSentence([_FakeWord("hello")])])
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=_FakePipeline, __version__="1.99.0"),
-    )
+    released: list[int] = []
+    _FakePipeline.__del__ = lambda self: released.append(1)  # type: ignore[attr-defined]
+
+    coref = _loaded_with(monkeypatch, _FakePipeline)
+    # Built by the preparation, before any request, and already released.
+    assert len(pipeline_inits) == 1
+    assert len(released) == 1
 
     response = batch_infer_coref(
         BatchInferRequest(
@@ -98,17 +118,25 @@ def test_batch_infer_coref_reuses_pipeline_and_returns_sparse_annotations(
                 {"sentences": [["the", "dog"], ["it", "ran"]]},
                 {"sentences": [["hello"]]},
             ],
-        )
+        ),
+        coref,
+    )
+    second = batch_infer_coref(
+        BatchInferRequest(task="coref", lang="eng", items=[{"sentences": [["hello"]]}]),
+        coref,
     )
 
-    assert len(pipeline_inits) == 1
+    # One build per batch, each released when its batch ended.
+    assert len(pipeline_inits) == 3
+    assert len(released) == 3
+    assert second.results[0].error is None
     assert pipeline_inits[0] == {
         "lang": "en",
         "processors": "tokenize,coref",
         "package": {"coref": "ontonotes-singletons_roberta-large-lora"},
         "tokenize_pretokenized": True,
     }
-    assert seen_texts == ["the dog\n\nit ran", "hello"]
+    assert seen_texts == ["the dog\n\nit ran", "hello", "hello"]
     assert response.results[0].error is None
     assert response.results[0].result == {
         "kind": "resolved",
@@ -174,18 +202,15 @@ def test_batch_infer_coref_refuses_extra_sentences_from_runtime(monkeypatch) -> 
                 ]
             )
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=_FakePipeline, __version__="1.99.0"),
-    )
+    coref = _loaded_with(monkeypatch, _FakePipeline)
 
     response = batch_infer_coref(
         BatchInferRequest(
             task="coref",
             lang="eng",
             items=[{"sentences": [["she"]]}],
-        )
+        ),
+        coref,
     )
 
     assert response.results[0].result is None
@@ -195,60 +220,50 @@ def test_batch_infer_coref_refuses_extra_sentences_from_runtime(monkeypatch) -> 
 def test_batch_infer_coref_reports_invalid_items_and_empty_documents(
     monkeypatch,
 ) -> None:
-    """Invalid items should fail explicitly, while empty documents stay no-op."""
+    """Invalid items should fail explicitly, while empty documents stay no-op,
+    and a batch with nothing to resolve builds no pipeline."""
+
+    builds: list[int] = []
 
     class _UnusedPipeline:
         def __init__(self, **_kwargs) -> None:
-            raise AssertionError(
-                "pipeline should not be created for invalid or empty items"
-            )
+            builds.append(1)
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=_UnusedPipeline, __version__="1.99.0"),
-    )
+        def __call__(self, _text: str):
+            raise AssertionError("invalid or empty items must never reach the model")
+
+    coref = _loaded_with(monkeypatch, _UnusedPipeline)
+    builds.clear()
 
     response = batch_infer_coref(
         BatchInferRequest(
             task="coref",
             lang="eng",
             items=[{"bad": "shape"}, {"sentences": []}],
-        )
+        ),
+        coref,
     )
 
     assert response.results[0].error == "Invalid CorefBatchItem"
     # Never sent to the engine, so it names none.
     assert response.results[1].result == {"kind": "no_sentences"}
+    assert builds == []
 
 
-def test_batch_infer_coref_fails_a_document_when_no_engine_can_be_named(
-    monkeypatch,
-) -> None:
-    """With no Stanza version there is no identity to report, so no resolution."""
+def test_load_refuses_a_model_whose_engine_cannot_be_named(monkeypatch) -> None:
+    """With no Stanza version there is no identity to report, so nothing loads:
+    refused at the load, before anything downloads."""
 
     class _UnusedPipeline:
         def __init__(self, **_kwargs) -> None:
-            raise AssertionError("no pipeline should run without an engine identity")
+            raise AssertionError("no pipeline should be built without an identity")
 
     monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=_UnusedPipeline),
+        sys.modules, "stanza", SimpleNamespace(Pipeline=_UnusedPipeline)
     )
 
-    response = batch_infer_coref(
-        BatchInferRequest(
-            task="coref",
-            lang="eng",
-            items=[{"sentences": [["she"]]}, {"sentences": []}],
-        )
-    )
-
-    assert response.results[0].result is None
-    assert response.results[0].error is not None
-    assert "cannot name the Stanza version" in response.results[0].error
-    assert response.results[1].result == {"kind": "no_sentences"}
+    with pytest.raises(RuntimeError, match="cannot name the Stanza version"):
+        prepare_coref()
 
 
 def test_batch_infer_coref_fails_the_document_on_runtime_failure(
@@ -268,18 +283,15 @@ def test_batch_infer_coref_fails_the_document_on_runtime_failure(
         def __call__(self, _text: str):
             raise RuntimeError("coref runtime exploded")
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=_ExplodingPipeline, __version__="1.99.0"),
-    )
+    coref = _loaded_with(monkeypatch, _ExplodingPipeline)
 
     response = batch_infer_coref(
         BatchInferRequest(
             task="coref",
             lang="eng",
             items=[{"sentences": [["she"], ["left"]]}],
-        )
+        ),
+        coref,
     )
 
     assert response.results[0].result is None
@@ -319,17 +331,14 @@ def test_unannotated_native_shape_faults_cannot_be_resolved(
                 ]
             )
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=Pipeline, __version__="1.99.0"),
-    )
+    coref = _loaded_with(monkeypatch, Pipeline)
     response = batch_infer_coref(
         BatchInferRequest(
             task="coref",
             lang="eng",
             items=[{"sentences": [["she"], ["left"]]}],
-        )
+        ),
+        coref,
     )
     assert response.results[0].result is None
     assert response.results[0].error is not None
@@ -353,17 +362,14 @@ def test_incomplete_native_item_does_not_poison_next_complete_document(
             )
             return SimpleNamespace(sentences=[SimpleNamespace(words=words)])
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "stanza",
-        SimpleNamespace(Pipeline=Pipeline, __version__="1.99.0"),
-    )
+    coref = _loaded_with(monkeypatch, Pipeline)
     response = batch_infer_coref(
         BatchInferRequest(
             task="coref",
             lang="eng",
             items=[{"sentences": [["broken"]]}, {"sentences": [["complete"]]}],
-        )
+        ),
+        coref,
     )
     assert response.results[0].result is None
     assert response.results[0].error is not None

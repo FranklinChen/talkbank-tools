@@ -4,9 +4,7 @@
 //! these methods: writing JSON-lines requests to stdin, reading JSON-lines
 //! responses from stdout, and handling timeouts, noise lines, and crashes.
 
-use crate::types::worker_v2::{
-    ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2, batched_items_timeout,
-};
+use crate::types::worker_v2::{ExecuteResponseV2, ProgressEventV2, batched_items_timeout};
 use crate::worker::error::{WorkerError, WorkerWait};
 use crate::worker::{
     BatchInferRequest, BatchInferResponse, InferRequest, InferResponse, WorkerCapabilities,
@@ -100,8 +98,10 @@ impl WorkerHandle {
         // events before it can answer the health probe.
         let response = self
             .read_response_skipping_progress_via_self(
-                WorkerWait::Health,
-                crate::worker::HEALTH_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Health,
+                    limit: crate::worker::HEALTH_TIMEOUT,
+                },
                 None,
             )
             .await?;
@@ -126,21 +126,28 @@ impl WorkerHandle {
         Ok(resp)
     }
 
-    /// Load one task's models on demand in a LazyProfile worker.
+    /// Prepare this worker for `load`: the `NotLoaded` to `Loaded`
+    /// transition, returning the proof every execute takes.
     ///
-    /// Sends the `ensure_task` IPC message and waits for the response.
-    /// Idempotent: if the task is already loaded, the worker responds instantly.
-    /// Timeout is generous (120s) for model downloads + initialization.
+    /// Unless this worker already completed the load (its proof is returned
+    /// with no round trip and no second lease), the host grants the load's
+    /// memory lease first (queued while the host cannot fit it), then the
+    /// `ensure_task` IPC message is sent, and the proof recorded from the
+    /// reply owns the lease. A load that fails releases its lease. The reply
+    /// wait is a [`crate::worker::LoadingStall`] window that the worker's
+    /// advancing progress re-arms, so a model download takes as long as it
+    /// takes and only a worker that goes quiet is stalled.
     pub async fn ensure_task(
         &mut self,
-        task: crate::worker::InferTask,
-        engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout: crate::api::PositiveSeconds,
-    ) -> Result<(), WorkerError> {
-        // Fast path: skip IPC if already known-loaded.
-        if self.loaded_tasks.contains(&task) {
-            return Ok(());
+        load: &crate::worker::pool::TaskLoad,
+        preparation: &crate::worker::pool::LoadPreparation,
+    ) -> Result<std::sync::Arc<crate::worker::pool::Loaded>, WorkerError> {
+        if let Some(loaded) = self.loads.get(load) {
+            return Ok(loaded);
         }
+        let admitted = preparation.admission.admit(load, self.pid).await?;
+        let task = admitted.load().task();
+        let engine_overrides = admitted.load().wire_overrides();
 
         use super::protocol::{ControlRequestId, EnsureTaskRequest};
 
@@ -154,14 +161,15 @@ impl WorkerHandle {
         .await?;
 
         // ensure_task is THE on-demand model-loading IPC: per-language
-        // Stanza pack downloads, HuggingFace model fetches, and torch
-        // checkpoint warm-ups all fire progress_v2 events from inside
-        // this call. Tolerate them; the timeout is per the caller's
-        // task budget, not per individual progress event.
+        // Stanza pack downloads, HuggingFace and ModelScope model fetches,
+        // and torch checkpoint warm-ups all fire progress_v2 events from
+        // inside this call. Each that advanced re-arms the stall window.
         let response = self
             .read_response_skipping_progress_via_self(
-                WorkerWait::EnsureTask { task },
-                timeout,
+                crate::worker::ResponseWait::Loading {
+                    waited_for: crate::worker::LoadingWait::EnsureTask { task },
+                    stall: preparation.stall,
+                },
                 None,
             )
             .await?;
@@ -176,8 +184,7 @@ impl WorkerHandle {
                     elapsed_s = response.elapsed_s.get(),
                     "ensure_task completed (sequential worker)"
                 );
-                self.loaded_tasks.insert(task);
-                Ok(())
+                Ok(self.loads.record(admitted.confirm().await))
             }
             WorkerResponse::Error(failure) => Err(failure.into_ensure_task_error()),
             other => Err(WorkerError::Protocol(format!(
@@ -200,8 +207,10 @@ impl WorkerHandle {
         // progress_v2 from inside the inference call too. Skip them.
         let response = self
             .read_response_skipping_progress_via_self(
-                WorkerWait::Infer,
-                crate::worker::INFER_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Infer,
+                    limit: crate::worker::INFER_TIMEOUT,
+                },
                 None,
             )
             .await?;
@@ -230,8 +239,10 @@ impl WorkerHandle {
         let items = request.items.len();
         let response = self
             .read_response_skipping_progress_via_self(
-                WorkerWait::BatchInfer { items },
-                batched_items_timeout(items as u64),
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::BatchInfer { items },
+                    limit: batched_items_timeout(items as u64),
+                },
                 None,
             )
             .await?;
@@ -257,9 +268,9 @@ impl WorkerHandle {
     /// to receive them.
     pub async fn execute_v2(
         &mut self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.execute_v2_with_progress(request, None).await
+        self.execute_v2_with_progress(permit, None).await
     }
 
     /// Send an `execute_v2` request, forwarding intermediate progress events
@@ -272,9 +283,10 @@ impl WorkerHandle {
     /// losing a progress update is not an error.
     pub async fn execute_v2_with_progress(
         &mut self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
         progress_tx: Option<&tokio::sync::mpsc::Sender<ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
+        let request = permit.request();
         self.last_activity = tokio::time::Instant::now();
 
         // Capture serialized request for failure dumps (before sending).
@@ -371,8 +383,10 @@ impl WorkerHandle {
         // budget; a health-check-sized wait can expire while imports progress.
         let response = self
             .read_response_skipping_progress_via_self(
-                WorkerWait::Capabilities,
-                crate::worker::CAPABILITY_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Capabilities,
+                    limit: crate::worker::CAPABILITY_TIMEOUT,
+                },
                 None,
             )
             .await?;

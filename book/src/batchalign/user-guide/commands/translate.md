@@ -1,7 +1,7 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-10-02 23:08 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Add translations to CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only, no audio involved.
@@ -160,10 +160,7 @@ flowchart TD
     parse --> collect[collect_payloads\nSpoken words and terminator per utterance]
     collect --> worker[execute_v2(task="translate"), one utterance per request\npaced and retried by the engine's provider policy → raw translation]
     worker --> inject[inject %xtra tiers with translated text]
-    inject --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    inject --> serialize[Serialize → .cha output]
     serialize --> done([Output .cha files])
 ```
 
@@ -191,7 +188,6 @@ re-invoke the worker.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--translate-engine google\|tencent\|aliyun\|nllb\|seamless` | `google` | Pick the translation engine for this invocation. `tencent` is best for Mandarin (requires CAM credentials, no Cantonese support); `aliyun` is the Cantonese-capable cloud option (requires Aliyun access keys); `nllb` is the recommended self-hosted fallback and handles Cantonese; `seamless` is BA2-inherited and retained for back-compat. |
-| `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the translated output |
 | `--target ISO3` | `eng` | Translation target, independent of each file's source language. Provider/model language-pair restrictions still apply. |
 
 ---

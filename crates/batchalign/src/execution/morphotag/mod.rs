@@ -162,7 +162,6 @@ pub(crate) async fn dispatch_morphotag_job(
                     &host_for_task,
                     &plan_for_task,
                     vec![file_result],
-                    options_for_task.should_merge_abbrev,
                 )
                 .await;
             }

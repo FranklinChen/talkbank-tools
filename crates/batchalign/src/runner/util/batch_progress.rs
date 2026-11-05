@@ -11,9 +11,11 @@
 //!
 //! The backend already produces the numbers.
 //! `batchalign/worker/_text_v2.py` installs an `_on_progress` callback that
-//! emits a `progress_v2` event at most once per second per request, carrying
-//! `completed` / `total` utterances. This module is the accounting that turns
-//! that stream into one honest per-file count.
+//! emits a `progress_v2` event at most once per second per request, a
+//! `request`-scoped event carrying `completed` / `total` utterances
+//! ([`UnitProgressV2`]). This module is the accounting that turns that stream
+//! into one honest per-file count; only request progress reaches it (see
+//! `execution::morphotag::progress::BackendProgressPort::report`).
 //!
 //! # One projection, per input file
 //!
@@ -80,7 +82,7 @@
 use std::collections::BTreeMap;
 
 use crate::api::{DisplayPath, LanguageCode3, UtteranceCount};
-use crate::types::worker_v2::ProgressEventV2;
+use crate::types::worker_v2::UnitProgressV2;
 
 /// Index of one chunk within a single (source, language-group) batch.
 ///
@@ -140,25 +142,28 @@ pub(crate) struct BackendProgress {
 }
 
 impl BackendProgress {
-    /// Lift one wire-protocol progress event into a domain message.
+    /// Lift one request's admitted item counts into a domain message.
     ///
-    /// The event's `stage` field is deliberately IGNORED. The 2026-04 producer
-    /// smuggled the language code through it by rewriting `event.stage` in
-    /// flight, so a field named "stage" carried a language by a convention no
-    /// type enforced. Provenance now arrives as typed fields supplied by the
-    /// dispatch site, which knows them for certain.
-    pub(crate) fn from_event(
+    /// Takes the counts, not the whole event: a load's progress is not request
+    /// progress, and the caller has already matched it away, so no other
+    /// measure's number can be read as utterances; and `completed <= total`
+    /// was admitted at the wire. The event's `stage` is not taken either. The 2026-04
+    /// producer smuggled the language code through it by rewriting
+    /// `event.stage` in flight, so a field named "stage" carried a language by
+    /// a convention no type enforced. Provenance now arrives as typed fields
+    /// supplied by the dispatch site, which knows them for certain.
+    pub(crate) fn from_units(
         source_id: DisplayPath,
         group: LanguageCode3,
         chunk: BatchChunkIndex,
-        event: &ProgressEventV2,
+        units: UnitProgressV2,
     ) -> Self {
         Self {
             source_id,
             group,
             chunk,
-            completed: UtteranceCount(u64::from(event.completed)),
-            total: UtteranceCount(u64::from(event.total)),
+            completed: UtteranceCount(u64::from(units.completed())),
+            total: UtteranceCount(u64::from(units.total())),
         }
     }
 }
@@ -287,19 +292,6 @@ pub(crate) struct SourceProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::worker_v2::ProgressEventV2;
-    use batchalign_types::worker_v2::WorkerRequestIdV2;
-
-    fn event(request: &str, completed: u32, total: u32) -> ProgressEventV2 {
-        ProgressEventV2 {
-            request_id: WorkerRequestIdV2::from(request),
-            completed,
-            total,
-            // The real Python producer hard-codes this label for every event;
-            // the ledger must never depend on it.
-            stage: "stanza_processing".to_string(),
-        }
-    }
 
     fn lang(code: &str) -> LanguageCode3 {
         LanguageCode3::try_new(code).expect("test language code must be a valid ISO 639-3 code")
@@ -321,11 +313,11 @@ mod tests {
         completed: u32,
         total: u32,
     ) -> bool {
-        ledger.record(ProgressReport::Chunk(BackendProgress::from_event(
+        ledger.record(ProgressReport::Chunk(BackendProgress::from_units(
             DisplayPath::from(source),
             lang(group),
             BatchChunkIndex(chunk),
-            &event("req", completed, total),
+            UnitProgressV2::new(completed, total).expect("a test count within its total"),
         )))
     }
 

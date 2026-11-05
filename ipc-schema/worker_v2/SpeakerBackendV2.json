@@ -12,11 +12,6 @@
       "description": "Pyannote diarization backend.",
       "type": "string",
       "const": "pyannote"
-    },
-    {
-      "description": "NeMo diarization backend.",
-      "type": "string",
-      "const": "nemo"
     }
   ]
 }

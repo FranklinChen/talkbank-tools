@@ -13,10 +13,11 @@ use crate::error::ServerError;
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::runner::util::{
-    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    drain_supervised_file_tasks, spawn_supervised_file_task, user_facing_error,
+    AfterFailure, FileAttempts, FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink,
+    classify_server_error, drain_supervised_file_tasks, spawn_supervised_file_task,
+    user_facing_error,
 };
-use crate::scheduling::{FailureCategory, NextAttempt, RetryPolicy, WorkUnitKind};
+use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::{PendingJobFile, RunnerJobSnapshot};
 use crate::transcribe::{
     SpeakerEvidenceRunParams, SpeakerEvidenceSource, resolve_speaker_evidence_for_audio,
@@ -33,9 +34,7 @@ use crate::worker::opensmile_request_v2::{
 };
 use crate::worker::pool::WorkerPool;
 
-use super::audio_output::{
-    ChatOutput, FileOutput, MergeAbbreviations, write_primary_output_artifact,
-};
+use super::audio_output::{ChatOutput, FileOutput, write_primary_output_artifact};
 use super::diarize_chat::MappedDiarizeSource;
 use super::diarize_turns::{SpeakerTurnsSource, format_turns_json};
 
@@ -155,13 +154,13 @@ async fn process_one_media_analysis_file_v2(
     if let MediaAnalysisDispatchPlan::Diarize { output_mode, .. } = plan
         && !output_mode.accepts_source_name(filename)
     {
-        lifecycle
+        return lifecycle
             .fail(
                 "diarize source does not match its admitted mode; use --speaker-map for timed CHAT",
                 FailureCategory::Validation,
             )
-            .await;
-        return FileTaskOutcome::TerminalStateRecorded;
+            .await
+            .into();
     }
 
     // Parse once, outside worker retries. Retain the same immutable source and
@@ -178,13 +177,13 @@ async fn process_one_media_analysis_file_v2(
         let text = match tokio::fs::read_to_string(&original_audio_path).await {
             Ok(text) => text,
             Err(error) => {
-                lifecycle
+                return lifecycle
                     .fail(
                         &format!("Failed to read CHAT input: {error}"),
                         FailureCategory::InputMissing,
                     )
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    .await
+                    .into();
             }
         };
         lifecycle.stage(FileStage::Parsing).await;
@@ -195,10 +194,10 @@ async fn process_one_media_analysis_file_v2(
         ) {
             Ok(source) => Some(source.into_valid_file()),
             Err(error) => {
-                lifecycle
+                return lifecycle
                     .fail(&error.to_string(), classify_server_error(&error))
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    .await
+                    .into();
             }
         }
     } else {
@@ -209,8 +208,10 @@ async fn process_one_media_analysis_file_v2(
             match MappedDiarizeSource::admit(transcript, mapping) {
                 Ok(source) => Some(source),
                 Err(error) => {
-                    lifecycle.fail(&error.to_string(), error.category()).await;
-                    return FileTaskOutcome::TerminalStateRecorded;
+                    return lifecycle
+                        .fail(&error.to_string(), error.category())
+                        .await
+                        .into();
                 }
             }
         }
@@ -228,16 +229,9 @@ async fn process_one_media_analysis_file_v2(
         mapped_source,
     };
 
-    let retry_policy = RetryPolicy::default();
-    for attempt_number in 1..=retry_policy.max_attempts {
-        if attempt_number > 1 {
-            lifecycle
-                .restart_attempt(WorkUnitKind::FileInfer, FileStage::Processing)
-                .await;
-        } else {
-            lifecycle.stage(FileStage::Processing).await;
-        }
-
+    let mut attempts =
+        FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Processing).await;
+    loop {
         match attempt.run().await {
             Ok(output) => {
                 lifecycle.stage(FileStage::Writing).await;
@@ -253,31 +247,16 @@ async fn process_one_media_analysis_file_v2(
                 {
                     Ok(written) => written,
                     Err(error) => {
-                        lifecycle
+                        return lifecycle
                             .fail(&error.operator_message("Analysis"), error.category())
-                            .await;
-                        return FileTaskOutcome::TerminalStateRecorded;
+                            .await
+                            .into();
                     }
                 };
-                written.record(&lifecycle).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                return written.record(&lifecycle).await.into();
             }
             Err(DispatchFailure::Runtime(error)) => {
                 let category = classify_server_error(&error);
-                if let NextAttempt::RetryAfter(backoff_ms) =
-                    retry_policy.after_failure(attempt_number, category)
-                {
-                    lifecycle
-                        .retry_after(
-                            backoff_ms.duration(),
-                            category,
-                            &format!("Worker error: {error}; retrying in {backoff_ms} ms"),
-                        )
-                        .await;
-                    tokio::time::sleep(backoff_ms.duration()).await;
-                    continue;
-                }
-
                 let raw_msg = format!("Worker error: {error}");
                 warn!(
                     job_id = %job_id,
@@ -286,9 +265,13 @@ async fn process_one_media_analysis_file_v2(
                     raw_error = %raw_msg,
                     "Media-analysis error (raw)"
                 );
-                let user_msg = user_facing_error(category, "Analysis", filename, &raw_msg);
-                lifecycle.fail(&user_msg, category).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                let message = user_facing_error(category, "Analysis", filename, &raw_msg);
+                // A runtime failure is retried when the policy allows its
+                // category; a terminal one is the arm below.
+                attempts = match attempts.failed(category, message).await {
+                    AfterFailure::Retry(grant) => grant.wait().await,
+                    AfterFailure::Recorded(recorded) => return recorded.into(),
+                };
             }
             Err(DispatchFailure::Terminal(error, category)) => {
                 error!(
@@ -298,14 +281,11 @@ async fn process_one_media_analysis_file_v2(
                     error = %error,
                     "Media-analysis V2 dispatch failed"
                 );
-                let user_msg = user_facing_error(category, "Analysis", filename, &error);
-                lifecycle.fail(&user_msg, category).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                let message = user_facing_error(category, "Analysis", filename, &error);
+                return attempts.fail(category, &message).await.into();
             }
         }
     }
-
-    FileTaskOutcome::MissingTerminalState
 }
 
 #[derive(Debug)]
@@ -413,7 +393,6 @@ impl MediaAnalysisAttempt<'_, '_> {
                             document: document.into(),
                             shortfalls: Vec::new(),
                             exclusions: Vec::new(),
-                            merge_abbreviations: MergeAbbreviations::Leave,
                         }));
                     }
                     let recording = super::media_search::resolve_transcript_media(
@@ -455,7 +434,6 @@ impl MediaAnalysisAttempt<'_, '_> {
                         document: document.into(),
                         shortfalls: Vec::new(),
                         exclusions: Vec::new(),
-                        merge_abbreviations: MergeAbbreviations::Leave,
                     }));
                 }
                 let audio_path = prepare_analysis_audio(original_audio_path).await?;
@@ -894,6 +872,7 @@ fn resolve_avqi_sv_path(cs_audio_path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduling::{NextAttempt, RetryPolicy};
 
     /// Exercise the wire-to-output admission used by both dispatchers, not
     /// only the shared protocol classifier: these paths formerly flattened

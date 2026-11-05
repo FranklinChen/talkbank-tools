@@ -1,7 +1,7 @@
 # batchalign-core: Rust Worker Runtime
 
 **Status:** Current
-**Last modified:** 2026-09-22 17:57 EDT
+**Last modified:** 2026-11-05 23:04 EST
 
 ## Overview
 
@@ -58,6 +58,16 @@ Properties worth knowing before adding a task:
   `MonoPreparedAudio` return is the only route to decoded samples: the raw
   require/load/decode primitives are private to `worker_artifacts`, so the
   un-checked path has no signature an executor can reach.
+
+- **An executor is handed what a load built, never an absent runner.** The
+  Python worker resolves a request's load in its load registry once
+  (`batchalign/worker/_execute_v2.py`) and refuses an absent one there as
+  `model_unavailable`. A model-backed executor takes the loaded host itself
+  and reads `backend` and `runner` (and, for ASR, `model_identity`) from it
+  through `worker_execute::admit_loaded_host`, which refuses a request for
+  another backend; a text or model-free executor takes the runner
+  (`LoadedRunner::of_host`). There is no `Option` runner parameter and no
+  per-backend "not loaded" message to keep in step.
 
 - **`ExecuteFailure` is the single owner of the failure-to-protocol-code
   mapping.** Do not re-derive a `ProtocolErrorCodeV2` in an executor; return the

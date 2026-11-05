@@ -4,8 +4,6 @@ use super::*;
 use crate::dp_align::LiteralMatchMode;
 use crate::dp_align::packed_literal::{BIT_WORDS, LiteralReference, PrefixScores, ReferenceOrder};
 
-const MAX_PACKED_WORK: usize = 64_000_000;
-
 pub(super) struct LiteralCandidates<'input> {
     payload: &'input [String],
     reference: &'input [String],
@@ -14,31 +12,23 @@ pub(super) struct LiteralCandidates<'input> {
     raw_edges: usize,
 }
 
-/// Constructed only from this observed input's sizes and raw posting census.
-struct PackedGeometry {
+/// A storage-admitted operation owns its actual input and candidate policy.
+/// Estimated CPU work cannot reject this otherwise qualified representation.
+struct StorageAdmittedLiteralProof<'plan, 'input> {
+    input: &'plan LiteralCandidates<'input>,
     stride: usize,
+    edge_limit: usize,
 }
 
-impl PackedGeometry {
-    fn admit(input: &LiteralCandidates<'_>, edge_limit: usize) -> Option<Self> {
+impl<'plan, 'input> StorageAdmittedLiteralProof<'plan, 'input> {
+    fn admit(input: &'plan LiteralCandidates<'input>, edge_limit: usize) -> Option<Self> {
         let m = input.payload.len();
         let n = input.reference.len();
-        if m.saturating_add(n).saturating_mul(6) > MAX_PACKED_WORK {
-            return None;
-        }
         let blocks = n.div_ceil(64);
         let mut stride = 1usize;
         while stride < m.div_ceil(stride) {
             stride += 1;
         }
-        // Three sparse row streams, prefix-index scans and checkpoint copies;
-        // two prefix-score queries and one optimal-edge probe per posting.
-        let work = m
-            .saturating_mul(blocks)
-            .saturating_mul(6)
-            .saturating_add(input.raw_edges.saturating_mul(3))
-            .saturating_add(m.saturating_add(n).saturating_mul(6))
-            .saturating_add(2);
         // Retained checkpoint bits, bounded prefix blocks, both row engines,
         // one reverse prefix view and rank/common payload. Include a generous
         // reference-map/header allowance; this is not an RSS/allocator claim.
@@ -52,10 +42,13 @@ impl PackedGeometry {
             .saturating_mul(rows)
             .saturating_add(n.saturating_mul(32))
             .saturating_add(m.saturating_add(1).saturating_mul(rank_words));
-        // Never exceed the old four-machine-word Edge payload allowance.
-        let edge_words = std::mem::size_of::<Edge>().div_ceil(std::mem::size_of::<usize>());
-        (work <= MAX_PACKED_WORK && storage <= edge_limit.saturating_mul(edge_words))
-            .then_some(Self { stride })
+        // Preserve the sparse address plus both completed-rank payload allowance.
+        let edge_words = sparse::EDGE_PAYLOAD_BYTES.div_ceil(std::mem::size_of::<usize>());
+        (storage <= edge_limit.saturating_mul(edge_words)).then_some(Self {
+            input,
+            stride,
+            edge_limit,
+        })
     }
 }
 
@@ -124,19 +117,42 @@ impl<'input> LiteralCandidates<'input> {
         edge_limit: usize,
         control: &C,
     ) -> Result<Option<CorrespondenceAdmission>, C::Error> {
-        let Some(geometry) = PackedGeometry::admit(self, edge_limit) else {
+        let Some(admitted) = StorageAdmittedLiteralProof::admit(self, edge_limit) else {
             return Ok(None);
         };
+        admitted.certify(control).map(Some)
+    }
+}
+
+impl StorageAdmittedLiteralProof<'_, '_> {
+    /// Consume the admitted operation; input, stride and policy are retained.
+    fn certify<C: WorkControl + ?Sized>(
+        self,
+        control: &C,
+    ) -> Result<CorrespondenceAdmission, C::Error> {
+        let Self {
+            input,
+            stride,
+            edge_limit,
+        } = self;
         control.check()?;
-        let forward_reference =
-            LiteralReference::observe(self.reference, self.mode, ReferenceOrder::Forward, control)?;
-        let reverse_reference =
-            LiteralReference::observe(self.reference, self.mode, ReferenceOrder::Reverse, control)?;
+        let forward_reference = LiteralReference::observe(
+            input.reference,
+            input.mode,
+            ReferenceOrder::Forward,
+            control,
+        )?;
+        let reverse_reference = LiteralReference::observe(
+            input.reference,
+            input.mode,
+            ReferenceOrder::Reverse,
+            control,
+        )?;
         let mut forward = forward_reference.start();
         let mut checkpoints = vec![forward.checkpoint()];
-        for (p, word) in self.payload.iter().enumerate() {
+        for (p, word) in input.payload.iter().enumerate() {
             forward = forward.extend(word, control)?;
-            if (p + 1) % geometry.stride == 0 {
+            if (p + 1) % stride == 0 {
                 checkpoints.push(forward.checkpoint());
             }
         }
@@ -145,37 +161,37 @@ impl<'input> LiteralCandidates<'input> {
         let mut populations: Vec<_> = (0..=optimum).map(|_| RankPopulation::Empty).collect();
         let mut optimal_edges = 0usize;
         let mut backward = reverse_reference.start();
-        let mut end = self.payload.len();
+        let mut end = input.payload.len();
         while end > 0 {
-            let start = (end - 1) / geometry.stride * geometry.stride;
-            let mut reconstructed = checkpoints[start / geometry.stride].resume();
+            let start = (end - 1) / stride * stride;
+            let mut reconstructed = checkpoints[start / stride].resume();
             let mut prefixes = Vec::with_capacity(end - start);
             for p in start..end {
                 prefixes.push(reconstructed.prefixes());
-                reconstructed = reconstructed.extend(&self.payload[p], control)?;
+                reconstructed = reconstructed.extend(&input.payload[p], control)?;
             }
             for p in (start..end).rev() {
                 control.check()?;
                 // This row observes source[p+1..] and the reversed reference.
                 let suffix = backward.prefixes();
-                if let Some(references) = self.references(p) {
+                if let Some(references) = input.references(p) {
                     for (ordinal, &r) in references.iter().enumerate() {
                         if ordinal % 1024 == 0 {
                             control.check()?;
                         }
                         let rank = prefixes[p - start].before(r) + 1;
-                        if rank + suffix.before(self.reference.len() - r - 1) == optimum {
+                        if rank + suffix.before(input.reference.len() - r - 1) == optimum {
                             if optimal_edges == edge_limit {
-                                return Ok(Some(CorrespondenceAdmission::BudgetExhausted(
-                                    CorrespondenceBudget::CandidateEdges,
-                                )));
+                                return Ok(CorrespondenceAdmission::BudgetExhausted(
+                                    CorrespondenceBudget::candidate_edges(edge_limit),
+                                ));
                             }
                             optimal_edges += 1;
                             populations[rank].observe(p, r);
                         }
                     }
                 }
-                backward = backward.extend(&self.payload[p], control)?;
+                backward = backward.extend(&input.payload[p], control)?;
             }
             end = start;
         }
@@ -186,8 +202,8 @@ impl<'input> LiteralCandidates<'input> {
                 RankPopulation::Empty | RankPopulation::Competing => None,
             })
             .collect();
-        Ok(Some(CorrespondenceAdmission::Complete(
-            CommonCorrespondences { pairs },
-        )))
+        Ok(CorrespondenceAdmission::Complete(CommonCorrespondences {
+            pairs,
+        }))
     }
 }

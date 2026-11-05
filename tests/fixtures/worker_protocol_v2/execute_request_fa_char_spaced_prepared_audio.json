@@ -3,6 +3,7 @@
   "task": "forced_alignment",
   "payload": {
     "kind": "forced_alignment",
+    "phase": {"kind": "candidate"},
     "backend": "whisper",
     "payload_ref_id": "inline-ref-0005",
     "audio_ref_id": "audio-ref-0005",

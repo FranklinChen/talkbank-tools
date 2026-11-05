@@ -60,23 +60,6 @@ def pc_real():
 # ---------------------------------------------------------------------------
 
 
-class _FakeAudioChunk:
-    """Stand-in for audio chunk returned by ASRAudioFile.chunk()."""
-
-    pass
-
-
-class _FakeAudioFile:
-    """Stand-in for ASRAudioFile returned by load_audio_file()."""
-
-    def chunk(self, start_ms: int, end_ms: int) -> _FakeAudioChunk:
-        return _FakeAudioChunk()
-
-
-def _fake_load_audio_file(path: str) -> _FakeAudioFile:
-    return _FakeAudioFile()
-
-
 def _fake_infer_wave2vec_fa(
     model: Any, audio: Any, words: list[str]
 ) -> list[tuple[str, tuple[int, int], float | None]]:
@@ -90,6 +73,6 @@ def cantonese_fa_host() -> CantoneseFaHost:
     return CantoneseFaHost(
         model=object(),
         romanizer=PyCantoneseFake(),
-        load_audio_file=_fake_load_audio_file,
         infer_wave2vec_fa=_fake_infer_wave2vec_fa,
+        lang="yue",
     )

@@ -296,6 +296,8 @@ pub enum FileProgressStage {
     RecoveringUtteranceTiming,
     /// Fallback timing recovery after an FA error.
     RecoveringTimingFallback,
+    /// Preparing source-bound alignment inputs and loaded-model admission.
+    PreparingAlignment,
     /// Main forced-alignment work.
     Aligning,
     /// Main ASR transcription work.
@@ -336,6 +338,14 @@ pub enum FileProgressStage {
     /// (every slot busy, nothing idle to evict). Congestion, not failure; the
     /// file keeps its place and resumes its previous stage when served.
     WaitingForWorker,
+    /// A worker startup or a model load for the file is queued until the
+    /// host can fit its memory: congestion, not failure. The file keeps its
+    /// place and resumes its previous stage when the memory is granted.
+    WaitingForHostMemory,
+    /// Worker startup or on-demand model preparation is active.
+    PreparingWorker,
+    /// Model cache growth is being measured; progress is in KiB, not items.
+    DownloadingModel,
 }
 
 impl FileProgressStage {
@@ -351,6 +361,7 @@ impl FileProgressStage {
             Self::ResolvingAudio => "Resolving audio",
             Self::RecoveringUtteranceTiming => "Recovering utterance timing",
             Self::RecoveringTimingFallback => "Recovering timing (fallback)",
+            Self::PreparingAlignment => "Preparing alignment",
             Self::Aligning => "Aligning",
             Self::Transcribing => "Transcribing",
             Self::Benchmarking => "Benchmarking",
@@ -370,6 +381,9 @@ impl FileProgressStage {
             Self::Comparing => "Comparing",
             Self::RetryScheduled => "Retry scheduled",
             Self::WaitingForWorker => "Waiting for a worker",
+            Self::WaitingForHostMemory => "Waiting for host memory",
+            Self::PreparingWorker => "Preparing worker",
+            Self::DownloadingModel => "Downloading model",
         }
     }
 }

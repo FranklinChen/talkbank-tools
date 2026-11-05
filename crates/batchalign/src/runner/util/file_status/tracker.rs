@@ -35,22 +35,49 @@ pub(crate) async fn set_file_progress(
 /// Explicit completion contract for one supervised file task.
 ///
 /// A task returns `TerminalStateRecorded` only after it has already written the
-/// final file status that the runner should trust. An early return or panic
-/// that skips that write path surfaces as `MissingTerminalState` so the
-/// supervisor can record a concrete failure. A job cancellation that stopped
-/// the task mid-flight is its own outcome, issued only by the supervision
-/// wrapper that observed the cancellation.
+/// final file status that the runner should trust. A panic that skips that
+/// write path reaches the supervisor as a join error, which records a concrete
+/// failure. A job cancellation that stopped the task mid-flight is its own
+/// outcome, issued only by the supervision wrapper that observed the
+/// cancellation. There is no "returned without a terminal state": the retry
+/// loops that could fall out of their last attempt into one are a typestate
+/// now (`FileAttempts`), whose every exit records the file's state.
 #[derive(Debug)]
 pub(crate) enum FileTaskOutcome {
-    /// The task itself recorded success or terminal failure for the file.
-    TerminalStateRecorded,
-    /// The task exited without recording a terminal file state.
-    MissingTerminalState,
+    /// The task itself recorded success or terminal failure for the file; the
+    /// token is the proof, made only by the call that recorded it.
+    TerminalStateRecorded(TerminalRecorded),
     /// The job was cancelled and the supervisor dropped the task's future
     /// wherever it was: in a worker dispatch, a cache wait, or between stages.
     /// Nothing after that point ran, so no output, debug dump or cache write
     /// belongs to a cancelled job.
     StoppedByCancellation,
+}
+
+/// Proof that a file's terminal state was recorded.
+///
+/// Made only by the [`FileRunTracker`] calls that record one (`fail`,
+/// `record_setup_failure`, the `complete_*` family), so a task cannot report
+/// [`FileTaskOutcome::TerminalStateRecorded`] without having recorded it. The
+/// supervisor used to need a "returned without a terminal state" outcome for
+/// exactly that mistake. Batch paths that record many files and report no
+/// per-file outcome simply drop it: there, recording is the whole effect.
+#[derive(Debug)]
+pub(crate) struct TerminalRecorded(());
+
+impl TerminalRecorded {
+    /// A token for a supervision test whose task records nothing: the test is
+    /// of the supervisor, not of recording.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self(())
+    }
+}
+
+impl From<TerminalRecorded> for FileTaskOutcome {
+    fn from(recorded: TerminalRecorded) -> Self {
+        Self::TerminalStateRecorded(recorded)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +135,11 @@ impl<'a> FileRunTracker<'a> {
     /// This is used for preflight rejection paths such as missing or
     /// incompatible media, where attempt history is still wanted but the file
     /// should not be advertised as actively processing.
-    pub(crate) async fn record_setup_failure(&self, error: &str, category: FailureCategory) {
+    pub(crate) async fn record_setup_failure(
+        &self,
+        error: &str,
+        category: FailureCategory,
+    ) -> TerminalRecorded {
         let refused_at = self.sink.now();
         self.sink
             .clear_file_retry_state(self.job_id, self.filename)
@@ -124,6 +155,7 @@ impl<'a> FileRunTracker<'a> {
         self.sink
             .mark_file_error(self.job_id, self.filename, error, category, refused_at)
             .await;
+        TerminalRecorded(())
     }
 
     /// Clear retry-only state, open the next attempt, and publish the stage
@@ -165,11 +197,12 @@ impl<'a> FileRunTracker<'a> {
     }
 
     /// Record a terminal file failure.
-    pub(crate) async fn fail(&self, error: &str, category: FailureCategory) {
+    pub(crate) async fn fail(&self, error: &str, category: FailureCategory) -> TerminalRecorded {
         let finished_at = self.sink.now();
         self.sink
             .mark_file_error(self.job_id, self.filename, error, category, finished_at)
             .await;
+        TerminalRecorded(())
     }
 
     /// Mark the file as done with a downloadable result and close the active
@@ -182,13 +215,13 @@ impl<'a> FileRunTracker<'a> {
         &self,
         result_filename: DisplayPath,
         content_type: ContentType,
-    ) {
+    ) -> TerminalRecorded {
         self.complete_with_stamped_result(
             result_filename,
             content_type,
             crate::api::FileStampOutcome::Unrecorded,
         )
-        .await;
+        .await
     }
 
     /// Mark the file as done, recording what the command decided about
@@ -198,14 +231,14 @@ impl<'a> FileRunTracker<'a> {
         result_filename: DisplayPath,
         content_type: ContentType,
         stamp: crate::api::FileStampOutcome,
-    ) {
+    ) -> TerminalRecorded {
         self.complete(FileCompletion::Clean(CompletedFileOutput {
             filename: result_filename,
             content_type,
             stamp,
             exclusions: Vec::new(),
         }))
-        .await;
+        .await
     }
 
     /// Mark the file as done: its output passed admission with nothing
@@ -216,14 +249,14 @@ impl<'a> FileRunTracker<'a> {
         result_filename: DisplayPath,
         content_type: ContentType,
         exclusions: Vec<crate::api::OutputExclusionRecord>,
-    ) {
+    ) -> TerminalRecorded {
         self.complete(FileCompletion::Clean(CompletedFileOutput {
             filename: result_filename,
             content_type,
             stamp: crate::api::FileStampOutcome::Unrecorded,
             exclusions,
         }))
-        .await;
+        .await
     }
 
     /// Mark the file as diagnosed: its output was written, together with what
@@ -236,7 +269,7 @@ impl<'a> FileRunTracker<'a> {
         content_type: ContentType,
         diagnostics: crate::api::FileOutputDiagnostics,
         exclusions: Vec<crate::api::OutputExclusionRecord>,
-    ) {
+    ) -> TerminalRecorded {
         self.complete(FileCompletion::Diagnosed {
             result: CompletedFileOutput {
                 filename: result_filename,
@@ -246,7 +279,7 @@ impl<'a> FileRunTracker<'a> {
             },
             diagnostics,
         })
-        .await;
+        .await
     }
 
     /// Record written text output with its stamp, exclusions and optional
@@ -255,7 +288,7 @@ impl<'a> FileRunTracker<'a> {
         &self,
         result: CompletedFileOutput,
         diagnostics: Option<crate::api::FileOutputDiagnostics>,
-    ) {
+    ) -> TerminalRecorded {
         self.complete(match diagnostics {
             Some(diagnostics) => FileCompletion::Diagnosed {
                 result,
@@ -263,17 +296,17 @@ impl<'a> FileRunTracker<'a> {
             },
             None => FileCompletion::Clean(result),
         })
-        .await;
+        .await
     }
 
     /// Mark the file as done without a downloadable artifact and close the
     /// active attempt as successful.
-    pub(crate) async fn complete_without_result(&self) {
-        self.complete(FileCompletion::WithoutResult).await;
+    pub(crate) async fn complete_without_result(&self) -> TerminalRecorded {
+        self.complete(FileCompletion::WithoutResult).await
     }
 
     /// The file finished and its attempt succeeded, both at one instant.
-    async fn complete(&self, completion: FileCompletion) {
+    async fn complete(&self, completion: FileCompletion) -> TerminalRecorded {
         let finished_at = self.sink.now();
         self.sink
             .mark_file_done(self.job_id, self.filename, finished_at, completion)
@@ -288,6 +321,7 @@ impl<'a> FileRunTracker<'a> {
                 finished_at,
             )
             .await;
+        TerminalRecorded(())
     }
 }
 

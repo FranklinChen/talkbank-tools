@@ -1,7 +1,7 @@
 # Cantonese Language Support
 
 **Status:** Current
-**Last updated:** 2026-09-15 12:12 EDT
+**Last updated:** 2026-11-05 23:04 EST
 
 User reference for Cantonese (`yue`) processing in batchalign3, ASR engine
 options, credentials, retokenize usage, and what to expect from each
@@ -13,7 +13,7 @@ normalization pipeline, segmenter selection, source-file map), see
 
 | Pipeline stage | Cantonese-specific behavior |
 |---|---|
-| ASR | 5 engine options: FunASR/SenseVoice (default), Tencent Cloud, Aliyun NLS, Qwen3-ASR, Whisper |
+| ASR | 5 Cantonese engine options: FunASR/SenseVoice (recommended), Tencent Cloud, Aliyun NLS, Qwen3-ASR, Whisper; the default for every language, Cantonese included, is Rev.AI |
 | Text normalization | Simplified → Traditional + 31-entry domain replacement (automatic) |
 | Number expansion | Traditional Chinese characters (五, 四十二, 一萬) |
 | Character tokenization | Per-character splitting for timestamp alignment |
@@ -25,18 +25,21 @@ normalization pipeline, segmenter selection, source-file map), see
 
 ## ASR engine options
 
-**The default for `yue` is FunASR/SenseVoice**: a local model that
-empirically outperforms vanilla Whisper-large-v3 by a wide margin
-on Cantonese child speech (42.8% CER vs 81.9% CER on TalkBank Tier
-3 fixtures; see the 2026-05-26 Cantonese ASR benchmark). The
-default is wired in `batchalign/worker/_model_loading/asr.py`'s
-`_LANG_DEFAULTS` table and applies when no `--asr-engine` is passed
-and no Rev.AI key is configured. Alternatives are selected with
-`--asr-engine`; run `batchalign3 transcribe --help` for the full list.
+**Pass `--asr-engine funaudio` for Cantonese.** FunASR/SenseVoice is a local
+model that empirically outperforms vanilla Whisper-large-v3 by a wide margin on
+Cantonese child speech (42.8% CER vs 81.9% CER on TalkBank Tier 3 fixtures; see
+the 2026-05-26 Cantonese ASR benchmark). It is not the default: with no
+`--asr-engine`, `transcribe` uses the control plane's default engine, Rev.AI,
+for every language, Cantonese included. These pages used to say a per-language
+table (`_LANG_DEFAULTS`) made FunASR the default for `yue`; that table lived in
+the worker and decided only what a worker loaded when the control plane named
+no worker-hosted engine (a Rev.AI job), never which engine produced the
+transcript, and it is gone. Alternatives are selected with `--asr-engine`; run
+`batchalign3 transcribe --help` for the full list.
 
 | Engine | Type | Credentials | Word output | Strength |
 |---|---|---|---|---|
-| FunASR/SenseVoice (**default for yue**) | Local | None | Per-character | No cloud, VAD built-in, lowest measured CER on child speech |
+| FunASR/SenseVoice (**recommended for yue**) | Local | None | Per-character | No cloud, VAD built-in, lowest measured CER on child speech |
 | Tencent Cloud | Cloud | Required | Per-character | Speaker diarization, strong on clean adult speech |
 | Aliyun NLS | Cloud | Required | Per-character | Real-time streaming |
 | Qwen3-ASR | Local | None | Per-character | Alibaba open-weight ASR; competitive on per-utterance Cantonese child speech in external evaluations (unverified on TalkBank's longer-form fixtures) |
@@ -45,8 +48,9 @@ and no Rev.AI key is configured. Alternatives are selected with
 ### Usage
 
 ```bash
-# Default (FunASR/SenseVoice), no flag needed
-batchalign3 transcribe input/ -o output/ --lang yue
+# FunASR/SenseVoice, the recommended local engine (not the default)
+batchalign3 transcribe input/ -o output/ --lang yue \
+  --asr-engine funaudio
 
 # Tencent Cloud ASR (requires credentials)
 batchalign3 transcribe input/ -o output/ --lang yue \
@@ -110,11 +114,9 @@ WAV format required (16 kHz mono).
 
 **FunASR/SenseVoice.** Local model, no cloud credentials, no network.
 Auto model selection: Paraformer or SenseVoice based on availability.
-VAD built in. Per-character timestamp alignment. Wired as the
-per-language default for `yue` via `_LANG_DEFAULTS` in
-`batchalign/worker/_model_loading/asr.py` so a bare
-`batchalign3 transcribe --lang yue ...` invocation no longer falls
-through to Whisper.
+VAD built in. Per-character timestamp alignment. Selected with
+`--asr-engine funaudio`; a bare `batchalign3 transcribe --lang yue ...` uses
+Rev.AI, the default for every language.
 
 **Qwen3-ASR.** Alibaba's open-weight Cantonese-capable ASR
 (`qwen-asr` Python package, model downloaded from HuggingFace on

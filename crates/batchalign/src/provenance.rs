@@ -199,6 +199,10 @@ enum StampField {
     Incremental,
     Lang,
     MainBullets,
+    /// Written by transcribe when `--merge-abbrev` ran on the recognized
+    /// words (`merge_abbrev=true`), whether or not any run of letters spelled
+    /// a known abbreviation; absent when the job did not ask for it.
+    MergeAbbrev,
     ProvenanceIncomplete,
     Retokenize,
     /// Written by `align` only when its bullets were refreshed from a complete
@@ -230,6 +234,7 @@ impl StampField {
             Self::Incremental => "incremental",
             Self::Lang => "lang",
             Self::MainBullets => "main_bullets",
+            Self::MergeAbbrev => "merge_abbrev",
             Self::ProvenanceIncomplete => "provenance_incomplete",
             Self::Retokenize => "retokenize",
             Self::Timing => "timing",
@@ -1266,8 +1271,9 @@ pub(crate) fn align_provenance(
 /// Build a provenance comment for transcribe: `asr=` names the engine,
 /// `asr_model=` the selected checkpoint, when there is one, `word_seg=`
 /// the segmenter that grouped the recognizer's characters into words, when
-/// one did, and `asr_synthesized_terminators=` how many utterances CHAT
-/// assembly closed with a terminator of its own, when any. Infallible: the checkpoint was admitted
+/// one did, `asr_synthesized_terminators=` how many utterances CHAT
+/// assembly closed with a terminator of its own, when any, and `merge_abbrev`
+/// that abbreviation merging ran on the recognized words. Infallible: the checkpoint was admitted
 /// as stamp-safe text with the transcribe plan, and the segmenter's name is a
 /// reported engine name.
 pub(crate) fn transcribe_provenance(
@@ -1277,7 +1283,13 @@ pub(crate) fn transcribe_provenance(
     wor: bool,
     word_segmenter: Option<&crate::api::ReportedEngineName>,
     synthesized_terminators: Option<NonZeroUsize>,
+    abbreviations: crate::pipeline::transcribe::AbbreviationMerging,
 ) -> ProvenanceComment {
+    use crate::pipeline::transcribe::AbbreviationMerging;
+    let merge_ran = match abbreviations {
+        AbbreviationMerging::Ran => true,
+        AbbreviationMerging::NotRequested => false,
+    };
     let comment = ProvenanceComment::new(ReleasedCommand::Transcribe)
         .field(StampField::Asr, StampFieldValue::from(asr.engine().clone()))
         .field(StampField::Lang, StampFieldValue::from(lang))
@@ -1290,7 +1302,8 @@ pub(crate) fn transcribe_provenance(
         .field_if_some(
             StampField::AsrSynthesizedTerminators,
             synthesized_terminators.map(StampFieldValue::from),
-        );
+        )
+        .field_if(StampField::MergeAbbrev, merge_ran);
     match asr.asr_model() {
         Some(model) => comment.field(StampField::AsrModel, StampFieldValue::from(model)),
         None => comment,
@@ -1670,6 +1683,28 @@ pub struct ProvenanceEntry {
     pub timestamp: String,
 }
 
+/// The abbreviation policy a transcript's own transcribe stamp records:
+/// [`MergeAbbrevPolicy::Merge`](crate::params::MergeAbbrevPolicy::Merge) when
+/// it carries `merge_abbrev`, `Keep` otherwise (including a transcript with no
+/// transcribe stamp, which no merge produced). For a replay, which must apply
+/// the policy the recorded run used rather than guess one.
+pub(crate) fn stamped_abbreviation_policy(
+    file: &ChatFile,
+) -> Result<crate::params::MergeAbbrevPolicy, UnparseableStamp> {
+    for line in file.lines.as_slice() {
+        if let Line::Header { header, .. } = line
+            && let Header::Comment { content } = header.as_ref()
+            && let Some(GeneratedComment::Stamp(entry)) =
+                recognize_generated_comment(&content.as_bullet_content().to_chat_string())?
+            && entry.command == ReleasedCommand::Transcribe.as_str()
+            && entry.fields.contains_key(StampField::MergeAbbrev.as_str())
+        {
+            return Ok(crate::params::MergeAbbrevPolicy::Merge);
+        }
+    }
+    Ok(crate::params::MergeAbbrevPolicy::Keep)
+}
+
 /// A `@Comment` this build generates, recognized by the codec that writes it.
 ///
 /// The two kinds a run adds to a file: its per-command stamp and its
@@ -1762,6 +1797,9 @@ pub fn extract_provenance(chat_text: &str) -> Result<Vec<ProvenanceEntry>, Unpar
 
 #[cfg(test)]
 mod tests {
+    /// The abbreviation step of a transcript whose job did not ask for it.
+    const NOT_REQUESTED: crate::pipeline::transcribe::AbbreviationMerging =
+        crate::pipeline::transcribe::AbbreviationMerging::NotRequested;
     use super::*;
     use batchalign_transform::parse::parse_lenient;
 
@@ -1837,6 +1875,7 @@ mod tests {
             false,
             None,
             None,
+            NOT_REQUESTED,
         )
         .format();
         assert!(
@@ -1856,15 +1895,47 @@ mod tests {
         let asr =
             AsrIdentity::of_replay(crate::transcribe::replay::LegacyProjectedAsrProducer::RevAi);
         let english = crate::api::TranscriptLanguage::One(LanguageCode3::eng());
-        let counted =
-            transcribe_provenance(&english, &asr, false, false, None, NonZeroUsize::new(3))
-                .format();
+        let counted = transcribe_provenance(
+            &english,
+            &asr,
+            false,
+            false,
+            None,
+            NonZeroUsize::new(3),
+            NOT_REQUESTED,
+        )
+        .format();
         assert!(
             counted.contains("asr_synthesized_terminators=3"),
             "{counted}"
         );
-        let none = transcribe_provenance(&english, &asr, false, false, None, None).format();
+        let none =
+            transcribe_provenance(&english, &asr, false, false, None, None, NOT_REQUESTED).format();
         assert!(!none.contains("synthesized_terminators"), "{none}");
+    }
+
+    /// A reader of a transcript can tell whether `--merge-abbrev` ran on the
+    /// recognized words: the stamp says so when it did, even when no run of
+    /// letters spelled an abbreviation, and is silent when it was not asked.
+    #[test]
+    fn the_transcribe_stamp_records_that_abbreviation_merging_ran() {
+        let asr =
+            AsrIdentity::of_replay(crate::transcribe::replay::LegacyProjectedAsrProducer::RevAi);
+        let english = crate::api::TranscriptLanguage::One(LanguageCode3::eng());
+        let ran = transcribe_provenance(
+            &english,
+            &asr,
+            false,
+            false,
+            None,
+            None,
+            crate::pipeline::transcribe::AbbreviationMerging::Ran,
+        )
+        .format();
+        assert!(ran.contains("merge_abbrev=true"), "{ran}");
+        let not_requested =
+            transcribe_provenance(&english, &asr, false, false, None, None, NOT_REQUESTED).format();
+        assert!(!not_requested.contains("merge_abbrev"), "{not_requested}");
     }
 
     #[test]
@@ -2224,6 +2295,7 @@ mod tests {
             false,
             None,
             None,
+            NOT_REQUESTED,
         )
         .format();
         assert!(
@@ -2264,6 +2336,7 @@ mod tests {
             false,
             None,
             None,
+            NOT_REQUESTED,
         )
         .format();
         assert!(!comment.contains("asr_model="), "{comment}");

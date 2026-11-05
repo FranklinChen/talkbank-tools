@@ -24,17 +24,12 @@ pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> InferTask {
         InferenceTaskV2::Asr => InferTask::Asr,
         InferenceTaskV2::ForcedAlignment => InferTask::Fa,
         InferenceTaskV2::Speaker => InferTask::Speaker,
-        // Deliberately the SAME pool task as diarization, not a new one.
-        //
-        // A worker-pool key names which model HOST a request needs, and both
-        // tasks are served by the speaker host in the same Python module
-        // family. Splitting them would spawn a second worker process to hold a
-        // model the first one could have loaded, for no isolation anybody
-        // needs. What makes this safe is that neither model is loaded at
-        // bootstrap: the diarization pipeline and the embedding model are both
-        // lazy, so a worker that only ever sees embedding requests never
-        // constructs the diarization pipeline, and therefore never reaches the
-        // gated calibration artifact that pipeline pulls in.
+        // The SAME pool task as diarization: one speaker host serves both.
+        // Which model that task's load builds (local pyannote, the embedding
+        // model, or nothing for pyannoteAI) is the job plan's speaker slot,
+        // part of the worker key (`GpuModelPlan::speaker_identity`), so a
+        // speaker-identification worker never builds the diarization pipeline
+        // or reaches the gated calibration artifact that pipeline pulls in.
         InferenceTaskV2::SpeakerEmbedding => InferTask::Speaker,
         InferenceTaskV2::Opensmile => InferTask::Opensmile,
         InferenceTaskV2::Avqi => InferTask::Avqi,
@@ -67,12 +62,7 @@ pub(super) fn execute_v2_worker_key(
     //
     // The same derivation the command route uses, from what this request
     // names; the two keys agree by construction.
-    let engine_selection = EngineSelection::derive(
-        infer_task,
-        execute_request_overrides(request),
-        target,
-        bootstrap_mode,
-    );
+    let engine_selection = EngineSelection::derive(infer_task, execute_request_overrides(request));
 
     Ok(WorkerKey {
         target,
@@ -97,6 +87,14 @@ pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOve
             translate: Some(TranslateEngineName::from_worker_backend(request.engine)),
             ..EngineOverrides::default()
         },
+        // The speaker model the request needs, which its task load builds:
+        // the plan's own derivation, so the two keys agree by construction.
+        TaskRequestV2::Speaker(request) => {
+            super::model_plan::PlannedSpeaker::Diarization(request.backend).loaded_model_overrides()
+        }
+        TaskRequestV2::SpeakerEmbedding(request) => {
+            super::model_plan::PlannedSpeaker::Embedding(request.backend).loaded_model_overrides()
+        }
         // One implementation each: nothing to select, so nothing enters the
         // key. Listed rather than wildcarded so a new task has to decide.
         // Word segmentation names its segmenter per request, and the worker
@@ -106,40 +104,9 @@ pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOve
         | TaskRequestV2::Utseg(_)
         | TaskRequestV2::Coref(_)
         | TaskRequestV2::WordSegmentation(_)
-        | TaskRequestV2::Speaker(_)
-        | TaskRequestV2::SpeakerEmbedding(_)
         | TaskRequestV2::Opensmile(_)
         | TaskRequestV2::Avqi(_) => EngineOverrides::default(),
     }
-}
-
-/// Extract the ensure_task parameters (task name + engine overrides map) from a
-/// V2 execute request, without the JSON round-trip.
-///
-/// Returns `None` for tasks that don't need model loading (e.g., text tasks in
-/// eager-profile mode). Used by the LazyProfile dispatch path.
-pub(crate) fn ensure_task_params(
-    request: &ExecuteRequestV2,
-) -> Result<
-    (
-        InferTask,
-        Option<std::collections::BTreeMap<String, String>>,
-    ),
-    WorkerError,
-> {
-    let task = infer_task_for_execute_v2(request.task);
-
-    // A lazy worker's identity is the task's own keys, whatever its target
-    // would preload eagerly.
-    let selection = EngineSelection::derive(
-        task,
-        execute_request_overrides(request),
-        WorkerTarget::from_infer_task(task, WorkerBootstrapMode::LazyProfile),
-        WorkerBootstrapMode::LazyProfile,
-    );
-    let overrides = (!selection.is_none()).then(|| selection.overrides().dispatch_overrides());
-
-    Ok((task, overrides))
 }
 
 pub(super) fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
@@ -159,7 +126,7 @@ mod tests {
     use super::*;
     use crate::api::LanguageCode3;
     use crate::types::worker_v2::{MorphosyntaxRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2};
-    use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
+    use crate::worker::{WorkerBootstrapMode, WorkerTarget};
 
     fn request_with_payload(task: InferenceTaskV2, payload: TaskRequestV2) -> ExecuteRequestV2 {
         ExecuteRequestV2 {
@@ -187,8 +154,9 @@ mod tests {
     ) -> WorkerKey {
         let language = LanguageCode3::try_new(code).expect("language code");
         let plan = super::super::GpuModelPlan::transcription(
-            crate::transcribe::AsrBackend::Worker(mode),
+            Some(crate::transcribe::AsrBackend::Worker(mode)),
             &extras,
+            None,
         );
         super::super::GpuRoute::worker_key(
             &plan,
@@ -276,44 +244,6 @@ mod tests {
                 "{code}"
             );
         }
-    }
-
-    /// A worker that preloads ASR with no engine named resolves its own and
-    /// falls back to stock Whisper for most languages, so it receives the
-    /// decode language whenever Whisper has a token; for a language with none,
-    /// nothing is sent and the worker refuses only if it does fall back.
-    #[test]
-    fn a_preloading_worker_receives_the_decode_language_when_whisper_has_one() {
-        use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
-        let preload_key = |code: &str| WorkerKey {
-            target: WorkerTarget::profile(WorkerProfile::Gpu),
-            language: WorkerLanguage::from(LanguageCode3::try_new(code).expect("language code")),
-            engine_selection: EngineSelection::derive(
-                InferTask::Fa,
-                EngineOverrides::default(),
-                WorkerTarget::profile(WorkerProfile::Gpu),
-                WorkerBootstrapMode::Profile,
-            ),
-        };
-        let english = preload_key("eng");
-        assert_eq!(
-            english.engine_selection.overrides().asr,
-            None,
-            "no engine named"
-        );
-        assert_eq!(
-            spawn_override::<WhisperDecodeLanguageV2>(&english, WHISPER_DECODE_LANGUAGE_KEY),
-            WhisperDecodeLanguageV2::for_language(&LanguageCode3::eng()).expect("English")
-        );
-        let taiwanese = super::super::lifecycle::spawn_engine_overrides(
-            &preload_key("nan"),
-            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
-        )
-        .expect("spawn");
-        assert!(
-            !taiwanese.contains(WHISPER_DECODE_LANGUAGE_KEY),
-            "{taiwanese}"
-        );
     }
 
     /// A worker rediscovered from the registry must land under the key the
@@ -482,7 +412,6 @@ mod tests {
             crate::api::ReleasedCommand::Utseg,
             crate::options::CommandOptions::Utseg(crate::options::UtsegOptions {
                 common: crowded_common_options(),
-                merge_abbrev: false.into(),
                 utseg_fallback: false.into(),
             }),
             request_with_payload(
@@ -503,7 +432,6 @@ mod tests {
             crate::api::ReleasedCommand::Coref,
             crate::options::CommandOptions::Coref(crate::options::CorefOptions {
                 common: crowded_common_options(),
-                merge_abbrev: false.into(),
             }),
             request_with_payload(
                 InferenceTaskV2::Coref,

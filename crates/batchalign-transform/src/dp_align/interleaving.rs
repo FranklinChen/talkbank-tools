@@ -19,7 +19,7 @@ pub use episodes::{
     LocalInterleavingRefusal, LocalInterleavingWorkPhase, LocalMatch, LocalSearchCorridor,
     LocalWord, RequiredLocalWord, SpeakerTurn,
 };
-pub use episodes::{PackedSearchCost, PackedSearchStage, PackedSearchStatus};
+pub use episodes::{PackedSearchCost, PackedSearchStage, PackedSearchStatus, PackedSearchWork};
 
 const MAX_CELLS: usize = 1_048_576;
 

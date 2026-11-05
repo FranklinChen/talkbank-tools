@@ -43,7 +43,7 @@ pub enum CliError {
     /// Complete named CHAT admission failed before offline analysis. Invalid
     /// input exits 2; an internal producer failure exits 6, never bad input.
     #[error(transparent)]
-    ChatAdmission(#[from] batchalign_transform::ValidatedParseError),
+    ChatAdmission(crate::error::SourceRefusal<batchalign_transform::ValidatedParseError>),
 
     /// The local CHAT grammar could not be initialized. This is a runtime
     /// failure, not an invalid command argument or invalid submitted CHAT.
@@ -444,13 +444,10 @@ impl CliError {
     /// Stable process exit code for this error category.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::ChatAdmission(error) => {
-                if crate::error::chat_admission_is_internal(error) {
-                    Self::EXIT_LOCAL_RUNTIME
-                } else {
-                    Self::EXIT_USAGE
-                }
-            }
+            Self::ChatAdmission(refusal) => match refusal.fault() {
+                crate::error::RefusalFault::InvalidInput => Self::EXIT_USAGE,
+                crate::error::RefusalFault::ToolFailure => Self::EXIT_LOCAL_RUNTIME,
+            },
             Self::ParserInitialization(_)
             | Self::ChatParserFailure { .. }
             | Self::HostUnreadable(_) => Self::EXIT_LOCAL_RUNTIME,

@@ -131,22 +131,6 @@ fn render_subcommand_help(name: &str) -> String {
     String::from_utf8(buf).expect("utf8 help")
 }
 
-fn merge_abbrev_value(options: &CommandOptions) -> Option<bool> {
-    match options {
-        CommandOptions::Align(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Transcribe(opts) | CommandOptions::TranscribeS(opts) => {
-            Some(opts.merge_abbrev.should_merge())
-        }
-        CommandOptions::Translate(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Morphotag(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Coref(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Compare(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Utseg(opts) => Some(opts.merge_abbrev.should_merge()),
-        CommandOptions::Benchmark(opts) => Some(opts.merge_abbrev.should_merge()),
-        _ => None,
-    }
-}
-
 fn wor_value(options: &CommandOptions) -> Option<bool> {
     match options {
         CommandOptions::Align(opts) => Some(opts.wor.should_write()),
@@ -990,18 +974,10 @@ fn parse_opensmile_with_bank_and_subdir() {
 
 #[test]
 fn parse_ba2_compat_flags() {
-    let cli = Cli::parse_from([
-        "batchalign3",
-        "align",
-        "--rev",
-        "--wav2vec",
-        "--no-merge-abbrev",
-        "input/",
-    ]);
+    let cli = Cli::parse_from(["batchalign3", "align", "--rev", "--wav2vec", "input/"]);
     if let Commands::Align(a) = &cli.command {
         assert!(a.utr_args.selection.rev);
         assert!(a.wav2vec);
-        assert!(a.no_merge_abbrev);
     } else {
         panic!("expected Align");
     }
@@ -1196,7 +1172,7 @@ fn progress_flags_resolve_to_one_value() {
 
 #[rstest]
 #[case(&["batchalign3", "align", "--wor", "--nowor", "corpus/"], &["--wor", "--nowor"])]
-#[case(&["batchalign3", "align", "--merge-abbrev", "--no-merge-abbrev", "corpus/"], &["--merge-abbrev", "--no-merge-abbrev"])]
+#[case(&["batchalign3", "transcribe", "--lang", "eng", "--merge-abbrev", "--no-merge-abbrev", "audio/"], &["--merge-abbrev", "--no-merge-abbrev"])]
 #[case(&["batchalign3", "transcribe", "--lang", "eng", "--wor", "--nowor", "audio/"], &["--wor", "--nowor"])]
 #[case(&["batchalign3", "morphotag", "--retokenize", "--keeptokens", "corpus/"], &["--retokenize", "--keeptokens"])]
 #[case(&["batchalign3", "morphotag", "--skipmultilang", "--multilang", "corpus/"], &["--skipmultilang", "--multilang"])]
@@ -1425,7 +1401,6 @@ fn build_options_align_defaults() {
             assert_eq!(a.utr.engine, Some(AppUtrEngine::RevAi));
             assert!(!a.pauses);
             assert!(a.wor.should_write());
-            assert!(!a.merge_abbrev.should_merge());
             assert!(!a.common.override_media_cache);
         }
         _ => panic!("expected Align"),
@@ -1475,10 +1450,6 @@ fn build_options_align_single_flags() {
         (
             &["batchalign3", "align", "--pauses", "corpus/"],
             Box::new(|a| assert!(a.pauses)),
-        ),
-        (
-            &["batchalign3", "align", "--merge-abbrev", "corpus/"],
-            Box::new(|a| assert!(a.merge_abbrev.should_merge())),
         ),
     ];
     for (args, check) in cases {
@@ -1932,7 +1903,6 @@ fn build_options_translate() {
         .unwrap();
     match opts {
         CommandOptions::Translate(t) => {
-            assert!(!t.merge_abbrev.should_merge());
             assert_eq!(t.target, crate::api::LanguageCode3::eng());
         }
         _ => panic!("expected Translate"),
@@ -1958,147 +1928,41 @@ fn translate_target_is_checked_and_preserved_by_option_lowering() {
 }
 
 #[test]
-fn build_options_merge_abbrev_matrix_for_processing_commands() {
-    let cases = [
-        (
-            vec!["batchalign3", "align", "corpus/"],
-            false,
-            "align defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "align", "--merge-abbrev", "corpus/"],
-            true,
-            "align enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "align", "--no-merge-abbrev", "corpus/"],
-            false,
-            "align honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "transcribe", "--lang", "eng", "audio/"],
-            false,
-            "transcribe defaults to no merge-abbrev",
-        ),
-        (
-            vec![
-                "batchalign3",
-                "transcribe",
-                "--lang",
-                "eng",
-                "--merge-abbrev",
-                "audio/",
-            ],
-            true,
-            "transcribe enables merge-abbrev",
-        ),
-        (
-            vec![
-                "batchalign3",
-                "transcribe",
-                "--lang",
-                "eng",
-                "--no-merge-abbrev",
-                "audio/",
-            ],
-            false,
-            "transcribe honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "translate", "corpus/"],
-            false,
-            "translate defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "translate", "--merge-abbrev", "corpus/"],
-            true,
-            "translate enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "translate", "--no-merge-abbrev", "corpus/"],
-            false,
-            "translate honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "morphotag", "corpus/"],
-            false,
-            "morphotag defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "morphotag", "--merge-abbrev", "corpus/"],
-            true,
-            "morphotag enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "morphotag", "--no-merge-abbrev", "corpus/"],
-            false,
-            "morphotag honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "coref", "corpus/"],
-            false,
-            "coref defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "coref", "--merge-abbrev", "corpus/"],
-            true,
-            "coref enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "coref", "--no-merge-abbrev", "corpus/"],
-            false,
-            "coref honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "compare", "corpus/"],
-            false,
-            "compare defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "compare", "--merge-abbrev", "corpus/"],
-            true,
-            "compare enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "compare", "--no-merge-abbrev", "corpus/"],
-            false,
-            "compare honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "utseg", "corpus/"],
-            false,
-            "utseg defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "utseg", "--merge-abbrev", "corpus/"],
-            true,
-            "utseg enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "utseg", "--no-merge-abbrev", "corpus/"],
-            false,
-            "utseg honors no-merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "benchmark", "audio/"],
-            false,
-            "benchmark defaults to no merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "benchmark", "--merge-abbrev", "audio/"],
-            true,
-            "benchmark enables merge-abbrev",
-        ),
-        (
-            vec!["batchalign3", "benchmark", "--no-merge-abbrev", "audio/"],
-            false,
-            "benchmark honors no-merge-abbrev",
-        ),
-    ];
+fn build_options_merge_abbrev_is_a_transcribe_option() {
+    let transcribe = |flag: Option<&'static str>| {
+        let mut args = vec!["batchalign3", "transcribe", "--lang", "eng"];
+        args.extend(flag);
+        args.push("audio/");
+        match typed_options_for(&args) {
+            CommandOptions::Transcribe(t) => t.merge_abbrev.should_merge(),
+            other => panic!("expected Transcribe, got {other:?}"),
+        }
+    };
+    assert!(!transcribe(None), "transcribe defaults to no merge");
+    assert!(
+        transcribe(Some("--merge-abbrev")),
+        "transcribe enables the merge"
+    );
+    assert!(
+        !transcribe(Some("--no-merge-abbrev")),
+        "transcribe honors --no-merge-abbrev"
+    );
+}
 
-    for (args, expected, note) in cases {
-        let opts = typed_options_for(&args);
-        assert_eq!(merge_abbrev_value(&opts), Some(expected), "{note}");
+/// The merge runs on the recognizer's tokens, so only transcribe has it.
+/// Every other command refuses both spellings at parse, rather than accepting
+/// a flag that would do nothing.
+#[rstest]
+#[case("align", "corpus/")]
+#[case("translate", "corpus/")]
+#[case("morphotag", "corpus/")]
+#[case("coref", "corpus/")]
+#[case("compare", "corpus/")]
+#[case("utseg", "corpus/")]
+#[case("benchmark", "audio/")]
+fn merge_abbrev_flags_are_rejected_outside_transcribe(#[case] command: &str, #[case] input: &str) {
+    for flag in ["--merge-abbrev", "--no-merge-abbrev"] {
+        assert_parse_error_contains(&["batchalign3", command, flag, input], &[flag]);
     }
 }
 
@@ -2169,18 +2033,6 @@ fn build_options_wor_matrix_for_processing_commands() {
 }
 
 #[test]
-fn build_options_coref_merge_abbrev() {
-    let cli = Cli::parse_from(["batchalign3", "coref", "--merge-abbrev", "corpus/"]);
-    let opts = build_typed_options(&cli.command, &cli.global)
-        .expect("enrollments validate")
-        .unwrap();
-    match opts {
-        CommandOptions::Coref(c) => assert!(c.merge_abbrev.should_merge()),
-        _ => panic!("expected Coref"),
-    }
-}
-
-#[test]
 fn build_options_utseg() {
     let cli = Cli::parse_from(["batchalign3", "utseg", "corpus/"]);
     let opts = build_typed_options(&cli.command, &cli.global)
@@ -2188,7 +2040,7 @@ fn build_options_utseg() {
         .unwrap();
     match opts {
         CommandOptions::Utseg(u) => {
-            assert!(!u.merge_abbrev.should_merge());
+            assert_eq!(u.utseg_fallback, crate::params::UtsegFallbackPolicy::Refuse);
         }
         _ => panic!("expected Utseg"),
     }
@@ -2205,7 +2057,6 @@ fn build_options_benchmark_defaults() {
             assert_eq!(b.asr_engine, AsrEngineName::RevAi);
             // Mirrors `align`: see BenchmarkOptions::wor rustdoc.
             assert!(b.wor.should_write());
-            assert!(!b.merge_abbrev.should_merge());
         }
         _ => panic!("expected Benchmark"),
     }

@@ -313,40 +313,14 @@ pub(crate) struct FinishedMorphosyntax {
     pub(crate) exclusions: Vec<OutputExclusionRecord>,
 }
 
-/// Why a text command's output could not be finished.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum FinishRefused {
-    /// The abbreviation merge broke its own gate: a transform defect. The
-    /// unmerged output is not written in its place.
-    #[error(transparent)]
-    Merge(Box<crate::pipeline::post_validate::AbbreviationMergeRefused>),
-    /// A record could not name its utterance in the written document: an
-    /// internal fault.
-    #[error(transparent)]
-    Location(#[from] UtteranceNotInDocument),
-}
-
 impl MorphosyntaxOutput<PostValidated> {
-    /// Merge abbreviations when asked, then locate the reports against the
-    /// merged document, the one written. Merging rewrites main tiers (`F B I`
-    /// becomes `FBI`), so a record located before it could quote text the
-    /// written file does not hold; locating here, against this output's own
-    /// document, leaves no way to pass a different one.
-    pub(crate) fn finish(
-        self,
-        merge: crate::pipeline::post_validate::MergeAbbreviations,
-    ) -> Result<FinishedMorphosyntax, FinishRefused> {
-        use crate::pipeline::post_validate::MergeAbbreviations;
-        let document = match merge {
-            MergeAbbreviations::Merge => self
-                .document
-                .with_abbreviations_merged()
-                .map_err(FinishRefused::Merge)?,
-            MergeAbbreviations::Leave => self.document,
-        };
-        let (shortfalls, exclusions) = self.report.into_records(document.document())?;
+    /// Locate the reports against this output's own document, the one
+    /// written, leaving no way to pass a different one. Refused only when a
+    /// record cannot name its utterance there: an internal fault.
+    pub(crate) fn finish(self) -> Result<FinishedMorphosyntax, UtteranceNotInDocument> {
+        let (shortfalls, exclusions) = self.report.into_records(self.document.document())?;
         Ok(FinishedMorphosyntax {
-            document,
+            document: self.document,
             shortfalls,
             exclusions,
         })

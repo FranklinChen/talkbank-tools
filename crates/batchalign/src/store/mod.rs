@@ -574,17 +574,93 @@ pub struct FileProgress {
     pub stage: Option<FileProgressStage>,
 }
 
-/// A change in how many of a file's worker checkouts wait on a saturated
-/// pool.
+/// What a file's work is waiting for in the worker pool: congestion, not
+/// failure, either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PoolWait {
+    /// A checkout queued on a saturated pool (every slot busy, nothing idle
+    /// to evict).
+    Worker,
+    /// A worker startup or a model load queued until the host can fit its
+    /// memory lease.
+    HostMemory,
+}
+
+/// A change in how many of a file's pool waits are open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerWaitChange {
-    /// A checkout began waiting.
+    /// A wait for this began.
+    Started(PoolWait),
+    /// A wait for this ended.
+    Ended(PoolWait),
+    /// A model preparation's owned lifetime and measured progress.
+    ModelLoad(ModelLoadChange),
+}
+
+/// Display evidence from a model preparation, never inference item counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelLoadProgress {
+    /// Preparation is active without a current measured download report.
+    Preparing,
+    /// The worker measured this much cache growth, in KiB.
+    Downloading { grown_kib: u32 },
+}
+
+/// Events emitted only by an owned model-loading observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelLoadChange {
+    /// An operation started; its guard owns the matching end.
     Started,
-    /// A checkout stopped waiting.
+    /// The active operation reported loading evidence.
+    Advanced(ModelLoadProgress),
+    /// The operation returned, failed, or was cancelled.
     Ended,
 }
 
-/// How many of a file's worker checkouts are waiting on a saturated pool.
+/// Inactive preparations carry no stale measurement or zero-valued count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ModelLoading {
+    #[default]
+    Inactive,
+    Active {
+        count: std::num::NonZeroU32,
+        progress: ModelLoadProgress,
+    },
+}
+
+impl ModelLoading {
+    fn apply(&mut self, change: ModelLoadChange) {
+        use ModelLoadChange::{Advanced, Ended, Started};
+        *self = match (*self, change) {
+            (Self::Inactive, Started) => Self::Active {
+                count: std::num::NonZeroU32::MIN,
+                progress: ModelLoadProgress::Preparing,
+            },
+            (Self::Active { count, .. }, Started) => Self::Active {
+                count: count.saturating_add(1),
+                progress: ModelLoadProgress::Preparing,
+            },
+            (Self::Active { count, .. }, Advanced(progress)) => Self::Active { count, progress },
+            (Self::Active { count, .. }, Ended) => match std::num::NonZeroU32::new(count.get() - 1)
+            {
+                Some(count) => Self::Active {
+                    count,
+                    progress: ModelLoadProgress::Preparing,
+                },
+                None => Self::Inactive,
+            },
+            (Self::Inactive, Advanced(_) | Ended) => {
+                tracing::warn!(
+                    ?change,
+                    "model loading update without an active preparation"
+                );
+                Self::Inactive
+            }
+        };
+    }
+}
+
+/// How many of a file's pool waits are open, by what they wait for.
 ///
 /// Its own fact, beside the stage the pipeline reported ([`FileProgress`]):
 /// two publishers (the pipeline's progress and the pool's wait observer)
@@ -593,7 +669,11 @@ pub(crate) enum WorkerWaitChange {
 /// stage that each publisher overwrote, with a view in the runner trying to
 /// restore whichever the other had replaced. Ephemeral, like progress.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OpenWorkerWaits(u32);
+pub struct OpenWorkerWaits {
+    worker: u32,
+    host_memory: u32,
+    loading: ModelLoading,
+}
 
 impl OpenWorkerWaits {
     /// Apply one change. An end with no open wait is a pairing defect
@@ -601,17 +681,45 @@ impl OpenWorkerWaits {
     /// logged and changes nothing.
     pub(crate) fn apply(&mut self, change: WorkerWaitChange) {
         match change {
-            WorkerWaitChange::Started => self.0 = self.0.saturating_add(1),
-            WorkerWaitChange::Ended => match self.0.checked_sub(1) {
-                Some(remaining) => self.0 = remaining,
-                None => tracing::warn!("a worker wait ended that never started; count unchanged"),
-            },
+            WorkerWaitChange::ModelLoad(change) => self.loading.apply(change),
+            WorkerWaitChange::Started(wait) => {
+                let count = self.count(wait);
+                *count = count.saturating_add(1);
+            }
+            WorkerWaitChange::Ended(wait) => {
+                let count = self.count(wait);
+                match count.checked_sub(1) {
+                    Some(remaining) => *count = remaining,
+                    None => tracing::warn!(
+                        ?wait,
+                        "a pool wait ended that never started; count unchanged"
+                    ),
+                }
+            }
         }
     }
 
-    /// Whether any checkout of the file is waiting.
-    pub(crate) fn any(self) -> bool {
-        self.0 > 0
+    fn count(&mut self, wait: PoolWait) -> &mut u32 {
+        match wait {
+            PoolWait::Worker => &mut self.worker,
+            PoolWait::HostMemory => &mut self.host_memory,
+        }
+    }
+
+    /// The stage an open wait shows, if any: a host-memory wait before a
+    /// worker wait, since memory is the scarcer of the two to wait on.
+    pub(crate) fn shown_stage(self) -> Option<FileProgressStage> {
+        match (self.host_memory, self.worker) {
+            (1.., _) => Some(FileProgressStage::WaitingForHostMemory),
+            (0, 1..) => Some(FileProgressStage::WaitingForWorker),
+            (0, 0) => match self.loading {
+                ModelLoading::Inactive => None,
+                ModelLoading::Active { progress, .. } => Some(match progress {
+                    ModelLoadProgress::Preparing => FileProgressStage::PreparingWorker,
+                    ModelLoadProgress::Downloading { .. } => FileProgressStage::DownloadingModel,
+                }),
+            },
+        }
     }
 }
 
@@ -639,7 +747,8 @@ pub struct FileStatus {
     pub current_attempt_id: Option<String>,
     /// Live progress, as the pipeline reported it. Ephemeral.
     pub progress: FileProgress,
-    /// Checkouts of this file waiting on a saturated pool. Ephemeral.
+    /// This file's open pool waits (a saturated pool, host memory).
+    /// Ephemeral.
     pub worker_waits: OpenWorkerWaits,
 }
 
@@ -656,17 +765,26 @@ impl FileStatus {
         }
     }
 
-    /// The progress the file shows: "waiting for a worker" while any of its
-    /// checkouts waits on a saturated pool (an in-flight file only), else
-    /// the stage its pipeline last reported, with its counts.
+    /// The progress the file shows: "waiting for host memory" or "waiting
+    /// for a worker" while any of its pool waits is open (an in-flight file
+    /// only), else the stage its pipeline last reported, with its counts.
     fn shown_progress(&self) -> FileProgress {
-        match (self.worker_waits.any(), self.status().is_terminal()) {
-            (true, false) => FileProgress {
-                stage: Some(FileProgressStage::WaitingForWorker),
-                current: None,
+        match (self.worker_waits.shown_stage(), self.status().is_terminal()) {
+            (Some(stage), false) => FileProgress {
+                stage: Some(stage),
+                current: match (stage, self.worker_waits.loading) {
+                    (
+                        FileProgressStage::DownloadingModel,
+                        ModelLoading::Active {
+                            progress: ModelLoadProgress::Downloading { grown_kib },
+                            ..
+                        },
+                    ) => Some(i64::from(grown_kib)),
+                    _ => None,
+                },
                 total: None,
             },
-            (false, _) | (true, true) => self.progress.clone(),
+            (None, _) | (Some(_), true) => self.progress.clone(),
         }
     }
 
@@ -710,10 +828,12 @@ impl FileStatus {
             progress_current: progress.current,
             progress_total: progress.total,
             progress_stage: progress.stage,
-            progress_label: progress
-                .stage
-                .map(FileProgressStage::label)
-                .map(str::to_string),
+            progress_label: progress.stage.map(|stage| match (stage, progress.current) {
+                (FileProgressStage::DownloadingModel, Some(grown_kib)) => {
+                    format!("Downloading model ({grown_kib} KiB received)")
+                }
+                _ => stage.label().to_string(),
+            }),
             review: crate::api::FileReview::of(
                 self.phase.kind(),
                 self.phase.diagnostics(),
@@ -955,8 +1075,10 @@ mod worker_wait_tests {
     #[test]
     fn waiting_is_derived_and_never_overwrites_the_reported_stage() {
         let mut file = processing(FileProgressStage::Analyzing, 3, 10);
-        file.worker_waits.apply(WorkerWaitChange::Started);
-        file.worker_waits.apply(WorkerWaitChange::Started);
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::Worker));
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::Worker));
         assert_eq!(
             shown(&file),
             (Some(FileProgressStage::WaitingForWorker), None, None)
@@ -973,27 +1095,134 @@ mod worker_wait_tests {
             (Some(FileProgressStage::WaitingForWorker), None, None)
         );
 
-        file.worker_waits.apply(WorkerWaitChange::Ended);
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::Worker));
         assert_eq!(
             shown(&file),
             (Some(FileProgressStage::WaitingForWorker), None, None),
             "one wait still open"
         );
-        file.worker_waits.apply(WorkerWaitChange::Ended);
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::Worker));
         assert_eq!(
             shown(&file),
             (Some(FileProgressStage::Analyzing), Some(5), Some(10))
         );
 
-        file.worker_waits.apply(WorkerWaitChange::Ended);
-        assert!(!file.worker_waits.any(), "an unpaired end changes nothing");
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::Worker));
+        assert_eq!(
+            file.worker_waits.shown_stage(),
+            None,
+            "an unpaired end changes nothing"
+        );
+    }
+
+    /// A wait for host memory shows as such, and over a worker wait open at
+    /// the same time; each kind's end closes only its own.
+    #[test]
+    fn a_host_memory_wait_shows_and_counts_apart() {
+        let mut file = processing(FileProgressStage::Aligning, 1, 4);
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::Worker));
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::HostMemory));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForHostMemory), None, None)
+        );
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::Worker));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForHostMemory), None, None),
+            "a worker wait's end does not close the memory wait"
+        );
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::HostMemory));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::Aligning), Some(1), Some(4))
+        );
+    }
+
+    #[test]
+    fn model_loading_progress_restores_pipeline_counts_after_memory_wait_and_completion() {
+        let mut file = processing(FileProgressStage::Aligning, 1, 4);
+        file.worker_waits
+            .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Started));
+        file.worker_waits
+            .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Advanced(
+                ModelLoadProgress::Downloading { grown_kib: 4096 },
+            )));
+        let entry = file.to_entry();
+        assert_eq!(
+            entry.progress_stage,
+            Some(FileProgressStage::DownloadingModel)
+        );
+        assert_eq!(
+            entry.progress_label.as_deref(),
+            Some("Downloading model (4096 KiB received)")
+        );
+        assert_eq!(entry.progress_current, Some(4096));
+        assert_eq!(
+            entry.progress_total, None,
+            "cache growth is not a known download total"
+        );
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::HostMemory));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::WaitingForHostMemory), None, None)
+        );
+        file.progress.current = Some(2);
+        file.worker_waits
+            .apply(WorkerWaitChange::Ended(PoolWait::HostMemory));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::DownloadingModel), Some(4096), None)
+        );
+        file.worker_waits
+            .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Ended));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::Aligning), Some(2), Some(4))
+        );
+    }
+
+    #[test]
+    fn model_loading_progress_does_not_end_another_active_load_or_revive_a_terminal_file() {
+        let mut file = processing(FileProgressStage::Writing, 1, 1);
+        for _ in 0..2 {
+            file.worker_waits
+                .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Started));
+        }
+        file.worker_waits
+            .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Ended));
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::PreparingWorker), None, None)
+        );
+        file.phase = FilePhase::Done {
+            started_at: None,
+            finished_at: None,
+            exclusions: Vec::new(),
+        };
+        assert_eq!(
+            shown(&file),
+            (Some(FileProgressStage::Writing), Some(1), Some(1))
+        );
+        file.worker_waits
+            .apply(WorkerWaitChange::ModelLoad(ModelLoadChange::Ended));
+        assert_eq!(file.worker_waits.shown_stage(), None);
     }
 
     /// A finished file never shows a wait, whatever the count.
     #[test]
     fn a_terminal_file_does_not_show_a_wait() {
         let mut file = processing(FileProgressStage::Writing, 1, 1);
-        file.worker_waits.apply(WorkerWaitChange::Started);
+        file.worker_waits
+            .apply(WorkerWaitChange::Started(PoolWait::HostMemory));
         file.phase = FilePhase::Done {
             exclusions: Vec::new(),
             started_at: None,

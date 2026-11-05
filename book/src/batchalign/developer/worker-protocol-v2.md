@@ -1,8 +1,13 @@
 # Worker Protocol V2
 
+The developing FA request contract now has required candidate, preparation and
+execution phases. See [FA preparation and adaptive admission](adaptive-fa-admission.md)
+for its owning states, input binding, compatibility requirements and remaining
+qualification. An allocation report is not an execution permit.
+
 **Status:** Current
 **Last verified:** 2026-08-31 07:13 EDT
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 23:04 EST
 
 **Speaker attribution (2026-09-16).** `AsrMonologueV2.speaker` is a tagged
 `SpeakerAttribution` rather than a bare string, and `ProviderMediaInput`
@@ -104,9 +109,8 @@ sufficient admission.
 Speaker results use a discriminated `SpeakerInferenceEvidenceV2` union:
 
 - `pyannote_ai` carries the completed provider job ID, output object, and
-  optional warning before normalization;
-- `pyannote` carries local Pyannote segments; and
-- `nemo` carries local NeMo segments.
+  optional warning before normalization; and
+- `pyannote` carries local Pyannote segments.
 
 The Rust FFI checks that the response variant matches the backend selected by
 the request. Rust then owns versioned normalization and the separate raw and
@@ -295,16 +299,32 @@ path: a reply the protocol refuses, or an `op=error` line) becomes a
 replies on the two worker paths" below. Every `ExecuteResponseV2` value
 therefore has a wire form, and its `Serialize` cannot fail.
 
-`ProgressEvent`
+`ProgressEvent`, by scope
 
 ```text
-{
-  request_id: string,
-  completed: u32,
-  total: u32,
-  stage: string
-}
+ProgressEvent =
+  { scope: "load", stage: string, measure: LoadMeasure }
+      // a model load's progress (startup, ensure_task, a download inside one):
+      // no request owns it
+  | { scope: "request", request_id: string, stage: string, progress: UnitProgress }
+      // one request's work; request_id is never empty
+
+LoadMeasure =
+  { kind: "download_growth", grown_kib: u32 }        // a model download's growth so far
+  | { kind: "phase", edge: "begin" | "complete" }   // a named phase boundary
+
+UnitProgress = { completed: u32, total: u32 }       // completed <= total
 ```
+
+`stage` is the stable stage name (for a phase, without any edge suffix). The
+scope decides what the number can be, so units in a load, growth in a
+request, request progress with an empty id and a count past its total are all
+refused at the wire. A loading wait's stall window re-arms on a load's growth
+past its stage's mark and on a phase boundary seen for the first time, never
+on request progress; request progress reads only `request` events; the shared
+GPU reader routes a `load` event to the waiting load by its scope. See the
+time-transparency chapter's "Progress as liveness" section for the rule and
+its reasons.
 
 `ShutdownRequest`
 
@@ -364,8 +384,13 @@ Current classification on the live `execute_v2` path is intentionally split:
 
 What a model host RAISES is classified in one place: every executor calls its
 runner through `LoadedRunner::call1` (`batchalign-pyo3/src/worker_execute.rs`),
-whose only constructor is `require_runner`, and which classifies the exception
-by its class, most specific first:
+which classifies the exception by its class, most specific first. A runner is
+taken from the loaded host the executor is handed: `admit_loaded_host` reads
+the host's `backend` and `runner`, refusing a request for another backend as
+`model_unavailable`, and a text or model-free task's executor wraps the runner
+Python passes (`LoadedRunner::of_host`). No executor receives an absent
+runner: Python resolves the request's load in its load registry once, before
+calling, and refuses an absent load there as `model_unavailable`.
 
 | Python class | Protocol code |
 | --- | --- |

@@ -121,12 +121,91 @@ pub(crate) struct ObservedWorkerRuntimes {
 }
 
 /// A worker cannot join a pool already pinned to different executable code.
-#[derive(Debug, thiserror::Error)]
-#[error("worker runtime identity differs from the runtime pinned by this server")]
-pub(crate) struct WorkerRuntimeMismatch {
+///
+/// Keeps both identities, and its message names the components that differ
+/// with both values, so a refusal says what changed. It used to be converted
+/// to a variant that carried neither, and the 2026-11-05 refusal (a worker
+/// whose distribution inventory changed because loading FunASR extended
+/// `sys.path` before it observed its identity) had to be found by experiment.
+#[derive(Debug)]
+pub struct WorkerRuntimeMismatch {
     expected: Box<WorkerRuntimeIdentity>,
     observed: Box<WorkerRuntimeIdentity>,
 }
+
+impl WorkerRuntimeMismatch {
+    /// Each component that differs: its wire name, the pinned value and the
+    /// worker's.
+    fn differences(&self) -> Vec<(&'static str, String, String)> {
+        // Destructured exhaustively, so a field added to the identity cannot
+        // be left out of the message: `admit` would refuse on it while the
+        // refusal named nothing.
+        let WorkerRuntimeIdentity {
+            schema_version: pinned_schema,
+            python_version: pinned_python,
+            python_executable_sha256: pinned_executable,
+            batchalign_package_tree_sha256: pinned_package,
+            batchalign_core_extension_sha256: pinned_extension,
+            distribution_inventory_sha256: pinned_inventory,
+        } = &*self.expected;
+        let WorkerRuntimeIdentity {
+            schema_version: worker_schema,
+            python_version: worker_python,
+            python_executable_sha256: worker_executable,
+            batchalign_package_tree_sha256: worker_package,
+            batchalign_core_extension_sha256: worker_extension,
+            distribution_inventory_sha256: worker_inventory,
+        } = &*self.observed;
+        [
+            (
+                "schema_version",
+                pinned_schema.to_string(),
+                worker_schema.to_string(),
+            ),
+            (
+                "python_version",
+                pinned_python.clone(),
+                worker_python.clone(),
+            ),
+            (
+                "python_executable_sha256",
+                pinned_executable.as_str().to_owned(),
+                worker_executable.as_str().to_owned(),
+            ),
+            (
+                "batchalign_package_tree_sha256",
+                pinned_package.as_str().to_owned(),
+                worker_package.as_str().to_owned(),
+            ),
+            (
+                "batchalign_core_extension_sha256",
+                pinned_extension.as_str().to_owned(),
+                worker_extension.as_str().to_owned(),
+            ),
+            (
+                "distribution_inventory_sha256",
+                pinned_inventory.as_str().to_owned(),
+                worker_inventory.as_str().to_owned(),
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, pinned, worker)| pinned != worker)
+        .collect()
+    }
+}
+
+impl std::fmt::Display for WorkerRuntimeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("worker runtime identity differs from the runtime pinned by this server")?;
+        for (index, (name, pinned, worker)) in self.differences().into_iter().enumerate() {
+            let separator = if index == 0 { ": " } else { "; " };
+            write!(f, "{separator}{name} pinned {pinned}, worker {worker}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for WorkerRuntimeMismatch {}
 
 impl ObservedWorkerRuntimes {
     /// Pin the first runtime and refuse a different runtime before job use.
@@ -232,5 +311,31 @@ mod tests {
         assert_eq!(*mismatch.expected, first);
         assert_eq!(*mismatch.observed, second);
         assert_eq!(registry.receipts(), vec![first]);
+    }
+
+    /// The refusal names exactly the component that differs, with both
+    /// values, and nothing that matched: what an operator needs to find the
+    /// cause without reproducing it.
+    #[test]
+    fn a_refusal_names_the_component_that_differs() {
+        let registry = ObservedWorkerRuntimes::default();
+        let first: WorkerRuntimeIdentity =
+            serde_json::from_str(&identity_json(1, &"a".repeat(64))).unwrap();
+        let second: WorkerRuntimeIdentity =
+            serde_json::from_str(&identity_json(1, &"d".repeat(64))).unwrap();
+        registry.admit(&first).unwrap();
+
+        let message = crate::worker::error::WorkerError::from(registry.admit(&second).unwrap_err())
+            .to_string();
+
+        assert_eq!(
+            message,
+            format!(
+                "worker runtime identity differs from the runtime pinned by this server: \
+                 python_executable_sha256 pinned {}, worker {}",
+                "a".repeat(64),
+                "d".repeat(64)
+            )
+        );
     }
 }

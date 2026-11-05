@@ -1,7 +1,7 @@
 # Rev.AI Integration
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:58 EST
+**Last updated:** 2026-11-05 19:37 EST
 
 Rev.AI is the default ASR engine for `batchalign3 transcribe`, and the default
 UTR engine for `batchalign3 align`.
@@ -43,7 +43,7 @@ batchalign3 align corpus/ -o aligned/ --utr-engine rev
   speaker stage even on top of Rev output. Dedicated labels replace Rev's
   speaker projection, are applied to timed ASR words, and split chunks before
   utterance segmentation. pyannoteAI Precision-2 is the default;
-  `--speaker-engine pyannote` and `nemo` select local alternatives.
+  `--speaker-engine pyannote` selects the local alternative.
 
 ## Provider-visible audio format matters
 

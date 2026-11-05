@@ -23,7 +23,6 @@ async fn golden_compare_eng() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
     let run_dir = unique_test_dir("compare_eng");
 
@@ -89,7 +88,6 @@ async fn golden_compare_uses_template_gold_fallback() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
     let run_dir = unique_test_dir("compare_template");
 
@@ -151,7 +149,6 @@ async fn golden_compare_sequential_jobs_stay_isolated() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
 
     let first_dir = unique_test_dir("compare_seq_first");
@@ -223,7 +220,6 @@ fn golden_compare_warmed_session_survives_tokio_runtime_restart() {
                     override_media_cache: true,
                     ..CommonOptions::default()
                 },
-                merge_abbrev: false.into(),
             });
             let run_dir = unique_test_dir(label);
             let (info, results) = session

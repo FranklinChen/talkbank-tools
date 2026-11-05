@@ -186,8 +186,9 @@ pub struct AlignBoundaryArgs {
     /// Whether utterance bullets already on the input may change.
     ///
     /// Use `keep` for a transcript whose bullets are authoritative, such as a
-    /// hand-checked or merged transcript. It changes only how alignment is
-    /// written into the transcript, never what is aligned or cached.
+    /// hand-checked or merged transcript. Missing word timings may receive one
+    /// exact supplied-window retry; accepted timings remain unchanged. Cache-only
+    /// runs never infer. Each actual request keeps its own window/text cache key.
     #[arg(long, value_enum, default_value_t = crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY)]
     pub main_bullets: crate::chat_ops::fa::MainBulletPolicy,
 }
@@ -254,14 +255,6 @@ pub struct AlignArgs {
     /// Disable %wor tier.
     #[arg(long, conflicts_with = "wor")]
     pub nowor: bool,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 
     // -- Hidden BA2 compatibility aliases --
     /// BA2 compat: use --fa-engine whisper instead.
@@ -530,11 +523,14 @@ pub struct TranscribeArgs {
     #[arg(long, conflicts_with = "wor")]
     pub nowor: bool,
 
-    /// Merge abbreviations in output.
+    /// Merge single letters the recognizer emitted for an abbreviation
+    /// (`F B I`) into one word (`FBI`) before the transcript is built,
+    /// timed from the first letter's start to the last letter's end.
+    /// Transcribe is the only command with this option.
     #[arg(long, conflicts_with = "no_merge_abbrev")]
     pub merge_abbrev: bool,
 
-    /// Do not merge abbreviations in output (default).
+    /// Do not merge abbreviations (default).
     #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
     pub no_merge_abbrev: bool,
 
@@ -609,14 +605,6 @@ pub struct TranslateArgs {
     /// Target language (three-letter ISO 639-3 code).
     #[arg(long, default_value = "eng", value_parser = crate::api::LanguageCode3::try_new)]
     pub target: crate::api::LanguageCode3,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 }
 
 /// Morphotag analysis-policy switches lowered into typed runtime policy at the
@@ -693,14 +681,6 @@ pub struct MorphotagArgs {
     #[arg(long)]
     pub lexicon: Option<String>,
 
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
-
     /// Legacy review-tier setting; retained for command compatibility.
     ///
     /// No value writes `%xalign` or `%xrev`. Machine decisions are retained in
@@ -723,14 +703,6 @@ pub struct CorefArgs {
     /// Shared file I/O options.
     #[command(flatten)]
     pub common: CommonOpts,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 }
 
 /// Arguments for the `compare` command.
@@ -748,14 +720,6 @@ pub struct CompareArgs {
     /// `--overwrite`: replace an existing `.compare.csv` beside the transcript.
     #[command(flatten)]
     pub overwrite: OverwriteFlag,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 }
 
 /// Arguments for the `utseg` command.
@@ -773,14 +737,6 @@ pub struct UtsegArgs {
     /// No short flag by design; the book explains why `-n` was removed.
     #[arg(long, default_value_t = 2)]
     pub num_speakers: u32,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 
     /// Opt in to the legacy Stanza constituency-parser fallback for
     /// utterance segmentation when no language-specific TalkBank BERT
@@ -829,14 +785,6 @@ pub struct BenchmarkArgs {
     /// Disable %wor tier.
     #[arg(long, conflicts_with = "wor")]
     pub nowor: bool,
-
-    /// Merge abbreviations in output.
-    #[arg(long, conflicts_with = "no_merge_abbrev")]
-    pub merge_abbrev: bool,
-
-    /// Do not merge abbreviations in output (default).
-    #[arg(long = "no-merge-abbrev", conflicts_with = "merge_abbrev")]
-    pub no_merge_abbrev: bool,
 
     /// Server media bank name (from server.yaml media_mappings).
     #[arg(long)]

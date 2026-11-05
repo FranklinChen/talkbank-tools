@@ -79,12 +79,15 @@ set_file_progress(store, job_id, filename, FileStage::Aligning, None, None).awai
 Orchestrators report fine-grained progress via a `ProgressSender` channel.
 The dispatch layer creates the channel with
 `spawn_observed_progress_forwarder(sink, job_id, filename)` and passes the
-sender to the orchestrator. It also returns a checkout wait observer and the
+sender to the orchestrator. It also returns a pool wait observer and the
 forwarder. The observer, installed around the work with
-`worker::pool::checkout_wait::observing_checkout_waits`, records each checkout
-that starts or stops waiting on a saturated pool; the store keeps that count
-(`FileStatus::worker_waits`) beside the reported stage and shows
-`waiting_for_worker` while it is positive, the reported stage otherwise. The
+`worker::pool::checkout_wait::observing_pool_waits`, records each wait that
+starts or stops, by what it waits for (`PoolWait`): a checkout on a saturated
+pool, or a worker startup or model load queued for host memory. The store
+keeps those counts (`FileStatus::worker_waits`) beside the reported stage and
+shows `waiting_for_host_memory` while a memory wait is open,
+`waiting_for_worker` while a checkout wait is, and the reported stage
+otherwise. The
 forwarder publishes progress and wait changes in order, drains both channels,
 and is awaited after the work (`FileProgressForwarder::finished`), so no late
 update lands after the file's next stage. Work that is not an audio-file attempt
@@ -96,7 +99,7 @@ several and returns once they are all recorded.
 let (progress_tx, waits, forwarder) =
     spawn_observed_progress_forwarder(sink.clone(), job_id, filename);
 
-let outcome = observing_checkout_waits(waits, run_utr_pass(..., Some(&progress_tx))).await;
+let outcome = observing_pool_waits(waits, run_utr_pass(..., Some(&progress_tx))).await;
 drop(progress_tx);
 forwarder.finished().await;
 ```
@@ -122,13 +125,22 @@ if let Some(tx) = progress {
 | Mark processing | "Reading" |, |
 | Read CHAT | "Resolving audio" |, |
 | UTR pre-pass (partial) | "Recovering utterance timing" | 1/W, 2/W, ... W/W windows |
-| UTR pre-pass (full-file) | "Recovering utterance timing" | 0/1 |
+| UTR pre-pass (full-file) | "Recovering utterance timing" | ASR windows while fetching; indeterminate during lexical proof |
 | Audio resolved | "Aligning" |, |
-| Cache check | "Checking cache" | 0/N groups |
-| Cache partition | "Aligning" | hits/N groups |
-| Each group done | "Aligning" | done/N groups |
+| Cache check | "Checking cache" | 0/N dispatch units |
+| Cache partition | "Aligning" | reused and cached units/N |
+| Each retained worker projection | "Aligning" | resolved units/N, published before the next request |
 | Apply results | "Applying results" | N/N |
 | Write output | "Writing" |, |
+
+Alignment counters come from the actual ledger population. An anchored group
+can have several dispatch units; shared-context units can share one model
+execution. Explicitly unavailable pieces have no dispatch unit. An unaligned
+worker outcome still resolves its unit, so `N/N` does not mean every word has a
+timestamp. Final file status and diagnostics report that separately. The
+[consuming dispatch flow](../developer/adaptive-fa-admission.md#each-completion-owns-the-next-dispatch)
+publishes each canonical/shared projection after cache retention and ledger
+recording, rather than collecting all model replies before advancing progress.
 
 ### transcribe
 

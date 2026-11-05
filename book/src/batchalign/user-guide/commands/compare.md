@@ -1,7 +1,7 @@
 # compare
 
 **Status:** Current
-**Last updated:** 2026-10-04 20:06 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Compare CHAT transcripts against gold-standard references to compute word
 error rate (WER) and produce annotated output. For each primary `.cha` input,
@@ -55,12 +55,8 @@ flowchart TD
     mor_only --> goldannot
     keep --> goldannot
     goldannot --> strip[Strip ordinary %mor / %gra]
-    strip --> merge_check
+    strip --> metrics[Write .compare.csv]
     internal_main --> internal_done([Internal main-annotated view])
-    merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| metrics[Write .compare.csv]
-    merge --> metrics
     metrics --> done([Output .cha + .compare.csv])
 ```
 
@@ -82,7 +78,6 @@ flowchart TD
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
 
 `compare` takes no `--lang`: like `morphotag`, it reads each main transcript's
 language from that file's own `@Languages:` header when it morphotags it, so a

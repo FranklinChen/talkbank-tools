@@ -53,13 +53,8 @@ static NAMES: LazyLock<HashSet<String>> = LazyLock::new(|| {
 ///
 /// Python checks abbreviations in original case (`i.strip() in abbrev`), not
 /// lowercased, so we preserve that behavior here.
-// Data is compile-time-constant: `include_str!` embeds the JSON at build time.
-#[allow(clippy::expect_used)]
-static ABBREV: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    let data: Vec<String> = serde_json::from_str(include_str!("../data/abbrev.json"))
-        .expect("embedded abbrev.json is valid");
-    data.into_iter().collect()
-});
+static ABBREV: LazyLock<HashSet<String>> =
+    LazyLock::new(|| crate::abbreviation_data::ENTRIES.iter().cloned().collect());
 
 /// Common speech fillers, all normalized to `"um"` during WER evaluation.
 static FILLERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {

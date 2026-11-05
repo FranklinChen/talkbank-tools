@@ -17,6 +17,7 @@ from batchalign.inference.fa import (
     infer_wave2vec_fa,
     infer_whisper_fa,
 )
+from batchalign.inference.fa_ctc_resources import MmsAlphabet
 
 
 class _FakeAudioFile:
@@ -116,7 +117,7 @@ class _FakeWave2VecModel:
 
     def __call__(self, audio: torch.Tensor):
         assert audio.shape == (1, 4)
-        return torch.ones((1, 4, 8), dtype=torch.float32), None
+        return torch.ones((1, 4, 29), dtype=torch.float32), None
 
 
 class _Span:
@@ -151,7 +152,7 @@ def _install_torchaudio_alignment_helpers(
     dictionary: dict[str, int] | None = None,
     spans: list[_Span] | None = None,
     capture: dict[str, Any] | None = None,
-) -> None:
+) -> MmsAlphabet:
     """Install fake torchaudio alignment helpers for Wave2Vec FA tests."""
 
     if dictionary is None:
@@ -186,6 +187,7 @@ def _install_torchaudio_alignment_helpers(
     monkeypatch.setitem(__import__("sys").modules, "torchaudio", torchaudio)
     monkeypatch.setitem(__import__("sys").modules, "torchaudio.functional", functional)
     monkeypatch.setitem(__import__("sys").modules, "torchaudio.pipelines", pipelines)
+    return MmsAlphabet.admit(dictionary)
 
 
 def _fa_item(
@@ -273,10 +275,7 @@ def test_load_whisper_fa_selects_device_and_dtype(
 
     class _ModelLoader:
         @staticmethod
-        def from_pretrained(
-            model: str, *, revision: str, attn_implementation: str, torch_dtype
-        ):
-            captured["model_revision"] = revision
+        def from_pretrained(model: str, *, attn_implementation: str, torch_dtype):
             captured["model_name"] = model
             captured["attn_implementation"] = attn_implementation
             captured["torch_dtype"] = torch_dtype
@@ -286,8 +285,7 @@ def test_load_whisper_fa_selects_device_and_dtype(
 
     class _ProcessorLoader:
         @staticmethod
-        def from_pretrained(model: str, *, revision: str):
-            captured["processor_revision"] = revision
+        def from_pretrained(model: str):
             captured["processor_name"] = model
             return SimpleNamespace(name=model)
 
@@ -313,28 +311,23 @@ def test_load_whisper_fa_selects_device_and_dtype(
 
     from batchalign.inference.fa import load_whisper_fa
     from batchalign.inference.types import WhisperModelIdentity
+    from batchalign.tests._snapshots import transformers_snapshot
 
-    identity = WhisperModelIdentity("openai/fake-whisper", "a" * 40)
-    monkeypatch.setattr(
-        "batchalign.inference.fa._resolve_whisper_identity", lambda model: identity
-    )
-
+    snapshot = transformers_snapshot("openai/fake-whisper")
     handle = load_whisper_fa(
-        model="openai/fake-whisper",
+        snapshot,
         target_sample_rate=22050,
         device_policy=DevicePolicy(force_cpu=force_cpu),
     )
 
     assert handle.sample_rate == 22050
-    assert handle.model_identity == identity
-    assert (
-        captured["model_revision"]
-        == captured["processor_revision"]
-        == identity.revision
+    # Model and processor load from the one snapshot, and the identity is
+    # its commit: nothing is resolved by name a second time.
+    assert handle.model_identity == WhisperModelIdentity(
+        "openai/fake-whisper", snapshot.commit
     )
-    assert handle.processor.name == "openai/fake-whisper"
-    assert captured["model_name"] == "openai/fake-whisper"
-    assert captured["processor_name"] == "openai/fake-whisper"
+    assert handle.processor.name == snapshot.path
+    assert captured["model_name"] == captured["processor_name"] == snapshot.path
     assert captured["attn_implementation"] == "eager"
     assert captured["torch_dtype"] == expected_dtype
     assert captured["device"].type == expected_device
@@ -372,8 +365,13 @@ def test_load_wave2vec_fa_selects_expected_device(
             return self
 
     class _Bundle:
-        def get_model(self):
+        def get_dict(self):
+            return {"h": 1, "i": 2, "*": 28}
+
+        def get_model(self, *, with_star: bool):
+            # Keyword with no default, so a call that omits it fails here.
             captured["bundle_get_model"] = True
+            captured["with_star"] = with_star
             return _LoadedModel()
 
     torchaudio = ModuleType("torchaudio")
@@ -383,8 +381,8 @@ def test_load_wave2vec_fa_selects_expected_device(
     monkeypatch.setattr("torch.backends.mps.is_available", lambda: mps_available)
     monkeypatch.setattr(
         "batchalign.inference.types.Wave2VecFAHandle",
-        lambda model, sample_rate: SimpleNamespace(
-            model=model, sample_rate=sample_rate
+        lambda model, sample_rate, alphabet: SimpleNamespace(
+            model=model, sample_rate=sample_rate, alphabet=alphabet
         ),
     )
 
@@ -396,6 +394,9 @@ def test_load_wave2vec_fa_selects_expected_device(
 
     assert handle.sample_rate == 8000
     assert captured["bundle_get_model"] is True
+    # The FA tokenizer maps unknown characters to the `*` wildcard, which
+    # only the star-token model has an output for.
+    assert captured["with_star"] is True
     assert captured["device"].type == expected_device
 
 
@@ -449,7 +450,10 @@ def test_load_wave2vec_fa_forces_float32_on_mps(
             return self
 
     class _Bundle:
-        def get_model(self):
+        def get_dict(self):
+            return {"h": 1, "i": 2, "*": 28}
+
+        def get_model(self, *, with_star: bool):
             model = _LoadedModel()
             captured["model"] = model
             return model
@@ -461,8 +465,8 @@ def test_load_wave2vec_fa_forces_float32_on_mps(
     monkeypatch.setattr("torch.backends.mps.is_available", lambda: mps_available)
     monkeypatch.setattr(
         "batchalign.inference.types.Wave2VecFAHandle",
-        lambda model, sample_rate: SimpleNamespace(
-            model=model, sample_rate=sample_rate
+        lambda model, sample_rate, alphabet: SimpleNamespace(
+            model=model, sample_rate=sample_rate, alphabet=alphabet
         ),
     )
 
@@ -577,7 +581,7 @@ def test_whisper_fa_excludes_padding_before_normalization_and_dtw(monkeypatch) -
 
 def test_live_whisper_host_binds_dtw_rows_to_lexical_labels(monkeypatch) -> None:
     """The actual worker callback must exclude conditioning before DTW."""
-    from batchalign.worker._fa_v2 import build_default_fa_execution_host_v2
+    from batchalign.worker._fa_v2 import whisper_fa_runner
 
     _install_whisper_alignment_helpers(monkeypatch)
     module = __import__("sys").modules["transformers.models.whisper.generation_whisper"]
@@ -591,10 +595,8 @@ def test_live_whisper_host_binds_dtw_rows_to_lexical_labels(monkeypatch) -> None
     handle = SimpleNamespace(
         model=_FakeWhisperModel(), processor=_FakeWhisperProcessor(), sample_rate=16000
     )
-    host = build_default_fa_execution_host_v2(
-        whisper_model=handle, wave2vec_model=None, canto_host=None, qwen_host=None
-    )
-    result = host.whisper_runner(np.zeros(1280, dtype=np.float32), "ab")
+    runner = whisper_fa_runner(handle)
+    result = runner(np.zeros(1280, dtype=np.float32), "ab")
     assert captured[0].shape == (3, 4)
     assert result[2:4] == [("tok-10", 0.0), ("tok-20", 0.02)]
     # Conditioning values deliberately differ from lexical rows. Normalizing
@@ -658,7 +660,7 @@ def test_whisper_fa_refuses_dtw_indices_outside_observed_audio(monkeypatch) -> N
 def test_infer_wave2vec_fa_converts_spans_to_milliseconds(monkeypatch) -> None:
     """Wave2Vec FA should retain timings and duration-weighted model scores."""
 
-    _install_torchaudio_alignment_helpers(
+    alphabet = _install_torchaudio_alignment_helpers(
         monkeypatch,
         spans=[
             _Span(10, 20, 0.5),
@@ -667,7 +669,9 @@ def test_infer_wave2vec_fa_converts_spans_to_milliseconds(monkeypatch) -> None:
         ],
     )
 
-    handle = SimpleNamespace(model=_FakeWave2VecModel(), sample_rate=1000)
+    handle = SimpleNamespace(
+        model=_FakeWave2VecModel(), sample_rate=1000, alphabet=alphabet
+    )
 
     result = infer_wave2vec_fa(
         handle,
@@ -682,7 +686,7 @@ def test_infer_wave2vec_fa_strips_blank_mapped_chars_from_targets(monkeypatch) -
     """Wave2Vec FA must remove chars whose MMS dictionary maps to CTC blank."""
 
     captured: dict[str, Any] = {}
-    _install_torchaudio_alignment_helpers(
+    alphabet = _install_torchaudio_alignment_helpers(
         monkeypatch,
         dictionary={"a": 1, "b": 2, "h": 3, "i": 4, "-": 0, "*": 28},
         spans=[
@@ -694,7 +698,9 @@ def test_infer_wave2vec_fa_strips_blank_mapped_chars_from_targets(monkeypatch) -
         capture=captured,
     )
 
-    handle = SimpleNamespace(model=_FakeWave2VecModel(), sample_rate=1000)
+    handle = SimpleNamespace(
+        model=_FakeWave2VecModel(), sample_rate=1000, alphabet=alphabet
+    )
 
     result = infer_wave2vec_fa(
         handle,
@@ -712,7 +718,7 @@ def test_infer_wave2vec_fa_uses_wildcard_when_blank_sanitization_empties_word(
     """Wave2Vec FA should keep word slots even if blank-sanitization removes all chars."""
 
     captured: dict[str, Any] = {}
-    _install_torchaudio_alignment_helpers(
+    alphabet = _install_torchaudio_alignment_helpers(
         monkeypatch,
         dictionary={"a": 1, "-": 0, "*": 28},
         spans=[
@@ -722,7 +728,9 @@ def test_infer_wave2vec_fa_uses_wildcard_when_blank_sanitization_empties_word(
         capture=captured,
     )
 
-    handle = SimpleNamespace(model=_FakeWave2VecModel(), sample_rate=1000)
+    handle = SimpleNamespace(
+        model=_FakeWave2VecModel(), sample_rate=1000, alphabet=alphabet
+    )
 
     result = infer_wave2vec_fa(
         handle,
@@ -732,3 +740,40 @@ def test_infer_wave2vec_fa_uses_wildcard_when_blank_sanitization_empties_word(
 
     assert captured["transcript"].tolist() == [[28, 1]]
     assert result == [("-", (10, 20), 1.0), ("a", (20, 30), 1.0)]
+
+
+@pytest.mark.parametrize("span_count", [1, 3])
+def test_wave2vec_refuses_a_native_path_with_missing_or_extra_labels(
+    monkeypatch, span_count: int
+) -> None:
+    """A native response must account for every prepared label exactly once."""
+    from batchalign.worker._model_errors import ModelOutputInvalidError
+
+    alphabet = _install_torchaudio_alignment_helpers(
+        monkeypatch,
+        spans=[_Span(index, index + 1) for index in range(span_count)],
+    )
+    handle = SimpleNamespace(
+        model=_FakeWave2VecModel(), sample_rate=1000, alphabet=alphabet
+    )
+    with pytest.raises(ModelOutputInvalidError, match="label population"):
+        infer_wave2vec_fa(handle, torch.zeros(4), ["hi"])
+
+
+def test_wave2vec_encoder_runs_in_the_inference_mode_used_by_its_resource_plan(
+    monkeypatch,
+) -> None:
+    alphabet = _install_torchaudio_alignment_helpers(monkeypatch)
+
+    class InferenceOnlyEncoder(_FakeWave2VecModel):
+        def __call__(self, audio: torch.Tensor):
+            assert torch.is_inference_mode_enabled(), (
+                "alignment must not build an autograd graph"
+            )
+            return super().__call__(audio)
+
+    handle = SimpleNamespace(
+        model=InferenceOnlyEncoder(), sample_rate=1000, alphabet=alphabet
+    )
+    result = infer_wave2vec_fa(handle, torch.zeros(4), ["hi", "a"])
+    assert len(result) == 2

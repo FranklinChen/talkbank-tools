@@ -38,11 +38,20 @@
 //! where a worker reply comes back, and it fails loudly if the reply names a
 //! request the ledger does not await.
 
+mod inference;
+
 use std::collections::HashSet;
+
+mod cache;
+pub(super) use cache::{
+    CandidateCacheAvailability, CandidateCacheReceipts, CandidateCacheState,
+    collect_candidate_cache,
+};
 
 use talkbank_model::WordIdx;
 use tracing::{info, warn};
 
+use super::preparation::{FaPreparationContext, PreparedFaPopulation};
 use super::transport::{FaInferencePlan, FaWorkerBatch, FaWorkerTransport, plan_fa_inference};
 use super::{
     AdmittedCachedFaTimings, AdmittedFaCacheGroup, FaCacheUnitAdmission, FaServices,
@@ -52,12 +61,12 @@ use crate::api::DurationMs;
 use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::FaWindow;
+use crate::chat_ops::fa::resource_partition::{ResourcePart, ResourceUnavailable};
 use crate::chat_ops::fa::{
     AnchoredPart, AnchoredPiece, FaGroup, FaWord, GroupUnit, GroupUnits, UnavailablePiece,
     WordTiming, cache_key,
 };
 use crate::error::ServerError;
-use crate::params::{AudioContext, FaParams};
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 use crate::types::results::{FaGroupContents, FaGroupEvidence};
 use crate::types::traces::{
@@ -91,12 +100,6 @@ impl UnitOrdinal {
     pub(crate) fn index(self) -> usize {
         self.0
     }
-
-    /// An ordinal minted outside any plan, for transport tests of request ids.
-    #[cfg(test)]
-    pub(crate) fn fixture(index: usize) -> Self {
-        Self(index)
-    }
 }
 
 impl std::fmt::Display for UnitOrdinal {
@@ -129,14 +132,14 @@ enum UnitRequest<'g> {
 impl<'g> UnitRequest<'g> {
     fn words(self) -> &'g [FaWord] {
         match self {
-            Self::Whole(request) => request.words,
+            Self::Whole(request) => request.words(),
             Self::Piece(piece) => piece.request_words(),
         }
     }
 
     fn window(self) -> FaWindow {
         match self {
-            Self::Whole(request) => request.window,
+            Self::Whole(request) => request.window(),
             Self::Piece(piece) => piece.window(),
         }
     }
@@ -154,6 +157,22 @@ pub(crate) struct DispatchUnit<'g> {
 }
 
 impl<'g> DispatchUnit<'g> {
+    pub(super) fn supplied(
+        source: &'g crate::chat_ops::fa::SuppliedRetrySource,
+        context: FaPreparationContext<'_>,
+    ) -> Self {
+        Self::keyed(
+            UnitOrdinal(0),
+            GroupOrdinal(0),
+            UnitRole::Whole,
+            UnitRequest::Whole(source.request()),
+            &RequestKeying {
+                audio_identity: context.audio.audio_identity,
+                whisper_text: context.params.whisper_text,
+                engine: context.params.engine,
+            },
+        )
+    }
     /// Key one request and place it in the plan.
     fn keyed(
         ordinal: UnitOrdinal,
@@ -199,6 +218,13 @@ impl<'g> DispatchUnit<'g> {
         self.request.words()
     }
 
+    pub(super) fn input(&self) -> GroupUnit<'g> {
+        match self.request {
+            UnitRequest::Whole(request) => request,
+            UnitRequest::Piece(piece) => GroupUnit::from_piece(piece),
+        }
+    }
+
     /// The window this request aligns against, within the engine budget.
     pub(crate) fn window(&self) -> FaWindow {
         self.request.window()
@@ -207,15 +233,6 @@ impl<'g> DispatchUnit<'g> {
     /// The request's content-addressed cache identity.
     pub(crate) fn cache_key(&self) -> &CacheKey {
         &self.cache_key
-    }
-
-    /// The words' cleaned texts, as the aligner receives them.
-    pub(crate) fn texts(&self) -> Vec<String> {
-        self.request
-            .words()
-            .iter()
-            .map(|word| word.text.clone())
-            .collect()
     }
 }
 
@@ -238,7 +255,78 @@ struct PlannedPiece<'g> {
 #[derive(Debug)]
 enum PlannedPart<'g> {
     Request(PlannedPiece<'g>),
-    Unavailable(&'g UnavailablePiece),
+    Unavailable(Unrequested<'g>),
+}
+
+/// Historical declared-capacity evidence and actual resource refusals remain
+/// distinct. Neither variant owns a request slot or an execution capability.
+#[derive(Debug, Clone, Copy)]
+enum Unrequested<'g> {
+    Declared(&'g UnavailablePiece),
+    Resource(&'g ResourceUnavailable),
+}
+
+impl Unrequested<'_> {
+    fn words(&self) -> &[FaWord] {
+        match self {
+            Self::Declared(piece) => piece.words(),
+            Self::Resource(piece) => piece.words(),
+        }
+    }
+    fn first_word(&self) -> WordIdx {
+        match self {
+            Self::Declared(piece) => piece.first_word(),
+            Self::Resource(piece) => piece.first_word(),
+        }
+    }
+    fn last_word(&self) -> WordIdx {
+        match self {
+            Self::Declared(piece) => piece.last_word(),
+            Self::Resource(piece) => piece.last_word(),
+        }
+    }
+    fn window_trace(&self) -> crate::types::traces::RefusedWindowTrace {
+        match self {
+            Self::Declared(piece) => piece.refusal().into(),
+            Self::Resource(piece) => crate::types::traces::RefusedWindowTrace::Resource {
+                start_ms: piece.window().audio_start().get(),
+                end_ms: piece.window().end().get(),
+                constraint: piece.constraint().clone(),
+            },
+        }
+    }
+}
+
+enum PartInput<'g> {
+    Request(&'g AnchoredPiece),
+    Unavailable(Unrequested<'g>),
+}
+
+fn plan_parts<'g>(
+    parts: impl Iterator<Item = PartInput<'g>>,
+    mut mint: impl FnMut() -> UnitOrdinal,
+    group: GroupOrdinal,
+    key: &RequestKeying<'_>,
+) -> PlannedUnits<'g> {
+    PlannedUnits::Pieces(
+        parts
+            .enumerate()
+            .map(|(position, part)| match part {
+                PartInput::Request(piece) => PlannedPart::Request(PlannedPiece {
+                    unit: DispatchUnit::keyed(
+                        mint(),
+                        group,
+                        UnitRole::Piece(PieceOrdinal(position)),
+                        UnitRequest::Piece(piece),
+                        key,
+                    ),
+                    first_word: piece.first_word(),
+                    last_word: piece.last_word(),
+                }),
+                PartInput::Unavailable(piece) => PlannedPart::Unavailable(piece),
+            })
+            .collect(),
+    )
 }
 
 /// A group's requests, in the group's own shape.
@@ -315,26 +403,27 @@ impl<'g> DispatchPlan<'g> {
                         UnitRequest::Whole(request),
                         &key,
                     )),
-                    GroupUnits::Pieces(pieces) => PlannedUnits::Pieces(
-                        pieces
-                            .enumerate()
-                            .map(|(position, part)| match part {
-                                AnchoredPart::Request(piece) => {
-                                    PlannedPart::Request(PlannedPiece {
-                                        unit: DispatchUnit::keyed(
-                                            mint(),
-                                            ordinal,
-                                            UnitRole::Piece(PieceOrdinal(position)),
-                                            UnitRequest::Piece(piece),
-                                            &key,
-                                        ),
-                                        first_word: piece.first_word(),
-                                        last_word: piece.last_word(),
-                                    })
-                                }
-                                AnchoredPart::Unavailable(piece) => PlannedPart::Unavailable(piece),
-                            })
-                            .collect(),
+                    GroupUnits::Pieces(pieces) => plan_parts(
+                        pieces.map(|part| match part {
+                            AnchoredPart::Request(piece) => PartInput::Request(piece),
+                            AnchoredPart::Unavailable(piece) => {
+                                PartInput::Unavailable(Unrequested::Declared(piece))
+                            }
+                        }),
+                        &mut mint,
+                        ordinal,
+                        &key,
+                    ),
+                    GroupUnits::Resource(pieces) => plan_parts(
+                        pieces.map(|part| match part {
+                            ResourcePart::Request(piece) => PartInput::Request(piece),
+                            ResourcePart::Unavailable(piece) => {
+                                PartInput::Unavailable(Unrequested::Resource(piece))
+                            }
+                        }),
+                        &mut mint,
+                        ordinal,
+                        &key,
                     ),
                 };
                 PlannedGroup { group, units }
@@ -350,10 +439,24 @@ impl<'g> DispatchPlan<'g> {
 }
 
 /// One unit's resolved timings and where they came from.
-#[derive(Debug)]
-struct UnitResolution {
+#[derive(Debug, Clone)]
+pub(super) struct UnitResolution {
     timings: Vec<Option<WordTiming>>,
     source: FaEvidenceSourceTrace,
+}
+
+impl UnitResolution {
+    /// Consume admitted cache evidence without exposing a constructor for
+    /// arbitrary timing arrays paired with cache-admission provenance.
+    pub(super) fn into_supplied_retry(
+        self,
+        key: &str,
+    ) -> crate::chat_ops::fa::supplied_retry::SuppliedRetryAnswer {
+        crate::chat_ops::fa::supplied_retry::SuppliedRetryAnswer::Timings {
+            timings: self.timings,
+            source: format!("cache key {key}; {:?}", self.source),
+        }
+    }
 }
 
 /// One awaited request and its resolution, once it has one.
@@ -375,7 +478,7 @@ enum PartResolution<'p, 'g> {
         slot: Slot<'p, 'g>,
         piece: &'p PlannedPiece<'g>,
     },
-    Unavailable(&'g UnavailablePiece),
+    Unavailable(&'p Unrequested<'g>),
 }
 
 /// What has been resolved so far, one entry per group in plan order, each
@@ -668,13 +771,13 @@ fn piece_trace(piece: &PlannedPiece<'_>, source: FaEvidenceSourceTrace) -> FaPie
 }
 
 fn unrequested_trace(
-    piece: &UnavailablePiece,
+    piece: &Unrequested<'_>,
     source: FaEvidenceSourceTrace,
 ) -> crate::types::traces::FaUnrequestedPieceTrace {
     crate::types::traces::FaUnrequestedPieceTrace {
         first_word: piece.first_word().raw(),
         last_word: piece.last_word().raw(),
-        window: piece.refusal().into(),
+        window: piece.window_trace(),
         source,
     }
 }
@@ -684,7 +787,7 @@ fn group_contents(group: &FaGroup, span: FaGroupSpanTrace) -> FaGroupContents {
     FaGroupContents {
         audio_start_ms: DurationMs(group.audio_start_ms()),
         audio_end_ms: DurationMs(group.audio_end_ms()),
-        utterances: group.utterance_indices().to_vec(),
+        utterances: group.utterance_indices(),
         words: group.words().map(|w| w.text.clone()).collect(),
         word_ids: group.words().map(|word| word.stable_id()).collect(),
         span,
@@ -709,8 +812,15 @@ impl ResolvedGroups {
     /// Split into the timings injection consumes (one list per group, in
     /// group order) and the evidence the trace records, whose pre-injection
     /// snapshot is taken from those very timings.
-    pub(super) fn into_parts(self) -> (Vec<Vec<Option<WordTiming>>>, Vec<FaGroupEvidence>) {
-        self.groups
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        Vec<Vec<Option<WordTiming>>>,
+        Vec<FaGroupEvidence>,
+        Vec<FaFallbackEventTrace>,
+    ) {
+        let (timings, evidence) = self
+            .groups
             .into_iter()
             .map(|group| {
                 let pre_injection_timings = group
@@ -726,57 +836,101 @@ impl ResolvedGroups {
                     },
                 )
             })
-            .unzip()
+            .unzip();
+        (timings, evidence, self.fallback_events)
     }
 }
 
 /// Everything resolution needs about the file and the run.
-pub(super) struct FaDispatchInputs<'a> {
-    /// The groups to resolve, in order.
-    pub(super) groups: &'a [FaGroup],
+pub(super) struct FaDispatchInputs<'a, 'document> {
+    /// Resource-planned groups and their matching immutable worker inputs.
+    pub(super) population: PreparedFaPopulation<'a>,
     /// The document the groups were built from, for `%wor` reuse.
-    pub(super) chat_file: &'a crate::chat_ops::ChatFile,
+    pub(super) chat_file: &'document crate::chat_ops::ChatFile,
     /// Utterances whose existing `%wor` timing may be reused; a group is
     /// reused only when every one of its utterances is in this set.
-    pub(super) reusable_utterances: &'a HashSet<usize>,
-    /// The audio being aligned.
-    pub(super) audio: &'a AudioContext<'a>,
-    /// Worker language for model bootstrap.
-    pub(super) worker_lang: &'a crate::api::LanguageCode3,
-    /// Pool, cache and FA namespace.
-    pub(super) services: FaServices<'a>,
-    /// The run's FA parameters.
-    pub(super) fa_params: &'a FaParams,
+    pub(super) reusable_utterances: &'document HashSet<usize>,
     /// Progress sink.
-    pub(super) progress: Option<&'a ProgressSender>,
+    pub(super) progress: Option<&'document ProgressSender>,
     /// Which path is resolving, for errors and logs.
     pub(super) context: &'static str,
+}
+
+/// Source geometry cannot be paired with another population's timing arrays.
+pub(super) struct ResolvedFaPopulation<'a> {
+    groups: Vec<FaGroup>,
+    resolved: ResolvedGroups,
+    retry: super::supplied_retry::FaRetryInputs<'a>,
+}
+
+pub(super) struct InjectedFaPopulation<'a> {
+    pub(super) applied: crate::chat_ops::fa::FaApplied,
+    pub(super) evidence: Vec<FaGroupEvidence>,
+    pub(super) fallback_events: Vec<FaFallbackEventTrace>,
+    pub(super) retry: super::supplied_retry::FaRetryInputs<'a>,
+}
+
+impl<'a> ResolvedFaPopulation<'a> {
+    pub(super) fn inject(
+        self,
+        chat: &mut crate::chat_ops::ChatFile,
+        projection: crate::chat_ops::fa::FaProjection,
+        write_wor: bool,
+    ) -> Result<InjectedFaPopulation<'a>, ServerError> {
+        let (timings, evidence, fallback_events) = self.resolved.into_parts();
+        let applied = crate::chat_ops::fa::apply_fa_results_with_projection_policy(
+            chat,
+            &self.groups,
+            &timings,
+            projection,
+            write_wor,
+        )
+        .map_err(super::kept_bullets_failed)?;
+        Ok(InjectedFaPopulation {
+            applied,
+            evidence,
+            fallback_events,
+            retry: self.retry,
+        })
+    }
 }
 
 /// Resolve every group's timings: `%wor` reuse for whole groups, then cache
 /// and worker inference per request, then assembly. Shared by the full and
 /// incremental FA paths.
-pub(super) async fn resolve_group_timings(
-    inputs: FaDispatchInputs<'_>,
-) -> Result<ResolvedGroups, ServerError> {
+pub(super) async fn resolve_group_timings<'a>(
+    inputs: FaDispatchInputs<'a, '_>,
+) -> Result<ResolvedFaPopulation<'a>, ServerError> {
     let FaDispatchInputs {
-        groups,
+        population,
         chat_file,
         reusable_utterances,
-        audio,
-        worker_lang,
-        services,
-        fa_params,
         progress,
         context,
     } = inputs;
-    let plan = DispatchPlan::build(
+    let PreparedFaPopulation {
+        context: preparation,
         groups,
+        requests,
+        cached: candidate_cache,
+        mut retry,
+    } = population;
+    let FaPreparationContext {
+        audio,
+        worker_lang,
+        services,
+        params: fa_params,
+    } = preparation;
+    let plan = DispatchPlan::build(
+        &groups,
         audio.audio_identity,
         fa_params.whisper_text,
         fa_params.engine,
     );
     let total_units = plan.units().count();
+    for unit in plan.units() {
+        retry.settle(super::preparation::RequestScope::for_unit(unit));
+    }
     if let Some(tx) = progress {
         let _ = tx.send(ProgressUpdate::new(
             FileStage::CheckingCache,
@@ -800,6 +954,12 @@ pub(super) async fn resolve_group_timings(
     let mut slots = ledger.open_slots();
     let key_strings: Vec<String> = slots
         .iter()
+        .filter(|(unit, _)| {
+            matches!(
+                candidate_cache.state(unit),
+                cache::CandidateCacheState::Unexamined
+            )
+        })
         .map(|(unit, _)| unit.cache_key.as_str().to_owned())
         .collect();
     let (cached, cached_raw) = match fa_params.cache_policy {
@@ -808,157 +968,64 @@ pub(super) async fn resolve_group_timings(
             std::collections::HashMap::new(),
         ),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
-            let cached = match services
-                .pipeline
-                .cache
-                .get_batch(&key_strings, FORCED_ALIGNMENT, services.cache_namespace)
-                .await
-            {
-                Ok(map) => map,
-                Err(error) => {
-                    warn!(error = %error, "FA cache batch lookup failed (treating all as misses)");
-                    std::collections::HashMap::new()
-                }
-            };
-            let cached_raw = match services
-                .pipeline
-                .cache
-                .get_batch(
-                    &key_strings,
-                    FORCED_ALIGNMENT_RAW_EVIDENCE,
-                    services.cache_namespace,
-                )
-                .await
-            {
-                Ok(map) => map,
-                Err(error) => {
-                    warn!(error = %error, "Raw FA evidence cache batch lookup failed");
-                    std::collections::HashMap::new()
-                }
-            };
-            (cached, cached_raw)
+            cache::read_values(&key_strings, services).await
         }
     };
 
     let mut misses: Vec<&DispatchUnit<'_>> = Vec::new();
     let mut fallback_events = Vec::new();
     for (unit, slot) in slots.iter_mut().map(|slot| (slot.0, &mut slot.1)) {
-        // Tier 2: replay immutable worker evidence through current Rust logic.
-        // Tier 3: fall back to the admitted derived timing cache when raw
-        // evidence is unavailable. This ordering is what makes local algorithm
-        // experiments inference-free.
-        let key = unit.cache_key.as_str();
-        if services.attention_capture_dir.is_some()
-            && fa_params.engine == crate::types::engines::FaEngineName::Whisper
-            && !super::attention_capture::cached_available(cached_raw.get(key), key).await
-        {
-            misses.push(unit);
-            continue;
-        }
-        let resolution =
-            FaCacheUnitAdmission::new(unit, fa_params.engine, services.cache_namespace)
-                .resolve(cached_raw.get(key), cached.get(key));
-        for refusal in resolution.refusals {
-            warn!(
-                error = %refusal.error,
-                cache_layer = refusal.layer,
-                request = unit.ordinal.0,
-                group = unit.group.0,
-                "Cached FA evidence was refused"
-            );
-        }
-        match resolution.admitted {
-            AdmittedFaCacheGroup::RawEvidence(evidence) => {
-                let evidence = *evidence;
-                if let Some(event) = evidence.fallback_event {
-                    fallback_events.push(event);
-                }
-                *slot = Some(UnitResolution {
-                    timings: evidence.timings,
-                    source: FaEvidenceSourceTrace::RawEvidenceReplay,
-                });
+        let answer = match candidate_cache.state(unit) {
+            cache::CandidateCacheState::Admitted(answer) => Some(answer.clone()),
+            cache::CandidateCacheState::Miss => None,
+            cache::CandidateCacheState::Unexamined => {
+                cache::resolve(
+                    unit,
+                    preparation,
+                    cached_raw.get(unit.cache_key().as_str()),
+                    cached.get(unit.cache_key().as_str()),
+                )
+                .await
             }
-            AdmittedFaCacheGroup::DerivedTimings(timings) => {
-                *slot = Some(UnitResolution {
-                    timings: timings.into_timings(),
-                    source: FaEvidenceSourceTrace::Cache,
-                });
-            }
-            // Tier 4: no admitted cache evidence, so inference is needed.
-            AdmittedFaCacheGroup::Miss => misses.push(unit),
+        };
+        match answer {
+            Some(answer) => *slot = Some(answer),
+            None => misses.push(unit),
         }
     }
     drop(slots);
 
-    let resolved_without_inference = total_units - misses.len();
-    info!(
-        context,
-        groups = groups.len(),
-        requests = total_units,
-        reused = reused_units,
-        cache_hits = resolved_without_inference - reused_units,
-        misses = misses.len(),
-        "FA partition (reused from %wor / cache hits / misses)"
-    );
-    if let Some(tx) = progress {
-        let _ = tx.send(ProgressUpdate::new(
-            FileStage::Aligning,
-            Some(resolved_without_inference as i64),
-            Some(total_units as i64),
-        ));
-    }
-
-    // Tier 4: worker inference for the misses, one request per unit. The
-    // authorization holds the missed units themselves, so the transport never
-    // looks a request up by number.
-    if let FaInferencePlan::Authorized(authorization) =
-        plan_fa_inference(fa_params.cache_policy, misses)?
     {
-        let transport = FaWorkerTransport::production(services);
-        let parsed_results = transport
-            .infer_units(FaWorkerBatch {
-                authorization,
-                audio_path: audio.audio_path,
-                worker_lang: worker_lang.into(),
-                engine: fa_params.engine,
-                whisper_text: fa_params.whisper_text,
-            })
-            .await?;
+        let sink = ledger.retaining(services, &mut fallback_events, progress);
+        let resolved_without_inference = sink.completed();
+        info!(
+            context,
+            groups = groups.len(),
+            requests = sink.total(),
+            reused = reused_units,
+            cache_hits = resolved_without_inference - reused_units,
+            misses = misses.len(),
+            "FA partition (reused from %wor / cache hits / misses)"
+        );
+        sink.report();
 
-        for (parsed_idx, parsed_result) in parsed_results.into_iter().enumerate() {
-            let projection = parsed_result.into_projection();
-            let source = projection.source();
-            if let Some(event) = projection.fallback_event {
-                fallback_events.push(event);
-            }
-            // Only direct, version-identified evidence can enter either cache
-            // layer. Fallback and unaligned results remain valid for this run
-            // but are deliberately recomputed later: the fallback model is
-            // outside the primary request's version namespace.
-            if let Some(raw_evidence) = projection.raw_evidence {
-                store_unit_evidence(
-                    services,
-                    projection.unit.cache_key.as_str(),
-                    &projection.timings,
-                    raw_evidence,
+        // Inference consumes the same missed units and retained inputs. The
+        // sink alone records each result and releases the next dispatch.
+        if let FaInferencePlan::Authorized(authorization) =
+            plan_fa_inference(fa_params.cache_policy, misses)?
+        {
+            FaWorkerTransport::production(services)
+                .infer_units(
+                    FaWorkerBatch {
+                        authorization,
+                        worker_lang: worker_lang.into(),
+                        engine: fa_params.engine,
+                    },
+                    requests,
+                    sink,
                 )
-                .await;
-            }
-            ledger.record(
-                projection.unit,
-                UnitResolution {
-                    timings: projection.timings,
-                    source,
-                },
-            )?;
-
-            if let Some(tx) = progress {
-                let _ = tx.send(ProgressUpdate::new(
-                    FileStage::Aligning,
-                    Some((resolved_without_inference + parsed_idx + 1) as i64),
-                    Some(total_units as i64),
-                ));
-            }
+                .await?
+                .into_sink();
         }
     }
 
@@ -970,15 +1037,25 @@ pub(super) async fn resolve_group_timings(
         ));
     }
 
-    Ok(ResolvedGroups {
+    let resolved = ResolvedGroups {
         groups: ledger.assemble(context)?,
         fallback_events,
+    };
+    drop(plan);
+    Ok(ResolvedFaPopulation {
+        groups,
+        resolved,
+        retry: super::supplied_retry::FaRetryInputs {
+            preparation,
+            retry,
+            cached: candidate_cache,
+        },
     })
 }
 
 /// Write one request's direct evidence to both cache layers. Failures are
 /// logged and non-fatal: the timings are valid for this run either way.
-async fn store_unit_evidence(
+pub(super) async fn store_unit_evidence(
     services: FaServices<'_>,
     key: &str,
     timings: &[Option<WordTiming>],
@@ -1110,11 +1187,12 @@ mod tests {
     fn split_parts(
         resolved: Vec<ResolvedGroup>,
     ) -> (Vec<Vec<Option<WordTiming>>>, Vec<FaGroupEvidence>) {
-        ResolvedGroups {
+        let (timings, evidence, _) = ResolvedGroups {
             groups: resolved,
             fallback_events: Vec::new(),
         }
-        .into_parts()
+        .into_parts();
+        (timings, evidence)
     }
 
     /// Single and anchored groups side by side: the plan lays out one unit

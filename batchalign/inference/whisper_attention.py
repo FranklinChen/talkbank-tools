@@ -83,11 +83,17 @@ class WhisperAttentionCapture:
             raise ValueError(
                 "attention capture does not match its admitted labels/audio"
             )
-        from batchalign.worker._protocol import write_progress_event
+        from batchalign.worker._protocol import write_request_progress
+        from batchalign.worker._types_v2 import UnitProgressV2
 
-        write_progress_event(
-            self._context.request_id, 0, len(heads) + 1, "attention_capture"
-        )
+        def progress(completed: int) -> None:
+            write_request_progress(
+                self._context.request_id,
+                "attention_capture",
+                UnitProgressV2(completed=completed, total=len(heads) + 1),
+            )
+
+        progress(0)
         # Never replace a previous capture or follow an existing symlink. A
         # failed write remains inspectable but cannot produce a success receipt.
         fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -166,12 +172,7 @@ class WhisperAttentionCapture:
                             for f in range(costs.shape[1])
                         ),
                     )
-                    write_progress_event(
-                        self._context.request_id,
-                        h + 1,
-                        len(heads) + 1,
-                        "attention_capture",
-                    )
+                    progress(h + 1)
                 connection.executemany(
                     "INSERT INTO costs VALUES(?,?,?)",
                     (
@@ -183,12 +184,7 @@ class WhisperAttentionCapture:
         finally:
             connection.close()
         self._recorded = True
-        write_progress_event(
-            self._context.request_id,
-            len(heads) + 1,
-            len(heads) + 1,
-            "attention_capture",
-        )
+        progress(len(heads) + 1)
 
     def require_recorded(self) -> None:
         """A callback cannot claim success without having recorded its tensor."""

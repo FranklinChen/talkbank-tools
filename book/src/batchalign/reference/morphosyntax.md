@@ -524,7 +524,7 @@ classifies the model's echo of our token; the resting shape is the role
 decided where the word is born, as special forms are (`WordRole`), which
 needs Chatter's extractor to carry the separator kind on the extracted word. The spelling itself is `punct|‡` and `punct|„` today (`cm|‡`
 and `cm|„` in Japanese, where the generic path wrote every `PUNCT` token's
-category as `cm`), PENDING Franklin's decision (O5a) between that and CLAN's
+category as `cm`), PENDING the maintainer's decision (O5a) between that and CLAN's
 `beg|beg` / `end|end`; whichever is chosen edits that one function and the
 test that pins it (`tag_marker_spelling_is_pending_o5a`). One difference
 from before: the generic path took the category from the model's UPOS for the

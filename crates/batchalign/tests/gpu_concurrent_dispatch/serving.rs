@@ -25,7 +25,9 @@ fn cpu_only_pool(python: String, per_key: usize) -> WorkerPool {
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<60>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(per_key),
         verbose: 0,

@@ -18,7 +18,7 @@
 //! - Two checkouts with `WorkerConfig`s that differ in any Python-observed
 //!   field spawn distinct workers (distinct pids).
 //! - `WorkerConfig` fields the Python child does NOT observe at startup
-//!   (e.g. `ready_timeout_s`) do not partition the pool, checkouts that
+//!   (e.g. `waits`) do not partition the pool, checkouts that
 //!   differ only in such a field still share a worker.
 
 use crate::common;
@@ -37,7 +37,9 @@ fn echo_config(python: String) -> WorkerConfig {
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
         test_echo: true,
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     }
 }
@@ -100,15 +102,19 @@ async fn checkout_distinct_rust_only_field_still_shares_worker() {
     let python = crate::prerequisite::worker_test_python();
     let pool = shared_test_worker_pool();
 
-    // `ready_timeout_s` is consumed Rust-side in `tokio::time::timeout` and
+    // `waits` is consumed Rust-side (stall window, permit wait) and
     // never reaches the Python child. Differing values must NOT partition
     // the pool.
     let cfg_a = WorkerConfig {
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..echo_config(python.clone())
     };
     let cfg_b = WorkerConfig {
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<90>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<90>(),
+        ),
         ..echo_config(python)
     };
 

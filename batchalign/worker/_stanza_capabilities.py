@@ -35,8 +35,9 @@ from typing import TYPE_CHECKING, Literal
 
 import batchalign_core
 from batchalign.inference._domain_types import StanzaCode
-from batchalign.worker._progress import emit_download_event
+from batchalign.worker._progress import Phase, emit_phase_event
 from batchalign.worker._types import StanzaProcessorName
+from batchalign.worker._types_v2 import PhaseEdgeV2
 
 _STANZA_PROCESSORS: tuple[StanzaProcessorName, ...] = batchalign_core.STANZA_PROCESSORS
 """Every processor a catalog entry can ship, in Rust's order (its closed set)."""
@@ -311,9 +312,10 @@ def refresh_resources_manifest_if_present() -> None:
     # Rule 11 (time transparency): this is an external blocking call (up to the
     # timeout), so frame it on the progress channel even though it is usually
     # sub-second.
-    emit_download_event(
-        stage="refreshing_stanza_catalog",
-        user_message="Checking for Stanza resource catalog updates (~1 MB)…",
+    emit_phase_event(
+        Phase.REFRESHING_STANZA_CATALOG,
+        PhaseEdgeV2.BEGIN,
+        "Checking for Stanza resource catalog updates (~1 MB)…",
     )
     outcome_message = "Using cached Stanza resource catalog."
     try:
@@ -343,9 +345,8 @@ def refresh_resources_manifest_if_present() -> None:
             "Stanza resources.json refresh skipped; using cached manifest (%s)",
             exc,
         )
-    emit_download_event(
-        stage="refreshing_stanza_catalog_complete",
-        user_message=outcome_message,
+    emit_phase_event(
+        Phase.REFRESHING_STANZA_CATALOG, PhaseEdgeV2.COMPLETE, outcome_message
     )
 
 
@@ -413,40 +414,31 @@ def _is_resources_missing(exc: BaseException) -> bool:
 def _bootstrap_and_retry(original: BaseException) -> StanzaCapabilityTable:
     """Download Stanza's resource catalog, then rebuild the capability table.
 
-    Pairs of ``progress_v2`` events frame the download so every UI surface
-    (CLI, TUI, desktop app, web dashboard) shows the user that the wait is
-    a one-time bootstrap, not a hang.
+    The download runs under ``download_liveness`` as a ``StanzaCatalog``, the
+    one source announced when it starts (this function runs only once the
+    catalog is known absent), so every UI surface shows a one-time bootstrap,
+    not a hang. A failed download is not announced as complete; its typed
+    error says what happened.
     """
     import stanza.resources.common as src
+
+    from batchalign.worker._download_liveness import StanzaCatalog, download_liveness
 
     L.info(
         "Stanza resource catalog missing (%s); bootstrapping from %s",
         original,
         src.DEFAULT_RESOURCES_URL,
     )
-    emit_download_event(
-        stage="downloading_stanza_catalog",
-        user_message=(
-            "Downloading Stanza resource catalog (one-time, ~1 MB; "
-            "future runs will be instant)…"
-        ),
-    )
     try:
-        src.download_resources_json()
+        with download_liveness(
+            StanzaCatalog(), what="the Stanza resource catalog (~1 MB)"
+        ):
+            src.download_resources_json()
     except Exception as download_exc:
-        emit_download_event(
-            stage="downloading_stanza_catalog_failed",
-            user_message=(f"Stanza resource catalog download failed: {download_exc}"),
-        )
         raise StanzaCatalogDownloadError(
             f"Failed to download Stanza resource catalog from "
             f"{src.DEFAULT_RESOURCES_URL}: {download_exc}"
         ) from download_exc
-
-    emit_download_event(
-        stage="downloading_stanza_catalog_complete",
-        user_message="Stanza resource catalog ready.",
-    )
 
     # Catalog is now on disk; the second build attempt should succeed. If
     # this still fails, surface the error; it means the downloaded catalog

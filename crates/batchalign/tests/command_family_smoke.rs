@@ -73,12 +73,14 @@ fn minimal_chat() -> String {
 /// hardcoded `Resolved(eng())` for all commands, which made the three
 /// per-file-lang tests fail at the validation boundary before dispatch
 /// ever ran.
+/// The submission language the server's own rule asks for: per file for a
+/// command that takes no job-level language, English otherwise. This list was
+/// kept here by hand and had left out `align`, `compare` and `convert`.
 fn lang_for_command(command: ReleasedCommand) -> LanguageSpec {
-    match command {
-        ReleasedCommand::Morphotag | ReleasedCommand::Translate | ReleasedCommand::Coref => {
-            LanguageSpec::PerFile
-        }
-        _ => LanguageSpec::Resolved(LanguageCode3::eng()),
+    if batchalign::takes_no_job_language(command) {
+        LanguageSpec::PerFile
+    } else {
+        LanguageSpec::Resolved(LanguageCode3::eng())
     }
 }
 
@@ -172,7 +174,6 @@ async fn smoke_morphotag() {
         ReleasedCommand::Morphotag,
         CommandOptions::Morphotag(MorphotagOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
 
             ..Default::default()
         }),
@@ -198,7 +199,6 @@ async fn smoke_utseg() {
         ReleasedCommand::Utseg,
         CommandOptions::Utseg(UtsegOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
             utseg_fallback: false.into(),
         }),
     )
@@ -223,7 +223,6 @@ async fn smoke_translate() {
         ReleasedCommand::Translate,
         CommandOptions::Translate(TranslateOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
             ..TranslateOptions::default()
         }),
     )
@@ -248,7 +247,6 @@ async fn smoke_coref() {
         ReleasedCommand::Coref,
         CommandOptions::Coref(CorefOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
         }),
     )
     .await;

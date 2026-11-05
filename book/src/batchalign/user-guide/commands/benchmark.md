@@ -1,7 +1,7 @@
 # benchmark
 
 **Status:** Current
-**Last updated:** 2026-10-04 20:41 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Transcribe audio via ASR and evaluate word error rate (WER) against gold
 `.cha` transcripts in the same directory. A composite command that runs
@@ -36,10 +36,7 @@ flowchart TD
     start([benchmark invoked]) --> resolve[Resolve audio file + companion gold .cha]
     resolve --> transcribe[Rust transcribe workflow\nProduce hypothesis CHAT]
     transcribe --> compare[Rust compare workflow\nDP alignment + WER metrics]
-    compare --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[Merge abbreviations in hypothesis CHAT output]
-    merge_check -->|No| output
-    merge --> output[Write hypothesis .cha + .compare.csv]
+    compare --> output[Write hypothesis .cha + .compare.csv]
     output --> done([Output results])
 ```
 
@@ -64,7 +61,6 @@ flowchart TD
 | `--asr-engine NAME` | `rev` | ASR engine. `--help` prints the list, which is generated from the engine set. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured, hidden from `--help`. |
 | `--wor` / `--nowor` | `--nowor` | Include or suppress the `%wor` tier in the hypothesis output |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
 | `--bank NAME` |: | Server media bank name from `server.yaml` `media_mappings` (server-backed runs only) |
 | `--subdir PATH` |: | Subdirectory under the selected `--bank` to scope the run |
 

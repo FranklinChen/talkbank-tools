@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, ChildStderr};
 use tracing::{info, warn};
@@ -22,22 +23,69 @@ use super::protocol::WorkerRequest;
 #[derive(serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum PreReadyLine {
-    /// A bootstrap-time progress event (model download, model load, etc.),
-    /// logged as written; its fields are not read.
-    ProgressV2 {},
-    /// The worker could not load its models and says why, in place of its
-    /// ready line, then exits.
-    Error(super::protocol::ReportedFailure),
+    /// A bootstrap-time progress event (model download, model load, etc.).
+    /// Its stage and measure decide whether it re-arms the startup stall
+    /// window ([`crate::worker::RunningWait::observe`]).
+    ProgressV2 {
+        event: crate::types::worker_v2::ProgressEventV2,
+    },
+}
+
+/// Progress lines kept for a startup failure's diagnostics: the latest ones.
+///
+/// A bounded tail rather than a cap: a long first download reports its growth
+/// every few seconds for as long as it runs (over a hundred lines for twenty
+/// minutes), which is the worker being alive, not misbehaving.
+const READY_PROGRESS_TAIL_LINES: usize = 8;
+
+/// What a worker wrote before its ready signal, for diagnostics.
+#[derive(Default)]
+struct ReadyPreamble {
+    /// Non-JSON lines, capped: past [`MAX_READY_STDOUT_PREAMBLE_LINES`] the
+    /// worker is writing something other than the protocol to stdout.
+    noise: Vec<String>,
+    /// The latest pre-ready progress lines.
+    progress: std::collections::VecDeque<String>,
+}
+
+impl ReadyPreamble {
+    /// Keep a non-JSON line; `true` once there are more than the cap allows.
+    fn noise(&mut self, line: &str) -> bool {
+        self.noise.push(line.to_owned());
+        self.noise.len() > MAX_READY_STDOUT_PREAMBLE_LINES
+    }
+
+    /// Keep a progress line, dropping the oldest past the tail length.
+    fn progress(&mut self, line: &str) {
+        if self.progress.len() == READY_PROGRESS_TAIL_LINES {
+            self.progress.pop_front();
+        }
+        self.progress.push_back(line.to_owned());
+    }
+
+    /// `detail`, followed by whatever the worker wrote before failing.
+    fn describe(&self, mut detail: String) -> String {
+        if !self.noise.is_empty() || !self.progress.is_empty() {
+            detail.push_str("; pre-ready stdout: ");
+            let lines: Vec<&str> = self
+                .noise
+                .iter()
+                .chain(self.progress.iter())
+                .map(String::as_str)
+                .collect();
+            detail.push_str(&lines.join(" | "));
+        }
+        detail
+    }
 }
 
 impl WorkerHandle {
     /// Read and parse the JSON ready signal from the worker's stdout.
     ///
     /// Workers may emit `progress_v2` lines before they have finished
-    /// bootstrapping (e.g. `_emit_stanza_lang_download_event_if_missing`
-    /// fires from inside `stanza.Pipeline()` while the language pack
-    /// downloads on first use, which happens BEFORE the worker writes its
-    /// ready signal). Treat any pre-ready JSON line whose `"op"` field is
+    /// bootstrapping (e.g. `download_liveness` reports a Stanza language
+    /// pack's growth while `stanza.Pipeline()` downloads it on first use,
+    /// which happens BEFORE the worker writes its ready signal). Treat any pre-ready JSON line whose `"op"` field is
     /// `"progress_v2"` as a tolerable bootstrap-time progress event,
     /// preserve it on the preamble for diagnostics, and keep reading for
     /// the actual ready signal. Any other JSON shape that is not a valid
@@ -49,82 +97,89 @@ impl WorkerHandle {
     /// were the parent killing a worker that had emitted a perfectly valid
     /// download-progress event one line ahead of its ready signal, a
     /// protocol-ordering race, not a real worker failure.
+    ///
+    /// The wait is a [`crate::worker::LoadingStall`] window, not a total
+    /// limit: each progress event that advanced re-arms it, so a worker
+    /// downloading its models for twenty minutes is ready when it finishes,
+    /// and one that reports nothing new for `stall` is
+    /// [`WorkerError::Stalled`].
     pub(super) async fn read_ready_line<R: tokio::io::AsyncBufRead + Unpin>(
         reader: &mut R,
+        stall: crate::worker::LoadingStall,
     ) -> Result<ReadySignal, WorkerError> {
+        let loading = crate::worker::pool::checkout_wait::ObservedModelLoad::begin();
+        let mut wait = crate::worker::RunningWait::start(crate::worker::ResponseWait::Loading {
+            waited_for: crate::worker::LoadingWait::Ready,
+            stall,
+        });
         let mut line = String::new();
-        let mut preamble = Vec::new();
+        let mut preamble = ReadyPreamble::default();
         loop {
             line.clear();
-            reader.read_line(&mut line).await.map_err(|e| {
-                WorkerError::ReadyParseFailed(format!("failed to read stdout: {e}"))
-            })?;
+            let bytes = match wait.within(reader.read_line(&mut line)).await {
+                Some(read) => read.map_err(|e| {
+                    WorkerError::ReadyParseFailed(format!("failed to read stdout: {e}"))
+                })?,
+                None => return Err(wait.expired()),
+            };
 
-            if line.is_empty() {
-                let mut detail = "worker closed stdout without emitting ready signal".to_string();
-                if !preamble.is_empty() {
-                    detail.push_str("; pre-ready stdout: ");
-                    detail.push_str(&preamble.join(" | "));
-                }
-                return Err(WorkerError::ReadyParseFailed(detail));
+            if bytes == 0 {
+                return Err(WorkerError::ReadyParseFailed(preamble.describe(
+                    "worker closed stdout without emitting ready signal".to_string(),
+                )));
             }
 
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if !trimmed.starts_with('{') {
-                preamble.push(trimmed.to_owned());
-                if preamble.len() > MAX_READY_STDOUT_PREAMBLE_LINES {
-                    let mut detail = format!(
-                        "worker emitted more than {MAX_READY_STDOUT_PREAMBLE_LINES} non-JSON line(s) before ready signal"
-                    );
-                    detail.push_str("; pre-ready stdout: ");
-                    detail.push_str(&preamble.join(" | "));
-                    return Err(WorkerError::ReadyParseFailed(detail));
-                }
-                continue;
-            }
-
-            match serde_json::from_str::<PreReadyLine>(trimmed) {
-                // Pre-ready progress events: the worker telling us about a
-                // bootstrap-time wait (model download, model load, etc.).
-                // Forward to the preamble for failure diagnostics AND emit
-                // as `info!` so bootstrap timing reaches the daemon log
-                // live: the Python worker's stderr is buffered until the
-                // process exits, so without this surface, per-task timing
-                // events emitted during model load are invisible until
-                // the worker dies.
-                Ok(PreReadyLine::ProgressV2 {}) => {
-                    tracing::info!(event = %trimmed, "Pre-ready progress event");
-                    preamble.push(trimmed.to_owned());
-                    if preamble.len() > MAX_READY_STDOUT_PREAMBLE_LINES {
-                        let mut detail = format!(
-                            "worker emitted more than {MAX_READY_STDOUT_PREAMBLE_LINES} pre-ready event(s) without sending ready signal"
-                        );
-                        detail.push_str("; pre-ready stdout: ");
-                        detail.push_str(&preamble.join(" | "));
-                        return Err(WorkerError::ReadyParseFailed(detail));
+            // The one line rule every reader applies.
+            let message = match super::protocol::WireLine::classify(&line) {
+                super::protocol::WireLine::Blank => continue,
+                super::protocol::WireLine::Noise => {
+                    if preamble.noise(line.trim()) {
+                        return Err(WorkerError::ReadyParseFailed(preamble.describe(format!(
+                            "worker emitted more than {MAX_READY_STDOUT_PREAMBLE_LINES} non-JSON line(s) before ready signal"
+                        ))));
                     }
                     continue;
                 }
-                // The worker's own classified reason for not starting: a
-                // download that failed in transit is retried like any other,
-                // where an unexplained exit could only be a system failure.
-                Ok(PreReadyLine::Error(failure)) => return Err(failure.into_startup_error()),
-                // Not a tagged pre-ready line: it must be the ready signal.
-                Err(_) => {}
-            }
+                super::protocol::WireLine::Message(message) => message,
+            };
 
-            return serde_json::from_str::<ReadySignal>(&line).map_err(|e| {
-                let mut detail = format!("invalid ready JSON: {e} (line: {line:?})");
-                if !preamble.is_empty() {
-                    detail.push_str("; pre-ready stdout: ");
-                    detail.push_str(&preamble.join(" | "));
+            // Every pre-ready line carries an `op` tag; the ready signal does
+            // not. A tagged line is decoded as one, and one that does not
+            // decode is a malformed protocol line, named as one rather than
+            // misreported as a bad ready signal.
+            if message.get("op").is_none() {
+                return ReadySignal::deserialize(&message).map_err(|e| {
+                    WorkerError::ReadyParseFailed(
+                        preamble
+                            .describe(format!("invalid ready JSON: {e} (line: {:?})", line.trim())),
+                    )
+                });
+            }
+            match PreReadyLine::deserialize(&message) {
+                // Pre-ready progress: the worker telling us about a
+                // bootstrap-time wait (model download, model load). Logged
+                // as `info!` so bootstrap timing reaches the daemon log live
+                // (the Python worker's stderr is buffered until it exits),
+                // kept in a bounded tail for failure diagnostics, and shown
+                // to the stall window, which an advance re-arms.
+                Ok(PreReadyLine::ProgressV2 { event }) => {
+                    tracing::info!(event = %line.trim(), "Pre-ready progress event");
+                    wait.observe(&event);
+                    match &event {
+                        crate::types::worker_v2::ProgressEventV2::Load(load) => {
+                            loading.report(load)
+                        }
+                        crate::types::worker_v2::ProgressEventV2::Request(_) => {}
+                    }
+                    preamble.progress(line.trim());
                 }
-                WorkerError::ReadyParseFailed(detail)
-            });
+                Err(error) => {
+                    return Err(WorkerError::ReadyParseFailed(preamble.describe(format!(
+                        "undecodable pre-ready line: {error} (line: {:?})",
+                        line.trim()
+                    ))));
+                }
+            }
         }
     }
 
@@ -398,6 +453,10 @@ mod ready_signal_tests {
     use super::*;
     use tokio::io::BufReader;
 
+    /// A stall window no in-memory reader test comes near.
+    const GENEROUS_STALL: crate::worker::LoadingStall =
+        crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<30>());
+
     fn buf(s: &str) -> BufReader<&[u8]> {
         BufReader::new(s.as_bytes())
     }
@@ -425,7 +484,9 @@ mod ready_signal_tests {
     async fn read_ready_line_accepts_ready_first() {
         let stdout = ready(4242);
         let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r).await.unwrap();
+        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
+            .await
+            .unwrap();
         assert!(signal.ready);
         assert_eq!(signal.pid, 4242);
         assert_eq!(signal.runtime.python_version(), "3.13.12");
@@ -443,58 +504,31 @@ mod ready_signal_tests {
         );
         let mut r = buf(stdout);
 
-        let runtime = WorkerHandle::read_ready_line(&mut r).await.unwrap().runtime;
+        let runtime = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
+            .await
+            .unwrap()
+            .runtime;
 
         assert_eq!(runtime.python_version(), "3.13.12");
         assert_eq!(runtime.python_executable_sha256().as_str(), "a".repeat(64));
     }
 
-    /// RED FIRST: a worker whose startup download failed exited before its
-    /// ready line, which read as `ReadyParseFailed`, a system failure never
-    /// retried. Its classified error line in place of the ready line is now
-    /// the error: a download, retried, from a worker that has exited.
-    #[tokio::test]
-    async fn read_ready_line_reads_a_classified_startup_failure() {
-        let stdout = concat!(
-            "{\"op\": \"progress_v2\", \"event\": {\"request_id\": \"\", \"completed\": 0, \"total\": 0, \"stage\": \"downloading\"}}\n",
-            "{\"op\": \"error\", \"error\": \"no cached copy\", \"kind\": \"download\"}\n",
-        );
-        let mut r = buf(stdout);
-
-        let error = WorkerHandle::read_ready_line(&mut r)
-            .await
-            .expect_err("an error line is not a ready signal");
-
-        assert!(
-            matches!(
-                &error,
-                WorkerError::ModelDownload {
-                    message,
-                    worker: crate::worker::error::WorkerAfterError::Exits,
-                } if message.contains("no cached copy")
-            ),
-            "{error:?}"
-        );
-        assert!(
-            ((crate::runner::util::classify_worker_error(&error)).retryability()
-                == crate::types::scheduling::Retryability::Retryable)
-        );
-    }
-
     /// 2026-05-06 morphotag protocol-ordering bug: a `progress_v2` event
-    /// emitted by the worker during model load (e.g.
-    /// `_emit_stanza_lang_download_event_if_missing`) lands on stdout
+    /// emitted by the worker during model load (e.g. a
+    /// `download_liveness` growth report) lands on stdout
     /// BEFORE the ready signal. The parent must tolerate it, not
     /// reject the worker, and consume the actual ready signal from a
     /// later line.
     #[tokio::test]
     async fn read_ready_line_skips_pre_ready_progress_event() {
         let stdout = format!(
-            "{{\"op\": \"progress_v2\", \"event\": {{\"request_id\": \"\", \"completed\": 0, \"total\": 0, \"stage\": \"downloading_stanza_lang_zh\"}}}}\n{}",
+            "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_lang_zh\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n{}",
             ready(9001)
         );
         let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r).await.unwrap();
+        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
+            .await
+            .unwrap();
         assert!(
             signal.ready,
             "ready signal must be parsed after a pre-ready progress event"
@@ -508,17 +542,66 @@ mod ready_signal_tests {
     async fn read_ready_line_skips_multiple_pre_ready_progress_events() {
         let stdout = format!(
             concat!(
-                "{{\"op\": \"progress_v2\", \"event\": {{\"stage\": \"downloading_stanza_catalog\"}}}}\n",
-                "{{\"op\": \"progress_v2\", \"event\": {{\"stage\": \"downloading_stanza_catalog_complete\"}}}}\n",
-                "{{\"op\": \"progress_v2\", \"event\": {{\"stage\": \"downloading_stanza_lang_zh\"}}}}\n",
+                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_catalog\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n",
+                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_catalog\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"complete\"}}}}}}\n",
+                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_lang_zh\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n",
                 "{}"
             ),
             ready(7)
         );
         let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r).await.unwrap();
+        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
+            .await
+            .unwrap();
         assert!(signal.ready);
         assert_eq!(signal.pid, 7);
+    }
+
+    /// A progress line missing its fields is a malformed protocol line, and
+    /// says so, instead of being misreported as an invalid ready signal.
+    #[tokio::test]
+    async fn read_ready_line_names_an_undecodable_progress_line() {
+        let stdout = "{\"op\": \"progress_v2\", \"event\": {\"stage\": \"x\"}}\n";
+        let mut r = buf(stdout);
+        match WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await {
+            Err(WorkerError::ReadyParseFailed(detail)) => {
+                assert!(detail.starts_with("undecodable pre-ready line"), "{detail}");
+            }
+            other => panic!("expected a named protocol failure, got {other:?}"),
+        }
+    }
+
+    /// A long download reports far more progress than the non-JSON cap
+    /// allows lines; progress is the worker being alive, so it never trips
+    /// the cap, and only the latest few are kept for diagnostics.
+    #[tokio::test]
+    async fn read_ready_line_accepts_a_long_download_s_progress() {
+        let mut stdout = String::new();
+        for kib in 1..=(4 * MAX_READY_STDOUT_PREAMBLE_LINES) {
+            stdout.push_str(&format!(
+                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_x\", \"measure\": {{\"kind\": \"download_growth\", \"grown_kib\": {kib}}}}}}}\n"
+            ));
+        }
+        stdout.push_str(&ready(11));
+        let mut r = buf(&stdout);
+        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
+            .await
+            .unwrap();
+        assert_eq!(signal.pid, 11);
+    }
+
+    /// A worker that stops reporting while it loads is stalled after one
+    /// window of silence, named as a stall at the ready signal.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_starting_worker_is_stalled() {
+        let (reader, _writer) = tokio::io::duplex(64);
+        let mut r = BufReader::new(reader);
+        match WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await {
+            Err(WorkerError::Stalled { waited_for, .. }) => {
+                assert_eq!(waited_for, crate::worker::LoadingWait::Ready);
+            }
+            other => panic!("expected a startup stall, got {other:?}"),
+        }
     }
 
     /// Non-progress JSON that is not a valid ReadySignal is still a hard
@@ -527,7 +610,7 @@ mod ready_signal_tests {
     async fn read_ready_line_rejects_unknown_json_shape() {
         let stdout = format!("{{\"hello\": \"world\"}}\n{}", ready(1));
         let mut r = buf(&stdout);
-        let result = WorkerHandle::read_ready_line(&mut r).await;
+        let result = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await;
         assert!(
             matches!(result, Err(WorkerError::ReadyParseFailed(_))),
             "unknown JSON shape ahead of ready must error"
@@ -540,7 +623,7 @@ mod ready_signal_tests {
         let mut r = buf(stdout);
 
         assert!(matches!(
-            WorkerHandle::read_ready_line(&mut r).await,
+            WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await,
             Err(WorkerError::ReadyParseFailed(_))
         ));
     }

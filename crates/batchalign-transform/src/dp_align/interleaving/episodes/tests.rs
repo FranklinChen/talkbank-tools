@@ -625,9 +625,12 @@ fn ordinary_following_monologues_are_not_implicitly_one_overlap_episode() {
         1,
         "only the adjacent turn is a local unmarked hypothesis"
     );
-    let nodes = Budget::nodes(&turns).expect("linear source size");
+    let materialized = PreparedGraph::admit(&turns)
+        .expect("linear source size")
+        .materialize(&Uninterrupted)
+        .unwrap();
     assert!(
-        nodes < 250,
+        materialized.graph().order.len() < 250,
         "ordinary continuation cannot explode the source graph"
     );
 }

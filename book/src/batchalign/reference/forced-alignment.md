@@ -509,11 +509,14 @@ prefixes derived from the witnessed lower bound, not heuristic chunks or guessed
 anchors. Complete forward/backward proof still determines all possible matches
 and omissions; a selected path alone never grants a timing hint. Affordable
 dense searches and fuzzy policies are unchanged, with no new CLI option.
-Storage is admitted before allocation and packed work is reserved or charged
-before each operation under the unchanged limits. A `packed_search` refusal
-reports the known work floor plus its next required operation; it is not a
-claim of missing ASR evidence or a full-run cost estimate. Finite budgets can
-still refuse a recording. See the
+Storage is admitted before allocation. Once packed execution is admitted, its
+operation counter is diagnostic: crossing 64 million operations no longer
+refuses the proof. The source-bound preparation owner also retains one graph
+survey across full/viable representation admission, avoiding repeated preparation.
+Preparation/representation work, storage and candidate limits still apply;
+`packed_search` work refusal can still arise during geometry admission. None
+of these refusals proves missing ASR evidence or gives a full-run cost estimate.
+Shared host-memory admission for UTR remains unfinished. See the
 [packed joint proof](../developer/backchannel-aware-alignment.md#optional-packed-joint-proof)
 for the ownership, pruning argument and independent-oracle tests. Recovered UTR
 hints remain distinct from acoustic FA, coverage and publication acceptance.
@@ -658,7 +661,7 @@ that turn overlaps this one. The same speaker's retained
 chain and the joint producer's obligatory words can only narrow it further. A
 corridor therefore cannot start at 0 beside a measured neighbour: before this,
 an unheard one-word acknowledgement between two heard turns searched from 0,
-exceeded the engine budget in a long recording, and was refused before any
+exceeded the earlier grouping duration cutoff in a long recording, and was refused before any
 request, although the word was there, inside the bounded corridor.
 Original bullets and output-completion requirements are unchanged. This bounded
 model does not cover arbitrary reordering or prove acoustic speaker identity.
@@ -1002,27 +1005,25 @@ Groups are formed by `group_utterances()` in
 `crates/batchalign/src/chat_ops/fa/grouping.rs`. Each group maps
 to one FA worker call, except an anchored group (below), which is one call per
 piece.
-Grouping is driven by two independent constraints, a group is flushed and a new
-one started when either is exceeded:
+Grouping uses two preferences when joining neighbours. Neither is permission
+to refuse an individual utterance:
 
-| Constraint | Limit | Rationale |
-|------------|-------|-----------|
-| **Time window** (`max_group_ms`) | Per engine: the `max_group` field of the selected engine's row in `FA_ENGINES` | Caps audio segment length sent to the FA worker. Larger windows give the model more context but increase latency and memory, and the engines do not agree on the trade-off: the wav2vec family's CTC target length grows with the window, so it takes a narrower one than Whisper. `group_utterances()` is never told which engine will align its groups; the caller reads the window off the run's engine (`FaParams::max_group_ms()`, which is `FaEngineName::max_group_ms()`, which is that row). The numbers are deliberately not restated here: read the rows in `crates/batchalign/src/types/engines.rs`. It is also the engine BUDGET for a single utterance: an utterance whose own window exceeds it is never sent whole. It is partitioned at recovered word ends into requestable and unavailable pieces. Bounded pieces survive an oversized `anchor_gap`; only that word range stays unrequested. Complete partitions record `window_split_at_anchors`. Whole-window refusal remains for `anchors_unusable` or `over_budget` when no usable cut exists. See "Over-budget utterances" below. |
-| **Label-byte cap** (`MAX_GROUP_LABEL_BYTES = 448`) | 448 UTF-8 bytes | Whisper's CTC forced-alignment backend (`ctc_loss` / `ctc_best_path`) has a maximum label sequence length of exactly 448 TOKENS; exceeding it produces a hard `ValueError: Labels' sequence length N cannot exceed the maximum allowed length of 448 tokens`. The cap is applied to EVERY engine's groups, not only Whisper's, because grouping is never told which engine will align them; the tightest engine's limit is therefore used for all. The unit is a UTF-8 BYTE, and that is a deliberately conservative proxy for the token limit: every token occupies at least one byte, so a byte count bounds the token count from above. A character count does not, and outside ASCII it is smaller, so counting characters would loosen the cap against the very limit it stands in for. |
+| Preference | Source | Effect |
+| --- | --- | --- |
+| Time target | `FaAggregationTarget`, from the selected engine's row | Start a new group when a join exceeds the target. Keep one longer supplied utterance intact, without padding or merging it. |
+| Label bytes | `MAX_GROUP_LABEL_BYTES`, counted by `LabelBytes` | Avoid large joins. A single utterance may exceed this preference; actual tokenizer labels are checked during loaded-model preparation. |
 
-The label-byte limit exists because the time window alone is insufficient. Dense
-speech (fast talkers, long-word languages like Spanish) can accumulate hundreds
-of words, and thus thousands of label bytes, well inside a single time window.
-The first time this was observed in production was on the `biling-data` corpus
-(`DiazCollazos/09.cha`, Spanish), where group 0 carried 2043 label bytes in
-10.97 seconds, and `DiazCollazos/01.cha` group 14 carried 2523 in 14.56
-seconds. Both crashed Whisper FA.
+The old engine duration constants did not establish intrinsic model capacity.
+The new request path separates aggregation, actual model constraints, projected
+workspace and the execution lease. See
+[FA preparation and adaptive admission](../developer/adaptive-fa-admission.md)
+for the implemented states and the remaining resource-driven partition work.
 
 ```mermaid
 flowchart TD
     utt(["Next utterance<br/>(requires timing bullet or UTR search evidence)"])
     extract["collect_fa_words()<br/>Extract words → count UTF-8 bytes<br/>(utt_bytes)"]
-    over_time{"(current duration +<br/>new duration) > max_group_ms<br/>or time went backwards?"}
+    over_time{"(current duration +<br/>new duration) > aggregation target<br/>or time went backwards?"}
     over_chars{"current_bytes +<br/>utt_bytes > 448?"}
     flush["Flush current group<br/>Reset: current_bytes = 0<br/>Extend audio window into gap"]
     add["Add utterance words to group<br/>current_bytes += utt_bytes"]
@@ -1040,44 +1041,24 @@ flowchart TD
     more -->|"no"| final
 ```
 
-**Known limit, the cap bounds a MERGE and not every group:** it is consulted
-only where two utterances are joined, so a SINGLE utterance whose own labels
-exceed 448 bytes is never split. The flush guard is skipped
-(`!current_words.is_empty()` is false) and the utterance is sent as its own
-group regardless. The worker may fail for that group, but the error is scoped
-to that group alone; the alternative, silently dropping the utterance, would
-corrupt injection by skewing the word-cursor alignment for every subsequent
-group, and splitting one utterance would mean splitting its audio window at a
-position grouping cannot justify. So "no group exceeds the cap" is not what
-this code guarantees.
-
-**Byte count vs. actual tokens:** The 448-byte limit is a conservative proxy
-for a limit stated in tokens, and conservative in the safe direction. Every
-token of these tokenizers covers at least one UTF-8 byte, so staying under the
-byte cap guarantees staying under the token limit, for every script. The cost
-is over-splitting non-Latin text, roughly threefold for Devanagari, CJK and
-most Indic scripts and twofold for Cyrillic and Greek: more, smaller groups
-still align correctly, where an oversized group is a hard engine failure.
-Tightening this means asking the engine for its real tokenizer, not swapping
-the proxy for a looser one.
-
-**Implementation note, why the word count is computed before the split
-decision:** The split must know the new utterance's byte count before deciding
-whether to flush, so `collect_fa_words()` is called at the top of the loop
-(before the flush check) and the words are held in `extracted` until after the
-flush decision. This avoids calling `collect_fa_words()` twice.
-
-Source: `crates/batchalign/src/chat_ops/fa/grouping.rs`,
-constant `MAX_GROUP_LABEL_BYTES` and the `LabelBytes` newtype that is the only
-way to produce a count comparable against it.
+The merge guard cannot arbitrarily cut one utterance's words or audio. The
+backend's tokenizer/configuration and projected workspace must decide whether
+that complete request is feasible. Additional groups or timestamps alone do not
+establish acoustic accuracy.
 
 #### Over-budget utterances: anchored splitting
 
-The engine budget (`max_group_ms`) limits one FA REQUEST: wav2vec runs one
-model forward pass over the whole window, so a single utterance longer than the
-budget cannot be aligned in one request. When the UTR pre-pass ran, it has
-usually already heard most of that utterance's words, and grouping cuts the
-utterance at those words.
+**Historical declared-capacity partition algorithm.** The current production
+paths use [adaptive model admission](../developer/adaptive-fa-admission.md#integrated-source-bound-adaptive-partitioning).
+The details below explain retained fixtures and older sidecars.
+The following describes splitting under an explicitly declared capacity, as
+exercised by the anchor/context regression fixtures and represented in earlier
+debug sidecars. It must not be read as a proof that the legacy 15/20-second
+aggregation preferences are model limits. The production grouping path no
+longer refuses or partitions a complete utterance merely for crossing that
+preference. Resource-driven partitioning must use loaded-model evidence, retain
+source-bound cuts, and prepare every resulting request before execution. A long
+anchor gap alone is not proof of acoustic misplacement.
 
 - **Anchors** (`chat_ops/fa/utr/anchors.rs`). A `WordAnchor` is a transcript
   word every one of whose lexical units has a correspondence in every optimal
@@ -1152,7 +1133,7 @@ utterance at those words.
 
 ```mermaid
 flowchart TD
-    long["utterance window > max_group_ms<br/>(OverBudgetWindow)"]
+    long["window exceeds declared capacity<br/>(partition fixture)"]
     lookup{"what did UTR<br/>observe here?"}
     cuts{"any interior cut?<br/>(anchored word end,<br/>not the last word)"}
     split["AnchoredSplit: source-owned partition<br/>(all original words)"]
@@ -1342,11 +1323,13 @@ curl http://127.0.0.1:8001/jobs/JOB_ID/traces | python3 -m json.tool
 
 #### Whisper fallback when worker has no Whisper model
 
-The Python worker loads **exactly one** FA model at startup, controlled by
-`engine_overrides["fa"]` in the worker bootstrap.  When Wave2Vec is the primary
-engine, `whisper_fa_model` in `_WorkerState` is `None`.  If Wave2Vec hits a CTC
-overflow and `infer_units_v2` dispatches the Whisper fallback, the worker
-returns `ExecuteOutcomeV2::Error { code: ModelUnavailable }`.
+The Python worker loads **exactly one** FA model, in its FA `ensure_task`,
+named by `engine_overrides["fa"]`; its load registry holds that one FA host
+(`LoadedWordFa` for Wave2Vec). If Wave2Vec hits a CTC overflow and the
+Whisper fallback reaches a worker whose FA host is Wave2Vec, the PyO3
+executor finds a Wave2Vec host for a Whisper request and returns
+`ExecuteOutcomeV2::Error { code: ModelUnavailable }` ("this worker loaded the
+wave2vec forced-alignment backend, and the request asks for whisper").
 
 `FallbackStep::after()` in `crates/batchalign/src/fa/transport.rs` reads the
 failure's protocol code (`FaWorkerFailure::ModelUnavailable`) and treats a
@@ -1580,7 +1563,7 @@ order diverge (overlapping speech, post-hoc transcript restructuring). CHAT's
 start-order rule (E362) forbids writing the earlier start on the later line,
 and the line order is the contributor's, so Pass 1 resolves the regression by
 the utterance's own overlap evidence (`StartRegression::resolve` in
-`fa/orchestrate.rs`, 2026-11-03):
+`fa/orchestrate/start_order.rs`):
 
 - **Marked `+<`** (the parsed model's `LazyOverlapPrecedes` linker): the
   transcriber said this turn starts while the previous one is still going, so
@@ -1602,6 +1585,11 @@ the utterance's own overlap evidence (`StartRegression::resolve` in
   or before it, or every timed word does): a raise would keep a bullet with
   no timed word inside it, so the utterance is stripped and recorded as a
   strip, with `cause=nothing_after_preceding_start` in the reason.
+
+The pass binds actual utterance borrows once. A kept source has no mutation
+target; revisable targets are consumed into accepted, regressing or yielding
+states. Neither a terminal result nor a cloned diagnostic snapshot can repeat
+the work. See the [ownership flow](../developer/adaptive-fa-admission.md#start-order-repair-owns-its-mutation-targets).
 
 Every start-order decision has `needs_review=true`. A raised utterance's
 start is the greatest accepted start, so what follows is judged against it
@@ -1676,10 +1664,15 @@ provisional UTR hint, to extend its end.
 Everything above describes the default, `MainBulletPolicy::DeriveFromWords`,
 where the utterance bullet is a projection of its words. Under
 `MainBulletPolicy::KeepGiven` a bullet the input carried is read-only for the
-whole projection. It is projection policy only: it never enters a cache key and
-never changes grouping or inference, so the pre-grouping passes (narrow-bullet
-rescue, edge-filler expansion, the partial `%wor` refresh) still widen bullets
-in the working document to give the aligner its windows.
+whole projection. The policy is not a raw cache-key dimension and does not
+change primary grouping. Pre-grouping passes (narrow-bullet rescue,
+edge-filler expansion and partial `%wor` refresh) may still widen the working
+windows. When kept source fit leaves missing positive word timing, full and
+incremental FA may perform one terminal retry over the complete original
+utterance and exact positive, recording-contained supplied window. It has its
+own request key and normal model/memory admission, preserves accepted timings,
+and cannot borrow padding. Cache-only recovery never infers. See
+[bounded supplied-window recovery](../user-guide/commands/align.md#bounded-recovery-inside-a-supplied-bullet).
 
 **Capture at the parse.** The given bullets cannot be read off the working
 document later: by then those passes, and the UTR pre-pass (whose two-pass
@@ -1702,7 +1695,11 @@ flowchart TD
     bind --> utr["UTR pre-pass, rescue, filler expansion<br/>(may widen bullets for grouping)"]
     utr --> apply["apply_fa_results_with_projection_policy<br/>kept: skip the bullet update"]
     apply --> impose["then_finalize: impose<br/>restore kept bullets, clamp words on<br/>main tier and %wor -> ImposedBullets"]
-    impose --> repair["bullet repair (optional)<br/>requires ImposedBullets"]
+    impose --> missing{"Missing positive word timing<br/>inside an original supplied window?"}
+    missing -->|"no"| repair["bullet repair (optional)<br/>requires ImposedBullets"]
+    missing -->|"yes"| retry["One terminal exact-window attempt<br/>unique preparation and normal cache/model admission"]
+    retry --> patch["Fill missing slots only, or retain unresolved timing<br/>accepted primary timings have no overwrite capability"]
+    patch --> repair
     repair --> mono["monotonicity<br/>requires ImposedBullets"]
     mono --> wor["%wor written (main-tier cuts folded in)"]
     wor --> held["restore_and_verify: restore given bullets<br/>of utterances not in the recording,<br/>then KeptBulletsHeld or KeptBulletError<br/>(fails the file)"]
@@ -2040,7 +2037,8 @@ evidence.
 - **`wav2vec`** (default): measures each word's start and end. Use it unless a
   measurement on your material says otherwise.
 - **`whisper`**: reports token onsets only, so every word's end is derived
-  (below). It accepts a longer window (20 s against 15 s). Choose it when
+  (below). Its aggregation preference differs from Wave2Vec; neither preference
+  is a fixed single-utterance duration limit. Choose it when
   measurement on your material shows it locates more words; on the one
   measurement recorded below it located fewer.
 - **`cantonese`**: the Wave2Vec aligner over jyutping, for Cantonese (`yue`)

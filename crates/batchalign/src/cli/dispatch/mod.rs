@@ -456,160 +456,164 @@ pub async fn dispatch(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_direct_mode(
+fn dispatch_direct_mode<'run>(
     mut cfg: ServerConfig,
     layout: RuntimeLayout,
-    lang: &LanguageSpec,
+    lang: &'run LanguageSpec,
     num_speakers: u32,
     input_kind: InputKind,
-    inputs: &[std::path::PathBuf],
-    out_dir: Option<&std::path::Path>,
-    options: &CommandOptions,
-    lexicon: Option<&str>,
-    before: Option<&std::path::Path>,
+    inputs: &'run [std::path::PathBuf],
+    out_dir: Option<&'run std::path::Path>,
+    options: &'run CommandOptions,
+    lexicon: Option<&'run str>,
+    before: Option<&'run std::path::Path>,
     force_cpu: bool,
     allow_mps: bool,
     runtime: RequestedRuntime,
     pace: DirectPace,
     overwrite: Option<Overwrite>,
-) -> Result<(), CliError> {
-    // `--workers N` and `--timeout S` are explicit overrides of the
-    // configured (or host-facts recommended) values.
-    runtime.apply_to(&mut cfg);
-    match pace {
-        DirectPace::Sequential => apply_sequential_config(&mut cfg),
-        DirectPace::Pooled => {}
-    }
+) -> futures::future::BoxFuture<'run, Result<(), CliError>> {
+    Box::pin(async move {
+        // `--workers N` and `--timeout S` are explicit overrides of the
+        // configured (or host-facts recommended) values.
+        runtime.apply_to(&mut cfg);
+        match pace {
+            DirectPace::Sequential => apply_sequential_config(&mut cfg),
+            DirectPace::Pooled => {}
+        }
 
-    let mapping_keys: Vec<String> = cfg
-        .media_mappings
-        .keys()
-        .map(|k| k.as_str().to_owned())
-        .collect();
-    let command = options.command();
-    let Some(prepared) = prepare_paths_submission(
-        options,
-        lang,
-        num_speakers,
-        input_kind,
-        inputs,
-        out_dir,
-        lexicon,
-        before,
-        &mapping_keys,
-        overwrite,
-        PassthroughMode::Copy,
-    )?
-    else {
-        eprintln!("warning: no files found for {input_kind:?} input");
-        return Ok(());
-    };
+        let mapping_keys: Vec<String> = cfg
+            .media_mappings
+            .keys()
+            .map(|k| k.as_str().to_owned())
+            .collect();
+        let command = options.command();
+        let Some(prepared) = prepare_paths_submission(
+            options,
+            lang,
+            num_speakers,
+            input_kind,
+            inputs,
+            out_dir,
+            lexicon,
+            before,
+            &mapping_keys,
+            overwrite,
+            PassthroughMode::Copy,
+        )?
+        else {
+            eprintln!("warning: no files found for {input_kind:?} input");
+            return Ok(());
+        };
 
-    eprintln!("Found {} file(s) to process.\n", prepared.total_files);
-    crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
-    eprintln!("Running locally (direct mode)...\n");
+        eprintln!("Found {} file(s) to process.\n", prepared.total_files);
+        crate::cli::discover::print_passthrough_skips(&prepared.passthrough);
+        eprintln!("Running locally (direct mode)...\n");
 
-    // One reading of the host for this run, with the CLI's device switches
-    // applied: the pool and every job's dispatch context resolve from it.
-    let cfg = cfg.with_device_flags(force_cpu, allow_mps);
-    let host_snapshot = std::sync::Arc::new(crate::host_facts::HostSnapshot::read(&cfg)?);
-    let direct_workers = prepare_workers(
-        build_direct_pool_config(&cfg, &host_snapshot, layout.state_dir()),
-        RegistryDiscovery::Ignore,
-    )
-    .await
-    .map_err(CliError::from)?;
-    let host = DirectHost::new(
-        cfg,
-        host_snapshot,
-        layout,
-        None,
-        None,
-        &direct_workers,
-        std::sync::Arc::new(crate::clock::SystemClock),
-    )
-    .await
-    .map_err(CliError::from)?;
-    let job_id = host
-        .submit_submission(prepared.submission)
+        // One reading of the host for this run, with the CLI's device switches
+        // applied: the pool and every job's dispatch context resolve from it.
+        let cfg = cfg.with_device_flags(force_cpu, allow_mps);
+        let host_snapshot = std::sync::Arc::new(crate::host_facts::HostSnapshot::read(&cfg)?);
+        let direct_workers = prepare_workers(
+            build_direct_pool_config(&cfg, &host_snapshot, layout.state_dir()),
+            RegistryDiscovery::Ignore,
+        )
         .await
         .map_err(CliError::from)?;
-    let submitted_debug = host
-        .job_debug_artifacts(&job_id)
+        let host = DirectHost::new(
+            cfg,
+            host_snapshot,
+            layout,
+            None,
+            None,
+            &direct_workers,
+            std::sync::Arc::new(crate::clock::SystemClock),
+        )
         .await
         .map_err(CliError::from)?;
-    eprintln!("Direct job prepared.\n");
-    helpers::print_job_debug_artifacts(&submitted_debug);
-    eprintln!();
-
-    let progress = BatchProgress::new(prepared.total_files as u64, command.as_wire_name());
-    let mut tracker = DirectProgressTracker::default();
-    if let Ok(initial) = host.job_info(&job_id).await {
-        tracker.observe(&progress, &initial);
-    }
-
-    let runner_host = host.clone();
-    let run_job_id = job_id.clone();
-    let run_fut = async move {
-        runner_host
-            .run_job(&run_job_id)
+        let job_id = host
+            .submit_submission(prepared.submission)
             .await
-            .map_err(CliError::from)
-    };
-    tokio::pin!(run_fut);
-    let mut poll_interval = tokio::time::interval(Duration::from_millis(120));
-    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            .map_err(CliError::from)?;
+        let submitted_debug = host
+            .job_debug_artifacts(&job_id)
+            .await
+            .map_err(CliError::from)?;
+        eprintln!("Direct job prepared.\n");
+        helpers::print_job_debug_artifacts(&submitted_debug);
+        eprintln!();
 
-    let final_info: JobInfo = loop {
-        tokio::select! {
-            result = &mut run_fut => {
-                if let Err(error) = result {
-                    progress.finish();
-                    return Err(error);
-                }
-                let info = match host.job_info(&job_id).await {
-                    Ok(info) => info,
-                    Err(error) => {
+        let progress = BatchProgress::new(prepared.total_files as u64, command.as_wire_name());
+        let mut tracker = DirectProgressTracker::default();
+        if let Ok(initial) = host.job_info(&job_id).await {
+            tracker.observe(&progress, &initial);
+        }
+
+        let runner_host = host.clone();
+        let run_job_id = job_id.clone();
+        let run_fut = async move {
+            runner_host
+                .run_job(&run_job_id)
+                .await
+                .map_err(CliError::from)
+        };
+        tokio::pin!(run_fut);
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(120));
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let final_info: JobInfo = loop {
+            tokio::select! {
+                result = &mut run_fut => {
+                    if let Err(error) = result {
                         progress.finish();
-                        return Err(CliError::from(error));
+                        return Err(error);
                     }
-                };
-                tracker.observe(&progress, &info);
-                break info;
-            }
-            _ = poll_interval.tick() => {
-                if let Ok(info) = host.job_info(&job_id).await {
+                    let info = match host.job_info(&job_id).await {
+                        Ok(info) => info,
+                        Err(error) => {
+                            progress.finish();
+                            return Err(CliError::from(error));
+                        }
+                    };
                     tracker.observe(&progress, &info);
+                    break info;
+                }
+                _ = poll_interval.tick() => {
+                    if let Ok(info) = host.job_info(&job_id).await {
+                        tracker.observe(&progress, &info);
+                    }
+                }
+            }
+        };
+        progress.finish();
+
+        let error_details = file_error_details(&final_info);
+        let clean_success = final_info.status == JobStatus::Completed
+            && error_details.is_empty()
+            && final_info
+                .error
+                .as_ref()
+                .is_none_or(|s| s.trim().is_empty());
+        if !clean_success {
+            match host.job_debug_artifacts(&job_id).await {
+                Ok(artifacts) => {
+                    eprintln!();
+                    helpers::print_job_debug_artifacts(&artifacts);
+                    eprintln!();
+                }
+                Err(error) => {
+                    eprintln!("warning: failed to collect direct debug artifacts: {error}")
                 }
             }
         }
-    };
-    progress.finish();
-
-    let error_details = file_error_details(&final_info);
-    let clean_success = final_info.status == JobStatus::Completed
-        && error_details.is_empty()
-        && final_info
-            .error
-            .as_ref()
-            .is_none_or(|s| s.trim().is_empty());
-    if !clean_success {
-        match host.job_debug_artifacts(&job_id).await {
-            Ok(artifacts) => {
-                eprintln!();
-                helpers::print_job_debug_artifacts(&artifacts);
-                eprintln!();
-            }
-            Err(error) => eprintln!("warning: failed to collect direct debug artifacts: {error}"),
-        }
-    }
-    finish_terminal_job(
-        &final_info,
-        &error_details,
-        prepared.total_files as u64,
-        &prepared.destinations.reporting_directory()?,
-        crate::cli::error::DiagnosedRelist::ThisRunOnly,
-    )
+        finish_terminal_job(
+            &final_info,
+            &error_details,
+            prepared.total_files as u64,
+            &prepared.destinations.reporting_directory()?,
+            crate::cli::error::DiagnosedRelist::ThisRunOnly,
+        )
+    })
 }
 
 /// The direct-mode pool for `cfg` (device switches already applied) on the
@@ -632,7 +636,7 @@ pub(crate) fn build_direct_pool_config(
     PoolConfig {
         python_path: resolve_python_executable(),
         health_check_interval_s: cfg.worker_health_interval_s,
-        ready_timeout_s: cfg.worker_ready_timeout_s,
+        startup_stall: cfg.worker_startup_stall(),
         test_echo: false,
         max_workers_per_key: match cfg.max_workers_per_key {
             Some(n) => crate::host_facts::PerProfile::uniform(n as usize),
@@ -645,7 +649,7 @@ pub(crate) fn build_direct_pool_config(
         // never inferred from worker_registry_path.
         runtime: worker_runtime.with_state_dir(state_dir.to_path_buf()),
         task_timeouts: cfg.task_timeouts(),
-        ensure_task_timeout: cfg.ensure_task_timeout_s,
+        ensure_task_stall: cfg.ensure_task_stall(),
         worker_registry_path: cfg.worker_registry_path.clone(),
         test_delay_ms: 0,
     }

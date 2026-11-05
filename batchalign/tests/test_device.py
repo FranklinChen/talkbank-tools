@@ -101,11 +101,3 @@ class TestMpsOptIn:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
         device = resolve_inference_device(DevicePolicy(force_cpu=True, allow_mps=True))
         assert device == torch.device("cpu")
-
-    def test_speaker_runtime_never_uses_mps_even_opted_in(self, monkeypatch) -> None:
-        """Seam test at the speaker engine's device resolver."""
-        from batchalign.inference.speaker import _device_for_speaker_runtime
-
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
-        assert _device_for_speaker_runtime(DevicePolicy(allow_mps=True)) == "cpu"

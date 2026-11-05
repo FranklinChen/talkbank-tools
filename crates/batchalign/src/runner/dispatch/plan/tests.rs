@@ -146,7 +146,6 @@ fn batched_plan_uses_morphotag_translation() {
             common,
             retokenize: true,
             skipmultilang: true,
-            merge_abbrev: true.into(),
 
             ..Default::default()
         }),
@@ -157,7 +156,6 @@ fn batched_plan_uses_morphotag_translation() {
 
     assert_eq!(plan.tokenization_mode, TokenizationMode::StanzaRetokenize);
     assert_eq!(plan.multilingual_policy, MultilingualPolicy::SkipNonPrimary);
-    assert!(plan.should_merge_abbrev);
     assert_eq!(
         plan.mwt.get("gonna"),
         Some(&vec!["going".to_string(), "to".to_string()])
@@ -215,7 +213,10 @@ fn transcribe_plan_reads_runtime_flags_and_speaker_override() {
         plan.base_options.cache_policies,
         TranscribeCachePolicies::uniform(crate::params::CachePolicy::SkipCache)
     );
-    assert!(plan.should_merge_abbrev);
+    assert_eq!(
+        plan.base_options.merge_abbrev,
+        crate::params::MergeAbbrevPolicy::Merge
+    );
 }
 
 #[test]
@@ -262,7 +263,10 @@ fn transcribe_s_plan_defaults_to_pyannote_ai_precision_2() {
         plan.base_options.cache_policies,
         TranscribeCachePolicies::uniform(crate::params::CachePolicy::UseCache)
     );
-    assert!(!plan.should_merge_abbrev);
+    assert_eq!(
+        plan.base_options.merge_abbrev,
+        crate::params::MergeAbbrevPolicy::Keep
+    );
 }
 
 /// RED FIRST (review item 7): a job naming an engine this build cannot
@@ -597,7 +601,6 @@ fn benchmark_plan_builds_rust_owned_transcribe_options() {
             },
             asr_engine: AsrEngineName::RevAi,
             wor: true.into(),
-            merge_abbrev: true.into(),
         }),
         BTreeMap::new(),
     );
@@ -617,7 +620,10 @@ fn benchmark_plan_builds_rust_owned_transcribe_options() {
     assert!(!plan.base_options.plan.with_utseg());
     assert!(!plan.base_options.with_morphosyntax);
     assert!(plan.base_options.write_wor);
-    assert!(plan.should_merge_abbrev);
+    assert_eq!(
+        plan.base_options.merge_abbrev,
+        crate::params::MergeAbbrevPolicy::Keep
+    );
     assert!(plan.mwt.is_empty());
 }
 
@@ -633,7 +639,6 @@ fn benchmark_plan_refuses_anything_but_one_language() {
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::RevAi,
                 wor: false.into(),
-                merge_abbrev: false.into(),
             }),
             BTreeMap::new(),
         );

@@ -66,6 +66,34 @@ impl PackedSearchStatus {
     }
 }
 
+/// Cumulative diagnostic work, never an execution budget or proof capability.
+/// Beyond the counter's numeric range, retain an explicit lower bound rather
+/// than wrap, invent an exact total, or refuse otherwise valid correspondence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackedSearchWork {
+    /// All charged operations are represented exactly.
+    Exact(u128),
+    /// At least this much work was charged; the exact total exceeded u128.
+    AtLeast(u128),
+}
+impl PackedSearchWork {
+    /// Known lower bound on reserved/charged abstract operations, not time.
+    pub fn lower_bound(self) -> u128 {
+        match self {
+            Self::Exact(units) | Self::AtLeast(units) => units,
+        }
+    }
+    fn plus(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Exact(a), Self::Exact(b)) => match a.checked_add(b) {
+                Some(total) => Self::Exact(total),
+                None => Self::AtLeast(u128::MAX),
+            },
+            (a, b) => Self::AtLeast(a.lower_bound().saturating_add(b.lower_bound())),
+        }
+    }
+}
+
 /// Immutable costs of one actual admitted search. Construction belongs to the
 /// graph producer; these values do not certify correspondence or acoustics.
 #[derive(Debug, Clone)]
@@ -79,15 +107,14 @@ pub struct PackedSearchCost {
     reserved_score_units: usize,
     profile_width_bound: usize,
     peak_profile_words: usize,
-    charged: [usize; 6],
-    required_at_least: Option<usize>,
+    charged: [PackedSearchWork; 6],
 }
 impl PackedSearchCost {
     /// Observed completion or refusal, not a certificate.
     pub fn status(&self) -> PackedSearchStatus {
         self.status
     }
-    /// Stage of the last checkpoint/operation, including a denied operation.
+    /// Stage of the last checkpoint/operation.
     pub fn last_stage(&self) -> PackedSearchStage {
         self.last_stage
     }
@@ -119,17 +146,16 @@ impl PackedSearchCost {
     pub fn peak_profile_words(&self) -> usize {
         self.peak_profile_words
     }
-    /// Reserved/charged work by stage; denied work is not included.
-    pub fn charged(&self, stage: PackedSearchStage) -> usize {
+    /// Reserved/charged diagnostic work by stage.
+    pub fn charged(&self, stage: PackedSearchStage) -> PackedSearchWork {
         self.charged[stage as usize]
     }
     /// Total charged work. Preparation includes prospective metadata reserves.
-    pub fn used(&self) -> usize {
-        self.charged.iter().sum()
-    }
-    /// The next denied operation's known floor, not the eventual full-run cost.
-    pub fn required_at_least(&self) -> Option<usize> {
-        self.required_at_least
+    pub fn used(&self) -> PackedSearchWork {
+        self.charged
+            .iter()
+            .copied()
+            .fold(PackedSearchWork::Exact(0), PackedSearchWork::plus)
     }
 }
 
@@ -142,11 +168,9 @@ stages!(ForwardWork=>Forward, ReconstructionWork=>Reconstruction, BackwardWork=>
 pub(super) struct Ledger<'p, 'g, 's, 'c, C: ?Sized> {
     plan: &'p Plan<'g, 's>,
     outer: &'c C,
-    used: Cell<usize>,
-    charged: [Cell<usize>; 6],
+    charged: [Cell<PackedSearchWork>; 6],
     last: Cell<PackedSearchStage>,
     peak: Cell<usize>,
-    denied: Cell<Option<usize>>,
 }
 pub(super) struct Scope<'a, 'p, 'g, 's, 'c, C: ?Sized, S> {
     ledger: &'a Ledger<'p, 'g, 's, 'c, C>,
@@ -154,34 +178,26 @@ pub(super) struct Scope<'a, 'p, 'g, 's, 'c, C: ?Sized, S> {
 }
 impl<'p, 'g, 's, 'c, C: WorkControl + ?Sized> Ledger<'p, 'g, 's, 'c, C> {
     pub(super) fn new(plan: &'p Plan<'g, 's>, outer: &'c C) -> Self {
-        let charged = std::array::from_fn(|_| Cell::new(0));
-        charged[PackedSearchStage::Preparation as usize].set(plan.geometry().work);
+        let charged = std::array::from_fn(|_| Cell::new(PackedSearchWork::Exact(0)));
+        charged[PackedSearchStage::Preparation as usize]
+            .set(PackedSearchWork::Exact(plan.geometry().work as u128));
         Self {
             plan,
             outer,
-            used: Cell::new(plan.geometry().work),
             charged,
             last: Cell::new(PackedSearchStage::Preparation),
             peak: Cell::new(0),
-            denied: Cell::new(None),
         }
     }
     pub(super) fn plan(&self) -> &'p Plan<'g, 's> {
         self.plan
     }
-    fn account<S: Stage>(&self, units: usize) -> Result<(), Stop<C::Error>> {
+    /// Counting cannot refuse execution. Cancellation and proof/resource
+    /// admission remain separate transitions with their own result types.
+    fn account<S: Stage>(&self, units: usize) {
         self.last.set(S::ID);
-        let required = self.used.get().saturating_add(units);
-        if required > WORK_CELLS {
-            self.denied.set(Some(required));
-            return Err(Stop::Refused(LocalInterleavingRefusal::Budget(
-                work_refusal(required),
-            )));
-        }
-        self.used.set(required);
         let charged = &self.charged[S::ID as usize];
-        charged.set(charged.get() + units);
-        Ok(())
+        charged.set(charged.get().plus(PackedSearchWork::Exact(units as u128)));
     }
     pub(super) fn stage<S: Stage>(&self) -> Scope<'_, 'p, 'g, 's, 'c, C, S> {
         Scope {
@@ -206,7 +222,6 @@ impl<'p, 'g, 's, 'c, C: WorkControl + ?Sized> Ledger<'p, 'g, 's, 'c, C> {
                 .div_ceil(64),
             peak_profile_words: self.peak.get(),
             charged: std::array::from_fn(|i| self.charged[i].get()),
-            required_at_least: self.denied.get(),
         };
         self.plan.admitted.report(self.outer, &receipt);
     }
@@ -221,7 +236,8 @@ impl<C: WorkControl + ?Sized, S: Stage> WorkControl for Scope<'_, '_, '_, '_, '_
 impl<C: WorkControl + ?Sized, S: Stage> PackedControl for Scope<'_, '_, '_, '_, '_, C, S> {
     fn charge(&self, units: usize) -> Result<(), Self::Error> {
         self.ledger
-            .account::<S>(self.ledger.plan.admitted.additional_pass_work(units))
+            .account::<S>(self.ledger.plan.admitted.additional_pass_work(units));
+        Ok(())
     }
     fn profile_width(&self, words: usize) {
         self.ledger.peak.set(self.ledger.peak.get().max(words));
@@ -231,9 +247,11 @@ impl<C: WorkControl + ?Sized, S: Stage> PackedControl for Scope<'_, '_, '_, '_, 
     }
 }
 
-impl<C: WorkControl + ?Sized> CandidateControl for Scope<'_, '_, '_, '_, '_, C, EdgeWork> {
-    fn candidate(&self) -> Result<(), Self::Error> {
-        self.ledger.account::<EdgeWork>(1)
+impl<C: WorkControl + ?Sized> Scope<'_, '_, '_, '_, '_, C, EdgeWork> {
+    /// Count observed candidate bits in one bounded block. Diagnostic work
+    /// cannot refuse, and other stages cannot charge addressed candidates.
+    pub(super) fn candidates(&self, count: usize) {
+        self.ledger.account::<EdgeWork>(count);
     }
 }
 
@@ -253,12 +271,17 @@ mod tests {
             self.0.borrow_mut().push(cost.clone());
         }
     }
-    fn with_plan(f: impl FnOnce(&Plan<'_, '_>)) {
+    fn with_plan(f: impl FnOnce(Plan<'_, '_>)) {
         let a = vec!["a".to_owned()];
         let b = vec!["b".to_owned()];
         let reference = vec!["b".to_owned(), "a".to_owned()];
         let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-        let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
+        let addresses = materialized.addresses();
         let relation = Relation::new(
             addresses
                 .iter()
@@ -268,72 +291,47 @@ mod tests {
             MatchMode::Exact,
         );
         let plan = uninterrupted(Plan::admit(
-            RefusedBand::testing(&graph, &relation),
+            uninterrupted(SurveyedLiteralSearch::observe(
+                PreparedLiteralSearch::testing(graph, &relation),
+                &Uninterrupted,
+            ))
+            .unwrap(),
             RowRequest::Viable,
             &Uninterrupted,
         ))
         .unwrap();
-        f(&plan);
+        f(plan);
     }
     #[test]
-    fn scope_receipt_totals_exclude_denied_work_and_keep_its_actual_stage() {
+    fn completed_cost_receipt_is_input_bound() {
         with_plan(|plan| {
             let recorder = Recorder::default();
-            let ledger = Ledger::new(plan, &recorder);
-            // A boundary test seeds only the scalar ledger, not graph evidence.
-            ledger.used.set(WORK_CELLS - 1);
-            ledger.charged[0].set(WORK_CELLS - 1);
-            assert!(ledger.stage::<ForwardWork>().charge(1).is_ok());
-            assert!(matches!(
-                ledger.stage::<EdgeWork>().charge(1),
-                Err(Stop::Refused(_))
-            ));
-            ledger.report(PackedSearchStatus::Refused(work_refusal(WORK_CELLS + 1)));
-            let costs = recorder.0.borrow();
-            let cost = &costs[0];
-            insta::assert_json_snapshot!((cost.status().name(),cost.last_stage().name(),cost.used(),cost.required_at_least(),cost.charged),@r###"
-            [
-              "refused",
-              "edges",
-              64000000,
-              64000001,
-              [
-                63999999,
-                1,
-                0,
-                0,
-                0,
-                0
-              ]
-            ]
-            "###);
-        });
-    }
-    #[test]
-    fn completed_cost_receipt_is_input_bound_and_does_not_change_proof() {
-        with_plan(|plan| {
-            let recorder = Recorder::default();
-            let observed = uninterrupted(super::super::execute(plan, &recorder)).unwrap();
-            let plain = uninterrupted(super::super::execute(plan, &Uninterrupted)).unwrap();
-            assert_eq!(observed.selected.len(), plain.selected.len());
-            for (a, b) in observed.words.iter().zip(&plain.words) {
-                assert_eq!(a.candidates, b.candidates);
-                assert_eq!(a.can_be_missing, b.can_be_missing);
-            }
+            let graph_nodes = plan.graph().order.len();
+            let checkpoint_stride = plan.geometry().block;
+            let _observed = uninterrupted(super::super::execute(plan, &recorder)).unwrap();
             let costs = recorder.0.borrow();
             assert_eq!(costs.len(), 1);
             let cost = &costs[0];
             assert_eq!(cost.status(), PackedSearchStatus::Completed);
-            assert_eq!(cost.required_at_least(), None);
             assert_eq!(cost.source_words(), 2);
             assert_eq!(cost.reference_words(), 2);
-            assert_eq!(cost.graph_nodes(), plan.graph().order.len());
-            assert_eq!(cost.checkpoint_stride(), plan.geometry().block);
+            assert_eq!(cost.graph_nodes(), graph_nodes);
+            assert_eq!(cost.checkpoint_stride(), checkpoint_stride);
             assert!(cost.peak_profile_words() <= cost.profile_width_bound());
-            assert!(cost.charged(PackedSearchStage::Forward) > 0);
-            assert!(cost.charged(PackedSearchStage::Reconstruction) > 0);
-            assert!(cost.charged(PackedSearchStage::Backward) > 0);
-            assert!(cost.charged(PackedSearchStage::Edges) > 0);
+            assert!(cost.charged(PackedSearchStage::Forward).lower_bound() > 0);
+            assert!(
+                cost.charged(PackedSearchStage::Reconstruction)
+                    .lower_bound()
+                    > 0
+            );
+            assert!(cost.charged(PackedSearchStage::Backward).lower_bound() > 0);
+            assert!(cost.charged(PackedSearchStage::Edges).lower_bound() > 0);
+            // Numeric overflow loses exactness explicitly; diagnostics cannot
+            // turn a completed correspondence proof into a work refusal.
+            assert_eq!(
+                PackedSearchWork::Exact(u128::MAX).plus(cost.used()),
+                PackedSearchWork::AtLeast(u128::MAX),
+            );
         });
     }
     #[test]
@@ -352,36 +350,9 @@ mod tests {
             assert_eq!(costs[0].status(), PackedSearchStatus::Completed);
             // Inspection walks live proof blocks; its scalar probes are already
             // reserved in preparation, so it needs no second packed pass.
-            assert_eq!(costs[0].charged(PackedSearchStage::Traceback), 0);
-        });
-    }
-    #[test]
-    fn full_admission_reserves_passes_but_still_bounds_candidate_visits() {
-        with_plan(|viable| {
-            let recorder = Recorder::default();
-            let full = uninterrupted(Plan::admit(
-                viable.admitted.refused(),
-                RowRequest::Full,
-                &recorder,
-            ))
-            .unwrap();
-            assert_eq!(full.source_slack(), full.source().len());
-            assert_eq!(full.reference_slack(), full.length());
-            let ledger = Ledger::new(&full, &recorder);
-            ledger.used.set(WORK_CELLS - 1);
-            ledger.charged[0].set(WORK_CELLS - 1);
-            // Already reserved full-row passes cannot be double-charged.
-            assert!(ledger.stage::<ForwardWork>().charge(WORK_CELLS).is_ok());
-            assert_eq!(ledger.used.get(), WORK_CELLS - 1);
-            assert!(ledger.stage::<EdgeWork>().candidate().is_ok());
-            assert!(matches!(
-                ledger.stage::<EdgeWork>().candidate(),
-                Err(Stop::Refused(_))
-            ));
-            ledger.report(PackedSearchStatus::Refused(work_refusal(WORK_CELLS + 1)));
-            assert!(
-                recorder.0.borrow().is_empty(),
-                "full rows keep the existing observer scope"
+            assert_eq!(
+                costs[0].charged(PackedSearchStage::Traceback),
+                PackedSearchWork::Exact(0)
             );
         });
     }
@@ -407,7 +378,10 @@ mod tests {
             assert_eq!(costs.len(), 1);
             assert_eq!(costs[0].status(), PackedSearchStatus::Interrupted);
             assert_eq!(costs[0].last_stage(), PackedSearchStage::Forward);
-            assert_eq!(costs[0].charged(PackedSearchStage::Forward), 0);
+            assert_eq!(
+                costs[0].charged(PackedSearchStage::Forward),
+                PackedSearchWork::Exact(0)
+            );
         });
     }
 }

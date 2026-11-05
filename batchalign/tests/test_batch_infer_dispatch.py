@@ -2,23 +2,29 @@
 # affects: batchalign/inference/**
 """Tests for the shrinking legacy ``batch_infer`` dispatch boundary.
 
-The Python cutover now requires `opensmile`, `avqi`, and `speaker` to use the
-typed V2 execute path. This suite keeps the legacy router honest by proving the
-remaining dynamic handlers still work while migrated tasks fail explicitly.
+Only the text tasks keep a legacy route, and it reads the same load registry
+the V2 route does. This suite keeps the legacy router honest by proving a
+loaded text task's host still answers while every migrated task fails
+explicitly.
 """
 
 from __future__ import annotations
 
 import importlib
 
-from batchalign.worker._infer import _batch_infer
+from batchalign.tests._loaded_hosts import loads
+from batchalign.worker._infer import _batch_infer, batch_infer_on
+from batchalign.worker._loads import TRANSLATE_LOAD, LoadedTranslate
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
     InferTask,
     ItemProduced,
+    TaskLoad,
+    TaskLoadRegistry,
     _state,
+    not_loaded_message,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,7 +82,9 @@ class TestDispatchRouting:
         )
         resp = _batch_infer(req)
         assert len(resp.results) == 1
-        assert resp.results[0].error == f"Unknown task: {InferTask.OPENSMILE}"
+        assert resp.results[0].error == (
+            f"{InferTask.OPENSMILE.value} runs only through worker protocol V2"
+        )
 
     def test_avqi_is_not_routed_through_batch_infer_any_more(self) -> None:
         """AVQI should now fail fast on the legacy batch-infer path."""
@@ -87,7 +95,9 @@ class TestDispatchRouting:
         )
         resp = _batch_infer(req)
         assert len(resp.results) == 1
-        assert resp.results[0].error == f"Unknown task: {InferTask.AVQI}"
+        assert resp.results[0].error == (
+            f"{InferTask.AVQI.value} runs only through worker protocol V2"
+        )
 
     def test_speaker_is_not_routed_through_batch_infer_any_more(self) -> None:
         req = BatchInferRequest(
@@ -97,7 +107,9 @@ class TestDispatchRouting:
         )
         resp = _batch_infer(req)
         assert len(resp.results) == 1
-        assert resp.results[0].error == f"Unknown task: {InferTask.SPEAKER}"
+        assert resp.results[0].error == (
+            f"{InferTask.SPEAKER.value} runs only through worker protocol V2"
+        )
 
     def test_empty_batch_returns_empty(self) -> None:
         """Empty batch should return empty results."""
@@ -106,20 +118,20 @@ class TestDispatchRouting:
             resp = _batch_infer(req)
             assert len(resp.results) == 0
 
-    def test_bootstrap_registered_handler_routes_dynamic_task(self) -> None:
-        """Dynamic tasks should route through the bootstrap-installed handler table."""
-        previous_handlers = dict(_state.batch_infer_handlers)
+    def test_a_loaded_text_task_answers_through_its_host(self) -> None:
+        """A text task routes to the host its load recorded."""
+        seen: list[object] = []
 
-        def _fake_translate(req: BatchInferRequest) -> BatchInferResponse:
+        def _fake_translate(req) -> BatchInferResponse:
+            seen.append(req)
             results: list[InferResponse] = []
-            for raw_item in req.items:
-                assert isinstance(raw_item, dict)
+            for item in req.items:
                 results.append(
                     InferResponse.timed(
-                        lambda raw_item=raw_item: ItemProduced(
+                        lambda item=item: ItemProduced(
                             result={
                                 "kind": "translated",
-                                "raw_translation": str(raw_item["text"]).upper(),
+                                "raw_translation": str(item["text"]).upper(),
                                 "engine": "test-engine",
                             }
                         )
@@ -127,25 +139,37 @@ class TestDispatchRouting:
                 )
             return BatchInferResponse(results=results)
 
-        _state.clear_batch_infer_handlers()
-        _state.register_batch_infer_handler(InferTask.TRANSLATE, _fake_translate)
-        try:
-            req = BatchInferRequest(
-                task=InferTask.TRANSLATE,
-                lang="eng",
-                items=[{"text": "hello"}],
-            )
-            resp = _batch_infer(req)
-            assert len(resp.results) == 1
-            assert resp.results[0].error is None
-            assert resp.results[0].result == {
-                "kind": "translated",
-                "raw_translation": "HELLO",
-                "engine": "test-engine",
-            }
-        finally:
-            _state.clear_batch_infer_handlers()
-            _state.batch_infer_handlers.update(previous_handlers)
+        req = BatchInferRequest(
+            task=InferTask.TRANSLATE,
+            lang="spa",
+            items=[{"text": "hola"}],
+        )
+        resp = batch_infer_on(
+            req, loads((TRANSLATE_LOAD, LoadedTranslate(runner=_fake_translate)))
+        )
+
+        assert len(resp.results) == 1
+        assert resp.results[0].error is None
+        assert resp.results[0].result == {
+            "kind": "translated",
+            "raw_translation": "HOLA",
+            "engine": "test-engine",
+        }
+        # The legacy request asks for English, admitted into the one request
+        # shape the V2 route also uses.
+        assert len(seen) == 1
+        assert seen[0].target_lang == "eng"
+
+    def test_an_unloaded_text_task_is_refused_per_item(self) -> None:
+        req = BatchInferRequest(task=InferTask.MORPHOSYNTAX, lang="eng", items=[{}, {}])
+
+        resp = batch_infer_on(req, TaskLoadRegistry())
+
+        # The one wording every route uses for an absent load.
+        assert [result.error for result in resp.results] == [
+            not_loaded_message(TaskLoad.MORPHOSYNTAX)
+        ] * 2
+        assert all(result.elapsed_s is None for result in resp.results)
 
     def test_asr_is_not_routed_through_batch_infer_any_more(self) -> None:
         """ASR should now fail fast on the legacy batch-infer path.
@@ -155,20 +179,14 @@ class TestDispatchRouting:
         re-entering the worker bootstrap path later.
         """
 
-        previous_handlers = dict(_state.batch_infer_handlers)
-        _state.clear_batch_infer_handlers()
-        try:
-            req = BatchInferRequest(
-                task=InferTask.ASR,
-                lang="eng",
-                items=[{"audio_path": "/tmp/example.wav"}],
-            )
-            resp = _batch_infer(req)
-            assert len(resp.results) == 1
-            assert resp.results[0].error == f"Unknown task: {InferTask.ASR}"
-        finally:
-            _state.clear_batch_infer_handlers()
-            _state.batch_infer_handlers.update(previous_handlers)
+        req = BatchInferRequest(
+            task=InferTask.ASR,
+            lang="eng",
+            items=[{"audio_path": "/tmp/example.wav"}],
+        )
+        resp = batch_infer_on(req, TaskLoadRegistry())
+        assert len(resp.results) == 1
+        assert resp.results[0].error == "asr runs only through worker protocol V2"
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +240,6 @@ class TestCapabilitiesAdvertisement:
         old_test_echo = _state.test_echo
         old_ready = _state.ready
         old_bootstrap = _state.bootstrap
-        old_asr_engine = _state.asr_engine
         try:
             monkeypatch.setattr(importlib, "import_module", fake_import_module)
             monkeypatch.setattr(legacy_config, "config_read", fail_config_read)
@@ -244,4 +261,3 @@ class TestCapabilitiesAdvertisement:
             _state.test_echo = old_test_echo
             _state.ready = old_ready
             _state.bootstrap = old_bootstrap
-            _state.asr_engine = old_asr_engine

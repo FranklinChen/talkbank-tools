@@ -173,6 +173,10 @@ pub mod coref;
 pub mod debug_artifacts;
 pub mod direct;
 pub(crate) mod dispatch_language;
+/// Whether a command takes no job-level language (its files carry their own,
+/// or it owns a fixed one): the one rule submission validation and every
+/// submitter read, so a client cannot keep its own list of such commands.
+pub use dispatch_language::takes_no_job_language;
 pub mod engine_reports;
 pub mod ensure_wav;
 pub mod error;

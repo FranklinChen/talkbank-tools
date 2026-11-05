@@ -9,7 +9,7 @@ the extension's own export list, and stubtest holds the two equal.
 """
 
 from collections.abc import Callable
-from typing import ClassVar, Literal, final
+from typing import ClassVar, Literal, Protocol, final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -103,7 +103,12 @@ def dispatch_protocol_message(
 ) -> dict[str, object]: ...
 
 WorkerErrorKind = Literal[
-    "runtime", "bootstrap", "download", "out_of_memory", "invalid_request"
+    "runtime",
+    "bootstrap",
+    "download",
+    "out_of_memory",
+    "access_denied",
+    "invalid_request",
 ]
 """What an ``{"op": "error"}`` line reports. The one Python spelling of
 Rust's ``WorkerErrorKind``; ``WORKER_ERROR_KINDS`` is the Rust list itself,
@@ -164,58 +169,61 @@ def error_kind_ends_worker(kind: WorkerErrorKind) -> bool:
 # Worker V2 execution
 # ---------------------------------------------------------------------------
 
-def execute_asr_request_v2(
-    request: object,
-    local_whisper_runner: Callable[..., object] | None = None,
-    hk_tencent_runner: Callable[..., object] | None = None,
-    hk_aliyun_runner: Callable[..., object] | None = None,
-    hk_funaudio_runner: Callable[..., object] | None = None,
-    hk_qwen_runner: Callable[..., object] | None = None,
-) -> str: ...
+class LoadedHostV2(Protocol):
+    """What one load built, as an executor reads it from the host it is
+    handed (``batchalign.worker._loads``).
+
+    Stub-only: a structural contract, never a runtime class. ``backend`` is
+    the wire spelling of the backend that loaded, checked against the
+    request's; ``runner`` calls the loaded model.
+    """
+
+    @property
+    def backend(self) -> str: ...
+    @property
+    def runner(self) -> Callable[..., object]: ...
+
+class LoadedAsrHostV2(LoadedHostV2, Protocol):
+    """An ASR host, which also carries the identity its load recorded."""
+
+    @property
+    def model_identity(self) -> object: ...
+
+def execute_asr_request_v2(request: object, loaded: LoadedAsrHostV2) -> str: ...
 def execute_forced_alignment_request_v2(
-    request: object,
-    whisper_runner: Callable[..., object] | None = None,
-    wave2vec_runner: Callable[..., object] | None = None,
-    canto_runner: Callable[..., object] | None = None,
-    qwen3_runner: Callable[..., object] | None = None,
+    request: object, loaded: LoadedHostV2
 ) -> str: ...
 def execute_opensmile_request_v2(
     request: object,
-    prepared_audio_runner: Callable[..., object] | None = None,
+    prepared_audio_runner: Callable[..., object],
 ) -> str: ...
 def execute_avqi_request_v2(
     request: object,
-    prepared_audio_runner: Callable[..., object] | None = None,
+    prepared_audio_runner: Callable[..., object],
 ) -> str: ...
-def execute_speaker_request_v2(
-    request: object,
-    pyannote_ai_prepared_audio_runner: Callable[..., object] | None = None,
-    pyannote_prepared_audio_runner: Callable[..., object] | None = None,
-    nemo_prepared_audio_runner: Callable[..., object] | None = None,
-) -> str: ...
+def execute_speaker_request_v2(request: object, loaded: LoadedHostV2) -> str: ...
 def execute_speaker_embedding_request_v2(
-    request: object,
-    pyannote_span_runner: Callable[..., object] | None = None,
+    request: object, loaded: LoadedHostV2
 ) -> str: ...
 def execute_morphosyntax_request_v2(
     request: object,
-    runner: Callable[..., object] | None = None,
+    runner: Callable[..., object],
 ) -> str: ...
 def execute_utseg_request_v2(
     request: object,
-    runner: Callable[..., object] | None = None,
+    runner: Callable[..., object],
 ) -> str: ...
 def execute_translate_request_v2(
     request: object,
-    runner: Callable[..., object] | None = None,
+    runner: Callable[..., object],
 ) -> str: ...
 def execute_coref_request_v2(
     request: object,
-    runner: Callable[..., object] | None = None,
+    runner: Callable[..., object],
 ) -> str: ...
 def execute_word_segmentation_request_v2(
     request: object,
-    runner: Callable[[str, str], object] | None = None,
+    runner: Callable[[str, str], object],
 ) -> str: ...
 
 @final

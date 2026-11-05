@@ -62,33 +62,60 @@ pub(super) struct Band<'graph, 'source> {
     capacity: Option<ReferenceCapacity<'graph, 'source>>,
 }
 
-/// A failed admission retains actual input ownership and already-paid work.
-/// Only this producer constructs it; an alternative cannot substitute inputs
-/// or forget preliminary witness/capacity costs.
-#[derive(Clone, Copy)]
-pub(super) struct RefusedBand<'graph, 'source> {
+/// One owned literal preparation. Its matching policy cannot describe fuzzy
+/// semantics, and ownership of the already-paid witness cannot be duplicated.
+pub(super) struct PreparedLiteralSearch<'graph, 'source> {
     graph: &'graph Graph,
-    relation: &'graph Relation<'source>,
-    refusal: LocalInterleavingRefusal,
+    source: &'graph [&'source str],
+    reference: &'source [String],
+    mode: crate::dp_align::LiteralMatchMode,
     preparation: usize,
     feasible: usize,
 }
 
-impl std::fmt::Debug for RefusedBand<'_, '_> {
+/// A scalar representation either offers a prepared literal alternative or
+/// an actual refusal. Choosing packed execution no longer requires a forged
+/// refusal whose policy and phase every consumer has to check again.
+pub(super) enum BandAlternative<'graph, 'source> {
+    Packed(PreparedLiteralSearch<'graph, 'source>),
+    Refused(LocalInterleavingRefusal),
+}
+
+impl std::fmt::Debug for BandAlternative<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.refusal.fmt(f)
+        match self {
+            Self::Packed(_) => f.write_str("prepared literal alternative"),
+            Self::Refused(cause) => cause.fmt(f),
+        }
     }
 }
 
-impl<'graph, 'source> RefusedBand<'graph, 'source> {
-    pub(super) fn refusal(&self) -> LocalInterleavingRefusal {
-        self.refusal
+impl std::fmt::Debug for PreparedLiteralSearch<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedLiteralSearch")
+            .field("source_words", &self.source.len())
+            .field("reference_words", &self.reference.len())
+            .field("feasible", &self.feasible)
+            .finish()
     }
+}
+
+impl<'graph, 'source> PreparedLiteralSearch<'graph, 'source> {
     pub(super) fn graph(&self) -> &'graph Graph {
         self.graph
     }
-    pub(super) fn relation(&self) -> &'graph Relation<'source> {
-        self.relation
+    pub(super) fn source(&self) -> &'graph [&'source str] {
+        self.source
+    }
+    pub(super) fn reference(&self) -> &'source [String] {
+        self.reference
+    }
+    pub(super) fn mode(&self) -> crate::dp_align::LiteralMatchMode {
+        self.mode
+    }
+    pub(super) fn matches(&self, source: usize, reference: usize) -> bool {
+        self.mode
+            .matches_words(self.source[source], &self.reference[reference])
     }
     pub(super) fn preparation(&self) -> usize {
         self.preparation
@@ -96,46 +123,46 @@ impl<'graph, 'source> RefusedBand<'graph, 'source> {
     pub(super) fn feasible(&self) -> usize {
         self.feasible
     }
+
     #[cfg(test)]
-    pub(super) fn testing_lower_bound(mut self, feasible: usize) -> Self {
-        assert!(feasible <= self.feasible);
-        self.feasible = feasible;
-        self
+    pub(super) fn testing_bounds(self) -> impl Iterator<Item = Self> {
+        let Self {
+            graph,
+            source,
+            reference,
+            mode,
+            preparation,
+            feasible,
+        } = self;
+        (0..=feasible).map(move |feasible| Self {
+            graph,
+            source,
+            reference,
+            mode,
+            preparation,
+            feasible,
+        })
     }
+
     #[cfg(test)]
     pub(super) fn testing(graph: &'graph Graph, relation: &'graph Relation<'source>) -> Self {
+        let Relation::Literal {
+            source,
+            reference,
+            mode,
+        } = relation
+        else {
+            panic!("a packed-search fixture declares literal matching");
+        };
+        let witness = uninterrupted(CanonicalWitness::observe(relation, &Uninterrupted))
+            .expect("fixture witness must complete; never invent a zero bound on failure");
         Self {
             graph,
-            relation,
-            preparation: 0,
-            feasible: match relation {
-                Relation::Literal {
-                    source, reference, ..
-                } => uninterrupted(CanonicalWitness::observe(
-                    relation,
-                    source.len(),
-                    reference.len(),
-                    &Uninterrupted,
-                ))
-                .map(|witness| witness.score())
-                .unwrap_or(0),
-                Relation::Fuzzy {
-                    source, reference, ..
-                } => uninterrupted(CanonicalWitness::observe(
-                    relation,
-                    source.len(),
-                    reference.len(),
-                    &Uninterrupted,
-                ))
-                .map(|witness| witness.score())
-                .unwrap_or(0),
-            },
-            refusal: LocalInterleavingRefusal::Budget(
-                LocalInterleavingBudget::WorkBudgetExceeded {
-                    phase: LocalInterleavingWorkPhase::BandedSearch,
-                    required_at_least: WORK_CELLS + 1,
-                },
-            ),
+            source,
+            reference,
+            mode: *mode,
+            preparation: witness.work(),
+            feasible: witness.score(),
         }
     }
 }
@@ -147,13 +174,27 @@ impl<'graph, 'source> Band<'graph, 'source> {
         source_len: usize,
         reference_len: usize,
         control: &C,
-    ) -> Result<Result<Self, RefusedBand<'graph, 'source>>, C::Error> {
-        let refused = |refusal, preparation, feasible| RefusedBand {
-            graph,
-            relation,
-            refusal,
-            preparation,
-            feasible,
+    ) -> Result<Result<Self, BandAlternative<'graph, 'source>>, C::Error> {
+        let refused = |cause, preparation, feasible| match (cause, relation) {
+            (
+                LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
+                    phase: LocalInterleavingWorkPhase::BandedSearch,
+                    ..
+                }),
+                Relation::Literal {
+                    source,
+                    reference,
+                    mode,
+                },
+            ) => BandAlternative::Packed(PreparedLiteralSearch {
+                graph,
+                source,
+                reference,
+                mode: *mode,
+                preparation,
+                feasible,
+            }),
+            (cause, _) => BandAlternative::Refused(cause),
         };
         // The witness uses this exact relation, including case/fuzzy policy.
         // Prefix/suffix matches are a feasible path even for non-transitive
@@ -179,7 +220,7 @@ impl<'graph, 'source> Band<'graph, 'source> {
         {
             CanonicalWitness::zero(relation)
         } else {
-            match CanonicalWitness::observe(relation, source_len, reference_len, control)? {
+            match CanonicalWitness::observe(relation, control)? {
                 Ok(witness) => witness,
                 Err(refusal) => return Ok(Err(refused(refusal, 0, 0))),
             }
@@ -355,71 +396,6 @@ impl<'graph, 'source> Band<'graph, 'source> {
     }
 }
 
-/// Construct a feasible canonical-order path score with linear retained memory.
-/// Its only authority is a lower bound, never a correspondence certificate.
-fn witness<C: WorkControl + ?Sized>(
-    relation: &Relation<'_>,
-    m: usize,
-    n: usize,
-    control: &C,
-) -> Result<Result<(usize, usize), LocalInterleavingRefusal>, C::Error> {
-    if m.max(n) > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                required_at_least: m.max(n),
-            },
-        )));
-    }
-    let mut prefix = 0;
-    while prefix < m.min(n) && relation.matches(prefix, prefix) {
-        if prefix % 1024 == 0 {
-            control.check()?;
-        }
-        prefix += 1;
-    }
-    let mut suffix = 0;
-    while suffix < m.min(n) - prefix && relation.matches(m - 1 - suffix, n - 1 - suffix) {
-        if suffix % 1024 == 0 {
-            control.check()?;
-        }
-        suffix += 1;
-    }
-    let a = m - prefix - suffix;
-    let b = n - prefix - suffix;
-    let work = a.saturating_mul(b).saturating_add(prefix + suffix + 2);
-    if work > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                required_at_least: work,
-            },
-        )));
-    }
-    if b.saturating_add(1) > SCORE_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::MemoryBudgetExceeded,
-        )));
-    }
-    let mut row = vec![0usize; b + 1];
-    for i in prefix..m - suffix {
-        control.check()?;
-        let mut diagonal = 0;
-        for j in 0..b {
-            if j % 1024 == 0 {
-                control.check()?;
-            }
-            let old = row[j + 1];
-            row[j + 1] = old.max(row[j]);
-            if relation.matches(i, prefix + j) {
-                row[j + 1] = row[j + 1].max(diagonal + 1);
-            }
-            diagonal = old;
-        }
-    }
-    Ok(Ok((prefix + suffix + row[b], work)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,13 +413,17 @@ mod tests {
         let reference: Vec<_> = std::iter::repeat_n("a".to_owned(), 6000)
             .chain(payload.iter().flatten().cloned())
             .collect();
-        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
         let relation = Relation::new(
             payload.iter().flatten().map(String::as_str).collect(),
             &reference,
             MatchMode::Exact,
         );
-        let band = uninterrupted(Band::admit(&graph, &relation, 1000, 7000, &Uninterrupted))
+        let band = uninterrupted(Band::admit(graph, &relation, 1000, 7000, &Uninterrupted))
             .expect("word-count upper bounds fit the unchanged joint work limit");
         assert_eq!(band.feasible, 1000);
         assert!(band.capacity.is_some());
@@ -515,27 +495,27 @@ mod tests {
                                 SpeakerTurn::new("A", &source[..split]),
                                 SpeakerTurn::new("B", &source[split..]),
                             ];
-                            let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+                            let materialized = PreparedGraph::admit(&turns)
+                                .unwrap()
+                                .materialize(&Uninterrupted)
+                                .unwrap();
+                            let graph = materialized.graph();
                             let relation = Relation::new(
                                 source.iter().map(String::as_str).collect(),
                                 &reference,
                                 MatchMode::Exact,
                             );
                             let mut pruned =
-                                uninterrupted(Band::admit(&graph, &relation, m, n, &Uninterrupted))
+                                uninterrupted(Band::admit(graph, &relation, m, n, &Uninterrupted))
                                     .unwrap();
                             // Exercise the new producer even though small graphs need no rescue.
-                            let witness = uninterrupted(CanonicalWitness::observe(
-                                &relation,
-                                m,
-                                n,
-                                &Uninterrupted,
-                            ))
-                            .unwrap();
+                            let witness =
+                                uninterrupted(CanonicalWitness::observe(&relation, &Uninterrupted))
+                                    .unwrap();
                             pruned.capacity =
                                 ReferenceCapacity::observe(&witness, &Uninterrupted).unwrap();
                             let dense = Band {
-                                graph: &graph,
+                                graph,
                                 relation: &relation,
                                 source_len: m,
                                 reference_len: n,
@@ -563,14 +543,18 @@ mod tests {
         reference[0] = "inserted_first".to_owned();
         reference[8999] = "inserted_last".to_owned();
         let turns = [SpeakerTurn::new("A", &payload)];
-        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
         let relation = Relation::new(
             payload.iter().map(String::as_str).collect(),
             &reference,
             MatchMode::Exact,
         );
         let band =
-            uninterrupted(Band::admit(&graph, &relation, 9000, 9000, &Uninterrupted)).unwrap();
+            uninterrupted(Band::admit(graph, &relation, 9000, 9000, &Uninterrupted)).unwrap();
         assert_eq!(band.feasible, 8998);
         assert!((0..=9000).map(|k| band.slots(k).len()).sum::<usize>() < 50_000);
     }
@@ -580,14 +564,18 @@ mod tests {
         let payload = vec!["source".to_owned(); 6000];
         let reference = vec!["other".to_owned(); 6000];
         let turns = [SpeakerTurn::new("A", &payload)];
-        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
         let relation = Relation::new(
             payload.iter().map(String::as_str).collect(),
             &reference,
             MatchMode::Exact,
         );
         let band =
-            uninterrupted(Band::admit(&graph, &relation, 6000, 6000, &Uninterrupted)).unwrap();
+            uninterrupted(Band::admit(graph, &relation, 6000, 6000, &Uninterrupted)).unwrap();
         assert_eq!(band.feasible, 0);
         assert!(band.capacity.is_none());
         assert_eq!(band.slots(3000).len(), 6001);
@@ -627,14 +615,18 @@ mod tests {
             .map(|(i, words)| SpeakerTurn::new(if i % 2 == 0 { "A" } else { "B" }, words))
             .collect();
         let reference: Vec<_> = payload.iter().flatten().cloned().collect();
-        let (graph, _) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
         let relation = Relation::new(
             payload.iter().flatten().map(String::as_str).collect(),
             &reference,
             MatchMode::Exact,
         );
         let band =
-            uninterrupted(Band::admit(&graph, &relation, 2800, 2800, &Uninterrupted)).unwrap();
+            uninterrupted(Band::admit(graph, &relation, 2800, 2800, &Uninterrupted)).unwrap();
         assert_eq!(band.feasible, 2800);
         assert_eq!(
             (0..=2800).map(|k| band.slots(k).len()).sum::<usize>(),

@@ -30,6 +30,7 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
         mut utterances,
         speaker_assignments,
         word_segmenter,
+        abbreviations,
     } = process_asr_with_prechat_segmentation(&mut ctx, &asr_output, &resolved_lang).await?;
     // The engine returned words and post-processing kept no utterance from
     // them. Its own empty-chunk path returns an empty Vec here, so without
@@ -81,6 +82,7 @@ pub(super) async fn stage_asr_postprocess<'a, P: TranscribePlan>(
         utterances,
         speaker_assignments,
         word_segmenter,
+        abbreviations,
     }))
 }
 
@@ -171,6 +173,37 @@ struct PostprocessedSpeech {
     speaker_assignments: SpeakerAssignmentOutcome,
     /// The segmenter that changed the words, for the provenance stamp.
     word_segmenter: Option<crate::api::ReportedEngineName>,
+    /// What the abbreviation step did, for the provenance stamp.
+    abbreviations: AbbreviationMerging,
+}
+
+/// Apply `--merge-abbrev` to the projected chunks: merge single letters that
+/// spell a known abbreviation into one word timed by the union of the letters
+/// (see `asr_postprocess::merge_abbreviations` for the rules), and say what was
+/// done, for the stamp. The stamp is read from this result rather than from the
+/// request, so it cannot claim a merge a path did not run.
+///
+/// It runs HERE, on the recognizer's words, for three reasons. Each word still
+/// carries the timing it was recognized with, so the merged word's interval is
+/// the true union rather than a guess made after the fact. Speakers are final
+/// (diarization has been projected), so a speaker change ends a run. And no
+/// CHAT exists yet, so nothing is parsed or re-serialized to make the change.
+pub(crate) fn resolve_abbreviations(
+    policy: crate::params::MergeAbbrevPolicy,
+    chunks: Vec<PreparedMonologueChunk>,
+) -> (Vec<PreparedMonologueChunk>, AbbreviationMerging) {
+    match policy {
+        crate::params::MergeAbbrevPolicy::Keep => (chunks, AbbreviationMerging::NotRequested),
+        crate::params::MergeAbbrevPolicy::Merge => {
+            let (chunks, report) = asr_postprocess::merge_abbreviations(chunks);
+            info!(
+                merged = report.merged(),
+                left_untimed = report.left_untimed(),
+                "Merged single-letter abbreviations on the recognized words"
+            );
+            (chunks, AbbreviationMerging::Ran)
+        }
+    }
 }
 
 /// `TranscribePipelineContext` has no job cancellation token wired yet (see
@@ -276,9 +309,11 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
     let (prepared, word_segmenter) =
         segmented.chunk(text_language.rules(), ctx.asr_pipeline_snapshot.as_mut());
     let ProjectedSpeechChunks {
-        chunks: prepared_chunks,
+        chunks: projected_chunks,
         speaker_assignments,
     } = project_speakers(prepared)?;
+    let (prepared_chunks, abbreviations) =
+        resolve_abbreviations(ctx.opts.merge_abbrev, projected_chunks);
 
     let Some(pre_chat_policy) = ctx.utseg_execution.pre_chat_policy() else {
         return Ok(PostprocessedSpeech {
@@ -289,6 +324,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
             ),
             speaker_assignments,
             word_segmenter,
+            abbreviations,
         });
     };
 
@@ -311,6 +347,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
             ),
             speaker_assignments,
             word_segmenter,
+            abbreviations,
         });
     };
 
@@ -319,6 +356,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
             utterances: Vec::new(),
             speaker_assignments,
             word_segmenter,
+            abbreviations,
         });
     }
 
@@ -357,6 +395,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
         utterances,
         speaker_assignments,
         word_segmenter,
+        abbreviations,
     })
 }
 
@@ -374,7 +413,9 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
 /// implementations rather than replaying one. The one stage it leaves out is
 /// word segmentation, which needs a worker and applies only to the languages
 /// `WordSegmenterV2::for_language` names; none of them has a pre-CHAT
-/// boundary model, so no replay of one is affected.
+/// boundary model, so no replay of one is affected. Abbreviation merging is
+/// the caller's next step ([`resolve_abbreviations`]), under the policy the
+/// run used: the replay reads it from the retained output's stamp.
 pub(crate) fn prepare_asr_chunks<'a>(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     language: impl Into<asr_postprocess::AsrTextLanguage<'a>>,
@@ -576,5 +617,84 @@ mod trace_write_tests {
         let actual: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("read trace")).expect("trace JSON");
         assert_eq!(actual, serde_json::to_value(trace).expect("expected trace"));
+    }
+}
+
+#[cfg(test)]
+mod abbreviation_tests {
+    use super::*;
+    use crate::params::MergeAbbrevPolicy;
+    use crate::pipeline::post_validate::{PostValidated, ProducedOutput};
+    use batchalign_transform::asr_postprocess::{AsrWord, SpeakerIndex};
+
+    fn word(text: &str, start_ms: i64, end_ms: i64) -> AsrWord {
+        AsrWord::new(text, Some(start_ms), Some(end_ms))
+    }
+
+    /// One speaker saying "the F B I is here ." with every letter timed.
+    fn spoken_letters() -> Vec<PreparedMonologueChunk> {
+        vec![PreparedMonologueChunk {
+            speaker: SpeakerIndex(0),
+            words: vec![
+                word("the", 0, 200),
+                word("F", 300, 400),
+                word("B", 450, 520),
+                word("I", 600, 700),
+                word("is", 800, 900),
+                word("here", 950, 1200),
+                word(".", 1200, 1200),
+            ],
+        }]
+    }
+
+    /// Build the transcript the way transcribe does after this stage, and
+    /// judge it with the producer transition transcribe's writer uses.
+    fn transcript(chunks: Vec<PreparedMonologueChunk>) -> ProducedOutput {
+        let utterances = punctuation_utterances(chunks, "eng", None);
+        let description = batchalign_transform::build_chat::transcript_from_asr_utterances(
+            &utterances,
+            &["PAR".to_string()],
+            &["eng".to_string()],
+            Some("clip"),
+            true,
+        )
+        .expect("the transcript description builds")
+        .description;
+        let file = batchalign_transform::build_chat::build_chat(description)
+            .expect("CHAT builds")
+            .into_file();
+        PostValidated::produced(file, crate::api::ReleasedCommand::Transcribe)
+    }
+
+    /// The merged word reaches CHAT as one word whose `%wor` bullet is the
+    /// union of its letters' intervals, and the document is admitted by the
+    /// same gate every transcribe output passes.
+    #[test]
+    fn merged_letters_become_one_admitted_word_timed_by_their_union() {
+        let (chunks, merging) = resolve_abbreviations(MergeAbbrevPolicy::Merge, spoken_letters());
+        assert_eq!(merging, AbbreviationMerging::Ran);
+
+        let produced = transcript(chunks);
+        let ProducedOutput::Admitted(admitted) = &produced else {
+            panic!("a transcript with a merged abbreviation is admitted: {produced:?}");
+        };
+        let chat = admitted.as_str();
+        assert!(chat.contains("*PAR:\tThe FBI is here ."), "{chat}");
+        assert!(chat.contains("FBI \u{15}300_700\u{15}"), "{chat}");
+    }
+
+    /// Without the option the letters reach CHAT as recognized, each with
+    /// its own timing, and the step records that it was not asked for.
+    #[test]
+    fn without_the_option_the_letters_are_written_as_recognized() {
+        let (chunks, merging) = resolve_abbreviations(MergeAbbrevPolicy::Keep, spoken_letters());
+        assert_eq!(merging, AbbreviationMerging::NotRequested);
+        let produced = transcript(chunks);
+        let ProducedOutput::Admitted(admitted) = &produced else {
+            panic!("the unmerged transcript is admitted: {produced:?}");
+        };
+        let chat = admitted.as_str();
+        assert!(chat.contains("*PAR:\tThe F B I is here ."), "{chat}");
+        assert!(chat.contains("F \u{15}300_400\u{15}"), "{chat}");
     }
 }

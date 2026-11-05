@@ -8,26 +8,20 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from batchalign.device import DevicePolicy
 from batchalign.inference.speaker import (
     LocalPyannoteSpeakerEvidence,
-    NemoSpeakerEvidence,
     PyannoteAISpeakerEvidence,
     SpeakerResponse,
     SpeakerSegment,
 )
-from batchalign.worker._speaker_v2 import (
-    SpeakerExecutionHostV2,
-    build_default_speaker_execution_host_v2,
-    execute_speaker_request_v2,
-)
+from batchalign.tests._loaded_hosts import diarization
+from batchalign.worker._speaker_v2 import execute_speaker_request_v2
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
     ExecuteSuccessV2,
     InferenceTaskV2,
     LocalPyannoteSpeakerEvidenceV2,
-    NemoSpeakerEvidenceV2,
     PreparedAudioEncodingV2,
     PreparedAudioRefV2,
     ProtocolErrorCodeV2,
@@ -52,10 +46,15 @@ def _pyannote_response(segments: list[SpeakerSegment] | None = None) -> SpeakerR
     )
 
 
-def _nemo_response(segments: list[SpeakerSegment] | None = None) -> SpeakerResponse:
-    """Build evidence which can only satisfy a NeMo request."""
+def _pyannote_ai_response() -> SpeakerResponse:
+    """Build evidence which can only satisfy a pyannoteAI request."""
 
-    return SpeakerResponse(evidence=NemoSpeakerEvidence(segments=segments or []))
+    return SpeakerResponse(
+        evidence=PyannoteAISpeakerEvidence(
+            job_id="job-paid-0",
+            output={"exclusiveDiarization": []},
+        )
+    )
 
 
 def _make_request(
@@ -122,17 +121,15 @@ def test_execute_speaker_request_v2_returns_typed_segments(tmp_path: Path) -> No
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path),
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda audio, sample_rate_hz, num_speakers: (
-                _pyannote_response(
-                    [
-                        SpeakerSegment(
-                            start_ms=10,
-                            end_ms=25,
-                            speaker=f"SPEAKER_{num_speakers}_{sample_rate_hz}_{audio.shape[0]}",
-                        )
-                    ]
-                )
+        diarization(
+            lambda audio, sample_rate_hz, num_speakers: _pyannote_response(
+                [
+                    SpeakerSegment(
+                        start_ms=10,
+                        end_ms=25,
+                        speaker=f"SPEAKER_{num_speakers}_{sample_rate_hz}_{audio.shape[0]}",
+                    )
+                ]
             )
         ),
     )
@@ -178,40 +175,15 @@ def test_execute_speaker_request_v2_preserves_an_unspecified_speaker_count(
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path, expected_speakers=None),
-        SpeakerExecutionHostV2(pyannote_prepared_audio_runner=runner),
+        diarization(runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert captured == {"shape": (4,), "sample_rate_hz": 16000, "num_speakers": None}
 
 
-def test_execute_speaker_request_v2_routes_nemo_backend(tmp_path: Path) -> None:
-    """NeMo requests should use the injected NeMo host, not the Pyannote host."""
-
-    captured: dict[str, object] = {}
-
-    def runner(audio, sample_rate_hz, num_speakers):
-        captured["shape"] = audio.shape
-        captured["sample_rate_hz"] = sample_rate_hz
-        captured["num_speakers"] = num_speakers
-        return _nemo_response(
-            [SpeakerSegment(start_ms=5, end_ms=15, speaker=f"SPEAKER_{num_speakers}")]
-        )
-
-    response = execute_speaker_request_v2(
-        _make_request(tmp_path, backend=SpeakerBackendV2.NEMO, expected_speakers=3),
-        SpeakerExecutionHostV2(nemo_prepared_audio_runner=runner),
-    )
-
-    assert isinstance(response.outcome, ExecuteSuccessV2)
-    assert isinstance(response.result, SpeakerResultV2)
-    assert isinstance(response.result.evidence, NemoSpeakerEvidenceV2)
-    assert response.result.evidence.segments[0].speaker == "SPEAKER_3"
-    assert captured == {"shape": (4,), "sample_rate_hz": 16000, "num_speakers": 3}
-
-
 def test_execute_speaker_request_v2_routes_pyannote_ai_backend(tmp_path: Path) -> None:
-    """Cloud requests must reach only the typed pyannoteAI host."""
+    """A pyannoteAI request runs on the hosted diarization host its load built."""
 
     called: list[str] = []
 
@@ -230,12 +202,7 @@ def test_execute_speaker_request_v2_routes_pyannote_ai_backend(tmp_path: Path) -
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path, backend=SpeakerBackendV2.PYANNOTE_AI),
-        SpeakerExecutionHostV2(
-            pyannote_ai_prepared_audio_runner=cloud_runner,
-            pyannote_prepared_audio_runner=lambda *_args: (_ for _ in ()).throw(
-                AssertionError("local pyannote runner must not be called")
-            ),
-        ),
+        diarization(cloud_runner, SpeakerBackendV2.PYANNOTE_AI),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -248,13 +215,11 @@ def test_execute_speaker_request_v2_routes_pyannote_ai_backend(tmp_path: Path) -
 def test_execute_speaker_request_v2_rejects_backend_evidence_mismatch(
     tmp_path: Path,
 ) -> None:
-    """A local pyannote request cannot be satisfied by NeMo provenance."""
+    """A local pyannote request cannot be satisfied by pyannoteAI provenance."""
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path, backend=SpeakerBackendV2.PYANNOTE),
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _nemo_response()
-        ),
+        diarization(lambda *_args: _pyannote_ai_response()),
     )
 
     _assert_error_response(
@@ -284,7 +249,7 @@ def test_execute_speaker_request_v2_rejects_wrong_task() -> None:
             ),
             attachments=[],
         ),
-        SpeakerExecutionHostV2(),
+        diarization(lambda *_args: _pyannote_response()),
     )
 
     _assert_error_response(
@@ -313,35 +278,18 @@ def test_speaker_provider_media_requests_fail_schema_validation() -> None:
         )
 
 
-def test_default_speaker_host_forwards_device_policy(monkeypatch) -> None:
-    """The live speaker host should forward the injected device policy."""
+def test_the_hosted_speaker_load_builds_the_pyannote_ai_host_and_loads_nothing() -> (
+    None
+):
+    """pyannoteAI is hosted: its load returns the host that calls the API,
+    named by its backend, and builds no local model."""
 
-    captured: dict[str, object] = {}
+    from batchalign.inference.speaker import infer_pyannote_ai_prepared_audio
+    from batchalign.worker._model_loading.speaker import hosted_speaker_task
 
-    def fake_infer(audio, sample_rate_hz, *, num_speakers, engine, device_policy):
-        captured["shape"] = audio.shape
-        captured["sample_rate_hz"] = sample_rate_hz
-        captured["num_speakers"] = num_speakers
-        captured["engine"] = engine
-        captured["device_policy"] = device_policy
-        if engine == "nemo":
-            return _nemo_response()
-        return _pyannote_response()
-
-    monkeypatch.setattr(
-        "batchalign.worker._speaker_v2.infer_speaker_prepared_audio",
-        fake_infer,
-    )
-
-    host = build_default_speaker_execution_host_v2(DevicePolicy(force_cpu=True))
-    assert host.nemo_prepared_audio_runner is not None
-    host.nemo_prepared_audio_runner(np.asarray([0.1, 0.2], dtype=np.float32), 16000, 3)
-
-    assert captured["shape"] == (2,)
-    assert captured["sample_rate_hz"] == 16000
-    assert captured["num_speakers"] == 3
-    assert captured["engine"] == "nemo"
-    assert captured["device_policy"] == DevicePolicy(force_cpu=True)
+    host = hosted_speaker_task()
+    assert host.backend is SpeakerBackendV2.PYANNOTE_AI
+    assert host.runner is infer_pyannote_ai_prepared_audio
 
 
 def test_missing_speaker_attachment_returns_typed_error(tmp_path: Path) -> None:
@@ -352,9 +300,7 @@ def test_missing_speaker_attachment_returns_typed_error(tmp_path: Path) -> None:
 
     response = execute_speaker_request_v2(
         request,
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _pyannote_response()
-        ),
+        diarization(lambda *_args: _pyannote_response()),
     )
 
     _assert_error_response(
@@ -369,9 +315,7 @@ def test_multichannel_speaker_audio_is_rejected(tmp_path: Path) -> None:
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path, channels=2, byte_len=32),
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _pyannote_response()
-        ),
+        diarization(lambda *_args: _pyannote_response()),
     )
 
     _assert_error_response(
@@ -384,9 +328,7 @@ def test_malformed_speaker_audio_returns_attachment_unreadable(tmp_path: Path) -
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path, byte_len=15),
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _pyannote_response()
-        ),
+        diarization(lambda *_args: _pyannote_response()),
     )
 
     _assert_error_response(
@@ -396,16 +338,26 @@ def test_malformed_speaker_audio_returns_attachment_unreadable(tmp_path: Path) -
     )
 
 
-def test_missing_nemo_host_returns_model_unavailable(tmp_path: Path) -> None:
-    """Requests for unloaded speaker hosts should fail explicitly."""
+def test_a_request_for_another_backend_than_the_loaded_one_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The executor reads the backend from the host it is handed: a pyannoteAI
+    request handed the local pyannote host is refused by name, and the local
+    runner never runs (a paid call is not silently replaced by a local one)."""
+
+    def must_not_run(*_args):
+        raise AssertionError("the loaded runner serves a different backend")
 
     response = execute_speaker_request_v2(
-        _make_request(tmp_path, backend=SpeakerBackendV2.NEMO),
-        SpeakerExecutionHostV2(),
+        _make_request(tmp_path, backend=SpeakerBackendV2.PYANNOTE_AI),
+        diarization(must_not_run, SpeakerBackendV2.PYANNOTE),
     )
 
     _assert_error_response(
-        response, ProtocolErrorCodeV2.MODEL_UNAVAILABLE, "no NeMo speaker host"
+        response,
+        ProtocolErrorCodeV2.MODEL_UNAVAILABLE,
+        "this worker loaded the pyannote speaker backend, and the request asks for "
+        "pyannote_ai",
     )
 
 
@@ -417,7 +369,7 @@ def test_speaker_runtime_failures_are_typed(tmp_path: Path) -> None:
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path),
-        SpeakerExecutionHostV2(pyannote_prepared_audio_runner=boom),
+        diarization(boom),
     )
 
     _assert_error_response(
@@ -443,9 +395,7 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
 
     response = execute_speaker_request_v2(
         bad_request,
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _pyannote_response()
-        ),
+        diarization(lambda *_args: _pyannote_response()),
     )
 
     _assert_error_response(
@@ -460,8 +410,8 @@ def test_invalid_speaker_host_output_becomes_runtime_failure(tmp_path: Path) -> 
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path),
-        SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda *_args: _pyannote_response(
+        diarization(
+            lambda *_args: _pyannote_response(
                 [
                     SpeakerSegment(
                         start_ms=1200,

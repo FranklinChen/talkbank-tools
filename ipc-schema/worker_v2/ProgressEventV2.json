@@ -1,37 +1,159 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProgressEventV2",
-  "description": "Progress event emitted by long-running V2 tasks.",
-  "type": "object",
-  "properties": {
-    "completed": {
-      "description": "Completed units.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+  "description": "One progress event, by scope.",
+  "oneOf": [
+    {
+      "description": "A model load's progress (worker startup, `ensure_task`, or a download\ninside one): no request owns it.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "const": "load"
+        }
+      },
+      "$ref": "#/$defs/LoadProgressV2",
+      "required": [
+        "scope"
+      ]
     },
-    "request_id": {
-      "description": "Correlation id of the request being updated.",
-      "$ref": "#/$defs/WorkerRequestIdV2"
-    },
-    "stage": {
-      "description": "Stable progress stage label.",
-      "type": "string"
-    },
-    "total": {
-      "description": "Total units expected.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0
+    {
+      "description": "One request's work, counted in items.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "const": "request"
+        }
+      },
+      "$ref": "#/$defs/RequestProgressV2",
+      "required": [
+        "scope"
+      ]
     }
-  },
-  "required": [
-    "request_id",
-    "completed",
-    "total",
-    "stage"
   ],
   "$defs": {
+    "LoadMeasureV2": {
+      "description": "What a model load's progress event measures.",
+      "oneOf": [
+        {
+          "description": "A model download's measured growth so far, in KiB.",
+          "type": "object",
+          "properties": {
+            "grown_kib": {
+              "description": "KiB the download's cache trees have grown since it started.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "download_growth"
+            }
+          },
+          "required": [
+            "kind",
+            "grown_kib"
+          ]
+        },
+        {
+          "description": "A named phase boundary.",
+          "type": "object",
+          "properties": {
+            "edge": {
+              "description": "Which end of the phase this event marks.",
+              "$ref": "#/$defs/PhaseEdgeV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "phase"
+            }
+          },
+          "required": [
+            "kind",
+            "edge"
+          ]
+        }
+      ]
+    },
+    "LoadProgressV2": {
+      "description": "A model load's progress: what moved, under which stage.\n\nA record of its own (not two fields of the enum variant) so a channel that\ncarries only a load's progress, such as a shared GPU worker's waiting\nload, is typed to carry nothing else.",
+      "type": "object",
+      "properties": {
+        "measure": {
+          "description": "What this event measures.",
+          "$ref": "#/$defs/LoadMeasureV2"
+        },
+        "stage": {
+          "description": "Stable stage name (for a phase, without any edge suffix).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "measure"
+      ]
+    },
+    "PhaseEdgeV2": {
+      "description": "Which end of a phase a [`LoadMeasureV2::Phase`] event marks.",
+      "oneOf": [
+        {
+          "description": "The phase began.",
+          "type": "string",
+          "const": "begin"
+        },
+        {
+          "description": "The phase finished.",
+          "type": "string",
+          "const": "complete"
+        }
+      ]
+    },
+    "RequestProgressV2": {
+      "description": "One request's work, counted in items, under that request's id.\n\nAdmitted only with a non-empty request id, by [`Self::new`] or at\ndeserialization: request progress belongs to a request, and an empty id is\nhow a load's progress used to be told apart, which the\n[`ProgressEventV2::Load`] scope now says instead.",
+      "type": "object",
+      "properties": {
+        "progress": {
+          "description": "How many of the request's items are done.",
+          "$ref": "#/$defs/UnitProgressV2"
+        },
+        "request_id": {
+          "description": "Correlation id of the request whose work this is; never empty.",
+          "$ref": "#/$defs/WorkerRequestIdV2"
+        },
+        "stage": {
+          "description": "Stable stage name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "stage",
+        "progress"
+      ]
+    },
+    "UnitProgressV2": {
+      "description": "Request work counted in items: how many of a request's items are done.\n\nAdmitted only with `completed <= total`, by [`Self::new`] or at\ndeserialization, so a consumer never sees a count past its own total.\nA record of its own, not two fields beside the request id: two adjacent\n`u32` counts are where completed and total get swapped.",
+      "type": "object",
+      "properties": {
+        "completed": {
+          "description": "Items finished so far.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "description": "Items the request holds in total; never fewer than `completed`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "completed",
+        "total"
+      ]
+    },
     "WorkerRequestIdV2": {
       "description": "Stable identifier for one V2 protocol request/response pair.",
       "type": "string"

@@ -18,6 +18,7 @@ use batchalign_types::worker_v2::{
 };
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
+use serde::de::IntoDeserializer;
 
 use crate::error::BatchalignBoundaryError;
 use crate::py_json_bridge::py_to_json_value;
@@ -265,6 +266,17 @@ pub(crate) fn extract_task_payload<'a, T>(
 pub(crate) struct LoadedRunner(Py<PyAny>);
 
 impl LoadedRunner {
+    /// The runner of a host whose load Python resolved before calling: a text
+    /// task's adapter, or a model-free task's analysis function.
+    ///
+    /// There is no "not loaded" case to refuse here. Python resolves a
+    /// request's load once, at its boundary (`batchalign.worker._execute_v2`),
+    /// and refuses an absent one as `model_unavailable` there, so an executor
+    /// is only ever called with what a load built.
+    pub(crate) fn of_host(runner: Py<PyAny>) -> Self {
+        Self(runner)
+    }
+
     /// Call the runner with positional `args`, classifying a raised exception
     /// into the shared failure taxonomy.
     pub(crate) fn call1<'py, A>(
@@ -282,20 +294,77 @@ impl LoadedRunner {
     }
 }
 
-/// One owner of the "this runner is not loaded" refusal every executor makes,
-/// and the only constructor of a [`LoadedRunner`].
+/// One attribute of a loaded host, refused by name when the host lacks it.
+fn host_attribute<'py>(
+    host: &Bound<'py, PyAny>,
+    name: &str,
+    label: &str,
+) -> Result<Bound<'py, PyAny>, ExecuteFailure> {
+    host.getattr(name).map_err(|error| {
+        ExecuteFailure::Runtime(format!("the loaded {label} host has no `{name}`: {error}"))
+    })
+}
+
+/// Admit the loaded host Python handed over for a request asking `requested`,
+/// and return its runner.
 ///
-/// The message stays the caller's, because it names the specific runner
-/// ("no wave2vec FA host loaded ...", "no pyannote speaker host loaded ...");
-/// what this owns is the refusal's CATEGORY, so no site can drift to a code
-/// other than `model_unavailable`.
-pub(crate) fn require_runner(
-    runner: Option<Py<PyAny>>,
-    unavailable_message: &str,
-) -> Result<LoadedRunner, ExecuteFailure> {
-    runner
-        .map(LoadedRunner)
-        .ok_or_else(|| ExecuteFailure::ModelUnavailable(unavailable_message.to_owned()))
+/// A host is what one load built (`batchalign.worker._loads`): its `backend`
+/// says which engine loaded and its `runner` calls the model. The backend is
+/// read from the host itself, never from worker state, and a request for
+/// another backend is refused by name as `model_unavailable`: the worker
+/// would otherwise run a model the request did not ask for. One check, here,
+/// replaced a separate optional runner per backend, each with its own "not
+/// loaded" message.
+pub(crate) fn admit_loaded_host<B>(
+    host: &Bound<'_, PyAny>,
+    requested: B,
+    label: &str,
+) -> Result<LoadedRunner, ExecuteFailure>
+where
+    B: serde::de::DeserializeOwned + serde::Serialize + PartialEq,
+{
+    let named: String = host_attribute(host, "backend", label)?
+        .extract()
+        .map_err(|error| {
+            ExecuteFailure::Runtime(format!(
+                "the loaded {label} host's `backend` is not a string: {error}"
+            ))
+        })?;
+    let loaded = B::deserialize(named.as_str().into_deserializer()).map_err(
+        |error: serde::de::value::Error| {
+            ExecuteFailure::Runtime(format!(
+                "the loaded {label} host names backend {named:?}, which is not one: {error}"
+            ))
+        },
+    )?;
+    if loaded != requested {
+        // Both named in the wire spelling, the one the request and the
+        // Python refusals use, so one backend has one name in every message.
+        let asked = serde_json::to_value(&requested)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                ExecuteFailure::Runtime(format!(
+                    "the requested {label} backend has no wire spelling"
+                ))
+            })?;
+        return Err(ExecuteFailure::ModelUnavailable(format!(
+            "this worker loaded the {named} {label} backend, and the request asks for {asked}"
+        )));
+    }
+    Ok(LoadedRunner(
+        host_attribute(host, "runner", label)?.unbind(),
+    ))
+}
+
+/// Read one typed field of a loaded host, as [`parse_host_output`] reads a
+/// runner's answer.
+pub(crate) fn parse_host_attribute<T: serde::de::DeserializeOwned>(
+    host: &Bound<'_, PyAny>,
+    name: &str,
+    label: &str,
+) -> Result<T, ExecuteFailure> {
+    parse_host_output(&host_attribute(host, name, label)?, label)
 }
 
 fn parse_execute_request(request: &Bound<'_, PyAny>) -> PyResult<ExecuteRequestV2> {

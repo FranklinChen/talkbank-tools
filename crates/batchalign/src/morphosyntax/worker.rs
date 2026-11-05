@@ -229,8 +229,9 @@ async fn infer_batch_homogeneous<T: AsRef<MorphosyntaxBatchItem> + Sync>(
 ) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
     // Progress reporting for this batch.
     //
-    // The Python backend emits `progress_v2` events carrying `completed` /
-    // `total` for the request it is working on, at most one per second (see
+    // The Python backend emits `progress_v2` events with a `units` measure
+    // (`completed` / `total`) for the request it is working on, at most one
+    // per second (see
     // `batchalign/worker/_text_v2.py`). It hard-codes `stage =
     // "stanza_processing"` on every one of them, so the wire event says nothing
     // about WHICH work it describes. Provenance therefore comes from here,

@@ -16,19 +16,18 @@ use crate::pipeline::PipelineServices;
 use crate::recipe_runner::runtime::plan_work_units_for_job;
 use crate::recipe_runner::work_unit::{BenchmarkWorkUnit, PlannedWorkUnit};
 use crate::runner::DispatchHostContext;
-use crate::scheduling::{FailureCategory, NextAttempt, RetryPolicy, StopReason, WorkUnitKind};
+use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
 use crate::transcribe::TranscribeOptions;
 use crate::worker::pool::WorkerPool;
 
 use super::super::util::{
-    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    drain_supervised_file_tasks, spawn_observed_progress_forwarder, spawn_supervised_file_task,
-    user_facing_error,
+    AfterFailure, FileAttempts, FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink,
+    classify_server_error, drain_supervised_file_tasks, spawn_observed_progress_forwarder,
+    spawn_supervised_file_task, user_facing_error,
 };
 use super::BenchmarkDispatchPlan;
 use super::asr_media::{prepare_asr_media_input, preserved_media_name_for_chat};
-use super::audio_output::MergeAbbreviations;
 
 mod outputs;
 use outputs::BenchmarkOutputPlan;
@@ -67,8 +66,6 @@ struct BenchmarkFileContext<'a> {
     mwt: &'a MwtDict,
     /// Planned benchmark pairs keyed by main audio display path.
     planned_units: &'a HashMap<String, BenchmarkWorkUnit>,
-    /// Whether output should pass through merge-abbrev before persistence.
-    should_merge_abbrev: bool,
 }
 
 /// Dispatch benchmark through the Rust-owned benchmark pipeline.
@@ -82,7 +79,6 @@ pub(crate) async fn dispatch_benchmark_infer(
         kernel_plan,
         base_options,
         mwt,
-        should_merge_abbrev,
     } = plan;
     let planned_units: Arc<HashMap<String, BenchmarkWorkUnit>> = {
         let sink = host.sink().clone();
@@ -153,7 +149,6 @@ pub(crate) async fn dispatch_benchmark_infer(
                 services,
                 mwt: &mwt,
                 planned_units: planned_units.as_ref(),
-                should_merge_abbrev,
             };
             process_one_benchmark_file(&file, &mut opts, context).await
         });
@@ -195,7 +190,6 @@ async fn process_one_benchmark_file(
         services,
         mwt,
         planned_units,
-        should_merge_abbrev,
     } = context;
     let job_id = &job.identity.job_id;
     let file_index = file.file_index;
@@ -210,13 +204,13 @@ async fn process_one_benchmark_file(
         resolve_benchmark_original_audio_path(&job.filesystem, file_index, filename);
 
     let Some(planned_unit) = planned_units.get(filename) else {
-        lifecycle
+        return lifecycle
             .fail(
                 &format!("Benchmark planning produced no work unit for {filename}"),
                 FailureCategory::Validation,
             )
-            .await;
-        return FileTaskOutcome::TerminalStateRecorded;
+            .await
+            .into();
     };
 
     let output_plan = match BenchmarkOutputPlan::admit(
@@ -229,10 +223,10 @@ async fn process_one_benchmark_file(
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(&error.to_string(), classify_server_error(&error))
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -243,23 +237,23 @@ async fn process_one_benchmark_file(
                 "Failed to read benchmark reference transcript {}: {err}",
                 planned_unit.gold_chat().display_path
             );
-            lifecycle
+            return lifecycle
                 .fail(&err_msg, FailureCategory::InputMissing)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
     let reference = match crate::compare::AdmittedComparisonReference::admit(&gold_text) {
         Ok(reference) => reference,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(
                     &error.to_string(),
                     crate::runner::util::classify_server_error(&error),
                 )
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -269,28 +263,22 @@ async fn process_one_benchmark_file(
             Ok(prepared) => prepared,
             Err(error) => {
                 let err_msg = error.to_string();
-                lifecycle.fail(&err_msg, FailureCategory::Validation).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                return lifecycle
+                    .fail(&err_msg, FailureCategory::Validation)
+                    .await
+                    .into();
             }
         };
     let audio_path = prepared_media.inference_audio_path;
     opts.media_name = prepared_media.media_name;
 
-    let retry_policy = RetryPolicy::default();
-
-    for attempt_number in 1..=retry_policy.max_attempts {
-        if attempt_number > 1 {
-            lifecycle
-                .restart_attempt(WorkUnitKind::FileInfer, FileStage::Benchmarking)
-                .await;
-        } else {
-            lifecycle.stage(FileStage::Benchmarking).await;
-        }
-
+    let mut attempts =
+        FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Benchmarking).await;
+    loop {
         let (progress_tx, wait_observer, forwarder) =
             spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
 
-        let attempt = crate::worker::pool::checkout_wait::observing_checkout_waits(
+        let attempt = crate::worker::pool::checkout_wait::observing_pool_waits(
             wait_observer,
             process_benchmark(BenchmarkRequest {
                 audio_path: &audio_path,
@@ -309,39 +297,9 @@ async fn process_one_benchmark_file(
             Ok(outputs) => {
                 lifecycle.stage(FileStage::Writing).await;
 
-                // The merge is the LAST transition on the proof, so the bytes
-                // written are bytes the gate judged. It ran on the finished
-                // TEXT here until 2026-09-07, which put a transform after the
-                // only thing that had looked at the document. A refusal is a
-                // typed per-file failure, not a `warn!`: the merged document
-                // is what would have reached disk.
-                let annotated_main_chat = match MergeAbbreviations::from_option(should_merge_abbrev)
-                {
-                    MergeAbbreviations::Merge => {
-                        match outputs.annotated_main_chat.with_abbreviations_merged() {
-                            Ok(proof) => proof,
-                            // POLICY: `refused.unmerged` is an admissible
-                            // benchmark output and this seam declines to write
-                            // it, for the reason `execution::text_io` gives.
-                            Err(refused) => {
-                                // TERMINAL, not `continue`: a gate refusal
-                                // is deterministic, so retrying would
-                                // re-run ASR to reach the same verdict.
-                                // This is the same shape the
-                                // non-retryable arm below uses.
-                                lifecycle
-                                    .fail(&refused.to_string(), FailureCategory::Validation)
-                                    .await;
-                                return FileTaskOutcome::TerminalStateRecorded;
-                            }
-                        }
-                    }
-                    MergeAbbreviations::Leave => outputs.annotated_main_chat,
-                };
-
                 return output_plan
                     .persist(crate::benchmark::BenchmarkOutputs {
-                        annotated_main_chat,
+                        annotated_main_chat: outputs.annotated_main_chat,
                         metrics: outputs.metrics,
                     })
                     .await;
@@ -356,32 +314,14 @@ async fn process_one_benchmark_file(
                     raw_error = %raw_msg,
                     "Benchmark error (raw)"
                 );
-                let err_msg = user_facing_error(category, "Benchmark", filename, &raw_msg);
-                // Only a worker's failure is retried here; the policy decides
-                // whether this one is, from its category and the budget.
-                let next = if let crate::error::ServerError::Worker(_) = &err {
-                    retry_policy.after_failure(attempt_number, category)
-                } else {
-                    NextAttempt::Stop(StopReason::Final)
+                let message = user_facing_error(category, "Benchmark", filename, &raw_msg);
+                attempts = match attempts.after_error(&err, category, message).await {
+                    AfterFailure::Retry(grant) => grant.wait().await,
+                    AfterFailure::Recorded(recorded) => return recorded.into(),
                 };
-                if let NextAttempt::RetryAfter(backoff_ms) = next {
-                    lifecycle
-                        .retry_after(backoff_ms.duration(), category, &err_msg)
-                        .await;
-                    // Honour the deadline just recorded, as the audio and
-                    // media-analysis pipelines do; retrying at once would
-                    // publish a retry time the runner then ignores.
-                    tokio::time::sleep(backoff_ms.duration()).await;
-                    continue;
-                }
-
-                lifecycle.fail(&err_msg, category).await;
-                return FileTaskOutcome::TerminalStateRecorded;
             }
         }
     }
-
-    FileTaskOutcome::MissingTerminalState
 }
 
 fn resolve_benchmark_original_audio_path(
@@ -406,36 +346,9 @@ fn resolve_benchmark_original_audio_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchmarkFileFuture, resolve_benchmark_original_audio_path};
-    use crate::api::DisplayPath;
-    use crate::runner::util::{FileTaskOutcome, spawn_supervised_file_task};
+    use super::resolve_benchmark_original_audio_path;
     use crate::store::RunnerFilesystemConfig;
     use std::path::PathBuf;
-
-    #[tokio::test]
-    async fn heap_owned_benchmark_future_crosses_supervision_and_yield() {
-        let payload = [42_u8; 65_536];
-        let task: BenchmarkFileFuture = Box::pin(async move {
-            tokio::task::yield_now().await;
-            assert!(payload.iter().all(|byte| *byte == 42));
-            FileTaskOutcome::TerminalStateRecorded
-        });
-        // Only the fixed-size owning handle crosses the supervisor boundary,
-        // regardless of the composite future's captured state.
-        assert_eq!(
-            std::mem::size_of_val(&task),
-            2 * std::mem::size_of::<usize>()
-        );
-        let supervised = spawn_supervised_file_task(
-            DisplayPath::from("benchmark.wav"),
-            "benchmark file task",
-            task,
-        );
-        assert!(matches!(
-            supervised.handle.await.unwrap(),
-            FileTaskOutcome::TerminalStateRecorded
-        ));
-    }
 
     fn filesystem_config(source_paths: Vec<&str>, source_dir: &str) -> RunnerFilesystemConfig {
         RunnerFilesystemConfig {

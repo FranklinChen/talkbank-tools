@@ -33,8 +33,9 @@ impl AudioFileTask for ReportedTask {
     ) -> Result<(), ServerError> {
         self.attempts += 1;
         if self.attempts == 1 && self.route != Route::InitialOnly {
-            return Err(ServerError::Worker(WorkerError::ReadyTimeout {
-                timeout_s: crate::api::PositiveSeconds::literal::<1>(),
+            return Err(ServerError::Worker(WorkerError::Stalled {
+                waited_for: crate::worker::LoadingWait::Ready,
+                stall: crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<1>()),
             }));
         }
         Ok(())
@@ -79,7 +80,6 @@ impl AudioFileTask for ReportedTask {
             .into(),
             shortfalls: self.recovery.contribution().shortfalls(),
             exclusions: Vec::new(),
-            merge_abbreviations: MergeAbbreviations::Leave,
         }))
     }
 }
@@ -126,7 +126,7 @@ async fn utr_failures_survive_real_audio_writeback_and_cancellation_stops_retry(
             &mut task,
         )
         .await;
-        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded));
+        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded(_)));
         let state = state.lock().unwrap();
         let path = tmp.path().join("requested/test.cha");
         if route == Route::CancelledFallback {

@@ -16,11 +16,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from batchalign.inference.utseg import NoPinnedBoundaryModel, PinnedBoundaryModel
 from batchalign.worker._model_loading.utterance import (
     PINNED_UTSEG_MODEL_KEY,
     load_utterance_model,
 )
-from batchalign.worker._types import _state
 
 CANTONESE_ID = "PolyU-AngelChanLab/Cantonese-Utterance-Segmentation"
 CANTONESE_COMMIT = "9784aeb9e11c674f55a5e70468094736f8285bb6"
@@ -37,16 +37,6 @@ def _overrides(model_id: str, commit: str) -> dict[str, str]:
     }
 
 
-@pytest.fixture(autouse=True)
-def _restore_state():
-    """Never leak a loaded model or name into the next test."""
-    old_model = _state.utterance_boundary_model
-    old_name = _state.utterance_model_name
-    yield
-    _state.utterance_boundary_model = old_model
-    _state.utterance_model_name = old_name
-
-
 @pytest.fixture
 def captured(monkeypatch) -> list[dict[str, Any]]:
     """Record what the loader constructs, with the hub call stubbed out."""
@@ -56,40 +46,37 @@ def captured(monkeypatch) -> list[dict[str, Any]]:
         def __init__(
             self,
             *,
-            model_id: str,
-            model_path: str,
-            model_revision: str,
+            snapshot: Any,
             lang: str | None = None,
         ) -> None:
             calls.append(
                 {
-                    "model_id": model_id,
-                    "model_path": model_path,
-                    "model_revision": model_revision,
+                    "model_id": snapshot.model_id,
+                    "model_path": snapshot.path,
+                    "model_revision": snapshot.commit,
                     "lang": lang,
                 }
             )
-            self.model_id = model_id
-            self.model_revision = model_revision
+            self.model_id = snapshot.model_id
+            self.model_revision = snapshot.commit
             self.lang = lang
 
-    def fake_snapshot(model_id: str, commit: str | None, files):
-        from batchalign.worker._model_loading.pinned_hub import (
-            HubFiles,
-            ResolvedSnapshot,
-        )
+    def fake_snapshot(requested, *, kind: str):
+        from batchalign.tests._snapshots import fake_resolve_transformers
+        from batchalign.worker._model_loading.pinned_hub import hub_commit_of
 
-        assert commit is not None, "a pinned load must ask for an exact commit"
-        assert files is HubFiles.TRANSFORMERS, "a BERT loader reads Transformers files"
-        return ResolvedSnapshot(
-            path=f"/cache/{model_id}/snapshots/{commit}", commit=commit
+        # That a BERT loader reads Transformers files is now the resolver it
+        # calls (`resolve_transformers`), which the type checker holds.
+        assert hub_commit_of(requested) is not None, (
+            "a pinned load must ask for an exact commit"
         )
+        return fake_resolve_transformers(requested, kind=kind)
 
     monkeypatch.setattr(
         "batchalign.models.utterance.infer.BertUtteranceModel", FakeBoundaryModel
     )
     monkeypatch.setattr(
-        "batchalign.worker._model_loading.utterance.resolve_pinned_snapshot",
+        "batchalign.worker._model_loading.utterance.resolve_transformers",
         fake_snapshot,
     )
     return calls
@@ -97,25 +84,24 @@ def captured(monkeypatch) -> list[dict[str, Any]]:
 
 def test_loads_the_pinned_model_from_a_resolved_snapshot(captured) -> None:
     """The model loads from a local path, at the exact commit Rust pinned."""
-    load_utterance_model("yue", _overrides(CANTONESE_ID, CANTONESE_COMMIT))
+    model = load_utterance_model("yue", _overrides(CANTONESE_ID, CANTONESE_COMMIT))
 
-    assert captured == [
-        {
-            "model_id": CANTONESE_ID,
-            "model_path": f"/cache/{CANTONESE_ID}/snapshots/{CANTONESE_COMMIT}",
-            "model_revision": CANTONESE_COMMIT,
-            "lang": "yue",
-        }
-    ]
-    assert _state.utterance_model_name == CANTONESE_ID
+    [call] = captured
+    assert call["model_id"] == CANTONESE_ID
+    assert call["model_revision"] == CANTONESE_COMMIT
+    assert call["model_path"].endswith(f"/snapshots/{CANTONESE_COMMIT}")
+    assert call["lang"] == "yue"
+    assert isinstance(model, PinnedBoundaryModel)
+    assert model.model.model_id == CANTONESE_ID
 
 
 def test_the_reported_identity_is_the_id_never_the_local_path(captured) -> None:
     """A stamp must never carry this machine's directory layout."""
-    load_utterance_model("cmn", _overrides(MANDARIN_ID, MANDARIN_COMMIT))
+    model = load_utterance_model("cmn", _overrides(MANDARIN_ID, MANDARIN_COMMIT))
 
-    assert _state.utterance_model_name == MANDARIN_ID
-    assert "/cache/" not in _state.utterance_model_name
+    assert isinstance(model, PinnedBoundaryModel)
+    assert model.model.model_id == MANDARIN_ID
+    assert "/snapshots/" not in model.model.model_id
 
 
 def test_a_language_with_no_pin_loads_no_model(captured) -> None:
@@ -124,11 +110,8 @@ def test_a_language_with_no_pin_loads_no_model(captured) -> None:
     The worker does not consult a local table to second-guess that: deciding it
     here is the duplicate table this change removed.
     """
-    load_utterance_model("spa", {})
-
+    assert load_utterance_model("spa", {}) == NoPinnedBoundaryModel()
     assert captured == []
-    assert _state.utterance_boundary_model is None
-    assert _state.utterance_model_name == ""
 
 
 def test_a_malformed_pin_is_refused_rather_than_loading_something_else(
@@ -140,4 +123,3 @@ def test_a_malformed_pin_is_refused_rather_than_loading_something_else(
         load_utterance_model("eng", {PINNED_UTSEG_MODEL_KEY: "{not json"})
 
     assert captured == []
-    assert _state.utterance_boundary_model is None

@@ -25,7 +25,7 @@ use super::asr_media::{
     PreparedAsrMediaInput, prepare_asr_media_input, preserved_media_name_for_chat,
     resolve_paths_mode_or_staging_input,
 };
-use super::audio_output::{ChatOutput, FileOutput, MergeAbbreviations};
+use super::audio_output::{ChatOutput, FileOutput};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 
 /// Shared runtime dependencies for top-level transcribe dispatch.
@@ -98,7 +98,6 @@ pub(crate) async fn dispatch_transcribe_infer(
     let TranscribeDispatchPlan {
         kernel_plan,
         base_options,
-        should_merge_abbrev,
     } = plan;
     let job_id = &job.identity.job_id;
     let sink = host.sink().clone();
@@ -157,15 +156,7 @@ pub(crate) async fn dispatch_transcribe_infer(
             async move {
                 let _permit = permit;
                 let services = PipelineServices::new(&pool, &cache);
-                process_one_transcribe_file(
-                    &job,
-                    sink.clone(),
-                    services,
-                    &file,
-                    &mut opts,
-                    should_merge_abbrev,
-                )
-                .await
+                process_one_transcribe_file(&job, sink.clone(), services, &file, &mut opts).await
             },
         ));
     }
@@ -196,8 +187,6 @@ struct TranscribeAudioTask<'a> {
     services: PipelineServices<'a>,
     opts: TranscribeOptions,
     debug_dir: Option<&'a Path>,
-    /// See `AlignAudioTask`: a property of the CHAT this task produces.
-    merge_abbreviations: MergeAbbreviations,
 }
 
 #[async_trait]
@@ -227,7 +216,6 @@ impl AudioFileTask for TranscribeAudioTask<'_> {
             shortfalls: output.shortfalls,
             // Transcription aligns nothing it could leave out.
             exclusions: Vec::new(),
-            merge_abbreviations: self.merge_abbreviations,
         }))
     }
 }
@@ -239,7 +227,6 @@ async fn process_one_transcribe_file(
     services: PipelineServices<'_>,
     file: &crate::store::PendingJobFile,
     opts: &mut TranscribeOptions,
-    should_merge_abbrev: bool,
 ) -> FileTaskOutcome {
     let job_id = &job.identity.job_id;
     let correlation_id = &*job.identity.correlation_id;
@@ -256,8 +243,10 @@ async fn process_one_transcribe_file(
             Ok(prepared) => prepared,
             Err(error) => {
                 let err_msg = error.to_string();
-                lifecycle.fail(&err_msg, FailureCategory::Validation).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                return lifecycle
+                    .fail(&err_msg, FailureCategory::Validation)
+                    .await
+                    .into();
             }
         };
     let PreparedAsrMediaInput {
@@ -273,8 +262,10 @@ async fn process_one_transcribe_file(
             "Resolved transcribe media path does not exist: {}",
             audio_path.display()
         );
-        lifecycle.fail(&err_msg, FailureCategory::Validation).await;
-        return FileTaskOutcome::TerminalStateRecorded;
+        return lifecycle
+            .fail(&err_msg, FailureCategory::Validation)
+            .await
+            .into();
     }
 
     let audio_path_str = audio_path.to_string_lossy();
@@ -293,7 +284,6 @@ async fn process_one_transcribe_file(
         services,
         opts: opts.clone(),
         debug_dir,
-        merge_abbreviations: MergeAbbreviations::from_option(should_merge_abbrev),
     };
 
     run_audio_file_task(
@@ -474,11 +464,12 @@ mod tests {
                 crate::params::CachePolicy::UseCache,
             ),
             write_wor: false,
+            merge_abbrev: crate::params::MergeAbbrevPolicy::Keep,
             media_name: None,
             engine_extras: std::collections::BTreeMap::new(),
         };
 
-        process_one_transcribe_file(&snapshot, sink, services, &file, &mut opts, false).await;
+        process_one_transcribe_file(&snapshot, sink, services, &file, &mut opts).await;
 
         let attempts = db
             .load_attempts_for_job("job-transcribe")

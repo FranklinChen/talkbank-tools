@@ -60,9 +60,9 @@ pub(crate) struct CompareMaterializedOutputs {
     /// The CHAT document written by the released compare command, as a PROOF.
     ///
     /// A `String` until 2026-09-07, which is what let `execution::kernel` run
-    /// `merge_abbreviations_in_chat_text` over it and write the RESULT: the
-    /// bytes on disk were then a transform past anything judged, and this
-    /// materializer had the `ChatFile` in hand the whole time. See
+    /// a text transform over it and write the RESULT: the bytes on disk were
+    /// then a transform past anything judged, and this materializer had the
+    /// `ChatFile` in hand the whole time. See
     /// [`gate_comparison_output`] for what it is judged against and why.
     pub chat_output: PostValidated,
     /// Producer-built metrics, retained structurally until each CSV boundary.
@@ -88,7 +88,6 @@ pub(crate) struct MainAnnotatedCompareOutputs {
 /// `input` is taken before edits: the completely admitted reference for released
 /// compare, or the morphotagged main document for benchmark. Both documents reach
 /// the materializer through producer-owned admission proofs, without reparsing.
-/// The output proof carries the judgment through any later abbreviation merge.
 fn gate_comparison_output(
     input: UtteranceCensus,
     output: crate::chat_ops::ChatFile,

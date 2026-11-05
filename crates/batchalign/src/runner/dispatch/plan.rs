@@ -43,8 +43,6 @@ pub(crate) struct BatchedInferDispatchPlan {
     pub tokenization_mode: TokenizationMode,
     /// Morphotag-specific multilingual routing policy.
     pub multilingual_policy: MultilingualPolicy,
-    /// Whether output should pass through merge-abbrev before persistence.
-    pub should_merge_abbrev: bool,
     /// Optional multi-word-token lexicon loaded by the CLI.
     pub mwt: MwtDict,
     /// [Experimental] Route @s words to secondary language Stanza models.
@@ -73,7 +71,6 @@ impl BatchedInferDispatchPlan {
             tokenization_mode,
             multilingual_policy,
             override_media_cache: _,
-            merge_abbrev,
             l2_policy,
             pos_hint_policy,
             ca_policy,
@@ -82,7 +79,6 @@ impl BatchedInferDispatchPlan {
             tokenization_mode: TokenizationMode::Preserve,
             multilingual_policy: MultilingualPolicy::ProcessAll,
             override_media_cache: job.dispatch.options.common().override_media_cache,
-            merge_abbrev: job.dispatch.options.merge_abbrev_policy(),
             l2_policy: crate::params::L2MorphotagPolicy::Placeholder,
             pos_hint_policy: crate::params::PosHintPolicy::Ignore,
             ca_policy: crate::options::CaMorphotagPolicy::Honor,
@@ -92,7 +88,6 @@ impl BatchedInferDispatchPlan {
         Self {
             tokenization_mode,
             multilingual_policy,
-            should_merge_abbrev: merge_abbrev.should_merge(),
             mwt: job.dispatch.options.common().mwt.clone(),
             l2_policy,
             pos_hint_policy,
@@ -209,8 +204,8 @@ pub(crate) enum DispatchPlanRefusal {
 
 /// Typed plan for transcribe dispatch.
 ///
-/// The transcribe pipeline consumes a concrete `TranscribeOptions` bundle plus
-/// the write-side merge-abbrev decision. Runtime-only toggles (`utseg`,
+/// The transcribe pipeline consumes a concrete `TranscribeOptions` bundle,
+/// the abbreviation-merge choice included. Runtime-only toggles (`utseg`,
 /// `morphosyntax`) are resolved here so the dispatch module stops re-reading
 /// the store-owned `runtime_state` bag.
 #[derive(Clone)]
@@ -220,8 +215,6 @@ pub(crate) struct TranscribeDispatchPlan {
     /// Base transcribe options cloned per file before media-specific values are
     /// filled in.
     pub base_options: TranscribeOptions,
-    /// Whether output should pass through merge-abbrev before persistence.
-    pub should_merge_abbrev: bool,
 }
 
 impl TranscribeDispatchPlan {
@@ -296,10 +289,10 @@ impl TranscribeDispatchPlan {
                 with_morphosyntax,
                 cache_policies,
                 write_wor: wor_tier.should_write(),
+                merge_abbrev,
                 media_name: None,
                 engine_extras,
             },
-            should_merge_abbrev: merge_abbrev.should_merge(),
         })
     }
 }
@@ -320,8 +313,6 @@ pub(crate) struct BenchmarkDispatchPlan {
     pub base_options: TranscribeOptions,
     /// MWT dictionary handed to the compare phase.
     pub mwt: MwtDict,
-    /// Whether the hypothesis CHAT output should merge abbreviations.
-    pub should_merge_abbrev: bool,
 }
 
 impl BenchmarkDispatchPlan {
@@ -346,7 +337,6 @@ impl BenchmarkDispatchPlan {
         let BenchmarkDispatchParams {
             asr_engine,
             wor_tier,
-            merge_abbrev,
             cache_policy,
             engine_extras,
         } = extract_benchmark_dispatch_params(&job.dispatch.options, cache_policy)
@@ -387,11 +377,13 @@ impl BenchmarkDispatchPlan {
                 with_morphosyntax: false,
                 cache_policies: TranscribeCachePolicies::uniform(cache_policy),
                 write_wor: wor_tier.should_write(),
+                // Benchmark scores what the recognizer produced; the merge
+                // is a transcribe option only.
+                merge_abbrev: crate::params::MergeAbbrevPolicy::Keep,
                 media_name: None,
                 engine_extras,
             },
             mwt: MwtDict::default(),
-            should_merge_abbrev: merge_abbrev.should_merge(),
         })
     }
 }
@@ -434,12 +426,14 @@ pub(crate) enum MediaAnalysisDispatchPlan {
 }
 
 impl MediaAnalysisDispatchPlan {
-    /// The GPU-profile engines these jobs' requests name: none. Diarization's
-    /// speaker requests select no engine, and openSMILE and AVQI run on IO
-    /// workers.
+    /// The GPU-profile engines these jobs' requests name: diarization's
+    /// speaker backend; none for openSMILE and AVQI, which run on IO workers.
     pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
         match self {
-            Self::Opensmile { .. } | Self::Avqi { .. } | Self::Diarize { .. } => {
+            Self::Diarize { backend, .. } => {
+                crate::worker::pool::GpuModelPlan::diarization(*backend)
+            }
+            Self::Opensmile { .. } | Self::Avqi { .. } => {
                 crate::worker::pool::GpuModelPlan::without_engines()
             }
         }

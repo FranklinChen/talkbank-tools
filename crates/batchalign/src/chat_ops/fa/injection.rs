@@ -192,6 +192,18 @@ pub fn inject_timings_for_utterance(
 /// For compound fillers (`&-you_know`), extraction split the word into N
 /// parts for FA. We must consume N timings and merge them into one span.
 fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Option<WordTiming> {
+    let timing = project_timing_for_word(word, cursor)?;
+    word.inline_bullet = Some(timing.bullet());
+    Some(timing)
+}
+
+/// The canonical FA-to-AST projection, shared by primary injection and the
+/// missing-slot retry. Ignored words consume zero slots; compound fillers
+/// consume every part and retain honest merged provenance.
+pub(super) fn project_timing_for_word(
+    word: &Word,
+    cursor: &mut TimingCursor<'_>,
+) -> Option<WordTiming> {
     if !counts_for_tier(word, TierDomain::Wor) {
         return None;
     }
@@ -200,7 +212,6 @@ fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Opti
     if parts <= 1 {
         // Normal word: consume one timing, and keep its provenance intact.
         let t = cursor.take()?;
-        word.inline_bullet = Some(t.bullet());
         return Some(t.clone());
     }
 
@@ -237,7 +248,6 @@ fn inject_timing_on_word(word: &mut Word, cursor: &mut TimingCursor<'_>) -> Opti
         Some(score) => timing.with_model_score(score),
         None => timing,
     })?;
-    word.inline_bullet = Some(timing.bullet());
     Some(timing)
 }
 

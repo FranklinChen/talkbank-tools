@@ -18,8 +18,8 @@ use pyo3::types::{PyDict, PyModule};
 use crate::py_json_bridge::json_value_to_py;
 use crate::worker_artifacts::require_mono_prepared_audio;
 use crate::worker_execute::{
-    ExecuteFailure, ValidatedRequestV2, execute_request_v2, extract_task_payload,
-    parse_host_output, require_runner,
+    ExecuteFailure, LoadedRunner, ValidatedRequestV2, admit_loaded_host, execute_request_v2,
+    extract_task_payload, parse_host_attribute, parse_host_output,
 };
 
 /// What a provider adapter said about one monologue's speaker.
@@ -70,42 +70,19 @@ fn default_provider_element_type() -> String {
     "text".to_owned()
 }
 
-/// The identity this worker recorded when it loaded its ASR engine.
+/// The identity the ASR load recorded, read from the loaded host itself.
 ///
-/// Read from worker state rather than threaded through the request because the
-/// loader and this bridge are the SAME process: a provider response describes
-/// speech and never the model behind it, so the load record is the only
-/// witness in reach, and a second copy travelling beside the request could only
-/// disagree with the first.
-fn loaded_worker_identity(
-    py: Python<'_>,
-    backend: AsrBackendV2,
-) -> Result<AsrModelIdentityV2, ExecuteFailure> {
-    let state = PyModule::import(py, "batchalign.worker._types")
-        .and_then(|module| module.getattr("_state"))
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-    let identity = state
-        .getattr("asr_model_identity")
-        .map_err(|error| ExecuteFailure::Runtime(error.to_string()))?;
-    if identity.is_none() {
-        // Named per provider, so an operator reads WHICH loader failed to
-        // record itself rather than a message true of any of five engines.
-        //
-        // Refused, never filled in. The request is sitting right here and its
-        // `models` field would make a plausible-looking substitute, which is
-        // exactly why it must not be used: writing the requested revisions into
-        // the observed half would record what was ASKED FOR as though it had
-        // been SEEN, and that substitution is the whole defect this workstream
-        // removes. An engine that cannot say what it loaded has nothing to
-        // report, and a transcript nobody can attribute is worse than a failed
-        // job.
-        return Err(ExecuteFailure::ModelUnavailable(format!(
-            "the {backend:?} ASR engine served a request in this worker without having \
-             recorded which models it loaded. Its loader must set `asr_model_identity` \
-             when it loads, as the Hugging Face Whisper handle already does."
-        )));
-    }
-    parse_host_output(&identity, "ASR model identity")
+/// The host Python hands over is what the load built (`LoadedProviderAsr`):
+/// its runner and the identity of the models behind it, set together, so an
+/// identity cannot belong to a model other than the one the runner calls. It
+/// used to be read from a worker-state attribute by name, beside runners
+/// passed separately, and an engine that forgot to set it was refused only
+/// when a request arrived. A provider response describes speech and never the
+/// model behind it, so this identity is the only witness in reach, and it is
+/// never filled in from the request: writing the requested revisions into the
+/// observed half would record what was ASKED FOR as though it had been SEEN.
+fn loaded_identity(host: &Bound<'_, PyAny>) -> Result<AsrModelIdentityV2, ExecuteFailure> {
+    parse_host_attribute(host, "model_identity", "ASR model identity")
 }
 
 /// Refuse a response whose models are not the ones the plan pinned.
@@ -307,13 +284,9 @@ fn run_local_whisper(
     py: Python<'_>,
     request: &ExecuteRequestV2,
     asr_request: &AsrRequestV2,
-    local_whisper_runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let audio = load_local_whisper_audio(request, asr_request)?;
-    let runner = require_runner(
-        local_whisper_runner,
-        "no local Whisper ASR host loaded for worker protocol V2",
-    )?;
     let audio_array = audio.into_pyarray(py);
     let response = runner.call1(py, (audio_array, asr_request.lang.as_worker_arg()))?;
     let parsed = parse_whisper_result(&response)?;
@@ -327,8 +300,8 @@ fn run_local_whisper(
 fn run_provider_backend(
     py: Python<'_>,
     asr_request: &AsrRequestV2,
-    provider_runner: Option<Py<PyAny>>,
-    unavailable_message: &'static str,
+    host: &Bound<'_, PyAny>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     // Read from the request, once, so the admission below judges what was
     // ASKED FOR rather than what came back.
@@ -341,10 +314,9 @@ fn run_provider_backend(
         }
     };
     let item = build_provider_media_item(py, asr_request)?;
-    let runner = require_runner(provider_runner, unavailable_message)?;
     // Admitted BEFORE the provider runs: these backends are paid cloud calls,
     // and a plan/worker disagreement is knowable without spending one.
-    let model = loaded_worker_identity(py, asr_request.backend)?;
+    let model = loaded_identity(host)?;
     admit_identity(&model, asr_request)?;
     let response = runner.call1(py, (item,))?;
     Ok(TaskResultV2::MonologueAsrResult(parse_provider_result(
@@ -354,14 +326,18 @@ fn run_provider_backend(
     )?))
 }
 
+/// How a worker-hosted ASR backend's runner is called.
+enum AsrCallShape {
+    /// Prepared mono audio and a language (stock Whisper, a Whisper fine-tune).
+    PreparedAudio,
+    /// One provider media item (the Cantonese providers).
+    ProviderMedia,
+}
+
 fn run_asr(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    local_whisper_runner: Option<Py<PyAny>>,
-    hk_tencent_runner: Option<Py<PyAny>>,
-    hk_aliyun_runner: Option<Py<PyAny>>,
-    hk_funaudio_runner: Option<Py<PyAny>>,
-    hk_qwen_runner: Option<Py<PyAny>>,
+    host: &Bound<'_, PyAny>,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let asr_request = extract_task_payload(
         &request,
@@ -371,76 +347,45 @@ fn run_asr(
         },
         "ASR",
     )?;
-    match asr_request.backend {
-        // ``WhisperHub`` shares the worker-side runtime shape with
-        // ``LocalWhisper``, both host a ``WhisperASRHandle`` loaded at
-        // worker bootstrap and receive prepared mono audio as the request
-        // input. The distinction lives at load time (which checkpoint got
-        // loaded) and at the worker-pool key (so separate workers serve
-        // each variant); the PyO3 dispatch treats them identically.
-        AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub => {
-            run_local_whisper(py, &request, asr_request, local_whisper_runner)
+    let shape = match asr_request.backend {
+        // Refused before the host is read: no worker loads Rev.AI, so no
+        // host could serve it, and the refusal names where it does run.
+        AsrBackendV2::Revai => {
+            return Err(ExecuteFailure::ModelUnavailable(
+                "Rev.AI is handled directly by the Rust control plane, not the Python worker"
+                    .to_owned(),
+            ));
         }
-        AsrBackendV2::HkTencent => run_provider_backend(
-            py,
-            asr_request,
-            hk_tencent_runner,
-            "no Tencent ASR host loaded for worker protocol V2",
-        ),
-        AsrBackendV2::HkAliyun => run_provider_backend(
-            py,
-            asr_request,
-            hk_aliyun_runner,
-            "no Aliyun ASR host loaded for worker protocol V2",
-        ),
-        AsrBackendV2::HkFunaudio => run_provider_backend(
-            py,
-            asr_request,
-            hk_funaudio_runner,
-            "no FunAudio ASR host loaded for worker protocol V2",
-        ),
-        AsrBackendV2::HkQwen => run_provider_backend(
-            py,
-            asr_request,
-            hk_qwen_runner,
-            "no Qwen3-ASR host loaded for worker protocol V2",
-        ),
-        AsrBackendV2::Revai => Err(ExecuteFailure::ModelUnavailable(
-            "Rev.AI is handled directly by the Rust control plane, not the Python worker"
-                .to_owned(),
-        )),
+        // ``WhisperHub`` shares the worker-side runtime shape with
+        // ``LocalWhisper``: both host a ``WhisperASRHandle`` and receive
+        // prepared mono audio. The distinction lives at load time (which
+        // checkpoint got loaded), in the worker-pool key, and in the host's
+        // backend.
+        AsrBackendV2::LocalWhisper | AsrBackendV2::WhisperHub => AsrCallShape::PreparedAudio,
+        AsrBackendV2::HkTencent
+        | AsrBackendV2::HkAliyun
+        | AsrBackendV2::HkFunaudio
+        | AsrBackendV2::HkQwen => AsrCallShape::ProviderMedia,
+    };
+    // One admission for every worker-hosted backend: the host's backend must
+    // be the request's.
+    let runner = admit_loaded_host(host, asr_request.backend, "ASR")?;
+    match shape {
+        AsrCallShape::PreparedAudio => run_local_whisper(py, &request, asr_request, runner),
+        AsrCallShape::ProviderMedia => run_provider_backend(py, asr_request, host, runner),
     }
 }
 
+/// Execute one ASR request on `loaded`, the host this worker's ASR load
+/// built (`LoadedLocalAsr` or `LoadedProviderAsr` on the Python side): its
+/// `backend`, `runner` and `model_identity` are read from it.
 #[pyfunction]
-#[pyo3(signature = (
-    request,
-    local_whisper_runner=None,
-    hk_tencent_runner=None,
-    hk_aliyun_runner=None,
-    hk_funaudio_runner=None,
-    hk_qwen_runner=None
-))]
 pub(crate) fn execute_asr_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    local_whisper_runner: Option<Py<PyAny>>,
-    hk_tencent_runner: Option<Py<PyAny>>,
-    hk_aliyun_runner: Option<Py<PyAny>>,
-    hk_funaudio_runner: Option<Py<PyAny>>,
-    hk_qwen_runner: Option<Py<PyAny>>,
+    loaded: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
-    execute_request_v2(request, |request| {
-        run_asr(
-            py,
-            request,
-            local_whisper_runner,
-            hk_tencent_runner,
-            hk_aliyun_runner,
-            hk_funaudio_runner,
-            hk_qwen_runner,
-        )
-    })
+    execute_request_v2(request, |request| run_asr(py, request, loaded))
 }
 
 #[cfg(test)]

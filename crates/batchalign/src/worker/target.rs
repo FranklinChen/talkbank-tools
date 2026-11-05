@@ -15,21 +15,21 @@ use super::InferTask;
 // `crate::worker::WorkerProfile` import paths continue to resolve.
 pub use batchalign_types::worker_profile::WorkerProfile;
 
-/// How one local Python worker should bootstrap.
+/// How one host runs its Python workers.
+///
+/// In every mode a worker starts with no models and loads each task's models
+/// in that task's `ensure_task`, before the task's first request; the modes
+/// differ in how workers are grouped and pre-scaled, not in what loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerBootstrapMode {
-    /// Load the full shared profile for a task family. Used on large machines
-    /// (>48 GB) where eager loading amortizes cold start across tasks.
+    /// One worker per profile, pre-scaled for a batch. Large machines
+    /// (>48 GB).
     Profile,
-    /// Start as a profile worker but load NO models at startup. Models are
-    /// loaded on demand via `ensure_task` IPC before the first dispatch for
-    /// each task. Used on medium-tier machines (24-48 GB) where eager loading
-    /// would speculatively consume 10-15 GB. Peak memory grows incrementally
-    /// as tasks are activated.
+    /// One worker per profile, not pre-scaled: a worker is spawned when files
+    /// need it. Medium machines (24-48 GB).
     LazyProfile,
-    /// Load only the requested infer task. Used on small machines (<24 GB)
-    /// where even one full profile would exhaust memory.
+    /// One worker per infer task. Small machines (<24 GB).
     Task,
 }
 
@@ -47,26 +47,6 @@ pub enum WorkerTarget {
 }
 
 impl WorkerTarget {
-    /// Every task a worker for this target loads models for at bootstrap.
-    ///
-    /// Derived from [`WorkerProfile::for_task`], the existing task-to-profile
-    /// map, rather than restating the bundle. Callers use it to guarantee that
-    /// a preloaded task arrives with an engine named, so the worker never has
-    /// to guess which model to load.
-    ///
-    /// Lazy-profile workers preload nothing and are not described here: they
-    /// name an engine per request via `ensure_task`.
-    pub fn preloaded_tasks(&self) -> Vec<InferTask> {
-        match self {
-            Self::Profile(profile) => InferTask::ALL
-                .iter()
-                .copied()
-                .filter(|task| WorkerProfile::for_task(*task) == *profile)
-                .collect(),
-            Self::InferTask(task) => vec![*task],
-        }
-    }
-
     /// Build a profile bootstrap target.
     pub fn profile(profile: WorkerProfile) -> Self {
         Self::Profile(profile)
@@ -136,18 +116,7 @@ impl WorkerTarget {
 /// Convert one infer task into the stable snake_case label used across Rust and
 /// Python bootstrap code.
 pub(crate) fn task_name(task: InferTask) -> &'static str {
-    match task {
-        InferTask::Morphosyntax => "morphosyntax",
-        InferTask::Utseg => "utseg",
-        InferTask::Translate => "translate",
-        InferTask::Coref => "coref",
-        InferTask::Fa => "fa",
-        InferTask::Asr => "asr",
-        InferTask::Opensmile => "opensmile",
-        InferTask::Avqi => "avqi",
-        InferTask::Speaker => "speaker",
-        InferTask::WordSegmentation => "word_segmentation",
-    }
+    task.wire_name()
 }
 
 #[cfg(test)]

@@ -11,8 +11,7 @@
 //! the resulting document must still pass complete construction admission.
 //!
 //! Model edits consume the previous proof and establish a new one before
-//! serialization. Failed optional abbreviation merging retains the unmerged
-//! admitted output. Unchanged output skips merging and provenance injection.
+//! serialization. Unchanged output skips provenance injection.
 //! Serialization is cached only after admission, from the admitted model.
 //!
 //! A separately named, test-only double can stand in for an admitted worker
@@ -65,7 +64,6 @@
 use std::sync::OnceLock;
 
 use crate::api::ReleasedCommand;
-use batchalign_transform::merge_abbreviations;
 use batchalign_transform::serialize::to_chat_string;
 use batchalign_transform::validate::{
     OutputChecks, ValidationError, ValidityLevel, validate_output,
@@ -222,17 +220,6 @@ impl DiagnosedOutput {
             Some(materialized) => materialized,
             None => to_chat_string(&file),
         }
-    }
-
-    /// Merge abbreviations on the model and judge it afresh by the producer
-    /// transition: it may now pass, or carry different findings. Never
-    /// refused, because a diagnosed output is written whatever the judgement
-    /// says.
-    fn with_abbreviations_merged(self) -> ProducedOutput {
-        let command = self.command;
-        let DiagnosedDocument { mut file, .. } = *self.document;
-        merge_abbreviations(&mut file);
-        PostValidated::produced(file, command)
     }
 
     /// The refusal this diagnosis amounts to, for a consumer whose own
@@ -512,15 +499,6 @@ impl ProducedOutput {
         match self {
             Self::Admitted(admitted) => admitted.into_text(),
             Self::Diagnosed(diagnosed) => diagnosed.into_text(),
-        }
-    }
-
-    /// [`PostValidated::with_abbreviations_merged`] for an admitted output; a
-    /// diagnosed one is merged and judged afresh by the producer transition.
-    pub(crate) fn with_abbreviations_merged(self) -> Result<Self, Box<AbbreviationMergeRefused>> {
-        match self {
-            Self::Admitted(admitted) => admitted.with_abbreviations_merged().map(Self::Admitted),
-            Self::Diagnosed(diagnosed) => Ok(diagnosed.with_abbreviations_merged()),
         }
     }
 }
@@ -1149,61 +1127,6 @@ impl PostValidationFailure {
     }
 }
 
-/// Whether a CHAT document has its single-letter abbreviations merged before
-/// it is written.
-///
-/// A sum rather than a `bool` because `write_primary_output_artifact(.., true)`
-/// says nothing at a call site about which question `true` answers, and this
-/// value used to be the eighth positional argument of a nine-argument shell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MergeAbbreviations {
-    /// Collapse runs of single letters that name a known abbreviation.
-    Merge,
-    /// Write the document as the pipeline produced it.
-    Leave,
-}
-
-impl MergeAbbreviations {
-    /// Read the caller's `merge_abbrev` option into this vocabulary.
-    pub(crate) fn from_option(should_merge: bool) -> Self {
-        if should_merge {
-            Self::Merge
-        } else {
-            Self::Leave
-        }
-    }
-}
-
-/// The abbreviation merge produced a document that fails the judgement its
-/// unmerged predecessor passed.
-///
-/// # Why the unmerged proof is in here
-///
-/// The transition CONSUMES the proof it merges, so without this the caller
-/// could not fall back to the admissible output it was already holding, and a
-/// cosmetic flag could turn a file with a valid judged output into a total
-/// per-file failure with nothing written at all. That is reachable rather than
-/// theoretical: `merge_abbreviations` edits the main tier and does not touch
-/// `%mor`, so collapsing `F B I` into `FBI` in a morphotag output leaves three
-/// `%mor` items against one word, which is exactly what `validate_output`
-/// refuses. Pinned by
-/// `a_merge_that_breaks_the_gate_hands_back_the_unmerged_proof`.
-///
-/// Deciding what to DO about it is the caller's, not this type's: writing the
-/// unmerged output and failing the file are both defensible, and they differ
-/// per seam. All five call sites currently fail the file, and each says so.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "the abbreviation merge produced a document that fails its own gate \
-         (the unmerged output is still admissible): {failure}"
-)]
-pub(crate) struct AbbreviationMergeRefused {
-    /// The proof the merge was applied TO. Still admissible, still writable.
-    pub(crate) unmerged: PostValidated,
-    /// Why the MERGED document was refused.
-    pub(crate) failure: PostValidationFailure,
-}
-
 /// What one judgement concluded about one model, before any caller decides
 /// whether a refusal is a failure or a diagnosis.
 ///
@@ -1512,81 +1435,6 @@ impl PostValidated {
         })
     }
 
-    /// Merge single-letter abbreviations and re-run the gate over the merged
-    /// MODEL, so the bytes returned are bytes a gate has judged.
-    ///
-    /// The writers used to call `merge_abbreviations_in_chat_text` on
-    /// `as_str()` and write ITS result, which put a transform after the proof
-    /// and made the proof describe a document that never reached disk. The
-    /// merge is a step inside the gate now: it runs on the MODEL the proof
-    /// carries and is re-judged under the SAME [`Judgement`] and for the SAME
-    /// command that proof records, so the merge cannot lower the bar it is
-    /// judged against, and a compare output is re-checked for preservation
-    /// against the input census rather than against a level nothing admitted.
-    ///
-    /// # A refusal hands the unmerged proof BACK
-    ///
-    /// See [`AbbreviationMergeRefused`]: the merge is cosmetic and can break a
-    /// document that was fine, so losing the proof it was applied to would
-    /// turn a valid output into nothing written. The whole-document clone
-    /// below is what that fallback costs, once per merged file, and it buys
-    /// the only alternative to discarding an admissible output.
-    ///
-    /// Nothing is parsed. Until 2026-09-07 this re-parsed `self.text` and threw
-    /// the parse errors away, so the re-gate's L0 rung was handed an empty
-    /// error list and could not have refused anything, and the model merged was
-    /// the parser's recovery of our own bytes rather than the model the gate
-    /// had judged.
-    ///
-    /// # A pass-through is returned untouched, and that is the POLICY
-    ///
-    /// The merge is a policy applied to what the command WROTE. A document
-    /// the command did not modify has no output for the merge to be a part
-    /// of, so it is left exactly as it arrived and the tree it is written back
-    /// into stays byte-identical. That is what pass-through means, and it is
-    /// what `@Options: dummy`, `NoAlign`, a CA document a command declines to
-    /// touch, and a document with no collectible payloads all get.
-    ///
-    /// This is a deliberate narrowing of the previous behaviour, where the
-    /// merge ran on every success including those, because it ran on the
-    /// finished TEXT at the writer rather than on a proof. Pinned by
-    /// `merging_abbreviations_leaves_a_pass_through_byte_identical` below, and
-    /// documented for operators in
-    /// `book/src/batchalign/reference/command-io.md`.
-    pub(crate) fn with_abbreviations_merged(self) -> Result<Self, Box<AbbreviationMergeRefused>> {
-        let command = self.command;
-        let (judgement, file, text) = match self.proof {
-            OutputProof::Gated {
-                judgement,
-                file,
-                text,
-            } => (judgement, file, text),
-            proof @ (OutputProof::Declined { .. } | OutputProof::PassedThrough { .. }) => {
-                return Ok(Self { command, proof });
-            }
-        };
-        let mut merged = file.clone().into_unchecked();
-        merge_abbreviations(&mut merged);
-        Self::judge(merged, judgement.clone(), command).map_err(|failure| {
-            // Boxed: it carries a whole proof, and an error that large would
-            // be copied through every `Result` it passes along.
-            Box::new(AbbreviationMergeRefused {
-                // Rebuilt from the parts the merge did not touch, cache
-                // included, so the caller gets back exactly the proof it
-                // handed in rather than an equivalent one.
-                unmerged: Self {
-                    command,
-                    proof: OutputProof::Gated {
-                        judgement,
-                        file,
-                        text,
-                    },
-                },
-                failure,
-            })
-        })
-    }
-
     /// Stamp the run's provenance comment onto the MODEL and re-run the gate,
     /// so the bytes returned are bytes a gate has judged.
     ///
@@ -1598,18 +1446,18 @@ impl PostValidated {
     /// first had deliberately let through. The stamp is a transition on the
     /// proof now, applied to the MODEL that proof carries and re-judged under
     /// the SAME [`Judgement`] and for the SAME command it records, so it
-    /// cannot lower the bar it is judged against. Nothing is parsed, for the
-    /// reason [`Self::with_abbreviations_merged`] gives.
+    /// cannot lower the bar it is judged against. Nothing is parsed: the
+    /// model judged is the model the proof carries, never the parser's
+    /// recovery of our own bytes.
     ///
-    /// Unlike the merge, a refusal here does not hand the pre-stamp proof
-    /// back, and that is deliberate rather than an oversight: a document
+    /// A refusal does not hand the pre-stamp proof back, and that is
+    /// deliberate rather than an oversight: a document
     /// written without its `[fc-ba3 ...]` line is not a lesser version of the
     /// same output, it is one the provenance gate can no longer recognise on
     /// the next run, so there is no fallback for a caller to choose.
     ///
-    /// A pass-through is returned untouched, for the same reason
-    /// [`Self::with_abbreviations_merged`] returns one untouched: the command
-    /// applied nothing, so there is no run for a provenance line to describe.
+    /// A pass-through is returned untouched: the command applied nothing, so
+    /// there is no run for a provenance line to describe.
     /// This is what makes `NoAlign`'s documented "strict pass-through, zero
     /// modifications" literally true; it used to acquire a `@Comment` line.
     pub(crate) fn with_provenance_injected(
@@ -1719,9 +1567,9 @@ impl PostValidated {
     /// builds a `ChatFile` to gate.
     ///
     /// It carries a GATED proof, not an unchanged one, because that is what
-    /// the real gateway returns. This matters: `with_abbreviations_merged`
+    /// the real gateway returns. This matters: `with_provenance_injected`
     /// returns a pass-through untouched, so a double claiming "unchanged"
-    /// would make the write path skip the merge in tests while running it in
+    /// would make the write path skip the stamp in tests while running it in
     /// production, which is the double modelling a different seam from the one
     /// it stands in for.
     #[cfg(test)]
@@ -1746,8 +1594,8 @@ impl PostValidated {
         // it just judged, with a FRESH cache, so the bytes after a transition
         // are the serialization of this parse and not what was passed in. A
         // double whose text does not round-trip must therefore be read, never
-        // transitioned; put a document through `with_abbreviations_merged` or
-        // `with_provenance_injected` in a test and it will come back
+        // transitioned; put a document through `with_provenance_injected` in
+        // a test and it will come back
         // re-serialized. This comment said "reading this proof hands back
         // exactly what the test wrote" with no such qualification until
         // 2026-09-07, which reads as a promise about the value rather than
@@ -1770,7 +1618,6 @@ impl PostValidated {
 mod tests {
     use super::*;
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
-    use talkbank_model::Location;
     use talkbank_model::model::Line;
 
     /// A minimal fully valid CHAT file with a terminator.
@@ -1997,97 +1844,6 @@ mod tests {
         );
     }
 
-    /// Abbreviation merging must retain preservation checks in addition to
-    /// complete construction. This valid fixture ensures the merge runs.
-    #[test]
-    fn a_preserved_proof_is_still_judged_by_preservation_after_the_merge() {
-        let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\tF B I here .\n@End\n";
-        let file = parse(text);
-        let proof = PostValidated::preserving(
-            UtteranceCensus::of(&file),
-            file.clone(),
-            ReleasedCommand::Compare,
-        )
-        .expect("nothing was lost: the output IS the input");
-        let merged = proof
-            .with_abbreviations_merged()
-            .expect("the merge must be judged the way the document that reached it was");
-        assert!(
-            merged.as_str().contains("FBI"),
-            "the merge must still have run, got: {}",
-            merged.as_str()
-        );
-    }
-
-    /// RED FIRST (2026-09-07 review, item 5): a merge that breaks the gate
-    /// hands the UNMERGED proof back, so a cosmetic transform cannot destroy an
-    /// admissible output.
-    ///
-    /// Reachable rather than contrived: `merge_abbreviations` edits the main
-    /// tier and leaves `%mor` alone, so collapsing `F B I` into `FBI` in a
-    /// morphotag output leaves four `%mor` items against two words, which is
-    /// exactly what `validate_output` refuses. Before this the transition had
-    /// consumed the proof and the caller had nothing left to fall back to.
-    #[test]
-    fn a_merge_that_breaks_the_gate_hands_back_the_unmerged_proof() {
-        let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\tF B I .\n\
-%mor:\tn|F n|B n|I .\n@End\n";
-        let proof = PostValidated::gate(&parse(text), ReleasedCommand::Morphotag)
-            .expect("precondition: the unmerged morphotag output passes its own gate");
-
-        let refused = proof
-            .with_abbreviations_merged()
-            .expect_err("the merged document desynchronises %mor and must be refused");
-        assert!(
-            refused.failure.to_string().contains("%mor has"),
-            "the failure must name what the merge broke, got: {}",
-            refused.failure
-        );
-        assert!(
-            refused.to_string().contains("abbreviation merge"),
-            "the refusal must name the merge as the cause, got: {refused}"
-        );
-        assert!(
-            refused.unmerged.as_str().contains("F B I"),
-            "the unmerged proof must come back intact, got: {}",
-            refused.unmerged.as_str()
-        );
-    }
-
-    /// RED FIRST: the abbreviation merge is a step INSIDE the gate, so the
-    /// bytes it returns are bytes the gate judged. Before this the writer ran
-    /// the merge on `as_str()` and wrote the RESULT, which no gate had seen.
-    #[test]
-    fn merging_abbreviations_returns_a_proof_over_the_merged_bytes() {
-        let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\tF B I here .\n@End\n";
-        let file = parse(text);
-        let proof =
-            PostValidated::gate(&file, ReleasedCommand::Utseg).expect("the input is valid at L1");
-        assert!(proof.as_str().contains("F B I"), "precondition: unmerged");
-        let merged = proof
-            .with_abbreviations_merged()
-            .expect("the merged document still satisfies its own gate");
-        assert!(
-            merged.as_str().contains("FBI"),
-            "the merge must have been applied to the bytes the proof carries, got: {}",
-            merged.as_str()
-        );
-    }
-
-    /// A pass-through is not re-written by the merge: the command applied
-    /// nothing, so there is no output for the merge to be a part of.
-    #[test]
-    fn merging_abbreviations_leaves_a_pass_through_byte_identical() {
-        let text = VALID.replace("hello world", "F B I");
-        let merged = PostValidated::pass_through(source(&text), ReleasedCommand::Utseg)
-            .with_abbreviations_merged()
-            .expect("a pass-through cannot fail a gate it does not run");
-        assert_eq!(merged.as_str(), text);
-    }
-
     /// Checked construction must reject an invalid manually assembled word.
     /// This is constructor-boundary evidence, not CHAT corpus coverage.
     #[test]
@@ -2261,38 +2017,6 @@ mod tests {
         };
         assert!(report.findings().next().is_some());
         assert_eq!(report.shortfalls().len(), 2);
-    }
-
-    /// A requested merge still runs on a diagnosed output, and the merged
-    /// model is judged afresh by the producer transition.
-    #[test]
-    fn merging_a_diagnosed_output_judges_it_afresh() {
-        use talkbank_model::model::{TierContentItems, UtteranceContent, Word};
-
-        let mut file = generated_with_invalid_word();
-        for line in &mut file.lines {
-            if let Line::Utterance(utt) = line {
-                utt.main.content.content = TierContentItems::new(
-                    ["F", "B", "I", "b2"]
-                        .into_iter()
-                        .map(|word| {
-                            UtteranceContent::Word(Box::new(Word::new(
-                                Location::Unlocated,
-                                talkbank_model::WordText::new(word).expect("nonempty fixture word"),
-                            )))
-                        })
-                        .collect(),
-                );
-            }
-        }
-        let merged = PostValidated::produced(file, ReleasedCommand::Transcribe)
-            .with_abbreviations_merged()
-            .expect("a diagnosed output is never refused by the merge");
-        assert!(merged.as_str().contains("FBI b2"), "{}", merged.as_str());
-        assert!(
-            matches!(merged, ProducedOutput::Diagnosed(_)),
-            "the merge does not repair the finding"
-        );
     }
 
     /// A recorded diagnosis is bounded: the count, a count per code and the

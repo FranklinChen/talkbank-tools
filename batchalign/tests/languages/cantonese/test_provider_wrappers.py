@@ -1,4 +1,11 @@
-"""Unit tests for HK provider wrapper modules."""
+"""Unit tests for HK provider wrapper modules.
+
+Each provider's load returns the provider object it built (``TencentAsr``,
+``FunAudioAsr``, ``AliyunAsr``); a request transcribes through that object.
+There is no module state and no "not loaded" path to test: a provider exists
+only after its load. The legacy batch wrappers (``infer_*_asr``) are gone with
+the module state they read; per-item batch handling has no route here.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,6 @@ from batchalign.inference.asr import (
     AttributedSpeaker,
     MonologueAsrResponse,
 )
-from batchalign.worker._types import BatchInferRequest, InferTask
 from batchalign.worker._types_v2 import (
     NotRequestedDiarizationV2,
     ProviderDiarizationV2,
@@ -36,14 +42,6 @@ def _item(diarization: ProviderDiarizationV2 | None = None) -> AsrBatchItem:
         diarization=(
             diarization if diarization is not None else NotRequestedDiarizationV2()
         ),
-    )
-
-
-def _valid_request() -> BatchInferRequest:
-    return BatchInferRequest(
-        task=InferTask.ASR,
-        lang="yue",
-        items=[_item().model_dump()],
     )
 
 
@@ -118,152 +116,65 @@ class _FakeTencentRecognizer:
         }
 
 
-def test_load_funaudio_asr_applies_engine_overrides(monkeypatch) -> None:
+def test_load_funaudio_asr_loads_the_given_snapshots_on_the_override_device(
+    monkeypatch,
+) -> None:
+    from batchalign.inference.languages.cantonese._funaudio_common import (
+        SenseVoiceSnapshots,
+    )
+    from batchalign.tests._snapshots import repository_snapshot
+
     created: dict[str, object] = {}
 
     class FakeRecognizer:
-        def __init__(
-            self,
-            *,
-            lang: str,
-            model: str,
-            device: str,
-            model_path: str | None = None,
-            model_revision: str | None = None,
-            vad_model: str | None = None,
-            vad_model_path: str | None = None,
-            vad_revision: str | None = None,
-            punc_model: str | None = None,
-            punc_revision: str | None = None,
-        ) -> None:
+        @classmethod
+        def load(cls, snapshots, *, lang: str, device: str, label: str) -> object:
             created.update(
-                {
-                    "lang": lang,
-                    "model": model,
-                    "device": device,
-                    "model_path": model_path,
-                    "vad_model_path": vad_model_path,
-                }
+                {"snapshots": snapshots, "lang": lang, "device": device, "label": label}
             )
+            return cls()
 
     monkeypatch.setattr(funaudio_asr, "FunAudioRecognizer", FakeRecognizer)
-    monkeypatch.setattr(funaudio_asr, "_recognizer", None)
+    snapshots = SenseVoiceSnapshots(
+        asr=repository_snapshot("org/asr"),
+        vad=repository_snapshot("org/vad"),
+    )
 
-    funaudio_asr.load_funaudio_asr(
+    provider = funaudio_asr.load_funaudio_asr(
         "yue",
-        {"funaudio_model": "custom-model", "funaudio_device": "cuda"},
+        {"funaudio_model": "ignored-here", "funaudio_device": "cuda"},
+        snapshots=snapshots,
+        label="FunAudioLLM/SenseVoiceSmall",
     )
 
-    # A direct caller passes no pin, and the loader must not invent one: the
-    # engine overrides still decide the checkpoint, and the resolved-snapshot
-    # arguments stay absent.
+    # The checkpoint is whatever the worker materialized; `funaudio_model` was
+    # already resolved into the pinned composition by the control plane.
     assert created == {
+        "snapshots": snapshots,
         "lang": "yue",
-        "model": "custom-model",
         "device": "cuda",
-        "model_path": None,
-        "vad_model_path": None,
+        "label": "FunAudioLLM/SenseVoiceSmall",
     }
+    # The load hands back what it built; nothing is stored at module level.
+    assert isinstance(provider.recognizer, FakeRecognizer)
+    assert not hasattr(funaudio_asr, "_recognizer")
 
 
-def test_infer_funaudio_asr_requires_loaded_recognizer(monkeypatch) -> None:
-    monkeypatch.setattr(funaudio_asr, "_recognizer", None)
+def test_funaudio_transcribe_surfaces_runtime_errors() -> None:
+    provider = funaudio_asr.FunAudioAsr(_FakeFunRecognizer(error=RuntimeError("boom")))
 
-    response = funaudio_asr.infer_funaudio_asr(_valid_request())
-
-    # Compared against the module's own constant, not a second copy of the
-    # sentence. What this test is for is that the not-loaded path reports THAT
-    # error rather than some other one; the wording is not the behaviour, and
-    # pinning it here is what let a punctuation edit fail a test about model
-    # loading.
-    assert response.results[0].error == funaudio_asr.NOT_LOADED_ERROR
+    with pytest.raises(RuntimeError, match="boom"):
+        provider.transcribe(_item())
 
 
-def test_infer_funaudio_asr_rejects_invalid_items(monkeypatch) -> None:
-    monkeypatch.setattr(funaudio_asr, "_recognizer", _FakeFunRecognizer())
-    request = BatchInferRequest(task=InferTask.ASR, lang="yue", items=[{}])
-
-    response = funaudio_asr.infer_funaudio_asr(request)
-
-    assert response.results[0].error == "Invalid AsrBatchItem"
-
-
-def test_infer_funaudio_asr_surfaces_runtime_errors(monkeypatch) -> None:
-    monkeypatch.setattr(
-        funaudio_asr,
-        "_recognizer",
-        _FakeFunRecognizer(error=RuntimeError("boom")),
-    )
-
-    response = funaudio_asr.infer_funaudio_asr(_valid_request())
-
-    assert response.results[0].error == "boom"
-
-
-class _WorkClock:
-    """A monotonic clock that moves only while a provider call does its work,
-    so a test's elapsed time depends on the work, never on how many times
-    anything reads the clock."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def read(self) -> float:
-        return self.now
-
-    def spend(self, seconds: float, method):
-        """Wrap a recognizer method so calling it takes ``seconds``."""
-
-        def timed_call(*args, **kwargs):
-            self.now += seconds
-            return method(*args, **kwargs)
-
-        return timed_call
-
-
-def test_infer_funaudio_asr_returns_result_payload(monkeypatch) -> None:
-    clock = _WorkClock()
-    recognizer = _FakeFunRecognizer()
-    monkeypatch.setattr(
-        recognizer, "transcribe", clock.spend(1.5, recognizer.transcribe)
-    )
-    monkeypatch.setattr(funaudio_asr, "_recognizer", recognizer)
-    monkeypatch.setattr("batchalign.worker._types._item_clock", clock.read)
-
-    response = funaudio_asr.infer_funaudio_asr(_valid_request())
-
-    assert response.results[0].error is None
-    assert response.results[0].result["monologues"][0]["elements"][0]["value"] == "好"
-    assert response.results[0].elapsed_s == 1.5
-
-
-def test_funaudio_transcribe_to_monologues_requires_loaded_recognizer(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(funaudio_asr, "_recognizer", None)
-
-    with pytest.raises(RuntimeError, match="not initialized"):
-        funaudio_asr._transcribe_to_monologues(_item())
-
-
-def test_infer_funaudio_asr_v2_filters_blank_elements(monkeypatch) -> None:
-    monkeypatch.setattr(funaudio_asr, "_recognizer", _FakeFunRecognizer())
-
-    response = funaudio_asr.infer_funaudio_asr_v2(_item())
+def test_funaudio_transcribe_filters_blank_elements() -> None:
+    response = funaudio_asr.FunAudioAsr(_FakeFunRecognizer()).transcribe(_item())
 
     assert response.lang == "yue"
     assert [element.value for element in response.monologues[0].elements] == ["好"]
 
 
-def test_infer_tencent_asr_requires_loaded_provider(monkeypatch) -> None:
-    monkeypatch.setattr(tencent_asr, "_recognizer", None)
-
-    response = tencent_asr.infer_tencent_asr(_valid_request())
-
-    assert response.results[0].error == "Tencent ASR provider not loaded"
-
-
-def test_load_tencent_asr_stores_recognizer(monkeypatch) -> None:
+def test_load_tencent_asr_returns_the_recognizer_it_built(monkeypatch) -> None:
     created: dict[str, object] = {}
 
     class FakeRecognizer:
@@ -278,7 +189,7 @@ def test_load_tencent_asr_stores_recognizer(monkeypatch) -> None:
 
     monkeypatch.setattr(tencent_asr, "TencentRecognizer", FakeRecognizer)
 
-    tencent_asr.load_tencent_asr(
+    provider = tencent_asr.load_tencent_asr(
         "yue", engine_model_type="16k_zh_en_2.0", config={"cfg": True}
     )
 
@@ -287,128 +198,48 @@ def test_load_tencent_asr_stores_recognizer(monkeypatch) -> None:
         "engine_model_type": "16k_zh_en_2.0",
         "config": {"cfg": True},
     }
-    assert tencent_asr._lang == "yue"
+    assert isinstance(provider.recognizer, FakeRecognizer)
+    assert not hasattr(tencent_asr, "_recognizer")
 
 
-def test_infer_tencent_asr_rejects_invalid_items(monkeypatch) -> None:
-    monkeypatch.setattr(tencent_asr, "_recognizer", _FakeTencentRecognizer())
-    request = BatchInferRequest(task=InferTask.ASR, lang="yue", items=[{}])
-
-    response = tencent_asr.infer_tencent_asr(request)
-
-    assert response.results[0].error == "Invalid AsrBatchItem"
-
-
-def test_infer_tencent_asr_surfaces_runtime_errors(monkeypatch) -> None:
-    monkeypatch.setattr(
-        tencent_asr,
-        "_recognizer",
-        _FakeTencentRecognizer(error=RuntimeError("boom")),
+def test_tencent_transcribe_surfaces_runtime_errors() -> None:
+    provider = tencent_asr.TencentAsr(
+        _FakeTencentRecognizer(error=RuntimeError("boom"))
     )
 
-    response = tencent_asr.infer_tencent_asr(_valid_request())
-
-    assert response.results[0].error == "boom"
-
-
-def test_infer_tencent_asr_returns_result_payload(monkeypatch) -> None:
-    clock = _WorkClock()
-    recognizer = _FakeTencentRecognizer()
-    monkeypatch.setattr(
-        recognizer, "transcribe", clock.spend(2.0, recognizer.transcribe)
-    )
-    monkeypatch.setattr(tencent_asr, "_recognizer", recognizer)
-    monkeypatch.setattr("batchalign.worker._types._item_clock", clock.read)
-
-    response = tencent_asr.infer_tencent_asr(_valid_request())
-
-    assert response.results[0].error is None
-    assert response.results[0].result["monologues"][0]["elements"][0]["value"] == "好"
-    assert response.results[0].elapsed_s == 2.0
+    with pytest.raises(RuntimeError, match="boom"):
+        provider.transcribe(_item())
 
 
-def test_tencent_transcribe_to_monologues_requires_loaded_recognizer(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(tencent_asr, "_recognizer", None)
-
-    with pytest.raises(RuntimeError, match="not initialized"):
-        tencent_asr._transcribe_to_monologues(_item())
-
-
-def test_infer_tencent_asr_v2_filters_blank_elements(monkeypatch) -> None:
-    monkeypatch.setattr(tencent_asr, "_recognizer", _FakeTencentRecognizer())
-
-    response = tencent_asr.infer_tencent_asr_v2(_item())
+def test_tencent_transcribe_filters_blank_elements() -> None:
+    response = tencent_asr.TencentAsr(_FakeTencentRecognizer()).transcribe(_item())
 
     assert response.lang == "yue"
     assert [element.value for element in response.monologues[0].elements] == ["好"]
 
 
-def test_infer_aliyun_asr_v2_delegates_to_single_item_helper(monkeypatch) -> None:
+def test_aliyun_transcribe_runs_the_item_audio_with_the_cached_token(
+    monkeypatch,
+) -> None:
+    """One provider object carries the account, so a transcription reads its
+    credentials and token from there, never from module state."""
     expected = _valid_response()
-    monkeypatch.setattr(
-        aliyun_asr,
-        "_transcribe_to_monologues",
-        lambda _path: expected,
-    )
+    seen: dict[str, object] = {}
 
-    response = aliyun_asr.infer_aliyun_asr_v2(_item())
+    class FakeRunner:
+        def __init__(self, *, token: str, appkey: str, wav_path: str) -> None:
+            seen.update({"token": token, "appkey": appkey, "wav_path": wav_path})
+
+        def start(self) -> list[object]:
+            return []
+
+    monkeypatch.setattr(aliyun_asr, "_request_token", lambda _id, _secret: "tok")
+    monkeypatch.setattr(aliyun_asr, "_AliyunRunner", FakeRunner)
+    monkeypatch.setattr(aliyun_asr, "_ensure_wav", lambda path: (path, None))
+    monkeypatch.setattr(aliyun_asr, "_project_results", lambda _results: expected)
+    provider = aliyun_asr.AliyunAsr(ak_id="id", ak_secret="secret", appkey="appkey")
+
+    response = provider.transcribe(_item())
 
     assert response == expected
-
-
-def test_infer_aliyun_asr_requires_load(monkeypatch) -> None:
-    """Not loaded, every item fails unexecuted, as at the other providers: the
-    batch is answered rather than raised whole."""
-    monkeypatch.setattr(aliyun_asr, "_ak_id", "")
-
-    response = aliyun_asr.infer_aliyun_asr(_valid_request())
-
-    assert response.results[0].error is not None
-    assert "load_aliyun_asr" in response.results[0].error
-    assert response.results[0].elapsed_s is None
-
-
-def test_infer_aliyun_asr_rejects_invalid_items(monkeypatch) -> None:
-    monkeypatch.setattr(aliyun_asr, "_ak_id", "loaded")
-    request = BatchInferRequest(task=InferTask.ASR, lang="yue", items=[{}])
-
-    response = aliyun_asr.infer_aliyun_asr(request)
-
-    assert response.results[0].error == "Invalid AsrBatchItem"
-
-
-def test_infer_aliyun_asr_surfaces_runtime_errors(monkeypatch) -> None:
-    monkeypatch.setattr(aliyun_asr, "_ak_id", "loaded")
-    monkeypatch.setattr(
-        aliyun_asr,
-        "_transcribe_to_monologues",
-        lambda _path: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-
-    response = aliyun_asr.infer_aliyun_asr(_valid_request())
-
-    assert response.results[0].error == "boom"
-
-
-def test_infer_aliyun_asr_returns_result_payload(monkeypatch) -> None:
-    # Batch start, the item's own start and end, batch end.
-    monotonic_values = iter([0.0, 0.0, 3.0, 3.0])
-    expected = _valid_response()
-    monkeypatch.setattr(aliyun_asr, "_ak_id", "loaded")
-    monkeypatch.setattr(
-        aliyun_asr,
-        "_transcribe_to_monologues",
-        lambda _path: expected,
-    )
-    monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._aliyun_asr.time.monotonic",
-        lambda: next(monotonic_values),
-    )
-
-    response = aliyun_asr.infer_aliyun_asr(_valid_request())
-
-    assert response.results[0].error is None
-    assert response.results[0].result["monologues"][0]["elements"][0]["value"] == "好"
-    assert response.results[0].elapsed_s == 3.0
+    assert seen == {"token": "tok", "appkey": "appkey", "wav_path": "clip.wav"}

@@ -12,13 +12,10 @@ from batchalign.inference.languages.cantonese._cantonese_fa import (
     CantoneseFaHost,
     _hanzi_to_jyutping,
     _maybe_romanize,
-    default_cantonese_fa_host,
-    infer_cantonese_fa,
     load_cantonese_fa,
 )
-from batchalign.worker._types import BatchInferRequest, InferTask
 
-from .conftest import PyCantoneseFake  # still used by FA host fixture in conftest
+from .conftest import PyCantoneseFake
 
 # ---------------------------------------------------------------------------
 # _hanzi_to_jyutping
@@ -65,7 +62,22 @@ class TestHanziToJyutping:
         assert _hanzi_to_jyutping(pc_real, "xyz") == "xyz"
 
     def test_mixed_known_unknown(self, pc_real) -> None:  # type: ignore[no-untyped-def]
-        assert _hanzi_to_jyutping(pc_real, "好x") == "hou"
+        # The old expectation was "hou", pinning the loss of the unknown
+        # source span. A known pronunciation must not erase its neighbour.
+        assert _hanzi_to_jyutping(pc_real, "好x") == "hou'x"
+
+    def test_missing_romanizer_source_span_is_a_named_failure(self) -> None:
+        from batchalign.inference.languages.cantonese._cantonese_fa import (
+            RomanizationCoverageError,
+        )
+
+        class IncompleteRomanizer:
+            @staticmethod
+            def characters_to_jyutping(_text: str):
+                return [("好", "hou2")]
+
+        with pytest.raises(RomanizationCoverageError, match="source"):
+            _hanzi_to_jyutping(IncompleteRomanizer(), "好x")
 
     def test_empty_string(self, pc_real) -> None:  # type: ignore[no-untyped-def]
         assert _hanzi_to_jyutping(pc_real, "") == ""
@@ -80,13 +92,18 @@ class TestHanziToJyutping:
         assert _hanzi_to_jyutping(pc_real, "我") == "ngo"
         assert _hanzi_to_jyutping(pc_real, "係") == "hai"
 
-    def test_type_error_returns_original_text(self) -> None:
+    def test_malformed_romanizer_result_is_a_named_failure(self) -> None:
+        from batchalign.inference.languages.cantonese._cantonese_fa import (
+            RomanizationCoverageError,
+        )
+
         class _BrokenPc:
             @staticmethod
             def characters_to_jyutping(_text: str):
                 return None
 
-        assert _hanzi_to_jyutping(_BrokenPc(), "你好") == "你好"
+        with pytest.raises(RomanizationCoverageError):
+            _hanzi_to_jyutping(_BrokenPc(), "你好")
 
 
 # ---------------------------------------------------------------------------
@@ -110,117 +127,69 @@ class TestMaybeRomanize:
 
 
 # ---------------------------------------------------------------------------
-# infer_cantonese_fa (with faked model environment)
+# CantoneseFaHost.align_words (with faked model environment)
 # ---------------------------------------------------------------------------
 
 
-class TestInferCantoneseFa:
-    def test_empty_batch(self, cantonese_fa_host: CantoneseFaHost) -> None:
-        req = BatchInferRequest(task=InferTask.FA, lang="yue", items=[])
-        resp = infer_cantonese_fa(req, host=cantonese_fa_host)
-        assert len(resp.results) == 0
+class TestAlignWords:
+    def test_mixed_source_span_reaches_the_aligner(self, pc_real) -> None:  # type: ignore[no-untyped-def]
+        class ReachedAlignment(Exception):
+            def __init__(self, words: tuple[str, ...]) -> None:
+                self.words = words
 
-    def test_single_item(self, cantonese_fa_host: CantoneseFaHost) -> None:
-        item = {
-            "words": ["你", "好"],
-            "word_ids": ["w1", "w2"],
-            "word_utterance_indices": [0, 0],
-            "word_utterance_word_indices": [0, 1],
-            "audio_path": "test.wav",
-            "audio_start_ms": 0,
-            "audio_end_ms": 1000,
-        }
-        req = BatchInferRequest(task=InferTask.FA, lang="yue", items=[item])
-        resp = infer_cantonese_fa(req, host=cantonese_fa_host)
-        assert len(resp.results) == 1
-        assert resp.results[0].error is None
-        assert resp.results[0].result is not None
+        def capture(_model: object, _audio: object, words: list[str]):
+            # Stop at the model boundary instead of inventing model output.
+            raise ReachedAlignment(tuple(words))
 
-    def test_empty_words_shortcut(self, cantonese_fa_host: CantoneseFaHost) -> None:
-        item = {
-            "words": [],
-            "word_ids": [],
-            "word_utterance_indices": [],
-            "word_utterance_word_indices": [],
-            "audio_path": "test.wav",
-            "audio_start_ms": 0,
-            "audio_end_ms": 1000,
-        }
-        req = BatchInferRequest(task=InferTask.FA, lang="yue", items=[item])
-        resp = infer_cantonese_fa(req, host=cantonese_fa_host)
-        assert len(resp.results) == 1
-        assert resp.results[0].error is None
-        assert resp.results[0].result["indexed_timings"] == []
+        host = CantoneseFaHost(
+            model=object(), romanizer=pc_real, infer_wave2vec_fa=capture, lang="yue"
+        )
+        with pytest.raises(ReachedAlignment) as reached:
+            host.align_words(object(), ["好x", "你好"])
+        assert reached.value.words == ("hou'x", "nei'hou")
 
-    def test_returns_error_when_model_not_loaded(self, monkeypatch) -> None:
-        import batchalign.inference.languages.cantonese._cantonese_fa as module
+    def test_words_are_romanized_before_alignment(
+        self, cantonese_fa_host: CantoneseFaHost
+    ) -> None:
+        rows = cantonese_fa_host.align_words(object(), ["你", "好"])
 
-        monkeypatch.setattr(module, "_model", None)
-        monkeypatch.setattr(module, "_pc", None)
-        req = BatchInferRequest(
-            task=InferTask.FA,
-            lang="yue",
-            items=[
-                {
-                    "words": ["你"],
-                    "word_ids": ["w1"],
-                    "word_utterance_indices": [0],
-                    "word_utterance_word_indices": [0],
-                    "audio_path": "test.wav",
-                    "audio_start_ms": 0,
-                    "audio_end_ms": 1000,
-                }
-            ],
+        assert [row[0] for row in rows] == ["nei", "hou"]
+        assert [row[1] for row in rows] == [(0, 100), (100, 200)]
+
+    def test_no_words_aligns_nothing(self, cantonese_fa_host: CantoneseFaHost) -> None:
+        assert cantonese_fa_host.align_words(object(), []) == []
+
+    def test_a_non_cantonese_host_passes_words_through(self) -> None:
+        seen: list[list[str]] = []
+
+        def record(_model, _audio, words):
+            seen.append(words)
+            return []
+
+        host = CantoneseFaHost(
+            model=object(),
+            romanizer=PyCantoneseFake(),
+            infer_wave2vec_fa=record,
+            lang="eng",
         )
 
-        resp = infer_cantonese_fa(req)
+        host.align_words(object(), ["你", "hello"])
 
-        assert resp.results[0].error == (
-            "Cantonese FA model not loaded, call load_cantonese_fa first"
-        )
+        assert seen == [["你", "hello"]]
 
-    def test_marks_invalid_items(self, cantonese_fa_host: CantoneseFaHost) -> None:
-        req = BatchInferRequest(
-            task=InferTask.FA, lang="yue", items=[{"words": ["你"]}]
-        )
-
-        resp = infer_cantonese_fa(req, host=cantonese_fa_host)
-
-        assert resp.results[0].error == "Invalid FaInferItem"
-
-    def test_runtime_failures_are_reported_as_item_errors(self) -> None:
-        class _FakeAudioFile:
-            def chunk(self, _start_ms: int, _end_ms: int):
-                return object()
-
+    def test_aligner_failures_propagate(self) -> None:
         def boom(*_args, **_kwargs):
             raise RuntimeError("alignment failed")
 
         host = CantoneseFaHost(
             model=object(),
             romanizer=PyCantoneseFake(),
-            load_audio_file=lambda _path: _FakeAudioFile(),
             infer_wave2vec_fa=boom,
-        )
-        item = {
-            "words": ["你", "好"],
-            "word_ids": ["w1", "w2"],
-            "word_utterance_indices": [0, 0],
-            "word_utterance_word_indices": [0, 1],
-            "audio_path": "test.wav",
-            "audio_start_ms": 0,
-            "audio_end_ms": 1000,
-        }
-
-        resp = infer_cantonese_fa(
-            BatchInferRequest(task=InferTask.FA, lang="yue", items=[item]),
-            host=host,
+            lang="yue",
         )
 
-        assert resp.results[0].result is None
-        assert (
-            resp.results[0].error == "Cantonese FA inference failed: alignment failed"
-        )
+        with pytest.raises(RuntimeError, match="alignment failed"):
+            host.align_words(object(), ["你"])
 
 
 def test_load_cantonese_fa_reports_missing_dependency(monkeypatch) -> None:
@@ -237,36 +206,28 @@ def test_load_cantonese_fa_reports_missing_dependency(monkeypatch) -> None:
         load_cantonese_fa("yue", None)
 
 
-def test_default_cantonese_fa_host_requires_loaded_state(monkeypatch) -> None:
-    import batchalign.inference.languages.cantonese._cantonese_fa as module
-
-    monkeypatch.setattr(module, "_model", None)
-    monkeypatch.setattr(module, "_pc", None)
-
-    assert default_cantonese_fa_host() is None
-
-
-def test_load_cantonese_fa_populates_default_host(monkeypatch) -> None:
+def test_load_cantonese_fa_returns_the_host_it_built(monkeypatch) -> None:
     import batchalign.inference.languages.cantonese._cantonese_fa as module
 
     fake_pc = object()
+
+    def fake_infer(model, audio, words):
+        return [("word", (0, 100))]
+
     monkeypatch.setitem(sys.modules, "pycantonese", fake_pc)
     monkeypatch.setattr(
         "batchalign.inference.fa.load_wave2vec_fa",
         lambda device_policy=None: {"device_policy": device_policy},
     )
-    monkeypatch.setattr(
-        "batchalign.inference.audio.load_audio_file", lambda path: f"audio:{path}"
-    )
-    monkeypatch.setattr(
-        "batchalign.inference.fa.infer_wave2vec_fa",
-        lambda model, audio, words: [("word", (0, 100))],
-    )
+    monkeypatch.setattr("batchalign.inference.fa.infer_wave2vec_fa", fake_infer)
 
-    module.load_cantonese_fa("yue", None, device_policy="policy")
-    host = module.default_cantonese_fa_host()
+    host = module.load_cantonese_fa("yue", None, device_policy="policy")
 
-    assert host is not None
     assert host.model == {"device_policy": "policy"}
     assert host.romanizer is fake_pc
-    assert host.load_audio_file("clip.wav") == "audio:clip.wav"
+    assert host.infer_wave2vec_fa is fake_infer
+    # The language the load was asked for is the host's, not a module default.
+    assert host.lang == "yue"
+    assert module.load_cantonese_fa("eng", None).lang == "eng"
+    # Nothing is stored at module level.
+    assert not hasattr(module, "_model")

@@ -22,9 +22,15 @@
 //!    replacements ("'cause" → "(be)cause") from per-language wordlists
 //! 8. **N-gram retrace detection**, detect repeated n-grams and wrap in `<...> [/]`
 //!
+//! Between stages 5 and 6 the transcribe pipeline can merge abbreviations
+//! (`--merge-abbrev`): single letters spelling a known abbreviation (`F B I`)
+//! become one word timed by the union of the letters' intervals. The caller
+//! runs it over the speaker-attributed chunks; see [`merge_abbreviations`].
+//!
 //! The implementation is split by stage so callers can find preparation,
 //! number-expansion, chunking, and utterance-finalization logic quickly.
 
+mod abbreviations;
 mod asr_types;
 pub mod cantonese;
 mod chunking;
@@ -52,6 +58,7 @@ use batchalign_types::domain::AudioPositionSeconds;
 use batchalign_types::segmentation::BoundaryTerminator;
 use serde::{Deserialize, Serialize};
 
+pub use abbreviations::{AbbreviationMergeReport, merge_abbreviations};
 pub use asr_types::{AsrNormalizedText, AsrRawText, ChatWordContent, ChatWordText, SpeakerIndex};
 pub use chunking::{
     PrechatSplit, RetraceAnalyzedChunk, SegmentationShapeError, SegmentedChunk,
@@ -68,6 +75,7 @@ pub use seam::{SeamAmbiguity, UnplacedSeams, WindowOrdinal, place_seam_ambiguiti
 pub use snapshot::AsrPipelineSnapshot;
 pub use timing::{
     AdmittedInterval, IntervalBound, IntervalRefusal, PositiveInterval, UntimedCause, WordTiming,
+    covering_all_timed,
 };
 pub use utterance::{
     chunk_monologues, chunk_monologues_with_snapshot, finalize_utterances, prepare_asr_chunks,
@@ -163,6 +171,32 @@ impl AsrWord {
             end_ms,
             kind: WordKind::default(),
         }
+    }
+
+    /// The word's one character, when it is a regular word of exactly one
+    /// character. A retrace-marked word has none: it is already structure.
+    /// The question a pass over single-character words asks (Han characters
+    /// for word segmentation, letters for abbreviation merging), answered once.
+    pub fn sole_char(&self) -> Option<char> {
+        match self.kind {
+            WordKind::Regular => {
+                let mut chars = self.text.as_str().chars();
+                match (chars.next(), chars.next()) {
+                    (Some(only), None) => Some(only),
+                    (None, _) | (Some(_), Some(_)) => None,
+                }
+            }
+            WordKind::Retrace => None,
+        }
+    }
+
+    /// The word's admitted, non-empty span, when it has one. Its bounds were
+    /// admitted when the words were prepared, so a refusal cannot arise here;
+    /// a word without a whole, non-empty span has no time to contribute.
+    pub fn timed_interval(&self) -> Option<AdmittedInterval> {
+        WordTiming::from_millis(self.start_ms, self.end_ms)
+            .ok()?
+            .interval()
     }
 }
 
@@ -434,6 +468,18 @@ pub struct AsrElement {
     /// Element kind: text or punctuation.
     #[serde(default)]
     pub kind: AsrElementKind,
+}
+
+impl AsrElement {
+    /// The element's admitted, non-empty span, when it has one: the same rule
+    /// as [`AsrWord::timed_interval`], over the provider's positions. An
+    /// element whose bounds are absent, inadmissible or zero-width has no time
+    /// to contribute.
+    pub fn timed_interval(&self) -> Option<AdmittedInterval> {
+        WordTiming::from_positions(self.ts, self.end_ts)
+            .ok()?
+            .interval()
+    }
 }
 
 /// Raw ASR output structure (matches Rev.AI format).

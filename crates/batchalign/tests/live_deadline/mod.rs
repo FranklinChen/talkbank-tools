@@ -577,24 +577,21 @@ impl CliRunBudget {
 pub enum HarnessBudget {
     /// How long a fixture session's `shutdown_for_reuse` may take.
     SessionShutdown,
-    /// How long a test fixture's worker may take to be admitted AND report
-    /// ready.
+    /// How long a test fixture's starting worker may go without advancing:
+    /// its startup stall window (`worker_startup_stall_s`).
     ///
-    /// This is symptom one's number, and the decomposition matters.
-    /// `memory_guard::acquire_spawn_permit` passes `ready_timeout_s` to the
-    /// host-memory lease wait AND then to the readiness wait, so one number
-    /// buys both: winning a startup slot from every other test binary on the
-    /// machine, and this worker's own Python startup. The fixtures used to set
-    /// 120s, which is ample for the second and not for the first: on a shared
-    /// machine a single process-global spawn permit can be held for minutes by
-    /// another suite's cold model load, and the failure surfaced as
-    /// `timed out waiting for host-memory capacity ... 1/1 local startup slots
-    /// in use`, which reads as a defect in the test that lost the race.
+    /// This is symptom one's number, and the decomposition matters. Winning
+    /// a startup slot from every other test binary on the machine is no
+    /// longer inside it: the spawn's wait for host memory (its startup lease)
+    /// queues with no limit, reported, so a slot held for minutes by another
+    /// suite's spawn is waited out rather than failing as `timed out waiting
+    /// for host-memory capacity ... 1/1 local startup slots in use`, which
+    /// read as a defect in the test that lost the race. What remains is the
+    /// worker's own Python startup, re-armed by the progress it reports.
     ///
-    /// The value below covers contention plus startup rather than startup
-    /// alone. It is not a blanket "longer timeout": a worker that genuinely
-    /// never comes up still fails here, and every wait the harness itself owns
-    /// is bounded by [`ServerTestDeadline`]'s idle window instead.
+    /// It is not a blanket "longer timeout": a worker that genuinely never
+    /// comes up still fails here, and every wait the harness itself owns is
+    /// bounded by [`ServerTestDeadline`]'s idle window instead.
     FixtureWorkerReady,
 }
 

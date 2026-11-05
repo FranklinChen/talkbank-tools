@@ -15,13 +15,14 @@ use super::comparison::{Alignable, FuzzyComparison, PreparedFuzzyWord};
 use super::control::{Uninterrupted, WorkControl, uninterrupted};
 use super::packed_literal::key;
 use super::{AlignResult, MatchMode};
+mod fuzzy;
 mod inspection;
 mod literal;
+mod sparse;
 pub use inspection::{CompletedInspection, InspectionAdmission, InspectionBudget, InspectionLimit};
 
 const _: () = assert!(super::COST_SUB == 2 * super::COST_GAP);
 const MAX_EDGES: usize = 1_048_576;
-const MAX_FUZZY_COMPARISONS: usize = 64_000_000;
 
 /// Independently completed or refused inspection and common correspondence proof.
 /// Only the alignment producer can construct this paired observation.
@@ -58,34 +59,25 @@ impl CorrespondenceAdmission {
         mode: MatchMode,
         control: &C,
     ) -> Result<Self, C::Error> {
-        admit_controlled(
-            payload,
-            reference,
-            mode,
-            MAX_EDGES,
-            MAX_FUZZY_COMPARISONS,
-            control,
-        )
+        admit_controlled(payload, reference, mode, MAX_EDGES, control)
     }
 }
 
-/// Which fixed proof budget a correspondence analysis reached.
+/// The candidate allowance actually denied by this proof's caller policy.
+/// Work estimates cannot construct a resource refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CorrespondenceBudget {
-    /// More candidate (payload, reference) match edges than the edge limit.
-    CandidateEdges,
-    /// A fuzzy relation would need more word comparisons than its limit.
-    FuzzyComparisons,
+pub struct CorrespondenceBudget {
+    edge_limit: usize,
 }
 
 impl CorrespondenceBudget {
-    /// The production limit this budget enforces, in its own unit
-    /// (edges, or word-pair comparisons).
+    fn candidate_edges(edge_limit: usize) -> Self {
+        Self { edge_limit }
+    }
+
+    /// The original caller's denied allowance, in candidate edges.
     pub fn limit(self) -> usize {
-        match self {
-            Self::CandidateEdges => MAX_EDGES,
-            Self::FuzzyComparisons => MAX_FUZZY_COMPARISONS,
-        }
+        self.edge_limit
     }
 }
 
@@ -153,12 +145,10 @@ impl CorrespondenceAnalysis {
 struct Edge {
     payload: usize,
     reference: usize,
-    forward: usize,
-    backward: usize,
 }
 
-enum PreparedCorrespondences {
-    Sparse(Vec<Edge>),
+enum PreparedCorrespondences<'input> {
+    Sparse(sparse::Candidates<'input>),
     Certified(CommonCorrespondences),
 }
 
@@ -168,14 +158,12 @@ fn admit(
     reference: &[String],
     mode: MatchMode,
     edge_limit: usize,
-    fuzzy_limit: usize,
 ) -> CorrespondenceAdmission {
     uninterrupted(admit_controlled(
         payload,
         reference,
         mode,
         edge_limit,
-        fuzzy_limit,
         &Uninterrupted,
     ))
 }
@@ -185,92 +173,33 @@ fn admit_controlled<C: WorkControl + ?Sized>(
     reference: &[String],
     mode: MatchMode,
     edge_limit: usize,
-    fuzzy_limit: usize,
     control: &C,
 ) -> Result<CorrespondenceAdmission, C::Error> {
-    let mut edges =
-        match candidate_edges(payload, reference, mode, edge_limit, fuzzy_limit, control)? {
-            Ok(PreparedCorrespondences::Sparse(edges)) => edges,
-            Ok(PreparedCorrespondences::Certified(common)) => {
-                return Ok(CorrespondenceAdmission::Complete(common));
-            }
-            Err(budget) => return Ok(CorrespondenceAdmission::BudgetExhausted(budget)),
-        };
-    let mut ranks = PrefixMaximum::new(reference.len());
-    let mut row_start = 0;
-    while row_start < edges.len() {
-        control.check()?;
-        let row_end = row_start
-            + edges[row_start..]
-                .iter()
-                .take_while(|edge| edge.payload == edges[row_start].payload)
-                .count();
-        // Delayed updates forbid using two edges from the same payload word.
-        for edge in &mut edges[row_start..row_end] {
-            edge.forward = ranks.before(edge.reference) + 1;
+    match candidate_edges(payload, reference, mode, edge_limit, control)? {
+        Ok(PreparedCorrespondences::Sparse(candidates)) => Ok(CorrespondenceAdmission::Complete(
+            candidates.certify(control)?,
+        )),
+        Ok(PreparedCorrespondences::Certified(common)) => {
+            Ok(CorrespondenceAdmission::Complete(common))
         }
-        for edge in &edges[row_start..row_end] {
-            ranks.record(edge.reference, edge.forward);
-        }
-        row_start = row_end;
+        Err(budget) => Ok(CorrespondenceAdmission::BudgetExhausted(budget)),
     }
-    let optimum = ranks.before(reference.len());
-    let mut ranks = PrefixMaximum::new(reference.len());
-    let mut row_end = edges.len();
-    while row_end > 0 {
-        control.check()?;
-        let row_start = row_end
-            - edges[..row_end]
-                .iter()
-                .rev()
-                .take_while(|edge| edge.payload == edges[row_end - 1].payload)
-                .count();
-        for edge in &mut edges[row_start..row_end] {
-            edge.backward = ranks.before(reference.len() - 1 - edge.reference) + 1;
-        }
-        for edge in &edges[row_start..row_end] {
-            ranks.record(reference.len() - 1 - edge.reference, edge.backward);
-        }
-        row_end = row_start;
-    }
-    let mut populations = vec![0usize; optimum + 1];
-    for edge in &edges {
-        if edge.forward + edge.backward - 1 == optimum {
-            populations[edge.forward] += 1;
-        }
-    }
-    let pairs = edges
-        .into_iter()
-        .filter(|edge| {
-            edge.forward + edge.backward - 1 == optimum && populations[edge.forward] == 1
-        })
-        .map(|edge| (edge.payload, edge.reference))
-        .collect();
-    Ok(CorrespondenceAdmission::Complete(CommonCorrespondences {
-        pairs,
-    }))
 }
 
-fn candidate_edges<C: WorkControl + ?Sized>(
-    payload: &[String],
-    reference: &[String],
+fn candidate_edges<'input, C: WorkControl + ?Sized>(
+    payload: &'input [String],
+    reference: &'input [String],
     mode: MatchMode,
     edge_limit: usize,
-    fuzzy_limit: usize,
     control: &C,
-) -> Result<Result<PreparedCorrespondences, CorrespondenceBudget>, C::Error> {
+) -> Result<Result<PreparedCorrespondences<'input>, CorrespondenceBudget>, C::Error> {
     control.check()?;
     let mut edges = Vec::new();
     let mut push = |payload, reference| {
         if edges.len() == edge_limit {
-            return Err(CorrespondenceBudget::CandidateEdges);
+            return Err(CorrespondenceBudget::candidate_edges(edge_limit));
         }
-        edges.push(Edge {
-            payload,
-            reference,
-            forward: 0,
-            backward: 0,
-        });
+        edges.push(Edge { payload, reference });
         Ok(())
     };
     match mode {
@@ -305,37 +234,20 @@ fn candidate_edges<C: WorkControl + ?Sized>(
             }
         }
         MatchMode::Fuzzy { threshold } => {
-            if payload
-                .len()
-                .checked_mul(reference.len())
-                .is_none_or(|comparisons| comparisons > fuzzy_limit)
-            {
-                return Ok(Err(CorrespondenceBudget::FuzzyComparisons));
-            }
-            let payload: Vec<_> = payload
-                .iter()
-                .map(|word| PreparedFuzzyWord::new(word))
-                .collect();
-            let reference: Vec<_> = reference
-                .iter()
-                .map(|word| PreparedFuzzyWord::new(word))
-                .collect();
-            let policy = FuzzyComparison::new(threshold);
-            for (p, word) in payload.iter().enumerate() {
-                for (r, other) in reference.iter().enumerate() {
-                    if r.is_multiple_of(1024) {
-                        control.check()?;
-                    }
-                    if word.matches(other, policy)
-                        && let Err(budget) = push(p, r)
-                    {
-                        return Ok(Err(budget));
-                    }
-                }
-            }
+            return fuzzy::FuzzyCandidates::prepare(
+                payload,
+                reference,
+                FuzzyComparison::new(threshold),
+                edge_limit,
+                control,
+            )?
+            .finish(control)
+            .map(|result| result.map(PreparedCorrespondences::Sparse));
         }
     }
-    Ok(Ok(PreparedCorrespondences::Sparse(edges)))
+    Ok(Ok(PreparedCorrespondences::Sparse(
+        sparse::Candidates::bind(reference, edges),
+    )))
 }
 
 /// Maximum chain length over reference positions strictly before a position.

@@ -56,6 +56,44 @@ impl SpawnScope {
     }
 }
 
+/// Run `work` in the background, under the current job: registered against
+/// the job (so a cancel's worker kill finds what it spawns) and dropped the
+/// moment the job is cancelled, in the caller's tracing span.
+///
+/// For work a file task starts but must not wait for, such as warming a
+/// language's extra workers after its first probe: the file goes on to its
+/// own dispatch while they come up. Nothing joins it; it ends with its work
+/// or with the job's cancellation.
+pub(crate) fn spawn_background(work: impl Future<Output = ()> + Send + 'static) {
+    use tracing::Instrument;
+
+    let span = tracing::Span::current();
+    match FileTaskScope::current() {
+        SpawnScope::Job(FileTaskScope {
+            job_id,
+            cancel_token,
+        }) => {
+            tokio::spawn(
+                CURRENT_JOB_ID
+                    .scope(job_id, async move {
+                        tokio::select! {
+                            biased;
+                            () = cancel_token.cancelled() => {}
+                            () = work => {}
+                        }
+                    })
+                    .instrument(span),
+            );
+        }
+        // Only tests spawn outside a runner; production work spawned here
+        // could not be cancelled, which the supervised spawn warns about too.
+        SpawnScope::Unscoped => {
+            tracing::warn!("background work spawned outside a job scope");
+            tokio::spawn(work.instrument(span));
+        }
+    }
+}
+
 /// The span for a file's work spawned from the current task: the one entry
 /// every per-file spawn uses (the supervised file tasks, and the morphotag and
 /// utseg fan-outs, which run on their own `JoinSet`).

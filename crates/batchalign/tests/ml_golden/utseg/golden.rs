@@ -22,7 +22,6 @@ fn utseg_options_with_fallback(allow_stanza_fallback: bool) -> CommandOptions {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
         utseg_fallback: allow_stanza_fallback.into(),
     })
 }

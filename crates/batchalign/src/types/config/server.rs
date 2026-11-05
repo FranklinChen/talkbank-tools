@@ -188,14 +188,13 @@ pub struct ServerConfig {
     )]
     pub max_total_workers: Option<u32>,
 
-    /// Seconds to wait for a Python worker to become ready after spawn.
-    /// Default: 300. Never zero; a legacy `0`, which meant the default, is
-    /// read as the default.
-    #[serde(
-        default = "default_worker_ready_timeout_s",
-        deserialize_with = "zero_as_default::<_, DEFAULT_WORKER_READY_TIMEOUT_S>"
-    )]
-    pub worker_ready_timeout_s: PositiveSeconds,
+    /// How long, in seconds, a starting worker may go without reporting
+    /// progress that advanced (a download growing, a load phase reached)
+    /// before it is retired as stalled. A stall window, not a limit on the
+    /// whole startup: a worker downloading for twenty minutes is fine while
+    /// it reports growth. Default: 300. Never zero.
+    #[serde(default = "default_worker_startup_stall_s")]
+    pub worker_startup_stall_s: PositiveSeconds,
 
     /// Maximum HTTP request body size in megabytes. Default: 100.
     #[serde(default = "default_max_body_bytes_mb")]
@@ -260,16 +259,13 @@ pub struct ServerConfig {
     )]
     pub analysis_task_timeout_s: Option<PositiveSeconds>,
 
-    /// Override, in seconds, of the timeout for on-demand model loading via
-    /// `ensure_task` IPC. Absent: 120. Increase on slow networks where
-    /// first-time model downloads (Stanza, Whisper) may take longer. A legacy
-    /// `0` is read as absent.
-    #[serde(
-        default,
-        deserialize_with = "zero_as_no_override",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub ensure_task_timeout_s: Option<PositiveSeconds>,
+    /// How long, in seconds, an on-demand model load (`ensure_task`) may go
+    /// without reporting progress that advanced before its worker is retired
+    /// as stalled. A stall window, not a limit on the load: a first download
+    /// takes as long as it takes while it reports growth. Default: 120. Never
+    /// zero.
+    #[serde(default = "default_ensure_task_stall_s")]
+    pub ensure_task_stall_s: PositiveSeconds,
 
     /// Path to the worker registry file for discovering pre-started TCP
     /// workers. Absent: `workers.json` in the state directory. A legacy empty
@@ -365,8 +361,11 @@ pub(crate) fn default_job_ttl_days() -> JobTtlDays {
 /// Default seconds between worker health checks.
 pub(crate) const DEFAULT_WORKER_HEALTH_INTERVAL_S: u64 = 30;
 
-/// Default seconds to wait for a spawned worker to become ready.
-pub(crate) const DEFAULT_WORKER_READY_TIMEOUT_S: u64 = 300;
+/// Default startup stall window, seconds (`worker_startup_stall_s`).
+pub(crate) const DEFAULT_WORKER_STARTUP_STALL_S: u64 = 300;
+
+/// Default on-demand load stall window, seconds (`ensure_task_stall_s`).
+pub(crate) const DEFAULT_ENSURE_TASK_STALL_S: u64 = 120;
 
 pub(crate) fn default_worker_health_interval_s() -> PositiveSeconds {
     PositiveSeconds::literal::<DEFAULT_WORKER_HEALTH_INTERVAL_S>()
@@ -376,8 +375,12 @@ pub(crate) fn default_max_concurrent_worker_startups() -> WorkerStartupLimit {
     WorkerStartupLimit::literal::<1>()
 }
 
-pub(crate) fn default_worker_ready_timeout_s() -> PositiveSeconds {
-    PositiveSeconds::literal::<DEFAULT_WORKER_READY_TIMEOUT_S>()
+pub(crate) fn default_worker_startup_stall_s() -> PositiveSeconds {
+    PositiveSeconds::literal::<DEFAULT_WORKER_STARTUP_STALL_S>()
+}
+
+pub(crate) fn default_ensure_task_stall_s() -> PositiveSeconds {
+    PositiveSeconds::literal::<DEFAULT_ENSURE_TASK_STALL_S>()
 }
 
 pub(crate) fn default_max_body_bytes_mb() -> MemoryMb {
@@ -425,7 +428,7 @@ impl Default for ServerConfig {
             max_concurrent_worker_startups: default_max_concurrent_worker_startups(),
             max_workers_per_key: None,
             max_total_workers: None,
-            worker_ready_timeout_s: default_worker_ready_timeout_s(),
+            worker_startup_stall_s: default_worker_startup_stall_s(),
             max_body_bytes_mb: default_max_body_bytes_mb(),
             memory_gate_timeout_s: default_memory_gate_timeout_s(),
             memory_gate_poll_s: default_memory_gate_poll_s(),
@@ -434,7 +437,7 @@ impl Default for ServerConfig {
             local_lease_ttl: default_local_lease_ttl(),
             audio_task_timeout_s: None,
             analysis_task_timeout_s: None,
-            ensure_task_timeout_s: None,
+            ensure_task_stall_s: default_ensure_task_stall_s(),
             worker_registry_path: None,
             memory_tier: None,
             gpu_startup_mb: None,
@@ -446,6 +449,18 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
+    /// How long a starting worker may go without advancing: the one
+    /// boundary from `worker_startup_stall_s` to its type.
+    pub fn worker_startup_stall(&self) -> crate::worker::LoadingStall {
+        crate::worker::LoadingStall::new(self.worker_startup_stall_s)
+    }
+
+    /// How long an on-demand load may go without advancing: the one
+    /// boundary from `ensure_task_stall_s` to its type.
+    pub fn ensure_task_stall(&self) -> crate::worker::LoadingStall {
+        crate::worker::LoadingStall::new(self.ensure_task_stall_s)
+    }
+
     /// The operator's transport-ceiling overrides, as the worker layer reads
     /// them.
     pub fn task_timeouts(&self) -> TaskTimeoutOverrides {

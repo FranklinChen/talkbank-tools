@@ -20,8 +20,10 @@ mod postprocess;
 mod presence;
 pub mod repair;
 mod rescue_narrow_bullets;
+pub(crate) mod resource_partition;
 pub mod speech_rate;
 mod split;
+pub(crate) mod supplied_retry;
 pub mod timing;
 pub mod utr;
 
@@ -45,6 +47,8 @@ use talkbank_parser_tests::test_error::ParseProductTestExt;
 pub use self::alignment::{align_fa_response, parse_fa_response};
 pub use self::expand_for_fillers::expand_bullets_for_edge_fillers;
 pub use self::extraction::collect_fa_words;
+#[cfg(test)]
+pub(crate) use self::grouping::group_with_declared_window_limit;
 pub use self::grouping::{
     FaGroup, GroupSpan, GroupWords, Grouping, MAX_GROUP_LABEL_BYTES, SingleSpan,
     count_utterance_timing, group_utterances,
@@ -54,6 +58,7 @@ pub use self::injection::inject_timings_for_utterance;
 pub use self::main_bullets::{
     FaProjection, GivenBulletError, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,
 };
+pub(crate) use self::main_bullets::{SuppliedRetrySource, SuppliedRetrySources};
 pub(crate) use self::orchestrate::WrittenFaDecisions;
 pub use self::orchestrate::{
     DroppedWordTiming, FaApplied, FaDecisions, FaFinalized, KeptBulletYield, MonotonicityEffect,
@@ -586,10 +591,11 @@ pub enum ExistingWorBoundaryPolicy {
 /// Whether a projection may change a main-tier utterance bullet the input
 /// already carried.
 ///
-/// Like [`ExistingWorBoundaryPolicy`], this is projection policy only: it never
-/// enters a cache key and never changes which groups are sent for inference or
-/// how their windows are built. It decides only what the admitted word evidence
-/// is allowed to do to the transcript afterwards.
+/// Primary grouping and raw cache identity are independent of this policy.
+/// `KeepGiven` and `KeepExact` also authorize one terminal exact-source retry
+/// for missing positive word timings inside an original supplied window.
+/// Accepted primary timings cannot be overwritten. The additional request has
+/// its own actual window/text key; cache-only runs never infer.
 ///
 /// The default reproduces the established behavior exactly. `KeepGiven` exists
 /// for transcripts whose utterance bullets are themselves the authority (hand
@@ -623,7 +629,8 @@ pub enum MainBulletPolicy {
     #[value(name = "derive")]
     DeriveFromWords,
     /// Leave every utterance bullet on the input exactly as given and fit the
-    /// word timings inside it; a word outside its bullet is left untimed.
+    /// word timings inside it; missing words may receive one exact-window
+    /// retry. Accepted timings remain unchanged; unresolved words stay untimed.
     #[serde(rename = "keep")]
     #[value(name = "keep")]
     KeepGiven,

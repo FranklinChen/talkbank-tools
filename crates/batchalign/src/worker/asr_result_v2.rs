@@ -120,6 +120,9 @@ pub(crate) fn parse_asr_response_v2(
     })?;
 
     match result {
+        TaskResultV2::FaPreparation(_) => Err(AsrResponseAdmissionError::WrongResult(
+            "FA preparation data",
+        )),
         TaskResultV2::WhisperChunkResult(result) => {
             result.model.admit(pinned.models(), backend)?;
             whisper_chunk_result_to_asr_response(result, fallback_lang)

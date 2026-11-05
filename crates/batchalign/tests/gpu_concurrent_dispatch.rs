@@ -121,7 +121,9 @@ fn test_pool(python: String) -> WorkerPool {
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable during test
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -206,7 +208,9 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
             test_echo: true,
             profile: WorkerProfile::Gpu,
             lang: WorkerLanguage::from(LanguageCode3::eng()),
-            ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+            startup_stall: batchalign::worker::LoadingStall::new(
+                batchalign::api::PositiveSeconds::literal::<30>(),
+            ),
             runtime: WorkerRuntimeConfig {
                 state_dir: Some(test_state_dir().to_path_buf()),
                 server_instance_id: Some(pool.current_server_instance_id().to_string()),
@@ -215,7 +219,7 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
             },
             ..WorkerConfig::for_tests()
         };
-        spawn_tcp_daemon(&daemon_config, 0)
+        spawn_tcp_daemon(&daemon_config, 0, &batchalign::host_memory::NoIdleWorkers)
             .await
             .expect("spawn a server-owned TCP daemon");
 
@@ -708,7 +712,9 @@ async fn gpu_request_with_short_timeout_fails_cleanly() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -765,11 +771,18 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
         test_delay_ms: 500, // 500ms delay
         profile: batchalign::worker::WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
+    let mut handle = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("spawn failed");
 
     let start = std::time::Instant::now();
     let resp = handle
@@ -870,7 +883,9 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -1003,7 +1018,9 @@ async fn cancel_kills_in_flight_worker_under_dispatch() {
     let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         test_delay_ms: 60_000,
         max_workers_per_key: PerProfile::uniform(1),
@@ -1341,7 +1358,9 @@ async fn a_cold_spawn_for_one_key_does_not_block_dispatch_to_a_warm_key() {
     let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
         python_path: shim.display().to_string(),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<SLOW_KEY_READY_TIMEOUT_S>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<SLOW_KEY_READY_TIMEOUT_S>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,

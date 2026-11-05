@@ -84,6 +84,25 @@ impl WorkerPool {
         self.config.runtime.host.memory_coordinator()
     }
 
+    /// What preparing one of this pool's workers for a load needs: the
+    /// host's admission of each load's memory lease (none for a test-echo
+    /// pool, whose workers build nothing), retiring this pool's idle workers
+    /// when a load has to queue, and the configured stall window.
+    pub(crate) fn load_preparation(&self) -> super::LoadPreparation {
+        let hosting = match self.config.test_echo {
+            true => super::ModelHosting::TestEcho,
+            false => super::ModelHosting::Models,
+        };
+        super::LoadPreparation {
+            admission: super::LoadAdmission::new(
+                self.memory_coordinator(),
+                hosting,
+                std::sync::Arc::new(super::idle_eviction::IdleWorkers(self.groups.clone())),
+            ),
+            stall: self.config.ensure_task_stall,
+        }
+    }
+
     /// Number of active workers (total across all keys, including checked-out).
     ///
     /// Counts sequential group workers, shared GPU workers, and TCP workers.

@@ -22,136 +22,136 @@
 //! every cache-relevant read site shares one tested implementation
 //! rather than each maintaining its own match-and-reject.
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::mpsc;
 
-use crate::api::PositiveSeconds;
 use crate::types::worker_v2::ProgressEventV2;
-use crate::worker::error::{WorkerError, WorkerWait};
+use crate::worker::error::WorkerError;
+use crate::worker::{ResponseWait, RunningWait};
 
 use super::WorkerHandle;
 use super::protocol::WorkerResponse;
-use serde::Deserialize;
+
+/// A source of worker responses: one complete response per call, by the one
+/// line rule ([`super::protocol::WireLine`]), with the source's own account
+/// of a pipe that broke or closed.
+///
+/// The stdio worker ([`WorkerHandle`]), the TCP worker
+/// (`crate::worker::TcpWorkerHandle`) and, in tests, a bare line reader
+/// implement it, so [`read_skipping_progress`] is the one progress loop all
+/// three run. There used to be three copies of that loop, each changed by
+/// hand when the wait gained progress-driven re-arming.
+pub(crate) trait ResponseSource {
+    /// The next complete response.
+    async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError>;
+}
+
+impl ResponseSource for WorkerHandle {
+    async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError> {
+        // The inherent reader, which drains stderr into `ProcessExited` on a
+        // broken or closed pipe.
+        WorkerHandle::read_response(self).await
+    }
+}
+
+/// Read responses from `source` until a non-`ProgressV2` one arrives, or
+/// `wait` ends.
+///
+/// Each `ProgressV2` event is shown to the wait (a loading wait re-arms on an
+/// advance, a budget on nothing; [`RunningWait::observe`]) and optionally
+/// forwarded to `progress_tx`, dropped if the channel is closed or full:
+/// progress is observability, not flow control, and a slow consumer must not
+/// stall the worker. The first other response is returned for the caller to
+/// match on the variants it expects.
+pub(crate) async fn read_skipping_progress<S: ResponseSource>(
+    source: &mut S,
+    wait: ResponseWait,
+    progress_tx: Option<&mpsc::Sender<ProgressEventV2>>,
+) -> Result<WorkerResponse, WorkerError> {
+    let loading = crate::worker::pool::checkout_wait::ObservedModelLoad::for_wait(&wait);
+    let mut running = RunningWait::start(wait);
+    loop {
+        let response = match running.within(source.read_response()).await {
+            Some(read) => read?,
+            None => return Err(running.expired()),
+        };
+        match response {
+            WorkerResponse::ProgressV2 { event } => {
+                running.observe(&event);
+                if let (Some(loading), ProgressEventV2::Load(load)) = (&loading, &event) {
+                    loading.report(load);
+                }
+                if let Some(tx) = progress_tx {
+                    let _ = tx.try_send(event);
+                }
+            }
+            other => return Ok(other),
+        }
+    }
+}
 
 impl WorkerHandle {
-    /// Read JSON-line responses from `reader` until either the deadline
-    /// elapses or a non-`ProgressV2` `WorkerResponse` arrives.
-    ///
-    /// Each `ProgressV2` event encountered is optionally forwarded to
-    /// `progress_tx` (drops silently if the channel is closed or full)
-    /// and the loop continues. The first non-progress response is
-    /// returned to the caller, which then matches on the variants it
-    /// expects (`Capabilities`, `Health`, `Infer`, etc.) the same way
-    /// it would have if it had called `read_response()` directly.
-    ///
-    /// This is the static, reader-driven testable shape. The
-    /// instance-method twin
-    /// [`Self::read_response_skipping_progress_via_self`] keeps the
-    /// stderr-drain / `ProcessExited` attribution that
-    /// [`Self::read_response`] performs on pipe errors; production
-    /// sites use that one. The static shape exists so the loop
-    /// discipline is unit-testable without spawning a child process.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// [`read_skipping_progress`] on this worker, marking the request flight
+    /// idle once a terminal response was read (the worker is then safe to
+    /// reuse).
+    pub(super) async fn read_response_skipping_progress_via_self(
+        &mut self,
+        wait: ResponseWait,
+        progress_tx: Option<&mpsc::Sender<ProgressEventV2>>,
+    ) -> Result<WorkerResponse, WorkerError> {
+        let response = read_skipping_progress(self, wait, progress_tx).await?;
+        self.request_flight = super::RequestFlight::Idle;
+        Ok(response)
+    }
+
+    /// [`read_skipping_progress`] over a bare line reader, so the loop can be
+    /// tested without spawning a worker.
+    #[cfg(test)]
     pub(super) async fn read_response_skipping_progress<R>(
         reader: &mut R,
-        waited_for: WorkerWait,
-        limit: PositiveSeconds,
+        wait: ResponseWait,
         progress_tx: Option<&mpsc::Sender<ProgressEventV2>>,
     ) -> Result<WorkerResponse, WorkerError>
     where
-        R: AsyncBufRead + Unpin,
+        R: tokio::io::AsyncBufRead + Unpin,
     {
-        let deadline = crate::worker::Deadline::after(limit);
+        read_skipping_progress(&mut LineSource(reader), wait, progress_tx).await
+    }
+}
+
+/// A bare line reader as a [`ResponseSource`], for tests: the one line rule,
+/// with an end of stream or a read error reported as a protocol error (there
+/// is no child process to drain).
+#[cfg(test)]
+struct LineSource<'a, R>(&'a mut R);
+
+#[cfg(test)]
+impl<R: tokio::io::AsyncBufRead + Unpin> ResponseSource for LineSource<'_, R> {
+    async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError> {
+        use serde::Deserialize;
+        use tokio::io::AsyncBufReadExt;
         let mut noise = super::protocol::NoiseRun::default();
         loop {
             let mut line = String::new();
-            let read_fut = reader.read_line(&mut line);
-            // Wrap the per-line read in `timeout_at` so a stalled
-            // worker can never hold the supervisor forever, regardless
-            // of how many progress events it has already emitted.
-            let bytes = match deadline.within(read_fut).await {
-                Some(Ok(b)) => b,
-                Some(Err(io_err)) => {
-                    return Err(WorkerError::Protocol(format!(
-                        "I/O error reading response: {io_err}"
-                    )));
-                }
-                None => return Err(WorkerError::Timeout { waited_for, limit }),
-            };
+            let bytes = self.0.read_line(&mut line).await.map_err(|io_err| {
+                WorkerError::Protocol(format!("I/O error reading response: {io_err}"))
+            })?;
             if bytes == 0 {
                 return Err(WorkerError::Protocol(
                     "worker closed stdout before delivering a final response".into(),
                 ));
             }
-
-            // The one line rule every reader applies.
-            let message = match super::protocol::WireLine::classify(&line) {
-                super::protocol::WireLine::Blank => continue,
-                super::protocol::WireLine::Noise => {
-                    noise
-                        .noise(&line)
-                        .map_err(super::protocol::NoiseLimit::into_worker_error)?;
-                    continue;
-                }
-                super::protocol::WireLine::Message(message) => message,
-            };
-            noise.message();
-            let response = WorkerResponse::deserialize(&message).map_err(|e| {
-                WorkerError::Protocol(format!(
-                    "failed to decode worker response: {e} (line: {})",
-                    super::protocol::excerpt(line.trim())
-                ))
-            })?;
-
-            match response {
-                WorkerResponse::ProgressV2 { event } => {
-                    // Forward to the optional progress channel. Drop
-                    // silently if the channel is closed or full
-                    // progress is observability, not flow control, and
-                    // a slow consumer must not stall the worker.
-                    if let Some(tx) = progress_tx {
-                        let _ = tx.try_send(event);
-                    }
-                    continue;
-                }
-                other => return Ok(other),
-            }
-        }
-    }
-
-    /// Instance-method twin of [`Self::read_response_skipping_progress`].
-    ///
-    /// Production sites use this one because it delegates to
-    /// [`Self::read_response`], which preserves the BrokenPipe →
-    /// `drain_stderr_tail` → `WorkerError::ProcessExited` attribution
-    /// the static helper cannot do (it has no access to the child or
-    /// stderr handle). The dispatch contract, skip every
-    /// `ProgressV2`, optionally forward to the channel, return the
-    /// first non-progress response: is identical.
-    pub(super) async fn read_response_skipping_progress_via_self(
-        &mut self,
-        waited_for: WorkerWait,
-        limit: PositiveSeconds,
-        progress_tx: Option<&mpsc::Sender<ProgressEventV2>>,
-    ) -> Result<WorkerResponse, WorkerError> {
-        let deadline = crate::worker::Deadline::after(limit);
-        loop {
-            let response = match deadline.within(self.read_response()).await {
-                Some(read) => read?,
-                None => return Err(WorkerError::Timeout { waited_for, limit }),
-            };
-
-            match response {
-                WorkerResponse::ProgressV2 { event } => {
-                    if let Some(tx) = progress_tx {
-                        let _ = tx.try_send(event);
-                    }
-                    continue;
-                }
-                other => {
-                    // A complete terminal response was read: safe to reuse.
-                    self.request_flight = super::RequestFlight::Idle;
-                    return Ok(other);
+            match super::protocol::WireLine::classify(&line) {
+                super::protocol::WireLine::Blank => {}
+                super::protocol::WireLine::Noise => noise
+                    .noise(&line)
+                    .map_err(super::protocol::NoiseLimit::into_worker_error)?,
+                super::protocol::WireLine::Message(message) => {
+                    return WorkerResponse::deserialize(&message).map_err(|e| {
+                        WorkerError::Protocol(format!(
+                            "failed to decode worker response: {e} (line: {})",
+                            super::protocol::excerpt(line.trim())
+                        ))
+                    });
                 }
             }
         }
@@ -161,7 +161,9 @@ impl WorkerHandle {
 #[cfg(test)]
 mod progress_preamble_tests {
     use super::*;
+    use crate::api::PositiveSeconds;
     use crate::types::worker_v2::WorkerRequestIdV2;
+    use crate::worker::error::WorkerWait;
     use tokio::io::BufReader;
 
     /// Wall-clock window large enough that no test should ever miss it.
@@ -174,15 +176,15 @@ mod progress_preamble_tests {
     /// (ensure_task time), and HuggingFace download (Whisper / pyannote
     /// / transformers warm-up time).
     const STANZA_CATALOG_PROGRESS: &str = concat!(
-        r#"{"op": "progress_v2", "event": {"request_id": "", "completed": 0, "total": 0, "stage": "downloading_stanza_catalog"}}"#,
+        r#"{"op": "progress_v2", "event": {"scope": "load", "stage": "downloading_stanza_catalog", "measure": {"kind": "phase", "edge": "begin"}}}"#,
         "\n",
     );
     const STANZA_LANG_PROGRESS: &str = concat!(
-        r#"{"op": "progress_v2", "event": {"request_id": "", "completed": 0, "total": 0, "stage": "downloading_stanza_lang_zh"}}"#,
+        r#"{"op": "progress_v2", "event": {"scope": "load", "stage": "downloading_stanza_lang_zh", "measure": {"kind": "phase", "edge": "begin"}}}"#,
         "\n",
     );
     const HF_MODEL_PROGRESS: &str = concat!(
-        r#"{"op": "progress_v2", "event": {"request_id": "", "completed": 0, "total": 0, "stage": "downloading_hf_openai_whisper-large-v3"}}"#,
+        r#"{"op": "progress_v2", "event": {"scope": "load", "stage": "downloading_hf_openai_whisper-large-v3", "measure": {"kind": "phase", "edge": "begin"}}}"#,
         "\n",
     );
 
@@ -211,8 +213,10 @@ mod progress_preamble_tests {
             let mut reader = BufReader::new(reader);
             let result = WorkerHandle::read_response_skipping_progress(
                 &mut reader,
-                WorkerWait::Capabilities,
-                crate::worker::CAPABILITY_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Capabilities,
+                    limit: crate::worker::CAPABILITY_TIMEOUT,
+                },
                 None,
             )
             .await;
@@ -251,8 +255,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -266,8 +272,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -281,8 +289,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -296,8 +306,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -311,8 +323,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -325,8 +339,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(CAPABILITIES_RESPONSE.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -344,8 +360,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -363,8 +381,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             Some(&tx),
         )
         .await
@@ -376,7 +396,7 @@ mod progress_preamble_tests {
         drop(tx);
         let mut stages = Vec::new();
         while let Some(event) = rx.recv().await {
-            stages.push(event.stage);
+            stages.push(event.stage().to_owned());
         }
         assert_eq!(
             stages.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -392,8 +412,10 @@ mod progress_preamble_tests {
         // No tx provided; helper must still complete cleanly.
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -410,8 +432,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(ERROR_RESPONSE.as_bytes());
         let resp = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await
@@ -433,8 +457,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let result = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await;
@@ -444,9 +470,9 @@ mod progress_preamble_tests {
         );
     }
 
-    /// A reader that never delivers a line ends at the limit with a typed
-    /// timeout naming what was awaited, which the retry policy reads without
-    /// parsing a message.
+    /// A budget read that never delivers a line ends at the limit with a
+    /// typed timeout naming what was awaited, which the retry policy reads
+    /// without parsing a message.
     #[tokio::test(start_paused = true)]
     async fn returns_a_typed_timeout_when_the_limit_passes() {
         // The writer half is held open and never written, so the read never
@@ -455,25 +481,208 @@ mod progress_preamble_tests {
         let mut reader = BufReader::new(reader);
         let result = WorkerHandle::read_response_skipping_progress(
             &mut reader,
-            WorkerWait::EnsureTask {
-                task: crate::worker::InferTask::Morphosyntax,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Capabilities,
+                limit: PositiveSeconds::literal::<30>(),
             },
-            PositiveSeconds::literal::<30>(),
             None,
         )
         .await;
         match result {
             Err(WorkerError::Timeout { waited_for, limit }) => {
-                assert_eq!(
-                    waited_for,
-                    WorkerWait::EnsureTask {
-                        task: crate::worker::InferTask::Morphosyntax
-                    }
-                );
+                assert_eq!(waited_for, WorkerWait::Capabilities);
                 assert_eq!(limit.get(), 30);
             }
             other => panic!("an elapsed limit must be a typed timeout, got {other:?}"),
         }
+    }
+
+    /// One growth report of a download stage, as `_download_liveness` writes it.
+    fn download_progress(grown_kib: u32) -> String {
+        format!(
+            "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_modelscope_iic_paraformer\", \"measure\": {{\"kind\": \"download_growth\", \"grown_kib\": {grown_kib}}}}}}}\n"
+        )
+    }
+
+    /// Exercise the actual wire reader under a file observation: load
+    /// growth reaches it, the final reply closes it, and request waits do
+    /// not become loading operations merely because they saw a load event.
+    #[tokio::test]
+    async fn model_loading_progress_from_the_wire_has_an_owned_lifetime() {
+        use crate::store::{ModelLoadChange, ModelLoadProgress};
+        use crate::worker::pool::checkout_wait::{observing_pool_waits, tests::RecordingObserver};
+        let observer = std::sync::Arc::new(RecordingObserver::default());
+        let input = format!("{}{ENSURE_TASK_RESPONSE}", download_progress(4096));
+        let mut reader = BufReader::new(input.as_bytes());
+        let response = observing_pool_waits(
+            observer.clone(),
+            WorkerHandle::read_response_skipping_progress(
+                &mut reader,
+                crate::worker::ResponseWait::Loading {
+                    waited_for: crate::worker::LoadingWait::EnsureTask {
+                        task: crate::worker::InferTask::Morphosyntax,
+                    },
+                    stall: crate::worker::LoadingStall::new(GENEROUS),
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("load reply");
+        assert!(matches!(response, WorkerResponse::EnsureTask { .. }));
+        assert_eq!(
+            observer.loads.lock().unwrap().as_slice(),
+            &[
+                ModelLoadChange::Started,
+                ModelLoadChange::Advanced(ModelLoadProgress::Downloading { grown_kib: 4096 }),
+                ModelLoadChange::Ended,
+            ]
+        );
+        observer.loads.lock().unwrap().clear();
+        let mut reader = BufReader::new(input.as_bytes());
+        observing_pool_waits(
+            observer.clone(),
+            WorkerHandle::read_response_skipping_progress(
+                &mut reader,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Health,
+                    limit: GENEROUS,
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("budget reply");
+        assert!(observer.loads.lock().unwrap().is_empty());
+
+        // A startup reports the same measured growth even when its pipe
+        // then closes without a ready line; refusal closes the observation.
+        let input = download_progress(8192);
+        let mut reader = BufReader::new(input.as_bytes());
+        let failure = observing_pool_waits(
+            observer.clone(),
+            WorkerHandle::read_ready_line(&mut reader, crate::worker::LoadingStall::new(GENEROUS)),
+        )
+        .await;
+        assert!(failure.is_err());
+        assert_eq!(
+            observer.loads.lock().unwrap().as_slice(),
+            &[
+                ModelLoadChange::Started,
+                ModelLoadChange::Advanced(ModelLoadProgress::Downloading { grown_kib: 8192 }),
+                ModelLoadChange::Ended,
+            ]
+        );
+    }
+
+    /// THE 2026-11-05 CASE, as a model load. A download that keeps reporting
+    /// growth is waited for however long it runs: here 20 minutes against a
+    /// 120 s stall window, a report every 60 s. The fixed 120 s budget this
+    /// replaced failed it at the second minute.
+    #[tokio::test(start_paused = true)]
+    async fn a_loading_wait_outlasts_its_window_while_progress_advances() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(1 << 16);
+        let worker = tokio::spawn(async move {
+            for minute in 1..=20u32 {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let _ = writer
+                    .write_all(download_progress(minute * 13_000).as_bytes())
+                    .await;
+            }
+            let _ = writer.write_all(ENSURE_TASK_RESPONSE.as_bytes()).await;
+            writer
+        });
+        let mut reader = BufReader::new(reader);
+        let result = WorkerHandle::read_response_skipping_progress(
+            &mut reader,
+            crate::worker::ResponseWait::Loading {
+                waited_for: crate::worker::LoadingWait::EnsureTask {
+                    task: crate::worker::InferTask::Asr,
+                },
+                stall: crate::worker::LoadingStall::new(PositiveSeconds::literal::<120>()),
+            },
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(WorkerResponse::EnsureTask { .. })),
+            "{result:?}"
+        );
+        let _ = worker.await;
+    }
+
+    /// A worker cannot keep itself alive by repeating itself: the same report
+    /// again is not an advance, so the window runs out from the last real one
+    /// and the wait ends as `Stalled`, not as a budget timeout.
+    #[tokio::test(start_paused = true)]
+    async fn repeated_progress_does_not_extend_a_loading_wait() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(1 << 16);
+        let worker = tokio::spawn(async move {
+            for _ in 0..10 {
+                let _ = writer.write_all(download_progress(500).as_bytes()).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+            writer
+        });
+        let mut reader = BufReader::new(reader);
+        let result = WorkerHandle::read_response_skipping_progress(
+            &mut reader,
+            crate::worker::ResponseWait::Loading {
+                waited_for: crate::worker::LoadingWait::EnsureTask {
+                    task: crate::worker::InferTask::Asr,
+                },
+                stall: crate::worker::LoadingStall::new(PositiveSeconds::literal::<120>()),
+            },
+            None,
+        )
+        .await;
+        match result {
+            Err(WorkerError::Stalled { waited_for, stall }) => {
+                assert_eq!(
+                    waited_for,
+                    crate::worker::LoadingWait::EnsureTask {
+                        task: crate::worker::InferTask::Asr
+                    }
+                );
+                assert_eq!(stall.window().get(), 120);
+            }
+            other => panic!("a repeating worker must stall, got {other:?}"),
+        }
+        worker.abort();
+    }
+
+    /// Progress never extends a budget: a request that reports progress
+    /// forever still ends at its limit.
+    #[tokio::test(start_paused = true)]
+    async fn progress_does_not_extend_a_budget() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(1 << 16);
+        let worker = tokio::spawn(async move {
+            for minute in 1..=10u32 {
+                let _ = writer
+                    .write_all(download_progress(minute * 1_000).as_bytes())
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            writer
+        });
+        let mut reader = BufReader::new(reader);
+        let result = WorkerHandle::read_response_skipping_progress(
+            &mut reader,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Capabilities,
+                limit: PositiveSeconds::literal::<30>(),
+            },
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(WorkerError::Timeout { .. })),
+            "{result:?}"
+        );
+        worker.abort();
     }
 
     #[tokio::test]
@@ -485,8 +694,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(stdout.as_bytes());
         let result = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await;
@@ -511,8 +722,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(below.as_bytes());
         let ok = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await;
@@ -522,8 +735,10 @@ mod progress_preamble_tests {
         let mut r = BufReader::new(at_limit.as_bytes());
         let error = WorkerHandle::read_response_skipping_progress(
             &mut r,
-            WorkerWait::Health,
-            GENEROUS,
+            crate::worker::ResponseWait::Budget {
+                waited_for: WorkerWait::Health,
+                limit: GENEROUS,
+            },
             None,
         )
         .await

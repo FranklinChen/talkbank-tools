@@ -4,9 +4,11 @@
 //!
 //! - **Per-file.** The command has no `--lang` at all. Each input file's
 //!   processing language is read from its own `@Languages:` header (morphotag,
-//!   translate, align) or is a constant the command owns (coref, which is
-//!   English-only). A job-level language would be a placeholder, and the
+//!   translate, align). A job-level language would be a placeholder, and the
 //!   2026-05-03 incident is what a placeholder costs.
+//! - **Fixed.** No `--lang` either, but the command runs in one language it
+//!   owns (coref, which is English-only), so its workers, and the probe that
+//!   prepares them, are keyed by that language.
 //! - **Job-level.** The command carries one resolved ISO code for every file
 //!   (utseg).
 //!
@@ -24,7 +26,7 @@
 //! [`JobLanguage`] and cannot be handed a per-file job; a per-file dispatcher
 //! takes no language at all and cannot demand one.
 
-use crate::api::{LanguageCode3, LanguageSpec, ReleasedCommand};
+use crate::api::{LanguageCode3, LanguageSpec, ReleasedCommand, WorkerLanguage};
 
 /// Where one command's processing language comes from.
 ///
@@ -32,12 +34,56 @@ use crate::api::{LanguageCode3, LanguageSpec, ReleasedCommand};
 /// command cannot compile until it states which shape it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommandLanguageSource {
-    /// No job-level language: the file, or a constant the command owns.
+    /// No job-level language: each file's `@Languages:` decides.
     PerFile,
+    /// No job-level language: the command runs in one language it owns.
+    Fixed(FixedLanguage),
     /// A job-level language: one resolved code, `auto`, or, for transcription
     /// only, a code-switched pair (see [`language_pair_support`]). Commands
     /// dispatched through [`DispatchLanguage`] need exactly one code.
     JobLevel,
+}
+
+/// A language a command owns outright: a closed set, so the code is never a
+/// string literal at a dispatch site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixedLanguage {
+    /// English (`eng`).
+    English,
+}
+
+impl FixedLanguage {
+    /// The ISO 639-3 code.
+    pub(crate) fn code(self) -> LanguageCode3 {
+        match self {
+            Self::English => LanguageCode3::eng(),
+        }
+    }
+}
+
+/// The language coreference runs in: Stanza's English coreference model. The
+/// one owner of that fact for its worker key, its requests and its stamps.
+pub(crate) const COREF_LANGUAGE: FixedLanguage = FixedLanguage::English;
+
+/// The worker language `command`'s capability probe keys by: the fixed
+/// language for a command that owns one, so the probe prepares the very
+/// worker its requests reach; otherwise the job's own language (`per-file`
+/// for a per-file command, whose requests are keyed file by file).
+pub(crate) fn probe_language(command: ReleasedCommand, lang: &LanguageSpec) -> WorkerLanguage {
+    match language_source(command) {
+        CommandLanguageSource::Fixed(language) => WorkerLanguage::from(language.code()),
+        CommandLanguageSource::PerFile | CommandLanguageSource::JobLevel => {
+            lang.to_worker_language()
+        }
+    }
+}
+
+/// Whether `command` takes no `--lang` at submission.
+pub const fn takes_no_job_language(command: ReleasedCommand) -> bool {
+    match language_source(command) {
+        CommandLanguageSource::PerFile | CommandLanguageSource::Fixed(_) => true,
+        CommandLanguageSource::JobLevel => false,
+    }
 }
 
 /// The one owner of the per-file/job-level question.
@@ -51,15 +97,15 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
     match command {
         // No `--lang` on the CLI. Morphotag, translate and compare (whose
         // internal morphotag of the main transcript is the same per-file
-        // resolution) resolve per file from `@Languages:`; coref is
-        // English-only and owns the constant. Native export carries the
-        // existing no-job-language wire value but never invokes linguistic
-        // resolution or reads a CHAT header.
+        // resolution) resolve per file from `@Languages:`. Native export
+        // carries the existing no-job-language wire value but never invokes
+        // linguistic resolution or reads a CHAT header.
         ReleasedCommand::Morphotag
         | ReleasedCommand::Translate
-        | ReleasedCommand::Coref
         | ReleasedCommand::Compare
         | ReleasedCommand::Convert => CommandLanguageSource::PerFile,
+        // No `--lang` either: coref is English-only and owns the language.
+        ReleasedCommand::Coref => CommandLanguageSource::Fixed(COREF_LANGUAGE),
         // Align has no `--lang` either. Its pipeline has always read each
         // file's language from `@Languages:` (the aligner and the UTR engine
         // are admitted against that header, and the provenance stamp names
@@ -166,8 +212,10 @@ impl JobLanguage {
 /// The dispatch shape for one job, derived from its command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DispatchLanguage {
-    /// The command has no job-level language; the file or the command decides.
+    /// The command has no job-level language; each file decides.
     PerFile,
+    /// The command runs in one language it owns.
+    Fixed(FixedLanguage),
     /// The command carries one resolved language for every file.
     Job(JobLanguage),
 }
@@ -214,16 +262,18 @@ impl DispatchLanguage {
         command: ReleasedCommand,
         lang: &LanguageSpec,
     ) -> Result<Self, DispatchLanguageError> {
+        let no_job_language = |shape: Self| match lang {
+            LanguageSpec::PerFile => Ok(shape),
+            LanguageSpec::Auto | LanguageSpec::Resolved(_) | LanguageSpec::Pair(_) => {
+                Err(DispatchLanguageError::UnexpectedJobLanguage {
+                    command,
+                    lang: lang.clone(),
+                })
+            }
+        };
         match language_source(command) {
-            CommandLanguageSource::PerFile => match lang {
-                LanguageSpec::PerFile => Ok(Self::PerFile),
-                LanguageSpec::Auto | LanguageSpec::Resolved(_) | LanguageSpec::Pair(_) => {
-                    Err(DispatchLanguageError::UnexpectedJobLanguage {
-                        command,
-                        lang: lang.clone(),
-                    })
-                }
-            },
+            CommandLanguageSource::PerFile => no_job_language(Self::PerFile),
+            CommandLanguageSource::Fixed(language) => no_job_language(Self::Fixed(language)),
             CommandLanguageSource::JobLevel => match lang {
                 LanguageSpec::Resolved(code) => Ok(Self::Job(JobLanguage(code.clone()))),
                 LanguageSpec::Auto | LanguageSpec::Pair(_) | LanguageSpec::PerFile => {
@@ -241,15 +291,37 @@ impl DispatchLanguage {
 mod tests {
     use super::*;
 
-    /// The defect this module exists to remove: coref is a per-file command,
-    /// so it resolves to the per-file shape rather than being refused for
-    /// lacking a `--lang` it does not have.
+    /// The defect this module exists to remove: coref has no `--lang`, so it
+    /// resolves to its own fixed language rather than being refused for
+    /// lacking a flag it does not have.
     #[test]
-    fn coref_resolves_to_the_per_file_shape() {
+    fn coref_resolves_to_its_fixed_language() {
         assert_eq!(
             DispatchLanguage::resolve(ReleasedCommand::Coref, &LanguageSpec::PerFile)
                 .expect("coref submits PerFile and must dispatch"),
-            DispatchLanguage::PerFile
+            DispatchLanguage::Fixed(FixedLanguage::English)
+        );
+    }
+
+    /// The probe prepares the worker a command's requests reach: English for
+    /// coref, whose requests are keyed by English, and the job's own language
+    /// otherwise.
+    #[test]
+    fn the_probe_language_is_the_language_requests_are_keyed_by() {
+        assert_eq!(
+            probe_language(ReleasedCommand::Coref, &LanguageSpec::PerFile),
+            WorkerLanguage::from(LanguageCode3::eng())
+        );
+        assert_eq!(
+            probe_language(ReleasedCommand::Morphotag, &LanguageSpec::PerFile),
+            WorkerLanguage::PerFile
+        );
+        assert_eq!(
+            probe_language(
+                ReleasedCommand::Utseg,
+                &LanguageSpec::Resolved(LanguageCode3::spa())
+            ),
+            WorkerLanguage::from(LanguageCode3::spa())
         );
     }
 
@@ -296,9 +368,9 @@ mod tests {
     fn exactly_the_no_lang_commands_are_per_file() {
         for command in ReleasedCommand::ALL {
             let expected = match command {
+                ReleasedCommand::Coref => CommandLanguageSource::Fixed(FixedLanguage::English),
                 ReleasedCommand::Morphotag
                 | ReleasedCommand::Translate
-                | ReleasedCommand::Coref
                 | ReleasedCommand::Compare
                 | ReleasedCommand::Convert
                 | ReleasedCommand::Align => CommandLanguageSource::PerFile,

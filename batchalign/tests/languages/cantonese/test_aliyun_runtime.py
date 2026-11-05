@@ -19,10 +19,16 @@ from batchalign.inference.asr import (
     UndiarizedSpeaker,
 )
 from batchalign.inference.languages.cantonese._aliyun_asr import (
+    AliyunAsr,
     _AliyunRunner,
     _ensure_wav,
-    _get_token,
+    _request_token,
 )
+
+
+def _provider() -> AliyunAsr:
+    """An admitted Aliyun account, as ``load_aliyun_asr`` builds one."""
+    return AliyunAsr(ak_id="id", ak_secret="secret", appkey="app")
 
 
 def _config_with_asr(**entries: str) -> configparser.ConfigParser:
@@ -114,10 +120,8 @@ def test_runner_start_streams_audio_chunks(monkeypatch) -> None:
     assert events["stopped"] is True
 
 
-def test_get_token_reports_missing_sdk_dependency(monkeypatch) -> None:
+def test_request_token_reports_missing_sdk_dependency(monkeypatch) -> None:
     original_import = builtins.__import__
-    monkeypatch.setattr(aliyun_asr, "_cached_token", None)
-    monkeypatch.setattr(aliyun_asr, "_cached_token_time", 0.0)
 
     def fake_import(name, *args, **kwargs):
         if name.startswith("aliyunsdkcore"):
@@ -127,21 +131,62 @@ def test_get_token_reports_missing_sdk_dependency(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ImportError, match="Aliyun engine dependencies"):
-        _get_token("id", "secret")
+        _request_token("id", "secret")
 
 
-def test_get_token_uses_cached_value(monkeypatch) -> None:
-    monkeypatch.setattr(aliyun_asr, "_cached_token", "cached")
-    monkeypatch.setattr(aliyun_asr, "_cached_token_time", 10.0)
+def test_a_token_inside_its_window_is_reused(monkeypatch) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(ak_id: str, ak_secret: str) -> str:
+        requests.append((ak_id, ak_secret))
+        return f"token-{len(requests)}"
+
+    clock = iter([10.0, 11.0])
+    monkeypatch.setattr(aliyun_asr, "_request_token", fake_request)
     monkeypatch.setattr(
         "batchalign.inference.languages.cantonese._aliyun_asr.time.monotonic",
-        lambda: 11.0,
+        lambda: next(clock),
     )
+    provider = _provider()
 
-    assert _get_token("id", "secret") == "cached"
+    assert provider._current_token() == "token-1"
+    assert provider._current_token() == "token-1"
+    assert requests == [("id", "secret")]
 
 
-def test_get_token_requires_token_id(monkeypatch) -> None:
+def test_a_token_past_its_window_is_refreshed(monkeypatch) -> None:
+    requests: list[str] = []
+
+    def fake_request(_ak_id: str, _ak_secret: str) -> str:
+        requests.append("asked")
+        return f"token-{len(requests)}"
+
+    clock = iter([0.0, aliyun_asr._TOKEN_TTL_S + 1.0])
+    monkeypatch.setattr(aliyun_asr, "_request_token", fake_request)
+    monkeypatch.setattr(
+        "batchalign.inference.languages.cantonese._aliyun_asr.time.monotonic",
+        lambda: next(clock),
+    )
+    provider = _provider()
+
+    assert provider._current_token() == "token-1"
+    assert provider._current_token() == "token-2"
+
+
+def test_two_accounts_keep_separate_tokens(monkeypatch) -> None:
+    """The cache belongs to the provider object, so a second load's account
+    never reads the first one's token."""
+    monkeypatch.setattr(
+        aliyun_asr, "_request_token", lambda ak_id, _secret: f"token-for-{ak_id}"
+    )
+    first = AliyunAsr(ak_id="a", ak_secret="s", appkey="k")
+    second = AliyunAsr(ak_id="b", ak_secret="s", appkey="k")
+
+    assert first._current_token() == "token-for-a"
+    assert second._current_token() == "token-for-b"
+
+
+def test_request_token_requires_token_id(monkeypatch) -> None:
     client_module = ModuleType("aliyunsdkcore.client")
 
     class AcsClient:
@@ -173,18 +218,12 @@ def test_get_token_requires_token_id(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "aliyunsdkcore", ModuleType("aliyunsdkcore"))
     monkeypatch.setitem(sys.modules, "aliyunsdkcore.client", client_module)
     monkeypatch.setitem(sys.modules, "aliyunsdkcore.request", request_module)
-    monkeypatch.setattr(aliyun_asr, "_cached_token", None)
-    monkeypatch.setattr(aliyun_asr, "_cached_token_time", 0.0)
-    monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._aliyun_asr.time.monotonic",
-        lambda: 1.0,
-    )
 
     with pytest.raises(RuntimeError, match=r"Token\.Id"):
-        _get_token("id", "secret")
+        _request_token("id", "secret")
 
 
-def test_get_token_refreshes_and_caches_value(monkeypatch) -> None:
+def test_request_token_returns_the_issued_token(monkeypatch) -> None:
     client_module = ModuleType("aliyunsdkcore.client")
 
     class AcsClient:
@@ -216,18 +255,8 @@ def test_get_token_refreshes_and_caches_value(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "aliyunsdkcore", ModuleType("aliyunsdkcore"))
     monkeypatch.setitem(sys.modules, "aliyunsdkcore.client", client_module)
     monkeypatch.setitem(sys.modules, "aliyunsdkcore.request", request_module)
-    monkeypatch.setattr(aliyun_asr, "_cached_token", "")
-    monkeypatch.setattr(aliyun_asr, "_cached_token_time", 0.0)
-    monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._aliyun_asr.time.monotonic",
-        lambda: 100.0,
-    )
 
-    token = _get_token("id", "secret")
-
-    assert token == "fresh-token"
-    assert aliyun_asr._cached_token == "fresh-token"
-    assert aliyun_asr._cached_token_time == 100.0
+    assert _request_token("id", "secret") == "fresh-token"
 
 
 def test_ensure_wav_converts_non_wav_audio(monkeypatch) -> None:
@@ -271,7 +300,7 @@ def test_ensure_wav_returns_existing_wav_path() -> None:
     assert temp_dir is None
 
 
-def test_transcribe_to_monologues_cleans_up_temp_dir(monkeypatch) -> None:
+def test_transcribe_cleans_up_temp_dir(monkeypatch) -> None:
     cleanup_called = {"value": False}
 
     class _TempDir:
@@ -297,24 +326,21 @@ def test_transcribe_to_monologues_cleans_up_temp_dir(monkeypatch) -> None:
         ],
     )
 
-    monkeypatch.setattr(aliyun_asr, "_ak_id", "id")
-    monkeypatch.setattr(aliyun_asr, "_ak_secret", "secret")
-    monkeypatch.setattr(aliyun_asr, "_appkey", "app")
-    monkeypatch.setattr(aliyun_asr, "_get_token", lambda *_args: "token")
+    monkeypatch.setattr(aliyun_asr, "_request_token", lambda *_args: "token")
     monkeypatch.setattr(
         aliyun_asr, "_ensure_wav", lambda _path: ("clip.wav", _TempDir())
     )
     monkeypatch.setattr(aliyun_asr, "_AliyunRunner", FakeRunner)
     monkeypatch.setattr(aliyun_asr, "_project_results", lambda _results: expected)
 
-    response = aliyun_asr._transcribe_to_monologues("clip.mp3")
+    response = _provider()._transcribe_path("clip.mp3")
 
     assert response == expected
     assert cleanup_called["value"] is True
 
 
-def test_load_aliyun_asr_stores_credentials() -> None:
-    aliyun_asr.load_aliyun_asr(
+def test_load_aliyun_asr_returns_the_admitted_account(monkeypatch) -> None:
+    provider = aliyun_asr.load_aliyun_asr(
         "yue",
         None,
         config=_config_with_asr(
@@ -326,6 +352,16 @@ def test_load_aliyun_asr_stores_credentials() -> None:
         ),
     )
 
-    assert aliyun_asr._ak_id == "id"
-    assert aliyun_asr._ak_secret == "secret"
-    assert aliyun_asr._appkey == "appkey"
+    seen: dict[str, str] = {}
+
+    def fake_request(ak_id: str, ak_secret: str) -> str:
+        seen.update({"ak_id": ak_id, "ak_secret": ak_secret})
+        return "token"
+
+    monkeypatch.setattr(aliyun_asr, "_request_token", fake_request)
+
+    assert provider._current_token() == "token"
+    assert seen == {"ak_id": "id", "ak_secret": "secret"}
+    assert provider._appkey == "appkey"
+    # Nothing is stored at module level.
+    assert not hasattr(aliyun_asr, "_ak_id")

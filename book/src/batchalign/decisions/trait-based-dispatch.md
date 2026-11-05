@@ -1,7 +1,7 @@
 # Trait-Based Dispatch
 
 **Status:** Current decision
-**Last updated:** 2026-05-21 15:05 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 ## Decision
 
@@ -17,8 +17,8 @@ Batchalign3 has several dispatch dimensions:
 1. **Algorithm strategies**: different implementations of the same
    operation (e.g., global vs. per-speaker UTR alignment).
 2. **Engine selection**: choosing which ML backend to use (Whisper vs.
-   Rev.AI for ASR, Wave2Vec vs. Whisper for FA, Pyannote vs. NeMo for
-   diarization).
+   Rev.AI for ASR, Wave2Vec vs. Whisper for FA, local Pyannote vs.
+   pyannoteAI for diarization).
 3. **Language-specific processing**: per-language rules for morphosyntax,
    number expansion, text normalization.
 4. **Command-level pipelines**: the top-level structure of each command

@@ -1,39 +1,37 @@
 """Tencent Cloud ASR provider for built-in HK/Cantonese engines.
 
-New-style provider: a pair of module-level functions (load + infer)
-instead of an engine class.  The heavy ``TencentRecognizer`` lives in
-``tencent_api.py`` and is kept as-is.
+The ASR load builds a :class:`TencentAsr` around one ``TencentRecognizer``
+(``tencent_api.py``) and records it in the worker's load registry; a request
+transcribes through that object. Nothing is held at module level.
 """
 
 from __future__ import annotations
 
 import configparser
 import logging
+from dataclasses import dataclass
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
-from batchalign.worker._types import (
-    BatchInferRequest,
-    BatchInferResponse,
-)
 
 from ._asr_types import admit_provider_monologues
-from ._common import ProviderNotLoaded, answer_asr_batch
 from ._tencent_api import TencentRecognizer
 
 L = logging.getLogger("batchalign.hk.tencent")
 
-# ---------------------------------------------------------------------------
-# Module-level state
-# ---------------------------------------------------------------------------
 
-_recognizer: TencentRecognizer | None = None
-_lang: LanguageCode = "eng"
+@dataclass(frozen=True, slots=True)
+class TencentAsr:
+    """The Tencent recognizer one ASR load built."""
 
+    recognizer: TencentRecognizer
 
-# ---------------------------------------------------------------------------
-# Provider interface
-# ---------------------------------------------------------------------------
+    def transcribe(self, item: AsrBatchItem) -> MonologueAsrResponse:
+        """Recognize one provider media item into raw speaker monologues."""
+        details = self.recognizer.transcribe(
+            item.audio_path, diarization=item.diarization
+        )
+        return admit_provider_monologues(self.recognizer.monologues(details), item.lang)
 
 
 def load_tencent_asr(
@@ -41,63 +39,19 @@ def load_tencent_asr(
     *,
     engine_model_type: str,
     config: configparser.ConfigParser | None = None,
-) -> None:
-    """Create a ``TencentRecognizer`` and store it in module-level state.
+) -> TencentAsr:
+    """Build the Tencent recognizer for one ASR load.
 
-    Called once at worker startup when ``--engine-overrides`` selects the
-    ``tencent`` ASR provider.
-
-    Takes no ``engine_overrides``: it had none to read. Tencent's one
-    configurable knob is the engine-model type, and the Rust control plane has
-    chosen that since the ISO 639-3 conversion moved there, passing it as
-    ``engine_model_type``. The parameter survived the move unread, which made
-    this loader look as though an override could still change what it loads.
+    Takes no ``engine_overrides``: it has none to read. Tencent's one
+    configurable knob is the engine-model type, which the Rust control plane
+    chooses (through the one ISO 639-3 conversion) and passes as
+    ``engine_model_type``.
     """
-    global _recognizer, _lang
-    _lang = lang
-    _recognizer = TencentRecognizer(
+    recognizer = TencentRecognizer(
         lang=lang, engine_model_type=engine_model_type, config=config
     )
     L.info("Tencent ASR provider loaded for lang=%s, model=%s", lang, engine_model_type)
+    return TencentAsr(recognizer)
 
 
-def infer_tencent_asr(req: BatchInferRequest) -> BatchInferResponse:
-    """Process a batch of ASR items via the Tencent recognizer.
-
-    Each item is an ``AsrBatchItem`` (audio_path, lang, diarization).
-    For each item we call the recognizer to get speaker monologues and
-    return that provider-shaped payload directly. Rust owns the shared
-    token/timing normalization layer after worker deserialization.
-    """
-    transcribe = (
-        ProviderNotLoaded("Tencent ASR provider not loaded")
-        if _recognizer is None
-        else _transcribe_to_monologues
-    )
-    return answer_asr_batch("tencent_asr", req.items, transcribe)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _transcribe_to_monologues(item: AsrBatchItem) -> MonologueAsrResponse:
-    """Run Tencent recognition and return raw speaker monologues."""
-    if _recognizer is None:
-        raise RuntimeError("Tencent recognizer not initialized")
-
-    details = _recognizer.transcribe(item.audio_path, diarization=item.diarization)
-    payload = _recognizer.monologues(details)
-    return admit_provider_monologues(payload, item.lang)
-
-
-def infer_tencent_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:
-    """Run one typed Tencent ASR request for worker protocol V2.
-
-    The V2 worker path should not rebuild a fake ``BatchInferRequest`` just to
-    reach the loaded recognizer. This helper keeps the provider boundary thin:
-    one typed ASR item in, one raw monologue payload out.
-    """
-
-    return _transcribe_to_monologues(item)
+__all__ = ["TencentAsr", "load_tencent_asr"]

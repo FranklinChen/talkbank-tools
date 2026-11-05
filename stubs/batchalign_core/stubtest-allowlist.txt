@@ -11,3 +11,9 @@ batchalign_core.batchalign_core.WorkerErrorKind
 # test_stanza_names_match_rust.
 batchalign_core.batchalign_core.StanzaProcessorName
 batchalign_core.batchalign_core.StanzaRequirementName
+
+# Stub-only protocols: the structural contract of the loaded host an executor
+# is handed (`batchalign.worker._loads` builds the hosts). Never runtime
+# classes; mypy holds every host the worker passes to them.
+batchalign_core.batchalign_core.LoadedHostV2
+batchalign_core.batchalign_core.LoadedAsrHostV2

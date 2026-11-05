@@ -33,7 +33,6 @@ pub(crate) async fn dispatch_translate_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     gateway: &dyn WorkerGateway,
-    should_merge_abbrev: bool,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Translate planning failed: {error}"))
@@ -110,15 +109,7 @@ pub(crate) async fn dispatch_translate_job(
         }
     }
 
-    write_text_results(
-        job,
-        host,
-        &plan,
-        all_results,
-        should_merge_abbrev,
-        "Translate",
-    )
-    .await;
+    write_text_results(job, host, &plan, all_results, "Translate").await;
     Ok(())
 }
 
@@ -240,7 +231,6 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Translate(TranslateOptions {
                     common: CommonOptions::default(),
-                    merge_abbrev: false.into(),
                     ..TranslateOptions::default()
                 }),
                 runtime_state: BTreeMap::new(),
@@ -299,7 +289,7 @@ mod tests {
         let gateway = FakeTranslateGateway::default();
         let job = translate_snapshot(temp.path());
 
-        dispatch_translate_job(&job, &host, &gateway, false)
+        dispatch_translate_job(&job, &host, &gateway)
             .await
             .expect("translate dispatch");
 
@@ -327,9 +317,7 @@ mod tests {
         options.target = LanguageCode3::fra();
         options.common.engine_overrides.translate =
             Some(crate::types::engines::TranslateEngineName::Nllb);
-        dispatch_translate_job(&job, &host, &gateway, false)
-            .await
-            .unwrap();
+        dispatch_translate_job(&job, &host, &gateway).await.unwrap();
         let state = gateway.state.lock().unwrap();
         assert_eq!(
             state
@@ -355,7 +343,7 @@ mod tests {
         let gateway = FakeTranslateGateway::default();
         let job = translate_snapshot(temp.path());
 
-        dispatch_translate_job(&job, &host, &gateway, false)
+        dispatch_translate_job(&job, &host, &gateway)
             .await
             .expect("translate dispatch");
 

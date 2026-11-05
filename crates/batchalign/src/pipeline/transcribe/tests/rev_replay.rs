@@ -186,6 +186,7 @@ async fn replay_output(tokens: Vec<AsrToken>) -> Result<TranscribeOutput, Server
         with_morphosyntax: live.with_morphosyntax,
         cache_policies: live.cache_policies,
         write_wor: live.write_wor,
+        merge_abbrev: live.merge_abbrev,
         media_name: live.media_name,
         engine_extras: live.engine_extras,
     };
@@ -365,6 +366,7 @@ async fn legacy_replay_runs_current_speaker_projection_without_live_inference() 
         with_morphosyntax: opts.with_morphosyntax,
         cache_policies: opts.cache_policies,
         write_wor: opts.write_wor,
+        merge_abbrev: opts.merge_abbrev,
         media_name: opts.media_name,
         engine_extras: opts.engine_extras,
     };

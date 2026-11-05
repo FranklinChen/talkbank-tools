@@ -1,10 +1,10 @@
 # Coping with Upstream Bugs and Limitations: Policy and Workflow
 
 **Status:** Current
-**Last updated:** 2026-05-20 01:09 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 Batchalign integrates several third-party NLP libraries, Stanza,
-Whisper, PyCantonese, Pyannote/NeMo, Rev.AI, Apple MPS, OpenSMILE,
+Whisper, PyCantonese, Pyannote, Rev.AI, Apple MPS, OpenSMILE,
 and others. Each is a working piece of software with real bugs,
 surprising edge cases, and version-to-version behavior changes. This
 document explains our policy for dealing with upstream defects and

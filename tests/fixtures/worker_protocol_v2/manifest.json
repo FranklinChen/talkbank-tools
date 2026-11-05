@@ -78,10 +78,6 @@
     },
     {
       "schema": "execute_request",
-      "file": "execute_request_speaker_nemo_prepared_audio.json"
-    },
-    {
-      "schema": "execute_request",
       "file": "execute_request_speaker_pyannote_ai_prepared_audio.json"
     },
     {
@@ -157,8 +153,32 @@
       "file": "progress_event_fa.json"
     },
     {
+      "schema": "progress_event",
+      "file": "progress_event_download_growth.json"
+    },
+    {
+      "schema": "progress_event",
+      "file": "progress_event_phase.json"
+    },
+    {
       "schema": "shutdown_request",
       "file": "shutdown_request.json"
+    },
+    {
+      "schema": "execute_request",
+      "file": "execute_request_fa_prepare.json"
+    },
+    {
+      "schema": "execute_request",
+      "file": "execute_request_fa_execute.json"
+    },
+    {
+      "schema": "execute_response",
+      "file": "execute_response_fa_prepared.json"
+    },
+    {
+      "schema": "execute_response",
+      "file": "execute_response_fa_preparation_refused.json"
     }
   ]
 }

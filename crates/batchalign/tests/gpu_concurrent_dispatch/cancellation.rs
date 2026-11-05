@@ -109,7 +109,9 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
     let pool_config = PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<60>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<60>(),
+        ),
         test_echo: true,
         test_delay_ms: ECHO_DISPATCH_MS,
         max_workers_per_key: PerProfile::uniform(1),

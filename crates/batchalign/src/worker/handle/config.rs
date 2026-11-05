@@ -1,6 +1,6 @@
 //! Configuration types for spawning Python worker processes.
 
-use crate::api::{LanguageCode3, MemoryMb, NumSpeakers, WorkerLanguage};
+use crate::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
 use crate::config::ServerConfig;
 use crate::host_facts::{HostSnapshot, RuntimeHost};
 use crate::worker::python::resolve_python_executable;
@@ -152,8 +152,9 @@ pub struct WorkerConfig {
     pub engine_overrides: String,
     /// Use test-echo mode (no ML models).
     pub test_echo: bool,
-    /// Longest wait for the worker to become ready.
-    pub ready_timeout_s: crate::api::PositiveSeconds,
+    /// How long the starting worker may go without advancing
+    /// (`worker_startup_stall_s`), for a stdio worker and a TCP daemon alike.
+    pub startup_stall: crate::worker::LoadingStall,
     /// Verbosity level (0=warn, 1=info, 2=debug, 3+=trace).
     /// Forwarded to the Python worker via `--verbose N` to control its logging
     /// level, enabling end-to-end verbosity from a single CLI `-v` flag.
@@ -181,7 +182,7 @@ impl WorkerConfig {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
             runtime,
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
@@ -207,13 +208,6 @@ impl WorkerConfig {
     /// Return the human-readable bootstrap label for logs and status.
     pub fn bootstrap_label(&self) -> String {
         self.bootstrap_target().label()
-    }
-
-    /// Resolve the startup reservation for this worker spawn using the
-    /// runtime-owned memory tier rather than raw host auto-detection.
-    pub fn startup_reservation_mb(&self) -> MemoryMb {
-        self.profile
-            .startup_reservation_mb_for_tier(&self.runtime.host.tier())
     }
 }
 
@@ -266,15 +260,6 @@ impl WorkerLaunch {
         }
     }
 
-    /// Whether the worker loads a task's models only on `ensure_task`, as
-    /// the pool asks before it dispatches.
-    pub(crate) fn loads_on_demand(&self) -> bool {
-        match self.bootstrap_mode {
-            WorkerBootstrapMode::LazyProfile => true,
-            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => false,
-        }
-    }
-
     /// The worker's language.
     pub(crate) fn lang(&self) -> &WorkerLanguage {
         &self.lang
@@ -287,20 +272,22 @@ impl WorkerLaunch {
     }
 
     /// A worker config that spawns this worker again with `python_path` from
-    /// `runtime`; everything not recorded (timeouts, verbosity, credentials,
-    /// and the host) comes from `runtime`.
+    /// `runtime`; everything not recorded (verbosity, credentials, and the
+    /// host) comes from `runtime`, and its startup stall is the operator's
+    /// configured `startup_stall`, as a server on this host would give it.
     pub(crate) fn into_config(
         self,
         python_path: String,
         runtime: WorkerRuntimeConfig,
+        startup_stall: crate::worker::LoadingStall,
     ) -> WorkerConfig {
         let mut runtime = runtime.with_bootstrap_mode(self.bootstrap_mode);
         runtime.force_cpu = self.force_cpu;
         runtime.allow_mps = self.allow_mps;
         runtime.gpu_thread_pool_size = self.gpu_thread_pool_size;
         // Spelled out in full: a replay is a diagnostic launch, so it never
-        // runs the echo test path, keeps the default ready budget and quiet
-        // logging, and applies no operator task-timeout overrides.
+        // runs the echo test path, keeps quiet logging, and applies no
+        // operator task-timeout overrides.
         WorkerConfig {
             python_path,
             profile: self.profile,
@@ -309,7 +296,7 @@ impl WorkerLaunch {
             num_speakers: self.num_speakers,
             engine_overrides: self.engine_overrides,
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall,
             verbose: 0,
             runtime,
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
@@ -342,15 +329,6 @@ mod worker_language_arg {
 mod tests {
     use super::{WorkerConfig, WorkerRuntimeConfig};
     use crate::worker::{InferTask, WorkerProfile};
-
-    #[test]
-    fn startup_reservation_uses_runtime_memory_tier() {
-        let config = WorkerConfig {
-            profile: WorkerProfile::Stanza,
-            ..WorkerConfig::for_tests()
-        };
-        assert_eq!(config.startup_reservation_mb().0, 3_000);
-    }
 
     /// A test launch carries the declared test host and no credentials.
     #[test]

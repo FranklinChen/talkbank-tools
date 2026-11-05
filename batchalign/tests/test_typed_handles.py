@@ -17,7 +17,14 @@ from batchalign.inference.types import (
     CheckpointPinnedLanguage,
     WhisperASRHandle,
 )
-from batchalign.worker._types_v2 import DetectWhisperLanguageV2, ForceWhisperLanguageV2
+from batchalign.tests._snapshots import transformers_snapshot
+from batchalign.worker._types_v2 import (
+    DetectWhisperLanguageV2,
+    ForceWhisperLanguageV2,
+    WhisperModelIdentityV2,
+)
+
+_STAND_IN_IDENTITY = WhisperModelIdentityV2(asr=transformers_snapshot().loaded)
 
 
 class TestWhisperASRHandle:
@@ -43,6 +50,7 @@ class TestWhisperASRHandle:
             config="cfg",
             decoding=DetectWhisperLanguageV2(),
             sample_rate=16000,
+            model_identity=_STAND_IN_IDENTITY,
         )
         result = handle(
             "audio_data", batch_size=1, generate_kwargs={"task": "transcribe"}
@@ -59,6 +67,7 @@ class TestWhisperASRHandle:
             config="my_config",
             decoding=ForceWhisperLanguageV2(token=token),
             sample_rate=16000,
+            model_identity=_STAND_IN_IDENTITY,
         )
         assert handle.gen_kwargs() == {
             "repetition_penalty": 1.001,
@@ -74,6 +83,7 @@ class TestWhisperASRHandle:
             config="my_config",
             decoding=DetectWhisperLanguageV2(),
             sample_rate=16000,
+            model_identity=_STAND_IN_IDENTITY,
         )
         assert handle.gen_kwargs() == {
             "repetition_penalty": 1.001,
@@ -106,6 +116,7 @@ class TestWhisperASRHandle:
             config="ft_config",
             decoding=CheckpointPinnedLanguage(),
             sample_rate=16000,
+            model_identity=_STAND_IN_IDENTITY,
         )
         assert handle.gen_kwargs() == {"max_new_tokens": 444}
 

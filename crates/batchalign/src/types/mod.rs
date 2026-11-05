@@ -60,8 +60,7 @@
 //!     "options": {
 //!         "command": "morphotag",
 //!         "retokenize": false,
-//!         "skipmultilang": false,
-//!         "merge_abbrev": false
+//!         "skipmultilang": false
 //!     }
 //! }"#;
 //!

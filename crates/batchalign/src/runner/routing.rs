@@ -146,19 +146,29 @@ pub(super) async fn dispatch_job_with_execution_context(
     // language) and forwarded; a per-file text command forwards the `per-file`
     // sentinel, which the Python bootstrap recognises, with `auto`, as a
     // non-ISO value and skips eager Stanza model load for, see
-    // `batchalign/worker/_model_loading/bootstrap.py::_load_single_task`.
+    // `batchalign/worker/_model_loading/bootstrap.py::record_load`. A
+    // command that owns its language (coref) is probed in that language
+    // (`dispatch_language::probe_language`), because its requests are keyed
+    // by it: the probe's `ensure_task` then prepares the worker they reach.
     let gpu_models = family.gpu_models();
-    if let Err(refusal) = probe_command_worker(
+    match probe_command_worker(
         pool,
         command,
-        job.dispatch.lang.to_worker_language(),
+        crate::dispatch_language::probe_language(command, &job.dispatch.lang),
         &job.dispatch.options,
         &gpu_models,
+        crate::infer_retry::Cancellation::Token(&job.cancel_token),
     )
     .await
     {
-        fail_job(&job, host, format!("cannot run '{command}': {refusal}")).await;
-        return Ok(());
+        Ok(_) => {}
+        // The cancellation path records the job's end; there is nothing to
+        // fail.
+        Err(crate::runner::dispatch::WorkerProbeRefusal::Cancelled) => return Ok(()),
+        Err(refusal) => {
+            fail_job(&job, host, format!("cannot run '{command}': {refusal}")).await;
+            return Ok(());
+        }
     }
     // Skipped for per-file text commands (morphotag, translate, coref): they
     // have no job-level language, and pre-scaling against a placeholder would
@@ -300,7 +310,6 @@ async fn dispatch_batched_text_command(
                     l2_policy: plan.l2_policy,
                     pos_hint_policy: plan.pos_hint_policy,
                     ca_policy: plan.ca_policy,
-                    should_merge_abbrev: plan.should_merge_abbrev,
                     review_level: plan.review_level,
                 },
                 num_workers,
@@ -310,7 +319,7 @@ async fn dispatch_batched_text_command(
         // Compare takes no language either: its internal morphotag of each
         // main transcript reads that file's `@Languages:` header.
         (DispatchLanguage::PerFile, ReleasedCommand::Compare) => {
-            dispatch_compare_job(job, host, &gateway, &plan.mwt, plan.should_merge_abbrev).await
+            dispatch_compare_job(job, host, &gateway, &plan.mwt).await
         }
         (DispatchLanguage::Job(job_language), ReleasedCommand::Utseg) => {
             // Refuse a language with no segmenter before dispatching, for the
@@ -340,24 +349,19 @@ async fn dispatch_batched_text_command(
                     return Ok(());
                 }
             };
-            dispatch_utseg_job(
-                job,
-                host,
-                Arc::new(gateway),
-                plan.should_merge_abbrev,
-                &route,
-            )
-            .await
+            dispatch_utseg_job(job, host, Arc::new(gateway), &route).await
         }
         // Translation and coreference name their engines on every result
         // they apply, so nothing about the worker's report travels with them.
         // Neither takes a language: translate resolves one per file from that
         // file's `@Languages:` header, and coref is English-only.
         (DispatchLanguage::PerFile, ReleasedCommand::Translate) => {
-            dispatch_translate_job(job, host, &gateway, plan.should_merge_abbrev).await
+            dispatch_translate_job(job, host, &gateway).await
         }
-        (DispatchLanguage::PerFile, ReleasedCommand::Coref) => {
-            dispatch_coref_job(job, host, &gateway, plan.should_merge_abbrev).await
+        // Its English requests reach the English worker the probe prepared
+        // (`dispatch_language::probe_language`).
+        (DispatchLanguage::Fixed(_), ReleasedCommand::Coref) => {
+            dispatch_coref_job(job, host, &gateway).await
         }
         // A programming error, not a user error, in one of two ways: a command
         // whose catalog entry declares `BatchedTextInfer` has no arm above, or
@@ -375,6 +379,7 @@ async fn dispatch_batched_text_command(
         (language, command) => {
             let shape = match language {
                 DispatchLanguage::PerFile => "per-file",
+                DispatchLanguage::Fixed(_) => "fixed",
                 DispatchLanguage::Job(_) => "job-level",
             };
             fail_job(
@@ -577,7 +582,8 @@ impl JobLevelFamily {
             Self::Transcribe(plan) => plan.gpu_models(),
             Self::Benchmark(plan) => plan.gpu_models(),
             Self::MediaAnalysis(plan) => plan.gpu_models(),
-            Self::SpeakerIdentity | Self::BatchedText => GpuModelPlan::without_engines(),
+            Self::SpeakerIdentity => GpuModelPlan::speaker_identity(),
+            Self::BatchedText => GpuModelPlan::without_engines(),
         }
     }
 }

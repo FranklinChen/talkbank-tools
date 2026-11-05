@@ -1,7 +1,7 @@
 # Observability Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 21:04 EST
 
 ## Release boundary
 
@@ -98,9 +98,8 @@ loads the composition once per process rather than re-reading it per request.
 flowchart LR
     J[Typed command options] --> K[WorkerKey<br/>target + language + engine recipe]
     K --> W[Exact selected worker]
-    W -->|lazy profile| L[ensure_task for this recipe]
-    W -->|eager profile or task| C[capabilities]
-    L --> C
+    W --> L[ensure_task for this recipe, every mode]
+    L --> C[capabilities]
     C --> I[Selected engine version]
     I --> R[PipelineServices]
     I --> H[Cache lookup and commit]
@@ -505,8 +504,10 @@ current/total counters. `diagnosed` is terminal written output that carries its
 admission findings and shortfalls, bounded (see the developer page on CHAT
 validation failures); a job with diagnosed files is not a clean success
 (`diagnosed_files` on the job list, CLI exit code 7).
-While any of a file's worker checkouts waits on a saturated pool, its stage
-is `waiting_for_worker` ("Waiting for a worker"), and otherwise the stage its
+While a worker startup or a model load of the file is queued for host
+memory, its stage is `waiting_for_host_memory` ("Waiting for host memory");
+while any of its worker checkouts waits on a saturated pool, it is
+`waiting_for_worker` ("Waiting for a worker"); otherwise it is the stage its
 pipeline last reported, with its counts: the store keeps the open waits and
 the reported stage as two facts and derives what the file shows. The wait has no deadline: it is logged and
 reconciled once per report interval, and ends as `PoolAccountingBroken` only
@@ -563,8 +564,11 @@ from COMPLETED files, not a mid-flight utterance percentage.
 
 Provenance comes from the dispatch site, which knows the file, the language and
 the chunk for certain. The wire event's `stage` field is ignored:
-`batchalign/worker/_protocol.py::write_progress_event` hard-codes
-`stage="stanza_processing"` on every event, so it identifies nothing.
+`batchalign/worker/_text_v2.py` writes `stage="stanza_processing"` on every
+event, so it identifies nothing. Only a `request`-scoped event's counts are
+read (`BackendProgressPort::report` matches on the scope); a model load's
+progress that arrives during the request is logged and never counted as
+utterances.
 
 ```mermaid
 sequenceDiagram
@@ -577,7 +581,7 @@ sequenceDiagram
     Port->>Drain: GroupTotal {source_id, group, total}
     Drain->>Ledger: record()
     Drain->>Store: set_file_progress(0 / total)
-    Py->>Port: progress_v2 {completed, total}
+    Py->>Port: progress_v2 {scope: request, progress: {completed, total}}
     Port->>Drain: Chunk {source_id, group, chunk, completed}
     Drain->>Ledger: record()
     Note over Drain,Ledger: publishes on a 2s cadence when changed,\nand republishes after 120s of silence

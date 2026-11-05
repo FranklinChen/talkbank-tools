@@ -45,7 +45,6 @@ async fn error_morphotag_unsupported_language_rejected() {
             "override_media_cache": false,
             "retokenize": false,
             "skipmultilang": false,
-            "merge_abbrev": false,
             "no_l2_morphotag": false
         },
         "paths_mode": false,

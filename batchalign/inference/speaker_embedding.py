@@ -48,8 +48,6 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from batchalign.inference.pyannote_local import PinnedHuggingFaceArtifact
 
-_EMBEDDING_MODEL: SpeakerEmbeddingModel | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class SpeakerEmbeddingSpanRequest:
@@ -137,68 +135,62 @@ class SpeakerEmbeddingModel:
 
 
 def load_speaker_embedding_model() -> SpeakerEmbeddingModel:
-    """Load the pinned embedding model once per worker process.
+    """Load the pinned embedding model, downloading it if it is not cached.
 
-    Lazily, and behind the same reclassification the diarization loader uses,
-    so a credential or gated-repository failure arrives as the typed
-    ``ModelAccessDeniedError`` the control plane already knows how to surface.
+    Called once, by the speaker task load of a worker whose plan selects the
+    embedding model (``batchalign.worker._model_loading.speaker``), under
+    ``download_liveness``. Behind the same reclassification the diarization
+    loader uses, so a credential or gated-repository failure arrives as the
+    typed ``ModelAccessDeniedError`` the control plane already knows how to
+    surface.
     """
 
-    global _EMBEDDING_MODEL
+    from batchalign.inference.pyannote_local import (
+        _download_pinned_artifact,
+        _reclassified_access_error,
+        load_local_pyannote_model_graph,
+        resolve_huggingface_hub_token,
+    )
+    from batchalign.worker._download_liveness import HfRepo, download_liveness
 
-    if _EMBEDDING_MODEL is None:
-        from batchalign.inference.pyannote_local import (
-            _download_pinned_artifact,
-            _reclassified_access_error,
-            load_local_pyannote_model_graph,
-            resolve_huggingface_hub_token,
-        )
-        from batchalign.worker._progress import emit_hf_download_if_missing
-
-        graph = load_local_pyannote_model_graph()
-        artifact = graph.embedding
-        emit_hf_download_if_missing(
-            artifact.repo_id,
-            kind="speaker embedding",
-            artifacts=(artifact.filename,),
-            revision=artifact.revision,
-        )
-        token = resolve_huggingface_hub_token()
+    graph = load_local_pyannote_model_graph()
+    artifact = graph.embedding
+    token = resolve_huggingface_hub_token()
+    with download_liveness(
+        HfRepo(artifact.repo_id), what=f"{artifact.repo_id} for speaker embedding"
+    ):
         checkpoint = _download_pinned_artifact(artifact, token=token)
-        from batchalign.inference.audio import (
-            pyannote_import_without_torchcodec_notice,
-        )
+    from batchalign.inference.audio import (
+        pyannote_import_without_torchcodec_notice,
+    )
 
-        try:
-            import torch
+    try:
+        import torch
 
-            with pyannote_import_without_torchcodec_notice():
-                from pyannote.audio.pipelines.speaker_verification import (
-                    PretrainedSpeakerEmbedding,
-                )
-        except ImportError as exc:  # pragma: no cover - deploy-config error
-            raise ImportError(
-                "Speaker identification requires pyannote.audio, which is not "
-                "installed.\nReinstall the standard batchalign3 package and "
-                "confirm 'import pyannote.audio' works in the worker Python "
-                "runtime."
-            ) from exc
-
-        try:
-            inference = PretrainedSpeakerEmbedding(
-                checkpoint, device=torch.device("cpu")
+        with pyannote_import_without_torchcodec_notice():
+            from pyannote.audio.pipelines.speaker_verification import (
+                PretrainedSpeakerEmbedding,
             )
-        except Exception as error:
-            raise _reclassified_access_error(error) from error
+    except ImportError as exc:  # pragma: no cover - deploy-config error
+        raise ImportError(
+            "Speaker identification requires pyannote.audio, which is not "
+            "installed.\nReinstall the standard batchalign3 package and "
+            "confirm 'import pyannote.audio' works in the worker Python "
+            "runtime."
+        ) from exc
 
-        _EMBEDDING_MODEL = SpeakerEmbeddingModel(
-            inference=inference,
-            dimension=int(inference.dimension),
-            minimum_frames=int(inference.min_num_samples),
-            sample_rate_hz=int(inference.sample_rate),
-            artifact=artifact,
-        )
-    return _EMBEDDING_MODEL
+    try:
+        inference = PretrainedSpeakerEmbedding(checkpoint, device=torch.device("cpu"))
+    except Exception as error:
+        raise _reclassified_access_error(error) from error
+
+    return SpeakerEmbeddingModel(
+        inference=inference,
+        dimension=int(inference.dimension),
+        minimum_frames=int(inference.min_num_samples),
+        sample_rate_hz=int(inference.sample_rate),
+        artifact=artifact,
+    )
 
 
 def embed_prepared_audio_spans(
@@ -206,7 +198,7 @@ def embed_prepared_audio_spans(
     sample_rate_hz: int,
     spans: Sequence[SpeakerEmbeddingSpanRequest],
     *,
-    model: SpeakerEmbeddingModel | None = None,
+    model: SpeakerEmbeddingModel,
 ) -> SpeakerEmbeddingResponse:
     """Return one outcome per requested span, in the order requested.
 
@@ -216,12 +208,10 @@ def embed_prepared_audio_spans(
     that have nothing to do with who was speaking.
     """
 
-    loaded = model if model is not None else load_speaker_embedding_model()
-
-    if sample_rate_hz != loaded.sample_rate_hz:
+    if sample_rate_hz != model.sample_rate_hz:
         raise ValueError(
             "speaker embedding requires audio at the model's sample rate "
-            f"{loaded.sample_rate_hz} Hz, and was handed {sample_rate_hz} Hz"
+            f"{model.sample_rate_hz} Hz, and was handed {sample_rate_hz} Hz"
         )
 
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -245,7 +235,7 @@ def embed_prepared_audio_spans(
             )
 
         span_frames = span.end_frame - span.start_frame
-        if span_frames < loaded.minimum_frames:
+        if span_frames < model.minimum_frames:
             results.append(
                 SpeakerEmbeddingSpanResult(
                     span_id=span.span_id,
@@ -255,7 +245,7 @@ def embed_prepared_audio_spans(
             continue
 
         window = samples[span.start_frame : span.end_frame]
-        vector = _embed_one(loaded, window, span.span_id)
+        vector = _embed_one(model, window, span.span_id)
         results.append(
             SpeakerEmbeddingSpanResult(
                 span_id=span.span_id, outcome=EmbeddedSpan(vector=vector)
@@ -263,8 +253,8 @@ def embed_prepared_audio_spans(
         )
 
     return SpeakerEmbeddingResponse(
-        dimension=loaded.dimension,
-        minimum_frames=loaded.minimum_frames,
+        dimension=model.dimension,
+        minimum_frames=model.minimum_frames,
         spans=results,
     )
 

@@ -1,7 +1,7 @@
 # diarize
 
 **Status:** Current
-**Last updated:** 2026-10-06 11:44 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 Detect speaker turns in audio (speaker diarization) without transcribing.
 Each input media file produces a speaker-turns JSON artifact naming which
@@ -100,10 +100,8 @@ flowchart TD
     pcm --> backend{--speaker-engine}
     backend -->|pyannote default| local["execute_v2(task='speaker')\nlocal TalkBank-pinned Pyannote"]
     backend -->|pyannote-ai| cloud["execute_v2(task='speaker')\npaid pyannoteAI Precision-2"]
-    backend -->|nemo| nemo["execute_v2(task='speaker')\nlocal NeMo"]
     local --> commit[Validate + durably commit raw evidence]
     cloud --> commit
-    nemo --> commit
     commit --> normalize
     normalize --> map[Map diarizer labels to anonymous tracks\nsorted labels → PAR0..PARn]
     map --> output([Write .turns.json per input])
@@ -120,7 +118,7 @@ flowchart TD
 | `--overwrite` | off | Replace an existing `.turns.json` beside the recording. Without it, and without `-o DIR`, an existing artifact is refused before anything is submitted, naming the file. `--speaker-map` rewrites the transcript it was given and needs no authority. |
 | `--speaker-map MAP` | absent | Select timed-CHAT splitting with explicit `PAR0=CHI,PAR1=MOT` mappings to existing participants |
 | `--num-speakers N` | auto-detect | Expected speaker count, 2 or more. Omit unless known: auto-detection is the point of the engine. A count of 1 is refused when the arguments are parsed |
-| `--speaker-engine {pyannote,pyannote-ai,nemo}` | `pyannote` | Local TalkBank Pyannote, paid pyannoteAI Precision-2, or local NeMo |
+| `--speaker-engine {pyannote,pyannote-ai}` | `pyannote` | Local TalkBank Pyannote, or paid pyannoteAI Precision-2 |
 | `--lang CODE\|auto` | required | 3-letter ISO 639-3 code, or `auto`, for worker-pool selection only; diarization itself is language-independent. There is no default: the language is recorded in the job and must be the one the operator chose, so an invocation without `--lang` is refused before anything is submitted. A code-switched pair is refused here; it belongs to `transcribe`. |
 
 ---
@@ -199,8 +197,8 @@ Accepting the gated repository's terms at
 <https://huggingface.co/pyannote/speaker-diarization-community-1> is required
 regardless of which of the two the token comes from. An operator who instead
 wants to avoid a Hugging Face account entirely should use
-`--speaker-engine pyannote-ai` (below) or `--speaker-engine nemo`, neither of
-which touches this dependency.
+`--speaker-engine pyannote-ai` (below), which does not touch this
+dependency.
 
 This local model download must not be confused with the pyannoteAI API key.
 That separate credential authorizes the paid pyannoteAI cloud service selected

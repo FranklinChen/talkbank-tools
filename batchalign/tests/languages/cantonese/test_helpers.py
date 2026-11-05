@@ -15,8 +15,10 @@ from batchalign.inference.languages.cantonese._common import (
 from batchalign.inference.languages.cantonese._funaudio_common import (
     FunAsrSegment,
     FunAudioRecognizer,
+    SenseVoiceSnapshots,
 )
 from batchalign.inference.languages.cantonese._tencent_api import TencentRecognizer
+from batchalign.tests._snapshots import repository_snapshot
 
 
 def config_with_asr(**entries: str) -> configparser.ConfigParser:
@@ -63,7 +65,16 @@ class TestHKHelpers:
         assert values["engine.tencent.key"] == "key"
 
     def test_funaudio_transcribe_sorts_timed_words(self) -> None:
-        recognizer = FunAudioRecognizer(lang="eng")
+        recognizer = FunAudioRecognizer(
+            lang="eng",
+            device="cpu",
+            snapshots=SenseVoiceSnapshots(
+                asr=repository_snapshot("org/asr"),
+                vad=repository_snapshot("org/vad"),
+            ),
+            label="test",
+            model=None,
+        )
         _S = FunAsrSegment
         recognizer._run_model = lambda _path: [  # type: ignore[method-assign]
             _S(

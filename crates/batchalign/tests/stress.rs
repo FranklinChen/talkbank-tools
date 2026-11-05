@@ -214,7 +214,6 @@ fn morphotag_submission(filename: &str) -> JobSubmission {
         source_dir: Default::default(),
         options: CommandOptions::Morphotag(MorphotagOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
 
             ..Default::default()
         }),

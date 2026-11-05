@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     )
     from transformers.pipelines import AutomaticSpeechRecognitionPipeline
 
+    from batchalign.inference.fa_ctc_resources import MmsAlphabet
     from batchalign.worker._types_v2 import AsrModelIdentityV2
 
 
@@ -229,6 +230,8 @@ class WhisperASRHandle:
         config: GenerationConfig,
         decoding: WhisperDecoding,
         sample_rate: SampleRate,
+        *,
+        model_identity: AsrModelIdentityV2,
     ) -> None:
         self._pipe = pipe
         self.config = config
@@ -238,13 +241,12 @@ class WhisperASRHandle:
         self.decoding = decoding
         self.sample_rate = sample_rate
 
-        # Which checkpoint this handle actually loaded, set by the worker
-        # layer that resolved it (``batchalign/worker/_model_loading/asr.py``).
-        # It travels on every ASR result this handle produces, so a hub
-        # repository that moved is refused by name at the bridge instead of
-        # silently changing transcripts. ``None`` only between construction
-        # and that assignment.
-        self.model_identity: AsrModelIdentityV2 | None = None
+        # Which checkpoint this handle actually loaded: the snapshot it was
+        # built from, so there is no handle without one. It travels on every
+        # ASR result this handle produces, so a hub repository that moved is
+        # refused by name at the bridge instead of silently changing
+        # transcripts.
+        self.model_identity = model_identity
 
     def __call__(
         self,
@@ -323,24 +325,24 @@ class WhisperFAHandle:
         processor: WhisperProcessor,
         sample_rate: SampleRate,
         *,
-        model_identity: WhisperModelIdentity | None = None,
+        model_identity: WhisperModelIdentity,
     ) -> None:
         self.model = model
         self.processor = processor
         self.sample_rate = sample_rate
+        # Always the commit the snapshot holds: a Whisper FA load reads only
+        # a resolved snapshot, so there is no load without an identity.
         self.model_identity = model_identity
 
 
+@dataclass(frozen=True, slots=True)
 class Wave2VecFAHandle:
     """Typed wrapper for Wave2Vec forced alignment model bundle.
 
-    Replaces the ``(model, sample_rate)`` tuple with named fields.
+    The admitted alphabet belongs to this loaded model and is shared by
+    preparation and execution. Frozen fields retain that pairing.
     """
 
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        sample_rate: SampleRate,
-    ) -> None:
-        self.model = model
-        self.sample_rate = sample_rate
+    model: torch.nn.Module
+    sample_rate: SampleRate
+    alphabet: MmsAlphabet

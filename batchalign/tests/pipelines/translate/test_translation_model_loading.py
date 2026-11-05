@@ -18,17 +18,17 @@ from batchalign.inference._domain_types import TranslationBackend
 from batchalign.worker._model_loading.translation import resolve_translate_engine
 
 
-def _loaded_engine_name() -> str:
-    """The reported engine name of the translation the worker holds.
+def _loaded_engine_name(translation: object) -> str:
+    """The reported engine name of the translation a loader returned.
 
     ``LoadedTranslation`` carries no backend selector any more (pacing moved
     to the Rust control plane, which was its only reader), so which loader ran
     is witnessed by the name every translated item reports.
     """
-    from batchalign.worker._types import _state
+    from batchalign.inference.translate import LoadedTranslation
 
-    assert _state.translation is not None
-    return _state.translation.engine
+    assert isinstance(translation, LoadedTranslation)
+    return translation.engine
 
 
 # The reported engine name each backend's loader installs. A backend whose
@@ -193,12 +193,6 @@ def _patch_aliyun_sdk(
     return captured_request
 
 
-def _reset_translate_state() -> None:
-    from batchalign.worker._types import _state
-
-    _state.translation = None
-
-
 class TestLoadAliyunTranslate:
     """Unit-level wiring proof for ``_load_aliyun_translate``.
 
@@ -206,7 +200,7 @@ class TestLoadAliyunTranslate:
     loader (a) reads creds via ``read_asr_config``, (b) builds a
     ``TranslateGeneralRequest`` with the documented field set,
     (c) parses the ``Data.Translated`` field, and (d) writes both
-    ``_state.translation`` so the
+    ``translation`` so the
     upstream batch-infer layer picks up the new engine.
     """
 
@@ -221,30 +215,26 @@ class TestLoadAliyunTranslate:
         self, monkeypatch, source, target, source_code, target_code
     ):
         from batchalign.worker._model_loading import translation as loader
-        from batchalign.worker._types import _state
 
-        monkeypatch.setattr(_state, "translation", None)
         captured = _patch_aliyun_sdk(
             monkeypatch,
             do_action=lambda _req: b'{"Code":"200","Data":{"Translated":"result"}}',
         )
-        loader._load_aliyun_translate()
-        assert _state.translation.translate("text", source, target) == "result"
+        translation = loader._load_aliyun_translate()
+        assert translation.translate("text", source, target) == "result"
         assert captured["SourceLanguage"] == source_code
         assert captured["TargetLanguage"] == target_code
 
     def test_unmapped_target_makes_no_provider_call(self, monkeypatch):
         from batchalign.worker._model_loading import translation as loader
-        from batchalign.worker._types import _state
 
-        monkeypatch.setattr(_state, "translation", None)
         captured = _patch_aliyun_sdk(
             monkeypatch,
             do_action=lambda _req: pytest.fail("unsupported route was sent"),
         )
-        loader._load_aliyun_translate()
+        translation = loader._load_aliyun_translate()
         with pytest.raises(ValueError, match="target language"):
-            _state.translation.translate("text", "eng", "xyz")
+            translation.translate("text", "eng", "xyz")
         assert captured == {}
 
     def test_loader_wires_state_and_request_shape(
@@ -252,7 +242,6 @@ class TestLoadAliyunTranslate:
     ) -> None:
         from batchalign.inference._domain_types import LanguageCode
         from batchalign.worker._model_loading import translation as translation_mod
-        from batchalign.worker._types import _state
 
         captured = _patch_aliyun_sdk(
             monkeypatch,
@@ -262,15 +251,17 @@ class TestLoadAliyunTranslate:
                 b'"RequestId": "test-req-id"}'
             ),
         )
-        _reset_translate_state()
 
-        translation_mod._load_aliyun_translate()
+        translation = translation_mod._load_aliyun_translate()
 
-        assert _state.translation is not None
+        assert translation is not None
 
-        assert _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.ALIYUN]
-        assert _state.translation is not None
-        result = _state.translation.translate("你好", LanguageCode("yue"))
+        assert (
+            _loaded_engine_name(translation)
+            == EXPECTED_ENGINE_NAME[TranslationBackend.ALIYUN]
+        )
+        assert translation is not None
+        result = translation.translate("你好", LanguageCode("yue"))
 
         # Wire-shape pin: any future refactor that drops ``Scene`` or
         # changes ``FormatType`` will break here, surfacing the change.
@@ -282,7 +273,7 @@ class TestLoadAliyunTranslate:
             "Scene": "general",
         }
         assert result == "hello world"
-        assert _state.translation.engine == "aliyun-mt"
+        assert translation.engine == "aliyun-mt"
 
     def test_empty_text_short_circuits_without_calling_sdk(
         self, monkeypatch: pytest.MonkeyPatch
@@ -293,17 +284,15 @@ class TestLoadAliyunTranslate:
         # confusing error path.
         from batchalign.inference._domain_types import LanguageCode
         from batchalign.worker._model_loading import translation as translation_mod
-        from batchalign.worker._types import _state
 
         def _must_not_call(_req: object) -> bytes:
             raise AssertionError("Aliyun client must not be called on empty input")
 
         _patch_aliyun_sdk(monkeypatch, do_action=_must_not_call)
-        _reset_translate_state()
 
-        translation_mod._load_aliyun_translate()
-        assert _state.translation is not None
-        assert _state.translation.translate("", LanguageCode("eng")) == ""
+        translation = translation_mod._load_aliyun_translate()
+        assert translation is not None
+        assert translation.translate("", LanguageCode("eng")) == ""
 
     def test_unmapped_source_language_raises(
         self, monkeypatch: pytest.MonkeyPatch
@@ -314,7 +303,6 @@ class TestLoadAliyunTranslate:
         # mode that motivated the Tencent guard on ``yue``).
         from batchalign.inference._domain_types import LanguageCode
         from batchalign.worker._model_loading import translation as translation_mod
-        from batchalign.worker._types import _state
 
         def _must_not_call(_req: object) -> bytes:
             raise AssertionError(
@@ -322,14 +310,13 @@ class TestLoadAliyunTranslate:
             )
 
         _patch_aliyun_sdk(monkeypatch, do_action=_must_not_call)
-        _reset_translate_state()
 
-        translation_mod._load_aliyun_translate()
-        assert _state.translation is not None
+        translation = translation_mod._load_aliyun_translate()
+        assert translation is not None
         with pytest.raises(ValueError, match="Aliyun MT does not have a mapped"):
             # ``mlt`` is a valid ISO-639-3 (Maltese) but not in our
             # map; serves as the canonical unmapped case.
-            _state.translation.translate("text", LanguageCode("mlt"))
+            translation.translate("text", LanguageCode("mlt"))
 
 
 # ---------------------------------------------------------------------------
@@ -373,11 +360,9 @@ def _load_translate_engine_fixture(
     from batchalign.worker._types import (
         InferTask,
         WorkerBootstrapRuntime,
-        _state,
     )
 
-    saved_translation = _state.translation
-    load_translation_engine(
+    translation = load_translation_engine(
         WorkerBootstrapRuntime(
             task=InferTask.TRANSLATE,
             lang="spa",
@@ -386,14 +371,11 @@ def _load_translate_engine_fixture(
         )
     )
     assert (
-        _state.translation is not None
-        and _state.translation.engine == EXPECTED_ENGINE_NAME[expected_backend]
-    ), f"fixture failed to select {expected_backend.name}; got {_state.translation!r}"
-    assert _state.translation is not None
-    try:
-        yield _state.translation.translate
-    finally:
-        _state.translation = saved_translation
+        translation is not None
+        and translation.engine == EXPECTED_ENGINE_NAME[expected_backend]
+    ), f"fixture failed to select {expected_backend.name}; got {translation!r}"
+    assert translation is not None
+    yield translation.translate
 
 
 @pytest.fixture(scope="module")
@@ -510,7 +492,7 @@ class TestSeamlessEdgeCases:
 class TestSeamlessRuntimeInvariants:
     """Behavior the production worker relies on: idempotent inference
     (calling twice on the same input returns the same shape of
-    result), state population (loader actually sets ``_state``),
+    result), the returned handle (the loader returns its ``LoadedTranslation``),
     and backend-switching (loading Google after Seamless works, and
     vice versa, so a daemon that handles both never poisons state).
     """
@@ -528,7 +510,7 @@ class TestSeamlessRuntimeInvariants:
 
     def test_backend_loader_populates_state(self) -> None:
         # The loader's contract: after a successful load,
-        # ``_state.translation`` holds the backend, its engine identity
+        # ``translation`` holds the backend, its engine identity
         # and the callable together. The batch-infer handler in
         # ``_infer_hosts.py`` refuses work while it is None, so the
         # loader must satisfy that.
@@ -536,28 +518,23 @@ class TestSeamlessRuntimeInvariants:
         from batchalign.worker._types import (
             InferTask,
             WorkerBootstrapRuntime,
-            _state,
         )
 
-        saved_translation = _state.translation
-        try:
-            load_translation_engine(
-                WorkerBootstrapRuntime(
-                    task=InferTask.TRANSLATE,
-                    lang="spa",
-                    num_speakers=1,
-                    engine_overrides={"translate": "seamless"},
-                )
+        translation = load_translation_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.TRANSLATE,
+                lang="spa",
+                num_speakers=1,
+                engine_overrides={"translate": "seamless"},
             )
-            assert _state.translation is not None
-            assert (
-                _loaded_engine_name()
-                == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
-            )
-            assert _state.translation is not None
-            assert callable(_state.translation.translate)
-        finally:
-            _state.translation = saved_translation
+        )
+        assert translation is not None
+        assert (
+            _loaded_engine_name(translation)
+            == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
+        )
+        assert translation is not None
+        assert callable(translation.translate)
 
     def test_can_switch_from_google_to_seamless_in_same_process(self) -> None:
         # A daemon serving both engine pools (one worker on Google,
@@ -568,45 +545,41 @@ class TestSeamlessRuntimeInvariants:
         from batchalign.worker._types import (
             InferTask,
             WorkerBootstrapRuntime,
-            _state,
         )
 
-        saved_translation = _state.translation
-        try:
-            load_translation_engine(
-                WorkerBootstrapRuntime(
-                    task=InferTask.TRANSLATE,
-                    lang="spa",
-                    num_speakers=1,
-                    engine_overrides={"translate": "google"},
-                )
+        translation = load_translation_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.TRANSLATE,
+                lang="spa",
+                num_speakers=1,
+                engine_overrides={"translate": "google"},
             )
-            assert _state.translation is not None
-            assert (
-                _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.GOOGLE]
-            )
-            google_translation = _state.translation
+        )
+        assert translation is not None
+        assert (
+            _loaded_engine_name(translation)
+            == EXPECTED_ENGINE_NAME[TranslationBackend.GOOGLE]
+        )
+        google_translation = translation
 
-            load_translation_engine(
-                WorkerBootstrapRuntime(
-                    task=InferTask.TRANSLATE,
-                    lang="spa",
-                    num_speakers=1,
-                    engine_overrides={"translate": "seamless"},
-                )
+        translation = load_translation_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.TRANSLATE,
+                lang="spa",
+                num_speakers=1,
+                engine_overrides={"translate": "seamless"},
             )
-            assert _state.translation is not None
-            assert (
-                _loaded_engine_name()
-                == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
-            )
-            assert _state.translation is not google_translation, (
-                "Seamless load must replace ``_state.translation``, "
-                "leaving the Google fn in place would silently route "
-                "Seamless-pool requests to Google."
-            )
-        finally:
-            _state.translation = saved_translation
+        )
+        assert translation is not None
+        assert (
+            _loaded_engine_name(translation)
+            == EXPECTED_ENGINE_NAME[TranslationBackend.SEAMLESS]
+        )
+        assert translation is not google_translation, (
+            "Seamless load must replace ``translation``, "
+            "leaving the Google fn in place would silently route "
+            "Seamless-pool requests to Google."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -680,27 +653,23 @@ class TestNllbRuntimeInvariants:
         from batchalign.worker._types import (
             InferTask,
             WorkerBootstrapRuntime,
-            _state,
         )
 
-        saved_translation = _state.translation
-        try:
-            load_translation_engine(
-                WorkerBootstrapRuntime(
-                    task=InferTask.TRANSLATE,
-                    lang="spa",
-                    num_speakers=1,
-                    engine_overrides={"translate": "nllb"},
-                )
+        translation = load_translation_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.TRANSLATE,
+                lang="spa",
+                num_speakers=1,
+                engine_overrides={"translate": "nllb"},
             )
-            assert _state.translation is not None
-            assert (
-                _loaded_engine_name() == EXPECTED_ENGINE_NAME[TranslationBackend.NLLB]
-            )
-            assert _state.translation is not None
-            assert callable(_state.translation.translate)
-        finally:
-            _state.translation = saved_translation
+        )
+        assert translation is not None
+        assert (
+            _loaded_engine_name(translation)
+            == EXPECTED_ENGINE_NAME[TranslationBackend.NLLB]
+        )
+        assert translation is not None
+        assert callable(translation.translate)
 
     def test_unsupported_language_raises_clear_error(self, nllb_translate_fn) -> None:
         # The FLORES-200 mapping is a closed set, an unmapped source

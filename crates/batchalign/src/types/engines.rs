@@ -551,6 +551,35 @@ impl FaFallbackPolicy {
     }
 }
 
+/// A positive preference for joining adjacent utterances.
+///
+/// This type has no conversion into model context or resource capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaAggregationTarget(std::num::NonZeroU64);
+
+impl FaAggregationTarget {
+    /// A positive preference for joining neighbouring utterances, never a
+    /// loaded-model constraint or permission to refuse one utterance.
+    pub const fn from_milliseconds(milliseconds: std::num::NonZeroU64) -> Self {
+        Self(milliseconds)
+    }
+
+    /// The preference's duration, in milliseconds.
+    pub const fn milliseconds(self) -> u64 {
+        self.0.get()
+    }
+}
+
+// Retain the former engine-row durations only as join preferences. They
+// have no measured-capacity claim. These compile-time positive literals fail
+// compilation if changed to zero; no runtime input can reach an unwrap here.
+#[allow(clippy::unwrap_used)]
+const LEGACY_WORD_INTERVAL_AGGREGATION: FaAggregationTarget =
+    FaAggregationTarget(std::num::NonZeroU64::new(15_000).unwrap());
+#[allow(clippy::unwrap_used)]
+const LEGACY_ONSET_AGGREGATION: FaAggregationTarget =
+    FaAggregationTarget(std::num::NonZeroU64::new(20_000).unwrap());
+
 /// Everything one forced-alignment engine is, stated once.
 ///
 /// # Why this exists
@@ -613,8 +642,9 @@ pub struct FaEngineSpec {
     /// What this engine reports about a word's extent.
     pub timing_resolution: FaTimingResolution,
 
-    /// Longest audio window handed to this engine in one dispatch.
-    pub max_group: batchalign_types::domain::DurationMs,
+    /// Legacy aggregation preference. Individual utterances may exceed it;
+    /// only loaded-model preparation and resource admission decide feasibility.
+    pub aggregation_target: FaAggregationTarget,
 
     /// Resident memory footprint estimate for one worker process running this
     /// engine, in MB. Feeds the admission gate's engine-aware reservation, see
@@ -654,9 +684,7 @@ const WAVE2VEC_FA_SPEC: FaEngineSpec = FaEngineSpec {
     aliases: &["wav2vec_fa", "wave2vec"],
     dispatch_override_name: "wave2vec",
     timing_resolution: FaTimingResolution::WordIntervals,
-    // The CTC decoder's target length grows with the audio window, so the
-    // wav2vec family takes the shorter one.
-    max_group: batchalign_types::domain::DurationMs(15_000),
+    aggregation_target: LEGACY_WORD_INTERVAL_AGGREGATION,
     // MMS / torchaudio Wave2Vec FA models: ~1.2 GB + runtime margin.
     resident_memory_mb: WAVE2VEC_FA_RSS_MB,
     // Aligns against its own label set and never sees the declaration.
@@ -673,7 +701,7 @@ const WHISPER_FA_SPEC: FaEngineSpec = FaEngineSpec {
     aliases: &["whisper_fa"],
     dispatch_override_name: "whisper",
     timing_resolution: FaTimingResolution::TokenOnsets,
-    max_group: batchalign_types::domain::DurationMs(20_000),
+    aggregation_target: LEGACY_ONSET_AGGREGATION,
     // Whisper-large-v2 FA: ~3 GB weights + tokenizer + Python runtime. Same
     // shape as Whisper-large-v3 ASR, hence the shared constant.
     resident_memory_mb: WHISPER_LARGE_V3_RSS_MB,
@@ -694,7 +722,7 @@ const WAV2VEC_CANTO_FA_SPEC: FaEngineSpec = FaEngineSpec {
     aliases: &["cantonese_fa", "wav2vec_canto", "wav2vec_fa_canto"],
     dispatch_override_name: "wav2vec_canto",
     timing_resolution: FaTimingResolution::WordIntervals,
-    max_group: batchalign_types::domain::DurationMs(15_000),
+    aggregation_target: LEGACY_WORD_INTERVAL_AGGREGATION,
     // Same model shape as the general wave2vec aligner.
     resident_memory_mb: WAVE2VEC_FA_RSS_MB,
     // It only adds a romanization step, which is itself gated on `yue`.
@@ -725,7 +753,7 @@ const QWEN3_FA_SPEC: FaEngineSpec = FaEngineSpec {
     // about the transcript, not about the model, and a wider window here would
     // change which words are grouped together without any measurement saying
     // it should.
-    max_group: batchalign_types::domain::DurationMs(15_000),
+    aggregation_target: LEGACY_WORD_INTERVAL_AGGREGATION,
     // Qwen3-ForcedAligner-0.6B: ~2.4 GB of float32 weights plus the processor
     // and the Python runtime.
     resident_memory_mb: QWEN3_FA_RSS_MB,
@@ -1034,9 +1062,9 @@ impl FaEngineName {
         self.spec().timing_resolution
     }
 
-    /// Longest audio window handed to this engine in one dispatch.
-    pub fn max_group_ms(&self) -> batchalign_types::domain::DurationMs {
-        self.spec().max_group
+    /// Preference for joining utterances, independent of request feasibility.
+    pub fn aggregation_target(&self) -> FaAggregationTarget {
+        self.spec().aggregation_target
     }
 
     /// Which languages this engine can be asked for.
@@ -1559,9 +1587,9 @@ impl TranslateEngineName {
     /// The estimate is the observed model + tokenizer + Python
     /// runtime footprint with a modest margin; conservative on the
     /// side of over-reserving so the OS OOM killer isn't the fallback
-    /// safety mechanism. Related but distinct from the *on-disk*
-    /// model-size hints used by the Python progress events
-    /// (``batchalign/worker/_progress.py::_HF_SIZE_HINTS_GB``).
+    /// safety mechanism. Unrelated to a model's *on-disk* size, which the
+    /// Python progress events report as measured download growth
+    /// (``batchalign/worker/_download_liveness.py``).
     pub fn resident_memory_mb(&self) -> u64 {
         match self {
             // googletrans + Tencent TMT + Aliyun MT are all thin
@@ -1635,8 +1663,6 @@ pub enum SpeakerEngineName {
     PyannoteAi,
     /// Local TalkBank-pinned Pyannote diarization.
     Pyannote,
-    /// Local NeMo diarization.
-    Nemo,
 }
 
 impl SpeakerEngineName {
@@ -1648,7 +1674,6 @@ impl SpeakerEngineName {
         match self {
             Self::PyannoteAi => SpeakerBackendV2::PyannoteAi,
             Self::Pyannote => SpeakerBackendV2::Pyannote,
-            Self::Nemo => SpeakerBackendV2::Nemo,
         }
     }
 }
@@ -1658,7 +1683,6 @@ impl EngineBackend for SpeakerEngineName {
         match self {
             Self::PyannoteAi => "pyannote_ai",
             Self::Pyannote => "pyannote",
-            Self::Nemo => "nemo",
         }
     }
 
@@ -1673,7 +1697,7 @@ impl EngineBackend for SpeakerEngineName {
 
 impl SelectableEngine for SpeakerEngineName {
     type Selected = Self;
-    const ALL: &'static [Self] = &[Self::PyannoteAi, Self::Pyannote, Self::Nemo];
+    const ALL: &'static [Self] = &[Self::PyannoteAi, Self::Pyannote];
     const DEFAULT: Self = Self::PyannoteAi;
     const CATEGORY: &'static str = "speaker diarization";
 
@@ -1681,7 +1705,6 @@ impl SelectableEngine for SpeakerEngineName {
         match self {
             Self::PyannoteAi => "pyannote-ai",
             Self::Pyannote => "pyannote",
-            Self::Nemo => "nemo",
         }
     }
 
@@ -1690,7 +1713,6 @@ impl SelectableEngine for SpeakerEngineName {
             ("pyannote-ai", Self::PyannoteAi),
             ("pyannote_ai", Self::PyannoteAi),
             ("pyannote", Self::Pyannote),
-            ("nemo", Self::Nemo),
         ]
     }
 
@@ -1762,6 +1784,14 @@ pub struct EngineOverrides {
     pub translate: Option<TranslateEngineName>,
     /// Dedicated speaker diarization engine.
     pub speaker: Option<SpeakerEngineName>,
+    /// The speaker-embedding model a speaker-identification worker loads.
+    ///
+    /// Set by the control plane from a job's GPU model plan
+    /// (`GpuModelPlan::speaker_identity`), never read from a job's options:
+    /// it is worker identity, and the speaker task load builds exactly the
+    /// model it names. Its own key, not a value of `speaker`, because the
+    /// embedding model is not a diarization engine a user can select.
+    pub speaker_embedding: Option<crate::types::worker_v2::SpeakerEmbeddingBackendV2>,
     /// Opaque per-engine configuration knobs (e.g., ``qwen_model``,
     /// ``qwen_device``). Round-trips verbatim through the JSON
     /// boundary so the Python worker bootstrap can read them by name.
@@ -1776,6 +1806,7 @@ impl EngineOverrides {
             && self.fa.is_none()
             && self.translate.is_none()
             && self.speaker.is_none()
+            && self.speaker_embedding.is_none()
             && self.extras.is_empty()
     }
 
@@ -1828,6 +1859,12 @@ impl EngineOverrides {
         if let Some(ref speaker) = self.speaker {
             map.insert("speaker".to_owned(), speaker.wire_name().to_owned());
         }
+        if let Some(embedding) = self.speaker_embedding {
+            map.insert(
+                "speaker_embedding".to_owned(),
+                embedding.wire_name().to_owned(),
+            );
+        }
         for (key, value) in &self.extras {
             map.insert(key.clone(), value.clone());
         }
@@ -1858,6 +1895,7 @@ impl Serialize for EngineOverrides {
             + self.utr.is_some() as usize
             + self.translate.is_some() as usize
             + self.speaker.is_some() as usize
+            + self.speaker_embedding.is_some() as usize
             + self.extras.len();
         let mut map = serializer.serialize_map(Some(count))?;
         if let Some(ref asr) = self.asr {
@@ -1874,6 +1912,9 @@ impl Serialize for EngineOverrides {
         }
         if let Some(ref speaker) = self.speaker {
             map.serialize_entry("speaker", speaker.wire_name())?;
+        }
+        if let Some(embedding) = self.speaker_embedding {
+            map.serialize_entry("speaker_embedding", embedding.wire_name())?;
         }
         for (key, value) in &self.extras {
             map.serialize_entry(key, value)?;
@@ -1916,6 +1957,16 @@ impl<'de> Deserialize<'de> for EngineOverrides {
                     overrides.speaker = Some(
                         SpeakerEngineName::from_wire_name(&value)
                             .map_err(serde::de::Error::custom)?,
+                    );
+                }
+                "speaker_embedding" => {
+                    overrides.speaker_embedding = Some(
+                        crate::types::worker_v2::SpeakerEmbeddingBackendV2::from_wire_name(&value)
+                            .ok_or_else(|| {
+                                serde::de::Error::custom(format!(
+                                    "unknown speaker-embedding model {value:?}"
+                                ))
+                            })?,
                     );
                 }
                 _other => {
@@ -2575,6 +2626,27 @@ mod selectable_engine_tests {
     #[test]
     fn translate_category_is_coherent() {
         assert_category_is_coherent::<TranslateEngineName>();
+    }
+
+    #[test]
+    fn speaker_category_is_coherent() {
+        assert_category_is_coherent::<SpeakerEngineName>();
+    }
+
+    /// `nemo` was a speaker engine with no installable runtime (no NeMo
+    /// package was ever a dependency) and has been removed. A stored job or
+    /// override map that still names it must fail to load with the named
+    /// unknown-engine error, never resolve to one of the remaining engines,
+    /// which would run a different diarizer than the record asked for.
+    #[test]
+    fn a_stored_nemo_speaker_engine_is_refused() {
+        assert!(SpeakerEngineName::resolve("nemo").is_none());
+        let error = SpeakerEngineName::from_wire_name("nemo")
+            .expect_err("nemo is no longer a speaker engine");
+        assert_eq!(error.name, "nemo");
+        assert_eq!(error.category, SpeakerEngineName::CATEGORY);
+        assert!(serde_json::from_str::<SpeakerEngineName>(r#""nemo""#).is_err());
+        assert!(serde_json::from_str::<EngineOverrides>(r#"{"speaker":"nemo"}"#).is_err());
     }
 
     /// ASR is no longer exempt.

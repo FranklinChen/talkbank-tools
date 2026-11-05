@@ -1,7 +1,7 @@
 # Adding Inference Providers
 
 **Status:** Current
-**Last updated:** 2026-09-16 03:36 EDT
+**Last updated:** 2026-11-05 23:04 EST
 
 Batchalign3 no longer has a public entry-point plugin system. New engines are
 added in-tree as built-in worker capabilities.
@@ -62,11 +62,18 @@ If this is a new live infer task, add it in the V2 IPC type definitions:
 If you are only adding a new engine behind an existing task such as ASR or FA,
 reuse the existing task and add only the new engine selector/state.
 
-### 3. Load model state in the worker
+### 3. Load the model and return its host
 
-Update `batchalign/worker/_model_loading/` so `load_worker_task()` can
-initialize the new engine for the relevant infer task. This is where task-level
-engine overrides are resolved and worker state is populated.
+Update `batchalign/worker/_model_loading/` so the task's load (`record_load`
+in `bootstrap.py`, run by `ensure_task`) builds the new engine and returns
+its host: a `batchalign/worker/_loads.py` class carrying the runner over the
+model and the identity of what loaded. `record_load` records it in the
+worker's load registry (`_state.loads`), the only place a loaded model lives.
+Do not add a field to `_WorkerState` or a module-level global: a request
+resolves its load in the registry once, at the dispatcher, and the executor
+receives the host as an argument. A new task needs a `TaskLoad` member, a
+`LoadKey` constant typed by its host, and an arm in `record_load`, which
+matches `TaskLoad` exhaustively.
 
 For existing command families, you usually update one of:
 
@@ -92,8 +99,8 @@ task; Rust admission refuses a report that names an engine for any other task
 stable and make `_reported_engine()` name the FA engine that actually loaded.
 Report `None` until the process can name it (FA reports `None` until an FA
 engine has loaded); never a guessed name or `"unknown"`. Set an identity where
-the loader loads the model, as the translation loaders build one
-`LoadedTranslation` record (backend and engine together) on `_state`. A name
+the loader loads the model, on the host it returns, as the FA load sets
+`engine` on its `LoadedWhisperFa` or `LoadedWordFa`. A name
 must be a valid `ReportedEngineName`, a wrapper over `StampSafeText`:
 non-blank, no surrounding whitespace (the Unicode `White_Space` set, written
 out as `_STAMP_WHITESPACE` in `batchalign/worker/_types.py`), and none of `|`,
@@ -143,7 +150,7 @@ _INFER_TASK_PROBES: dict[InferTask, tuple[str, ...]] = {
 Capabilities are detected lazily from the first real worker spawn, there is no
 dedicated probe worker at startup. The capability check uses import probes, not
 loaded model state. This means capability advertisement must be based on import
-availability, never on `_state.my_model is not None`. If you gate on loaded
+availability, never on whether a load completed. If you gate on loaded
 model state, your task will not be advertised and the server will silently
 exclude the command. The FA engine NAME in `engine_versions` is the opposite:
 it reflects what has actually loaded, and is `None` before that.
@@ -218,8 +225,10 @@ add a variant: the ASR `#### Result` section of
 
 Worker-side enum (matches Rust wire name one-to-one):
 
-- `AsrEngine` in `batchalign/worker/_types.py`: the Python enum the
-  worker bootstrap stores in `_state.asr_engine`.
+- `AsrEngine` in `batchalign/worker/_types.py`: the Python enum the ASR
+  load parses the control plane's `asr` override into. Its host carries the
+  matching `AsrBackendV2` (`LoadedLocalAsr` or `LoadedProviderAsr`), which the
+  PyO3 executor checks against the request's backend.
 
 Request validation surface (optional, only for engines with
 per-engine language constraints like the Cantonese ASR engines):

@@ -135,7 +135,6 @@ function makeJob(jobId, status, { completed, total, submittedAt, fileStatuses, e
       command: "morphotag",
       retokenize: false,
       skipmultilang: false,
-      merge_abbrev: false,
       override_cache: false,
     },
     lang: "eng",

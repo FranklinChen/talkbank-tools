@@ -1,0 +1,8 @@
+{
+  "scope": "load",
+  "stage": "downloading_hf_openai_whisper-large-v3",
+  "measure": {
+    "kind": "download_growth",
+    "grown_kib": 2048
+  }
+}

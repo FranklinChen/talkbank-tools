@@ -2,7 +2,7 @@
 //!
 //! Each `cargo test` run of the worker-spawning suites fork/exec's
 //! ~50 `uv run python -m batchalign.worker` processes. At default parallelism
-//! the spawn tail under contention exceeded `ready_timeout_s`, producing
+//! the spawn tail under contention exceeded the ready wait (`waits`), producing
 //! flaky failures. This fixture is the principled fix: tests within a binary
 //! share workers keyed by the subset of [`WorkerConfig`] the Python child
 //! observes at startup.
@@ -11,7 +11,7 @@
 //! and uninstalled here, so nothing caps it now, which is why the suites
 //! rely on this fixture rather than on a cap.
 //!
-//! Fields the Python child does NOT observe, `ready_timeout_s`,
+//! Fields the Python child does NOT observe, `waits`,
 //! `audio_task_timeout_s`, `analysis_task_timeout_s`, `runtime.host`,
 //! `runtime.server_instance_id`,
 //! `runtime.server_process_id`: are deliberately excluded from
@@ -156,7 +156,13 @@ impl SharedTestWorkerPool {
                 // from any runtime, so the caller still just awaits here.
                 let config = config.clone();
                 let handle = worker_runtime()
-                    .spawn(async move { WorkerHandle::spawn(config).await })
+                    .spawn(async move {
+                        WorkerHandle::spawn(
+                            config,
+                            std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+                        )
+                        .await
+                    })
                     .await
                     .map_err(|e| {
                         WorkerError::Io(std::io::Error::other(format!(

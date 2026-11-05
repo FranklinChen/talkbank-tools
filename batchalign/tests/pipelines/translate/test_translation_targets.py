@@ -9,7 +9,6 @@ import pytest
 from pydantic import ValidationError
 
 from batchalign.worker._model_loading import translation as loader
-from batchalign.worker._types import _state
 
 
 @pytest.fixture
@@ -58,11 +57,13 @@ def local_models(monkeypatch):
             SeamlessM4TModel=Model,
         ),
     )
+    # No hub: the resolve edge names a stand-in snapshot the fakes "load".
+    from batchalign.tests._snapshots import fake_resolve_transformers
+
     monkeypatch.setattr(
-        "batchalign.worker._progress.emit_hf_download_if_missing",
-        lambda *args, **kwargs: None,
+        "batchalign.worker._model_loading.pinned_hub.resolve_transformers",
+        fake_resolve_transformers,
     )
-    monkeypatch.setattr(_state, "translation", None)
     return calls
 
 
@@ -70,9 +71,9 @@ def local_models(monkeypatch):
 def test_local_engine_uses_each_requests_target_not_a_cached_english_target(
     local_models, backend
 ):
-    getattr(loader, f"_load_{backend}_translate")()
-    assert _state.translation.translate("hello", "eng", "spa") == "translated"
-    assert _state.translation.translate("hello", "eng", "fra") == "translated"
+    translation = getattr(loader, f"_load_{backend}_translate")()
+    assert translation.translate("hello", "eng", "spa") == "translated"
+    assert translation.translate("hello", "eng", "fra") == "translated"
     if backend == "nllb":
         assert [call["forced_bos_token_id"] for call in local_models] == [2, 3]
         assert [call["source"] for call in local_models] == ["eng_Latn", "eng_Latn"]
@@ -83,9 +84,9 @@ def test_local_engine_uses_each_requests_target_not_a_cached_english_target(
 
 @pytest.mark.parametrize("source,target", [("xyz", "eng"), ("eng", "xyz")])
 def test_nllb_unmapped_route_is_refused_before_generation(local_models, source, target):
-    loader._load_nllb_translate()
+    translation = loader._load_nllb_translate()
     with pytest.raises(ValueError, match="mapping"):
-        _state.translation.translate("hello", source, target)
+        translation.translate("hello", source, target)
     assert local_models == []
 
 
@@ -112,14 +113,12 @@ def tencent(monkeypatch):
             "engine.tencent.region": "test-region",
         },
     )
-    monkeypatch.setattr(_state, "translation", None)
-    loader._load_tencent_translate()
-    return calls, response
+    return calls, response, loader._load_tencent_translate()
 
 
 def test_tencent_supported_sdk_client_carries_non_english_target(tencent):
-    calls, _ = tencent
-    assert _state.translation.translate("hello", "eng", "spa") == "translated"
+    calls, _, translation = tencent
+    assert translation.translate("hello", "eng", "spa") == "translated"
     assert calls == [
         (
             "TextTranslate",
@@ -129,18 +128,18 @@ def test_tencent_supported_sdk_client_carries_non_english_target(tencent):
 
 
 def test_tencent_unmapped_target_is_not_sent(tencent):
-    calls, _ = tencent
+    calls, _, translation = tencent
     with pytest.raises(ValueError, match="target language"):
-        _state.translation.translate("hello", "eng", "xyz")
+        translation.translate("hello", "eng", "xyz")
     assert calls == []
 
 
 @pytest.mark.parametrize("value", [None, 12, {"text": "hello"}])
 def test_tencent_bad_response_is_not_coerced_to_translation(tencent, value):
-    _, response = tencent
+    _, response, translation = tencent
     response["Response"]["TargetText"] = value
     with pytest.raises(ValidationError):
-        _state.translation.translate("hello", "eng", "spa")
+        translation.translate("hello", "eng", "spa")
 
 
 def test_legacy_batch_admits_its_english_contract_without_discarding_v2_targets(
@@ -148,7 +147,8 @@ def test_legacy_batch_admits_its_english_contract_without_discarding_v2_targets(
 ):
     from batchalign.inference.translate import LoadedTranslation
     from batchalign.providers import BatchInferRequest
-    from batchalign.worker._infer_hosts import build_translate_batch_infer_handler
+    from batchalign.worker._infer_hosts import build_translate_runner, legacy_translate
+    from batchalign.worker._loads import LoadedTranslate
 
     calls = []
 
@@ -156,19 +156,18 @@ def test_legacy_batch_admits_its_english_contract_without_discarding_v2_targets(
         calls.append((text, source, target))
         return "hello"
 
-    monkeypatch.setattr(
-        _state,
-        "translation",
-        LoadedTranslation(engine="test-engine", translate=translate),
+    host = LoadedTranslate(
+        runner=build_translate_runner(
+            LoadedTranslation(engine="test-engine", translate=translate)
+        )
     )
-    handler = build_translate_batch_infer_handler()
-    good = handler(
-        BatchInferRequest(task="translate", lang="spa", items=[{"text": "hola"}])
+    good = legacy_translate(
+        host, BatchInferRequest(task="translate", lang="spa", items=[{"text": "hola"}])
     )
     assert calls == [("hola", "spa", "eng")]
     assert good.results[0].error is None
-    refused = handler(
-        BatchInferRequest(task="translate", lang="", items=[{"text": "hola"}])
+    refused = legacy_translate(
+        host, BatchInferRequest(task="translate", lang="", items=[{"text": "hola"}])
     )
     assert refused.results[0].error.startswith("Invalid legacy translation direction")
     assert len(calls) == 1

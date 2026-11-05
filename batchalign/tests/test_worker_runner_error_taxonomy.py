@@ -38,19 +38,23 @@ from batchalign.inference.qwen_timing import (
 )
 from batchalign.inference.types import Wave2VecWordAlignment
 from batchalign.inference.utseg import UtsegModelNotFoundError
-from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
-from batchalign.worker._fa_v2 import (
-    ForcedAlignmentExecutionHostV2,
-    execute_forced_alignment_request_v2,
+from batchalign.tests._loaded_hosts import (
+    loads,
+    morphosyntax,
+    prepare_fa_fixture,
+    word_fa,
 )
+from batchalign.worker._execute_v2 import execute_on_loads
+from batchalign.worker._fa_v2 import execute_forced_alignment_request_v2
 from batchalign.worker._language_errors import UnsupportedLanguageError
-from batchalign.worker._text_v2 import TextExecutionHostV2
+from batchalign.worker._loads import MORPHOSYNTAX_LOAD
 from batchalign.worker._types import BatchInferResponse
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
     ExecuteResponseV2,
     FaBackendV2,
+    FaCandidateV2,
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     InferenceTaskV2,
@@ -254,34 +258,37 @@ def _fa_request(tmp_path: Path) -> ExecuteRequestV2:
     )
     audio_path = tmp_path / "fa-audio.pcm"
     audio_path.write_bytes(np.asarray([0.1, 0.2, 0.3, 0.4], dtype="<f4").tobytes())
-    return ExecuteRequestV2(
-        request_id="req-runner-error-fa",
-        task=InferenceTaskV2.FORCED_ALIGNMENT,
-        payload=ForcedAlignmentRequestV2(
-            backend=FaBackendV2.WAVE2VEC,
-            payload_ref_id="fa-payload-ref",
-            audio_ref_id="fa-audio-ref",
-            text_mode=FaTextModeV2.SPACE_JOINED,
-        ),
-        attachments=[
-            PreparedTextRefV2(
-                id="fa-payload-ref",
-                path=str(payload_path),
-                encoding=PreparedTextEncodingV2.UTF8_JSON,
-                byte_offset=0,
-                byte_len=payload_path.stat().st_size,
+    return prepare_fa_fixture(
+        ExecuteRequestV2(
+            request_id="req-runner-error-fa",
+            task=InferenceTaskV2.FORCED_ALIGNMENT,
+            payload=ForcedAlignmentRequestV2(
+                phase=FaCandidateV2(),
+                backend=FaBackendV2.WAVE2VEC,
+                payload_ref_id="fa-payload-ref",
+                audio_ref_id="fa-audio-ref",
+                text_mode=FaTextModeV2.SPACE_JOINED,
             ),
-            PreparedAudioRefV2(
-                id="fa-audio-ref",
-                path=str(audio_path),
-                encoding=PreparedAudioEncodingV2.PCM_F32LE,
-                channels=1,
-                sample_rate_hz=16000,
-                frame_count=4,
-                byte_offset=0,
-                byte_len=audio_path.stat().st_size,
-            ),
-        ],
+            attachments=[
+                PreparedTextRefV2(
+                    id="fa-payload-ref",
+                    path=str(payload_path),
+                    encoding=PreparedTextEncodingV2.UTF8_JSON,
+                    byte_offset=0,
+                    byte_len=payload_path.stat().st_size,
+                ),
+                PreparedAudioRefV2(
+                    id="fa-audio-ref",
+                    path=str(audio_path),
+                    encoding=PreparedAudioEncodingV2.PCM_F32LE,
+                    channels=1,
+                    sample_rate_hz=16000,
+                    frame_count=4,
+                    byte_offset=0,
+                    byte_len=audio_path.stat().st_size,
+                ),
+            ],
+        )
     )
 
 
@@ -294,10 +301,10 @@ def test_a_text_runner_exception_keeps_its_class_code(
     def _raise(*_args: object) -> BatchInferResponse:
         raise make_error()
 
-    response = execute_request_v2(
-        request=_morphosyntax_request(tmp_path),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(morphosyntax_runner=_raise)
+    response = execute_on_loads(
+        _morphosyntax_request(tmp_path),
+        loads(
+            (MORPHOSYNTAX_LOAD, morphosyntax(_raise)),
         ),
     )
 
@@ -312,10 +319,10 @@ def test_rejected_qwen_report_survives_worker_protocol(tmp_path: Path) -> None:
     def _raise(*_args: object) -> BatchInferResponse:
         raise error
 
-    response = execute_request_v2(
-        request=_morphosyntax_request(tmp_path),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(morphosyntax_runner=_raise)
+    response = execute_on_loads(
+        _morphosyntax_request(tmp_path),
+        loads(
+            (MORPHOSYNTAX_LOAD, morphosyntax(_raise)),
         ),
     )
     restored = ExecuteResponseV2.model_validate_json(response.model_dump_json())
@@ -339,7 +346,7 @@ def test_a_forced_alignment_runner_exception_keeps_its_class_code(
 
     response = execute_forced_alignment_request_v2(
         _fa_request(tmp_path),
-        ForcedAlignmentExecutionHostV2(wave2vec_runner=_raise),
+        word_fa(_raise),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)

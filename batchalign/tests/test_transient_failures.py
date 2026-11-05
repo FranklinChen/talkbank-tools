@@ -31,10 +31,9 @@ from batchalign.inference._transient_failures import (
     is_device_out_of_memory,
     is_model_download_failure,
 )
-from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
+from batchalign.worker._execute_v2 import execute_on_loads
 from batchalign.worker._protocol import _classify_dispatch_exception
 from batchalign.worker._stanza_capabilities import StanzaCatalogDownloadError
-from batchalign.worker._text_v2 import TextExecutionHostV2
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
@@ -193,8 +192,11 @@ def test_a_utseg_pipeline_download_failing_inside_the_request_is_a_download(
     language's Stanza pipeline inside the request. A download failure there
     reached the Rust boundary as a runtime failure of a local model, which
     the server does not retry. It now carries ``model_download_failed``."""
+    from batchalign.inference.utseg import NoPinnedBoundaryModel
+    from batchalign.tests._loaded_hosts import loads
     from batchalign.worker import _stanza_loading
-    from batchalign.worker._infer_hosts import build_utseg_inference_handler
+    from batchalign.worker._infer_hosts import build_utseg_runner
+    from batchalign.worker._loads import UTSEG_LOAD, LoadedUtseg
 
     def _download_fails(_lang: str) -> object:
         raise _no_cached_copy_after(httpx2.ConnectError("connection refused"))
@@ -212,8 +214,8 @@ def test_a_utseg_pipeline_download_failing_inside_the_request_is_a_download(
         ),
         encoding="utf-8",
     )
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-utseg-download",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -232,8 +234,11 @@ def test_a_utseg_pipeline_download_failing_inside_the_request_is_a_download(
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(utseg_runner=build_utseg_inference_handler())
+        loads(
+            (
+                UTSEG_LOAD,
+                LoadedUtseg(runner=build_utseg_runner(NoPinnedBoundaryModel())),
+            )
         ),
     )
 
@@ -241,29 +246,32 @@ def test_a_utseg_pipeline_download_failing_inside_the_request_is_a_download(
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_DOWNLOAD_FAILED
 
 
-def test_a_worker_whose_startup_download_fails_says_so_in_place_of_ready(
+def test_a_worker_reports_the_runtime_it_started_with_not_what_loading_changed(
     tmp_path: Path,
 ) -> None:
-    """RED FIRST: a stdio worker that could not download its models at
-    startup exited before its ready line, and the server could only call
-    that a system failure. It now writes one classified error line instead,
-    which the Rust ready reader turns into a retried download failure."""
+    """A model loader that changes `sys.path` (importing FunASR's dependencies
+    puts setuptools' vendored packages there) must not change the identity
+    the worker reports in its ready line. The identity used to be observed at
+    the ready line, after loading, so a worker that loaded FunASR reported a
+    different distribution inventory from one that had not, and the server
+    refused it (2026-11-05). It is now observed at process start."""
+    vendored = tmp_path / "vendored"
+    (vendored / "Vendored_Dist-1.0.dist-info").mkdir(parents=True)
+    (vendored / "Vendored_Dist-1.0.dist-info" / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: Vendored-Dist\nVersion: 1.0\n"
+    )
     code = (
-        "import sys, httpx2\n"
-        "from huggingface_hub.errors import LocalEntryNotFoundError\n"
+        "import os, sys\n"
         "from batchalign.worker import _main\n"
-        "def fail(_bootstrap):\n"
-        "    try:\n"
-        "        raise httpx2.ConnectError('connection refused')\n"
-        "    except httpx2.ConnectError as cause:\n"
-        "        raise LocalEntryNotFoundError('no cached copy') from cause\n"
-        "_main.load_worker_task = fail\n"
+        f"def load(_bootstrap):\n    sys.path.insert(0, {str(vendored)!r})\n"
+        "_main.start_worker = load\n"
         "sys.argv = ['worker', '--task', 'morphosyntax', '--lang', 'eng',\n"
-        "            '--transport', 'stdio', '--serving', 'sequential', '--supervisor-pid', str(__import__('os').getppid())]\n"
+        "            '--transport', 'stdio', '--serving', 'sequential',\n"
+        "            '--supervisor-pid', str(os.getppid())]\n"
         "_main.refresh_resources_manifest_if_present = lambda: None\n"
         "_main.main()\n"
     )
-    completed = subprocess.run(
+    worker = subprocess.run(
         [sys.executable, "-c", code],
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -271,11 +279,22 @@ def test_a_worker_whose_startup_download_fails_says_so_in_place_of_ready(
         timeout=120,
         check=False,
     )
-
-    assert completed.returncode == 1, completed.stderr
-    lines = [line for line in completed.stdout.splitlines() if line.strip()]
-    assert len(lines) == 1, completed.stdout
-    envelope = json.loads(lines[0])
-    assert envelope["op"] == "error"
-    assert envelope["kind"] == "download"
-    assert "no cached copy" in envelope["error"]
+    ready = next(
+        json.loads(line)
+        for line in worker.stdout.splitlines()
+        if line.strip().startswith('{"ready"')
+    )
+    baseline = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json\n"
+            "from batchalign.worker._runtime_identity import observe_worker_runtime\n"
+            "print(json.dumps(observe_worker_runtime().json_value()))\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    assert ready["runtime"] == json.loads(baseline.stdout), worker.stderr

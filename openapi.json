@@ -192,6 +192,55 @@
         "description": "Correlation ID for tracing a job across log entries (non-empty).\n\nUsually the same as `JobId` but may differ for retried or cloned jobs.",
         "type": "string"
       },
+      "DecodedAudioShortfallV2": {
+        "description": "Wire representation of an admitted empty decoder observation. It grants no\naudio or inference capability and never claims the source was past EOF.",
+        "oneOf": [
+          {
+            "description": "The decoder produced zero bytes.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "no_bytes"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nonzero bytes did not complete one sample of the selected encoding.",
+            "properties": {
+              "decoded_bytes": {
+                "description": "Measured nonzero output bytes.",
+                "format": "int64",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "partial_sample"
+                ],
+                "type": "string"
+              },
+              "sample_bytes": {
+                "description": "Bytes per whole sample in the actual decoder encoding.",
+                "format": "int64",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "decoded_bytes",
+              "sample_bytes",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "DisplayPath": {
         "description": "Display path for a file within a job: either a bare basename\n(`\"sample.cha\"`) for single-file input or a relative forward-slash path\n(`\"PWA/TYO_a1.cha\"`) for directory input with subdirectories.\n\nBackslashes are normalized to forward slashes on construction so the value\nis platform-independent regardless of whether the CLI ran on Windows.\n\nThis type replaces the former `FileName` which incorrectly rejected path\nseparators during deserialization even though the system routinely carries\nrelative paths.",
         "type": "string"
@@ -389,6 +438,204 @@
         ],
         "type": "string"
       },
+      "FaConstraintUnitV2": {
+        "description": "The quantities an actual model constraint can limit.",
+        "enum": [
+          "audio_samples",
+          "encoded_frames",
+          "text_labels"
+        ],
+        "type": "string"
+      },
+      "FaPreparationRefusalV2": {
+        "description": "Preparation cannot produce an executable model request.",
+        "oneOf": [
+          {
+            "description": "A constraint from the loaded model's configuration or tokenizer.",
+            "properties": {
+              "engine": {
+                "description": "Which loaded model imposed it.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "model_constraint"
+                ],
+                "type": "string"
+              },
+              "maximum": {
+                "description": "The actual model bound.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "provided": {
+                "description": "Requested population.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unit": {
+                "$ref": "#/components/schemas/FaConstraintUnitV2",
+                "description": "Units of both populations."
+              }
+            },
+            "required": [
+              "unit",
+              "provided",
+              "maximum",
+              "engine",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Input below the minimum extent required by the loaded model.",
+            "properties": {
+              "engine": {
+                "description": "The loaded model imposing the constraint.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "insufficient_input"
+                ],
+                "type": "string"
+              },
+              "minimum": {
+                "description": "The model's required minimum.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "provided": {
+                "description": "Actual input population.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "unit": {
+                "$ref": "#/components/schemas/FaConstraintUnitV2",
+                "description": "Units of both populations."
+              }
+            },
+            "required": [
+              "unit",
+              "provided",
+              "minimum",
+              "engine",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Allocation projection was unavailable; no guessed footprint substitutes.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "projection_unavailable"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "description": "The original qualified diagnostic.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "message",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FaResourceConstraintV2": {
+        "description": "Exact loaded-model or physical-host constraint retained for unavailable\nsource words. These quantities describe a request, not a duration policy.",
+        "oneOf": [
+          {
+            "description": "Decoder measurement, before a model request could be prepared.",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "empty_decoded_audio"
+                ],
+                "type": "string"
+              },
+              "shortfall": {
+                "$ref": "#/components/schemas/DecodedAudioShortfallV2",
+                "description": "Preserve no bytes versus a partial sample; infer no acoustic cause."
+              }
+            },
+            "required": [
+              "shortfall",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The loaded backend's original typed preparation refusal.",
+            "properties": {
+              "cause": {
+                "$ref": "#/components/schemas/FaPreparationRefusalV2",
+                "description": "The original quantities, model identity and diagnostic."
+              },
+              "kind": {
+                "enum": [
+                  "model"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Full request demand exceeds total usable physical host capacity.",
+            "properties": {
+              "engine": {
+                "description": "The loaded model that projected this request.",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "host_memory"
+                ],
+                "type": "string"
+              },
+              "required_mb": {
+                "description": "Model, request workspace, activation margin and worker baseline.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reserve_mb": {
+                "description": "Capacity unavailable to model requests by host policy.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "total_mb": {
+                "description": "Physical capacity, independent of transient memory pressure.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "engine",
+              "required_mb",
+              "reserve_mb",
+              "total_mb",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "FailureCategory": {
         "description": "Broad classification for failures seen by the control plane.\n\nRetry behavior should be defined against these categories rather than raw\nerror strings.",
         "enum": [
@@ -464,6 +711,7 @@
           "resolving_audio",
           "recovering_utterance_timing",
           "recovering_timing_fallback",
+          "preparing_alignment",
           "aligning",
           "transcribing",
           "benchmarking",
@@ -482,7 +730,10 @@
           "resolving_coreference",
           "comparing",
           "retry_scheduled",
-          "waiting_for_worker"
+          "waiting_for_worker",
+          "waiting_for_host_memory",
+          "preparing_worker",
+          "downloading_model"
         ],
         "type": "string"
       },
@@ -2302,6 +2553,40 @@
       "RefusedWindowTrace": {
         "description": "Wire form of [`batchalign_transform::decisions::RefusedWindow`]: one\nvariant per cause, tagged by `cause`, each carrying only its own numbers.",
         "oneOf": [
+          {
+            "description": "Actual loaded-model or physical-host refusal, with original quantities\nand identity. This is never inferred from a duration preference.",
+            "properties": {
+              "cause": {
+                "enum": [
+                  "resource"
+                ],
+                "type": "string"
+              },
+              "constraint": {
+                "$ref": "#/components/schemas/FaResourceConstraintV2",
+                "description": "The actual request constraint that prevented execution."
+              },
+              "end_ms": {
+                "description": "Original source-owned range end in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_ms": {
+                "description": "Original source-owned range start in file milliseconds.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "start_ms",
+              "end_ms",
+              "constraint",
+              "cause"
+            ],
+            "type": "object"
+          },
           {
             "description": "Longer than the engine's alignment budget.",
             "properties": {

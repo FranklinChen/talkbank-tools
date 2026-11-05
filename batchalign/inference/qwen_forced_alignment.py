@@ -42,6 +42,7 @@ from batchalign.worker._model_errors import ModelOutputInvalidError
 
 if TYPE_CHECKING:
     from batchalign.inference.qwen_timing import QwenFaCacheIdentity, WindowAlignment
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 L = logging.getLogger("batchalign.qwen.fa")
 
@@ -719,17 +720,20 @@ class QwenForcedAligner:
     model: Any
 
     @classmethod
-    def load(cls, aligner_id: str, device: str, dtype: Any) -> QwenForcedAligner:
-        """Load the aligner, or raise. There is no half-loaded aligner."""
+    def load(
+        cls, snapshot: TransformersSnapshot, device: str, dtype: Any
+    ) -> QwenForcedAligner:
+        """Load the aligner from its resolved snapshot, or raise. There is no
+        half-loaded aligner, and no load by name that could download."""
         from transformers import (  # type: ignore[import-not-found]
             AutoProcessor,
             Qwen3ASRForTokenClassification,
         )
 
         return cls(
-            processor=AutoProcessor.from_pretrained(aligner_id),
+            processor=AutoProcessor.from_pretrained(snapshot.path),
             model=Qwen3ASRForTokenClassification.from_pretrained(
-                aligner_id, device_map=device, dtype=dtype
+                snapshot.path, device_map=device, dtype=dtype
             ),
         )
 
@@ -857,36 +861,42 @@ class QwenFaHost:
         return segmentation.fold(alignment)
 
 
-def load_qwen_fa(lang: LanguageCode, *, device_policy: Any = None) -> QwenFaHost:
+@dataclass(frozen=True, slots=True)
+class LoadedQwenFaHost(QwenFaHost):
+    """The native loaded aligner, whose model also admits allocation planning."""
+
+    aligner: QwenForcedAligner
+
+
+def load_qwen_fa(
+    language: QwenLanguageLabel,
+    snapshot: TransformersSnapshot,
+    *,
+    device_policy: Any = None,
+) -> LoadedQwenFaHost:
     """Load the standalone Qwen3 FA engine for one worker.
 
-    The language is resolved FIRST, so an unsupported one fails at worker
-    bootstrap rather than after a multi-gigabyte download.
+    Takes the resolved language LABEL (``resolve_qwen_language``), not a
+    language code, so the caller has necessarily refused an unsupported
+    language before resolving ``snapshot``, the multi-gigabyte download.
     """
     import torch  # type: ignore[import-not-found]
 
     from batchalign.device import resolve_inference_device
-    from batchalign.worker._progress import emit_hf_download_if_missing
 
-    language = resolve_qwen_language(lang)
     device = resolve_inference_device(device_policy)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
-    emit_hf_download_if_missing(QWEN_FORCED_ALIGNER_MODEL_ID, kind="forced alignment")
-    aligner = QwenForcedAligner.load(
-        aligner_id=QWEN_FORCED_ALIGNER_MODEL_ID,
-        device=device.type,
-        dtype=dtype,
-    )
+    aligner = QwenForcedAligner.load(snapshot, device=device.type, dtype=dtype)
     L.info(
-        "Qwen3 FA loaded: aligner=%s, lang=%s (%s), device=%s, dtype=%s",
-        QWEN_FORCED_ALIGNER_MODEL_ID,
-        lang,
+        "Qwen3 FA loaded: aligner=%s at %s, lang=%s, device=%s, dtype=%s",
+        snapshot.model_id,
+        snapshot.commit,
         language,
         device.type,
         dtype,
     )
-    return QwenFaHost(aligner=aligner, language=language)
+    return LoadedQwenFaHost(aligner=aligner, language=language)
 
 
 __all__ = [

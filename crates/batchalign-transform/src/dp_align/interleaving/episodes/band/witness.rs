@@ -2,8 +2,20 @@
 
 use super::*;
 use crate::dp_align::LiteralMatchMode;
-use crate::dp_align::packed_literal::{BIT_WORDS, LiteralReference, ReferenceOrder, policy};
+use crate::dp_align::packed_literal::{BIT_WORDS, LiteralReference, ReferenceOrder};
 
+mod preparation;
+use preparation::PreparedWitness;
+
+struct InteriorScore(usize);
+
+struct LiteralInterior<'relation, 'source> {
+    source: &'relation [&'source str],
+    reference: &'relation [String],
+    mode: LiteralMatchMode,
+}
+
+/// A feasible canonical score, never an addressed correspondence certificate.
 pub(super) struct CanonicalWitness<'relation, 'source> {
     relation: &'relation Relation<'source>,
     score: usize,
@@ -31,111 +43,50 @@ impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
 
     pub(super) fn observe<C: WorkControl + ?Sized>(
         relation: &'relation Relation<'source>,
-        m: usize,
-        n: usize,
         control: &C,
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
-        if m.max(n) > WORK_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::Budget(
-                LocalInterleavingBudget::WorkBudgetExceeded {
-                    phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                    required_at_least: m.max(n),
-                },
-            )));
+        match PreparedWitness::observe(relation, control)? {
+            Ok(prepared) => prepared.finish(control).map(Ok),
+            Err(refusal) => Ok(Err(refusal)),
         }
-        let mut prefix = 0;
-        while prefix < m.min(n) && relation.matches(prefix, prefix) {
-            if prefix % 1024 == 0 {
-                control.check()?;
-            }
-            prefix += 1;
-        }
-        let mut suffix = 0;
-        while suffix < m.min(n) - prefix && relation.matches(m - 1 - suffix, n - 1 - suffix) {
-            if suffix % 1024 == 0 {
-                control.check()?;
-            }
-            suffix += 1;
-        }
-        // Retain the zero-/small-work prefix/suffix path and general fuzzy
-        // relation. A literal word equality supports bit-parallel exact LCS.
-        let quadratic = (m - prefix - suffix).saturating_mul(n - prefix - suffix);
-        let result = if let Relation::Literal {
-            source,
-            reference,
-            mode,
-        } = relation
-            && quadratic > 1_000_000
-            && let Some(mode) = policy(*mode)
-        {
-            literal(source, reference, mode, control)?
-        } else {
-            super::witness(relation, m, n, control)?
-        };
-        Ok(result.and_then(|(score, work)| {
-            let work = work.saturating_add(prefix + suffix);
-            if work > WORK_CELLS {
-                Err(LocalInterleavingRefusal::Budget(
-                    LocalInterleavingBudget::WorkBudgetExceeded {
-                        phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                        required_at_least: work,
-                    },
-                ))
-            } else {
-                Ok(Self {
-                    relation,
-                    score,
-                    work,
-                })
-            }
-        }))
     }
 }
 
-/// Allison-Dix exact LCS row differences packed into machine words.
-/// Sparse equality masks avoid alphabet-size times transcript-size storage.
-/// https://www.cantab.net/users/mmlist/ll/Publications/1986IPL/
-fn literal<C: WorkControl + ?Sized>(
-    source: &[&str],
-    reference: &[String],
-    mode: LiteralMatchMode,
-    control: &C,
-) -> Result<Result<(usize, usize), LocalInterleavingRefusal>, C::Error> {
-    let blocks = reference.len().div_ceil(64);
-    // One sparse-mask/row stream per source word. Include preprocessing,
-    // normalization and scans; there is no dense mask clear/populate pass.
-    let work = source
-        .len()
-        .saturating_mul(blocks)
-        .saturating_add(source.len().saturating_mul(3))
-        .saturating_add(reference.len().saturating_mul(3))
-        .saturating_add(2);
-    if work > WORK_CELLS {
-        return Ok(Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::FeasibleWitness,
-                required_at_least: work,
-            },
-        )));
+impl LiteralInterior<'_, '_> {
+    // One sparse-mask/row stream per source word, plus normalization/scans.
+    // This is declared algorithmic work, not latency or byte memory.
+    fn work(&self) -> usize {
+        self.source
+            .len()
+            .saturating_mul(self.reference.len().div_ceil(64))
+            .saturating_add(self.source.len().saturating_mul(3))
+            .saturating_add(self.reference.len().saturating_mul(3))
+            .saturating_add(2)
     }
-    // Posting pairs, map entries and two packed rows, before any allocation.
-    if reference
-        .len()
-        .saturating_mul(6)
-        .saturating_add(blocks.saturating_mul(2 * BIT_WORDS))
-        > SCORE_CELLS
-    {
-        return Ok(Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::MemoryBudgetExceeded,
-        )));
+
+    fn cells(&self) -> usize {
+        // Posting pairs, map entries and two packed rows.
+        self.reference.len().saturating_mul(6).saturating_add(
+            self.reference
+                .len()
+                .div_ceil(64)
+                .saturating_mul(2 * BIT_WORDS),
+        )
     }
-    let reference = LiteralReference::observe(reference, mode, ReferenceOrder::Forward, control)?;
-    let mut row = reference.start();
-    for word in source {
-        row = row.extend(word, control)?;
+
+    /// Allison-Dix exact LCS row differences with sparse equality masks.
+    /// https://www.cantab.net/users/mmlist/ll/Publications/1986IPL/
+    /// Only the admitted witness owner executes this in production.
+    fn execute<C: WorkControl + ?Sized>(self, control: &C) -> Result<InteriorScore, C::Error> {
+        let reference =
+            LiteralReference::observe(self.reference, self.mode, ReferenceOrder::Forward, control)?;
+        let mut row = reference.start();
+        for word in self.source {
+            row = row.extend(word, control)?;
+        }
+        // Padding bits cannot enter a state: masks contain real reference bits.
+        Ok(InteriorScore(row.score()))
     }
-    // Padding bits cannot enter a state: x contains only real reference bits.
-    Ok(Ok((row.score(), work)))
 }
 
 #[cfg(test)]
@@ -143,21 +94,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sparse_streaming_witness_admits_long_literal_rows_under_the_unchanged_limit() {
+    fn canonical_witness_admits_only_the_unmatched_interior() {
         let source = vec!["a"; 35_000];
         let mut reference = vec!["a".to_owned(); 40_000];
         reference[0] = "b".to_owned();
         reference[39_999] = "b".to_owned();
         let relation = Relation::new(source, &reference, MatchMode::Exact);
-        let witness = uninterrupted(CanonicalWitness::observe(
-            &relation,
-            35_000,
-            40_000,
-            &Uninterrupted,
-        ))
-        .unwrap();
+        let witness = uninterrupted(CanonicalWitness::observe(&relation, &Uninterrupted)).unwrap();
         assert_eq!(witness.score(), 35_000);
         assert!(witness.work() <= WORK_CELLS);
+
+        // The matching edges are already a completed part of the witness.
+        // Charging/scoring them again would refuse this affordable interior.
+        let mut source = vec!["edge"; 66_000];
+        let mut reference = vec!["edge".to_owned(); 66_000];
+        source[32_000..34_000].fill("source-only");
+        reference[32_000..34_000].fill("reference-only".to_owned());
+        let relation = Relation::new(source, &reference, MatchMode::Exact);
+        let witness = uninterrupted(CanonicalWitness::observe(&relation, &Uninterrupted))
+            .expect("only the 2,000 by 2,000 unmatched interior needs scoring");
+        assert_eq!(witness.score(), 64_000);
     }
 
     fn oracle(source: &[&str], reference: &[String], mode: MatchMode) -> usize {
@@ -178,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_witness_equals_scalar_oracle_across_word_boundaries_and_repetitions() {
+    fn canonical_witness_equals_scalar_oracle_across_word_boundaries_and_repetitions() {
         let alphabet = ["a", "A", "b", "B", "é", "É", "other"];
         for m in [0, 1, 63, 64, 65, 127, 128, 129, 257] {
             for n in [0, 1, 63, 64, 65, 127, 128, 129, 257] {
@@ -190,15 +146,12 @@ mod tests {
                         .map(|i| alphabet[(i * 3 + i / 11 + seed * 2) % alphabet.len()].to_owned())
                         .collect();
                     for mode in [MatchMode::Exact, MatchMode::CaseInsensitive] {
-                        let (score, _) = uninterrupted(literal(
-                            &source,
-                            &reference,
-                            policy(mode).unwrap(),
-                            &Uninterrupted,
-                        ))
-                        .unwrap();
+                        let relation = Relation::new(source.clone(), &reference, mode);
+                        let witness =
+                            uninterrupted(CanonicalWitness::observe(&relation, &Uninterrupted))
+                                .unwrap();
                         assert_eq!(
-                            score,
+                            witness.score(),
                             oracle(&source, &reference, mode),
                             "m={m} n={n} seed={seed} mode={mode:?}"
                         );
@@ -217,10 +170,13 @@ mod tests {
                 Err("cancelled")
             }
         }
-        assert_eq!(
-            literal(&["a"], &["a".to_owned()], LiteralMatchMode::Exact, &Cancel),
+        assert!(matches!(
+            CanonicalWitness::observe(
+                &Relation::new(vec!["a"], &["a".to_owned()], MatchMode::Exact),
+                &Cancel,
+            ),
             Err("cancelled")
-        );
+        ));
     }
 
     #[test]
@@ -235,12 +191,12 @@ mod tests {
                         let reference: Vec<_> = (0..n)
                             .map(|i| if b & (1 << i) == 0 { "a" } else { "b" }.to_owned())
                             .collect();
-                        let (score, _) = uninterrupted(literal(
-                            &source,
-                            &reference,
-                            LiteralMatchMode::Exact,
-                            &Uninterrupted,
-                        ))
+                        let InteriorScore(score) = LiteralInterior {
+                            source: &source,
+                            reference: &reference,
+                            mode: LiteralMatchMode::Exact,
+                        }
+                        .execute(&Uninterrupted)
                         .unwrap();
                         assert_eq!(score, oracle(&source, &reference, MatchMode::Exact));
                     }
@@ -254,27 +210,33 @@ mod tests {
         for m in [63, 64, 65, 128, 257, 300] {
             let source = vec!["same"; m];
             let reference = vec!["same".to_owned(); 257];
-            let (score, _) = uninterrupted(literal(
-                &source,
-                &reference,
-                LiteralMatchMode::Exact,
-                &Uninterrupted,
-            ))
+            let InteriorScore(score) = LiteralInterior {
+                source: &source,
+                reference: &reference,
+                mode: LiteralMatchMode::Exact,
+            }
+            .execute(&Uninterrupted)
             .unwrap();
             assert_eq!(score, m.min(257));
         }
     }
 
     #[test]
-    fn packed_witness_admits_work_and_memory_before_mask_allocation() {
-        let source = vec!["a"; 1_000_000];
-        let reference = vec!["a".to_owned(); 8192];
+    fn canonical_witness_admits_work_and_memory_before_row_allocation() {
+        // Packed masks do not fit, but the scalar row and its work do. A
+        // representation's refusal is not refusal of the canonical problem.
+        let reference = vec!["reference".to_owned(); 350_000];
+        let relation = Relation::new(vec!["source"; 4], &reference, MatchMode::Exact);
+        let witness = uninterrupted(CanonicalWitness::observe(&relation, &Uninterrupted))
+            .expect("the admitted scalar alternative must remain available");
+        assert_eq!(witness.score(), 0);
+
+        let source = vec!["source"; 1_000_000];
+        let reference = vec!["reference".to_owned(); 8192];
         assert!(matches!(
-            uninterrupted(literal(
-                &source,
-                &reference,
-                LiteralMatchMode::Exact,
-                &Uninterrupted
+            uninterrupted(CanonicalWitness::observe(
+                &Relation::new(source, &reference, MatchMode::Exact),
+                &Uninterrupted,
             )),
             Err(LocalInterleavingRefusal::Budget(
                 LocalInterleavingBudget::WorkBudgetExceeded {
@@ -283,14 +245,12 @@ mod tests {
                 }
             ))
         ));
-        let source = vec!["a"; 1000];
-        let reference = vec!["a".to_owned(); 400_000];
+        let source = vec!["source"; 1000];
+        let reference = vec!["reference".to_owned(); 400_000];
         assert!(matches!(
-            uninterrupted(literal(
-                &source,
-                &reference,
-                LiteralMatchMode::Exact,
-                &Uninterrupted
+            uninterrupted(CanonicalWitness::observe(
+                &Relation::new(source, &reference, MatchMode::Exact),
+                &Uninterrupted,
             )),
             Err(LocalInterleavingRefusal::Budget(
                 LocalInterleavingBudget::MemoryBudgetExceeded

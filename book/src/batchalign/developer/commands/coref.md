@@ -1,7 +1,7 @@
 # coref: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-02 22:01 EDT
+**Last updated:** 2026-11-05 21:04 EST
 
 Implementation guide for the `coref` command. For user-facing documentation,
 see [User Guide: coref](../../user-guide/commands/coref.md).
@@ -12,14 +12,21 @@ see [User Guide: coref](../../user-guide/commands/coref.md).
 
 | Layer | Location | Responsibility |
 |-------|----------|----------------|
-| CLI args | `crates/batchalign/src/cli/args/commands.rs`: `CorefArgs` | merge-abbrev only; coref has no `--lang` |
+| CLI args | `crates/batchalign/src/cli/args/commands.rs`: `CorefArgs` | shared I/O options only; coref has no `--lang` |
 | Language shape | `crates/batchalign/src/dispatch_language.rs` | Declares coref per-file, and mints the proof a job-level dispatcher needs |
 | Coref dispatch | `crates/batchalign/src/execution/coref.rs`: `dispatch_coref_job` | Plans, tracks, batches across files, writes; takes no language |
 | Catalog entry | `crates/batchalign/src/recipe_runner/catalog.rs` | the `CatalogEntry` for `coref` |
 | Stage recipe | `crates/batchalign/src/recipe_runner/recipes.rs` | `COREF_RECIPE` |
 | Coref orchestration | `crates/batchalign/src/coref.rs` | Full-document context assembly, worker dispatch, sparse injection |
 | Injection | `crates/batchalign/src/coref.rs` | Writes sparse `%xcoref:` tiers |
-| Worker IPC | `batchalign/inference/coref.py`: `batch_infer_coref()` | Loads Stanza coref model, returns chain structures |
+| Worker task load | `batchalign/worker/_model_loading/coreference.py`: `load_coref_task()` | `prepare_coref()` at `ensure_task` (first use): downloads the model and names its engine, returning a `PreparedCoref` that holds no pipeline |
+| Worker IPC | `batchalign/inference/coref.py`: `batch_infer_coref()` | Builds the pipeline from the prepared files for this batch, resolves each document, releases it; returns chain structures |
+
+Coref's language is fixed (`dispatch_language::COREF_LANGUAGE`, English):
+its requests are keyed by it, and so is the job's capability probe
+(`probe_language`), whose `ensure_task` therefore prepares the very worker
+the requests reach. The model is resident only during a batch, and a job
+sends one cross-file batch.
 
 Local submissions (auto-daemon or loopback `--server`) use `paths_mode=true`
 as of 2026-04-14: the CLI posts source/output path lists instead of CHAT

@@ -13,7 +13,7 @@ use crate::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
 use crate::worker::error::{WorkerAfterFailure, WorkerError};
 use crate::worker::tcp_handle::TcpWorkerHandle;
-use crate::worker::{BatchInferRequest, BatchInferResponse, WorkerBootstrapMode, WorkerTarget};
+use crate::worker::{BatchInferRequest, BatchInferResponse, WorkerTarget};
 use tracing::{instrument, warn};
 
 use super::checkout::CheckedOutWorker;
@@ -21,7 +21,36 @@ use super::checkout_wait::{GroupCounts, Parked, SaturatedWait};
 use super::eviction::EvictionOutcome;
 use super::execute_v2::{self, execute_v2_worker_key};
 use super::job_tracker::TrackerGuard;
-use super::{AwayFromQueue, WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
+use super::{AwayFromQueue, TaskLoad, WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
+use super::{DispatchPreparation, ReadyRequest};
+
+// The exchange order is identical on every transport. Both sends require the
+// same lease-owning RunPermit; the FA preparation reply advances the owned
+// candidate rather than reopening an arbitrary execution packet.
+macro_rules! dispatch_prepared {
+    ($loaded:expr, $admission:expr, $prepared:expr, $permit:ident => $send:expr) => {
+        'prepared_dispatch: {
+            use $crate::worker::pool::{DispatchPreparation, FaPreparationCompletion};
+            let ready = match $prepared {
+                DispatchPreparation::Ready(ready) => ready,
+                DispatchPreparation::ForcedAlignment(exchange) => {
+                    let $permit = $loaded.run(exchange.query(), $admission).await?;
+                    let reply = $send.await?;
+                    drop($permit);
+                    match exchange.bind(reply)? {
+                        FaPreparationCompletion::Ready(ready) => ready.into_ready(),
+                        FaPreparationCompletion::Refused(reply) => {
+                            break 'prepared_dispatch Ok(reply);
+                        }
+                    }
+                }
+            };
+            let $permit = $loaded.run(ready, $admission).await?;
+            $send.await
+        }
+    };
+}
+pub(crate) use dispatch_prepared;
 
 /// A TCP worker handle checked out of its group for one exchange.
 ///
@@ -391,7 +420,8 @@ impl WorkerPool {
         progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
         let key = execute_v2_worker_key(lang.into(), request, self.config.runtime.bootstrap_mode)?;
-        self.dispatch_v2_on_key(&key, request, progress_tx).await
+        self.dispatch_v2_on_key(&key, DispatchPreparation::begin(request)?, progress_tx)
+            .await
     }
 
     /// The route for one GPU task of a job's model plan, in `language`.
@@ -428,7 +458,21 @@ impl WorkerPool {
         request: &ExecuteRequestV2,
     ) -> Result<ExecuteResponseV2, WorkerError> {
         route.admit(request)?;
-        self.dispatch_v2_on_key(&route.key, request, None).await
+        self.dispatch_v2_on_key(&route.key, DispatchPreparation::begin(request)?, None)
+            .await
+    }
+
+    /// Consume retained preparation on the ordinary route. The loaded worker
+    /// still grants a fresh lease-owning run permit; a planning observation
+    /// cannot substitute for execution admission on any transport.
+    pub(crate) async fn dispatch_ready_routed(
+        &self,
+        route: &super::GpuRoute,
+        ready: ReadyRequest,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
+        route.admit(ready.request())?;
+        self.dispatch_v2_on_key(&route.key, DispatchPreparation::Ready(ready), None)
+            .await
     }
 
     /// Dispatch a GPU-profile request in integration tests, on the route
@@ -453,39 +497,34 @@ impl WorkerPool {
     async fn dispatch_v2_on_key(
         &self,
         key: &WorkerKey,
-        request: &ExecuteRequestV2,
+        prepared: DispatchPreparation,
         progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
         if self.serving(key.target).is_shared() {
             // Shared workers don't support progress forwarding yet.
-            return self.dispatch_gpu_execute_v2(key, request).await;
+            return self.dispatch_gpu_execute_v2(key, prepared).await;
         }
 
-        // In LazyProfile mode the worker started with no models, so the task's
-        // models are loaded before dispatching (idempotent if already loaded).
-        // The task is read from the request once, before any worker is taken,
-        // so a malformed request never retires a worker.
-        let lazy_task = match self.config.runtime.bootstrap_mode {
-            WorkerBootstrapMode::LazyProfile => Some(execute_v2::ensure_task_params(request)?),
-            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => None,
-        };
-        let timeout = self.config.effective_ensure_task_timeout();
+        // The prepare step: every model loads here, before the request's
+        // first dispatch to a worker, in every bootstrap mode (no worker
+        // loads one at startup). `ensure_task` is the transition to the
+        // `Loaded` proof the execute takes; a worker that already completed
+        // this load returns its proof with no round trip. A download runs
+        // under the loading stall window, never inside the request. The load
+        // is read from the request once, before any worker is taken, so a
+        // malformed request never retires a worker.
+        let load = TaskLoad::for_request(prepared.request());
+        let preparation = self.load_preparation();
 
         // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
             && let Some(mut checkout) = self.try_checkout_tcp(key)
         {
             let result = async {
-                if let Some((task, overrides)) = &lazy_task {
-                    checkout
-                        .handle()
-                        .ensure_task(*task, overrides.as_ref(), timeout)
-                        .await?;
-                }
-                checkout
+                let loaded = checkout.handle().ensure_task(&load, &preparation).await?;
+                dispatch_prepared!(loaded, &preparation.admission, prepared, permit => checkout
                     .handle()
-                    .execute_v2_with_progress(request, progress_tx)
-                    .await
+                    .execute_v2_with_progress(&permit, progress_tx))
             }
             .await;
             checkout.finish(&result);
@@ -495,13 +534,8 @@ impl WorkerPool {
         // Fall back to stdio worker.
         let mut worker = self.checkout(key).await?;
         let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
-        if let Some((task, overrides)) = &lazy_task {
-            worker
-                .ensure_task(*task, overrides.as_ref(), timeout)
-                .await?;
-        }
-
-        worker.execute_v2_with_progress(request, progress_tx).await
+        let loaded = worker.ensure_task(&load, &preparation).await?;
+        dispatch_prepared!(loaded, &preparation.admission, prepared, permit => worker.execute_v2_with_progress(&permit, progress_tx))
     }
 
     /// The registry GPU daemon connected for `key`, if its stream is still
@@ -542,42 +576,32 @@ impl WorkerPool {
         fields(
             target = %key.target.label(),
             lang = %key.language,
-            request_id = %request.request_id,
+            request_id = %prepared.request().request_id,
         ),
     )]
     async fn dispatch_gpu_execute_v2(
         &self,
         key: &WorkerKey,
-        request: &ExecuteRequestV2,
+        prepared: DispatchPreparation,
     ) -> Result<ExecuteResponseV2, WorkerError> {
+        // The prepare step, as in `dispatch_v2_on_key`.
+        let load = TaskLoad::for_request(prepared.request());
+        let preparation = self.load_preparation();
+
         // Try TCP worker first (discovered from registry).
         if matches!(key.target, WorkerTarget::Profile(_))
             && let Some(tcp_worker) = self.live_gpu_tcp_worker(key).await
         {
             let _job_guard = TrackerGuard::new(&self.job_tracker, tcp_worker.pid());
-            if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-                let (task, overrides) = execute_v2::ensure_task_params(request)?;
-                let timeout = self.config.effective_ensure_task_timeout();
-                tcp_worker
-                    .ensure_task(task, overrides.as_ref(), timeout)
-                    .await?;
-            }
-            return tcp_worker.execute_v2(request).await;
+            let loaded = tcp_worker.ensure_task(&load, &preparation).await?;
+            return dispatch_prepared!(loaded, &preparation.admission, prepared, permit => tcp_worker.execute_v2(&permit));
         }
 
         // Fall back to stdio worker.
         let gpu_worker = self.get_or_create_gpu_worker(key).await?;
         let _job_guard = TrackerGuard::new(&self.job_tracker, gpu_worker.pid());
-
-        if self.config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-            let (task, overrides) = execute_v2::ensure_task_params(request)?;
-            let timeout = self.config.effective_ensure_task_timeout();
-            gpu_worker
-                .ensure_task(task, overrides.as_ref(), timeout)
-                .await?;
-        }
-
-        let result = gpu_worker.execute_v2(request).await;
+        let loaded = gpu_worker.ensure_task(&load, &preparation).await?;
+        let result = dispatch_prepared!(loaded, &preparation.admission, prepared, permit => gpu_worker.execute_v2(&permit));
         if let Err(WorkerError::Timeout { .. }) = &result {
             // The worker thread serving the request may still be running it,
             // holding one of the worker's `gpu_thread_pool_size` slots for
@@ -640,10 +664,16 @@ impl WorkerPool {
             gpu,
             self.config.runtime.bootstrap_mode,
         );
-        let loaded_task = requirement.task();
-        let overrides = key.engine_selection.overrides().dispatch_overrides();
-        let overrides = (!overrides.is_empty()).then_some(overrides);
-        let timeout = self.config.effective_ensure_task_timeout();
+        // The load the job's own requests will need, so the probe prepares
+        // exactly the model they run on: a GPU command's from its plan (which
+        // names the speaker model, never part of the key), any other from
+        // the key's engines.
+        let task = requirement.task();
+        let load = match super::GpuTask::of(task) {
+            Some(gpu_task) => TaskLoad::new(task, gpu.load_overrides(gpu_task)),
+            None => TaskLoad::new(task, key.engine_selection.overrides().clone()),
+        };
+        let preparation = self.load_preparation();
 
         let reports = if self.serving(key.target).is_shared() {
             let registry_worker = if matches!(key.target, WorkerTarget::Profile(_)) {
@@ -653,9 +683,7 @@ impl WorkerPool {
             };
             match registry_worker {
                 Some(worker) => {
-                    worker
-                        .ensure_task(loaded_task, overrides.as_ref(), timeout)
-                        .await?;
+                    worker.ensure_task(&load, &preparation).await?;
                     let caps = worker.capabilities().await?;
                     match self.record_capabilities(&key, caps) {
                         Ok(reports) => reports,
@@ -670,9 +698,7 @@ impl WorkerPool {
                 }
                 None => {
                     let worker = self.get_or_create_gpu_worker(&key).await?;
-                    worker
-                        .ensure_task(loaded_task, overrides.as_ref(), timeout)
-                        .await?;
+                    worker.ensure_task(&load, &preparation).await?;
                     let caps = worker.capabilities().await?;
                     match self.record_capabilities(&key, caps) {
                         Ok(reports) => reports,
@@ -692,10 +718,7 @@ impl WorkerPool {
             // Load, probe and admit as one exchange, so a refused report
             // retires the handle exactly as a broken connection would.
             let admitted = async {
-                checkout
-                    .handle()
-                    .ensure_task(loaded_task, overrides.as_ref(), timeout)
-                    .await?;
+                checkout.handle().ensure_task(&load, &preparation).await?;
                 let caps = checkout.handle().capabilities().await?;
                 self.record_capabilities(&key, caps)
                     .map_err(WorkerError::from)
@@ -705,9 +728,7 @@ impl WorkerPool {
             admitted?
         } else {
             let mut worker = self.checkout(&key).await?;
-            worker
-                .ensure_task(loaded_task, overrides.as_ref(), timeout)
-                .await?;
+            worker.ensure_task(&load, &preparation).await?;
             let caps = worker.capabilities().await?;
             match self.record_capabilities(&key, caps) {
                 Ok(reports) => reports,
@@ -719,10 +740,7 @@ impl WorkerPool {
                 }
             }
         };
-        Ok(super::LoadedCapabilities {
-            task: loaded_task,
-            reports,
-        })
+        Ok(super::LoadedCapabilities { task, reports })
     }
 }
 
@@ -736,7 +754,7 @@ mod tcp_checkout_tests {
     use crate::api::LanguageCode3;
     use crate::options::{CommandOptions, MorphotagOptions};
     use crate::worker::tcp_handle::TcpWorkerInfo;
-    use crate::worker::{WorkerPid, WorkerProfile};
+    use crate::worker::{WorkerBootstrapMode, WorkerPid, WorkerProfile};
 
     /// A fake TCP worker daemon that reads one request and then either answers
     /// it with `reply` (and keeps the connection open), or, with no reply,
@@ -765,7 +783,8 @@ mod tcp_checkout_tests {
     async fn pool_with_one_tcp_handle(port: u16) -> (WorkerPool, WorkerKey, CommandOptions) {
         let mut config = super::super::PoolConfig::for_tests();
         config.runtime.bootstrap_mode = WorkerBootstrapMode::Profile;
-        config.ensure_task_timeout = Some(crate::api::PositiveSeconds::literal::<5>());
+        config.ensure_task_stall =
+            crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<5>());
         let pool = WorkerPool::new(config);
         let options = CommandOptions::Morphotag(MorphotagOptions::default());
         let key = WorkerKey::from_command_options(

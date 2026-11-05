@@ -4,11 +4,21 @@
 //! (e.g. "air" + "plane" → "airplane"). The compound list is loaded from
 //! `data/compounds.json` at compile time (3,660 raw entries, 3,584 unique
 //! pairs after `HashSet` dedup).
+//!
+//! # Timing
+//!
+//! The merged word covers both parts: it starts where the earlier part starts
+//! and ends where the later part ends. A pair is merged only when both parts
+//! are timed ([`AsrElement::timed_interval`]); a pair with an untimed part is
+//! kept as two words, exactly as recognized. Both rules are the abbreviation
+//! merge's, taken from the one owner, [`covering_all_timed`]: a merged word
+//! timed from one part would claim an end (or start) nobody observed, and an
+//! untimed merged word would discard the timing the other part did have.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use super::{AsrElement, AsrElementKind, AsrRawText};
+use super::{AsrElement, AsrElementKind, AsrRawText, covering_all_timed};
 
 /// Compound word pairs loaded from the JSON data file at compile time.
 ///
@@ -25,8 +35,9 @@ static COMPOUNDS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::ne
 /// Merge adjacent ASR elements that form known compound words.
 ///
 /// Uses a sliding window of size 2. When two adjacent tokens match a known
-/// compound pair, they are merged: values concatenated (no space), timing
-/// from the first element, kind set to `Text`.
+/// compound pair and both are timed, they are merged: values concatenated
+/// (no space), timing covering both, kind set to `Text`. A matching pair with
+/// an untimed part is kept as two words (see the module documentation).
 ///
 /// # Example
 ///
@@ -34,34 +45,51 @@ static COMPOUNDS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::ne
 /// ["air", "plane", "is", "here"] → ["airplane", "is", "here"]
 /// ```
 pub fn merge_compounds(elements: &[AsrElement]) -> Vec<AsrElement> {
-    if elements.len() < 2 {
-        return elements.to_vec();
-    }
-
     let mut result: Vec<AsrElement> = Vec::with_capacity(elements.len());
     let mut i = 0;
 
     while i < elements.len() {
-        if i + 1 < elements.len() {
-            let w1 = elements[i].value.as_str();
-            let w2 = elements[i + 1].value.as_str();
-            if COMPOUNDS.contains(&(w1, w2)) {
-                // Merge: concatenate values, take timing from first
-                result.push(AsrElement {
-                    value: AsrRawText::new(format!("{w1}{w2}")),
-                    ts: elements[i].ts,
-                    end_ts: elements[i].end_ts,
-                    kind: AsrElementKind::Text,
-                });
-                i += 2;
-                continue;
-            }
+        if let Some(merged) = elements
+            .get(i + 1)
+            .and_then(|next| merge_pair(&elements[i], next))
+        {
+            result.push(merged);
+            i += 2;
+            continue;
         }
         result.push(elements[i].clone());
         i += 1;
     }
 
     result
+}
+
+/// The compound two adjacent elements form, when they spell a known compound
+/// and both are timed.
+fn merge_pair(first: &AsrElement, second: &AsrElement) -> Option<AsrElement> {
+    let (w1, w2) = (first.value.as_str(), second.value.as_str());
+    if !COMPOUNDS.contains(&(w1, w2)) {
+        return None;
+    }
+    match covering_all_timed([first.timed_interval(), second.timed_interval()]) {
+        Some(union) => {
+            let (start, end) = union.as_positions();
+            Some(AsrElement {
+                value: AsrRawText::new(format!("{w1}{w2}")),
+                ts: Some(start),
+                end_ts: Some(end),
+                kind: AsrElementKind::Text,
+            })
+        }
+        None => {
+            tracing::debug!(
+                first = w1,
+                second = w2,
+                "compound kept as two words: a part has no timing"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -101,9 +129,30 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0].value, "airplane");
         assert_eq!(merged[0].ts, observed(0.0));
-        assert_eq!(merged[0].end_ts, observed(0.5)); // timing from first
+        // The merged word covers both parts.
+        assert_eq!(merged[0].end_ts, observed(1.0));
         assert_eq!(merged[1].value, "is");
         assert_eq!(merged[2].value, "here");
+    }
+
+    #[test]
+    fn a_compound_with_an_untimed_part_stays_two_words() {
+        let untimed_plane = AsrElement {
+            value: AsrRawText::new("plane"),
+            ts: observed(0.5),
+            end_ts: None,
+            kind: AsrElementKind::Text,
+        };
+        let elems = vec![elem("air", 0.0, 0.5), untimed_plane.clone()];
+        let merged = merge_compounds(&elems);
+        assert_eq!(merged, elems);
+        assert_eq!(merged[1], untimed_plane);
+    }
+
+    #[test]
+    fn a_compound_with_a_zero_width_part_stays_two_words() {
+        let elems = vec![elem("air", 0.0, 0.5), elem("plane", 0.5, 0.5)];
+        assert_eq!(merge_compounds(&elems), elems);
     }
 
     #[test]

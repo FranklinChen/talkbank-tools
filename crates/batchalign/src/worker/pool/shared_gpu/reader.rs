@@ -202,6 +202,50 @@ fn route_line(parsed: &Value, routes: &Routes, pid: WorkerPid) {
                 None => offer_control(routes, pid, ControlLine::Unowned(failure)),
             }
         }
+        // Progress is observability, never an answer. A model load waiting in
+        // the control slot takes it to keep its stall window open; with no
+        // load waiting (a dispatch's own progress, which this channel does
+        // not forward) a well-formed event is dropped. It used to reach the arm below, which
+        // turned it into a failure for whichever op was waiting: a load that
+        // reported its own download progress was failed by it.
+        Some("progress_v2") => match crate::worker::handle::WorkerResponse::deserialize(parsed) {
+            // A load's progress, by its scope: the worker writes its download
+            // growth and load phases outside any dispatch, and they go to the
+            // load waiting in the control slot, if any.
+            Ok(crate::worker::handle::WorkerResponse::ProgressV2 {
+                event: crate::types::worker_v2::ProgressEventV2::Load(load),
+            }) => {
+                if !routes.control.progress(load) {
+                    debug!(pid = %pid, "GPU worker: load progress with no load waiting");
+                }
+            }
+            // A request's work, by its scope. It is not the load's, and must
+            // not keep a load's stall window open. A shared GPU dispatch has
+            // no progress sink to route it to (its pending entry waits for a
+            // reply only), so it is dropped here, by name.
+            Ok(crate::worker::handle::WorkerResponse::ProgressV2 {
+                event: crate::types::worker_v2::ProgressEventV2::Request(request),
+            }) => debug!(
+                pid = %pid,
+                request_id = %request.request_id(),
+                "GPU worker: dispatch progress, not forwarded on this channel"
+            ),
+            Ok(other) => offer_control(
+                routes,
+                pid,
+                ControlLine::Unowned(ReplyFailure::Refused(format!(
+                    "a progress_v2 line decoded as another response: {other:?}"
+                ))),
+            ),
+            // A malformed protocol line is refused as every other one is.
+            Err(error) => offer_control(
+                routes,
+                pid,
+                ControlLine::Unowned(ReplyFailure::Refused(format!(
+                    "failed to decode progress_v2 line: {error}"
+                ))),
+            ),
+        },
         // No shared GPU op asks for health: the pool watches a shared worker
         // through its stream's liveness, not a probe.
         Some("health") => offer_control(
@@ -548,6 +592,84 @@ mod tests {
             Ok(response) => assert_eq!(response.task, InferTask::Morphosyntax),
             Err(failure) => panic!("expected its own reply, got {failure:?}"),
         }
+    }
+
+    /// A model load's own download progress reaches the load (which uses it
+    /// to keep its stall window open) and does not answer or fail it. It used
+    /// to fall through to the unknown-op arm and fail whichever op waited, so
+    /// a shared GPU worker's `ensure_task` was failed by its first progress
+    /// report. A load's real reply still answers it afterwards.
+    #[tokio::test]
+    async fn a_load_s_progress_reaches_it_and_does_not_fail_it() {
+        let routes = Routes::default();
+        let armed = routes
+            .control
+            .arm_ensure_task(InferTask::Asr)
+            .expect("an idle slot arms");
+        let mut answer = armed.answer;
+        let mut progress = armed.progress;
+        route(
+            &routes,
+            r#"{"op":"progress_v2","event":{"scope":"load","stage":"downloading_modelscope_iic_paraformer","measure":{"kind":"download_growth","grown_kib":2048}}}"#,
+        );
+        assert!(
+            answer.try_recv().is_err(),
+            "progress must not answer the load"
+        );
+        let event = progress.try_recv().expect("the load receives its progress");
+        assert_eq!(
+            event.measure,
+            crate::types::worker_v2::LoadMeasureV2::DownloadGrowth { grown_kib: 2048 }
+        );
+        route(
+            &routes,
+            r#"{"op":"ensure_task","response":{"status":"loaded","task":"asr","elapsed_s":840.0}}"#,
+        );
+        match answer.await.expect("answered") {
+            Ok(response) => assert_eq!(response.task, InferTask::Asr),
+            Err(failure) => panic!("expected its own reply, got {failure:?}"),
+        }
+    }
+
+    /// A dispatch's progress names its request and is not the load's: it
+    /// must not reach a waiting load, where it would keep a hung load's
+    /// stall window open while a sibling request makes progress.
+    #[tokio::test]
+    async fn a_dispatch_s_progress_does_not_reach_a_waiting_load() {
+        let routes = Routes::default();
+        let armed = routes
+            .control
+            .arm_ensure_task(InferTask::Asr)
+            .expect("an idle slot arms");
+        let mut progress = armed.progress;
+        route(
+            &routes,
+            r#"{"op":"progress_v2","event":{"scope":"request","request_id":"asr-v2-request-7","stage":"transcribing","progress":{"completed":1,"total":4}}}"#,
+        );
+        assert!(
+            progress.try_recv().is_err(),
+            "a dispatch's progress is not the load's"
+        );
+    }
+
+    /// Progress with no load waiting (a dispatch's own, which this channel
+    /// does not forward) is dropped, and fails no waiting dispatch.
+    #[tokio::test]
+    async fn progress_with_no_load_waiting_fails_nothing() {
+        let routes = Routes::default();
+        let receipt = wait_for(&routes, "asr-v2-request-7");
+        route(
+            &routes,
+            r#"{"op":"progress_v2","event":{"scope":"request","request_id":"asr-v2-request-7","stage":"transcribing","progress":{"completed":1,"total":4}}}"#,
+        );
+        assert_eq!(routes.pending.waiting(), 1, "the dispatch is still waiting");
+        assert!(
+            receipt
+                .reply_within(Duration::from_millis(20))
+                .await
+                .is_none(),
+            "progress must not answer a dispatch"
+        );
     }
 
     /// A late failure of an op that timed out does not answer the next op:

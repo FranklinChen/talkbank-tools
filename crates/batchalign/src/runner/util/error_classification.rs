@@ -5,7 +5,6 @@
 //! that help users understand what happened and what to do about it.
 
 use crate::error::{AsrProviderDisposition, RecordingDurationFault, ServerError};
-use crate::host_memory::HostMemoryError;
 use crate::scheduling::FailureCategory;
 use crate::worker::error::WorkerError;
 use crate::worker::memory_guard::MemoryGuardError;
@@ -32,7 +31,7 @@ fn truncate_tail(s: &str, max_chars: usize) -> &str {
 /// Classify worker errors into control-plane failure categories.
 pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
     match error {
-        WorkerError::ReadyTimeout { .. } => FailureCategory::WorkerTimeout,
+        WorkerError::Stalled { .. } => FailureCategory::WorkerTimeout,
         WorkerError::HealthCheckFailed(_) => FailureCategory::WorkerTimeout,
         WorkerError::ProcessExited { .. } => FailureCategory::WorkerCrash,
         // The worker went away under the request, as a crash takes it away;
@@ -58,7 +57,7 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // produced multi-GB log explosions, each attempt dumping a full
         // Python traceback before the worker exited. A download that failed
         // in transit is not one of these (below).
-        WorkerError::Bootstrap { .. } | WorkerError::RuntimeIdentityMismatch => {
+        WorkerError::Bootstrap { .. } | WorkerError::RuntimeIdentityMismatch(_) => {
             FailureCategory::WorkerBootstrap
         }
         // A download that failed in transit may get through later: the
@@ -68,6 +67,10 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         // The device ran out of memory: retried after a backoff, by which
         // time concurrent work may have released it.
         WorkerError::DeviceOutOfMemory { .. } => FailureCategory::MemoryPressure,
+        // The worker is refused the model (a gated repository): the same
+        // category a request refused for it gets, never retried, and the
+        // message names the remedy.
+        WorkerError::ModelAccessDenied { .. } => FailureCategory::ModelAccessDenied,
         // The generic code does not establish a cause or determinism.
         // Keep that uncertainty distinct from typed permanent refusals.
         WorkerError::ModelRuntime(_) => FailureCategory::LocalRuntime,
@@ -95,25 +98,27 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
     }
 }
 
-/// A spawn the memory guard blocked: memory pressure only when memory was
-/// the cause. A host that will not report its memory, a ledger the guard
-/// cannot read or write, and a server shutting down are not pressure, and
-/// retrying after a backoff would meet each of them again.
+/// A worker reservation the host refused. A full host is not here: that
+/// wait queues and never fails. A reservation larger than the host can ever
+/// fit is final (a retry asks for the same memory from the same host) and
+/// actionable, so it is a bootstrap failure, like a model that will not
+/// load; a host that will not report its memory, a ledger the coordinator
+/// cannot read or write, and a server shutting down are system failures.
 fn memory_guard_category(guard: &MemoryGuardError) -> FailureCategory {
     match guard {
-        MemoryGuardError::InsufficientMemory { .. } => FailureCategory::MemoryPressure,
-        MemoryGuardError::HostReservation(reservation) => match reservation {
-            HostMemoryError::CapacityRejected { .. }
-            | HostMemoryError::StartupSlotsBusy { .. }
-            | HostMemoryError::MlTestLockBusy { .. }
-            | HostMemoryError::TimedOut { .. } => FailureCategory::MemoryPressure,
-            HostMemoryError::Unreadable(_)
-            | HostMemoryError::Io { .. }
-            | HostMemoryError::CorruptLedger { .. } => FailureCategory::System,
-        },
-        MemoryGuardError::SemaphoreClosed
-        | MemoryGuardError::ReservationTaskFailed(_)
-        | MemoryGuardError::HostUnreadable(_) => FailureCategory::System,
+        MemoryGuardError::ExceedsHost { .. } => FailureCategory::WorkerBootstrap,
+        MemoryGuardError::LedgerUnusable(_)
+        | MemoryGuardError::SemaphoreClosed
+        | MemoryGuardError::ReservationTaskFailed(_) => FailureCategory::System,
+    }
+}
+
+/// The failure category of a refusal: the input's fault is a validation
+/// failure, a tool's a system failure.
+fn refusal_category(fault: crate::error::RefusalFault) -> FailureCategory {
+    match fault {
+        crate::error::RefusalFault::InvalidInput => FailureCategory::Validation,
+        crate::error::RefusalFault::ToolFailure => FailureCategory::System,
     }
 }
 
@@ -162,27 +167,9 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         ServerError::AlignmentMedia(_) | ServerError::KeptOffRecordBulletConflict { .. } => {
             FailureCategory::Validation
         }
-        ServerError::MergeVerification(error) => {
-            if error.is_internal() {
-                FailureCategory::System
-            } else {
-                FailureCategory::Validation
-            }
-        }
-        ServerError::ChatAdmission(error) => {
-            if crate::error::chat_admission_is_internal(error) {
-                FailureCategory::System
-            } else {
-                FailureCategory::Validation
-            }
-        }
-        ServerError::ChatReplacementAdmission(error) => {
-            if error.has_internal_failure() {
-                FailureCategory::System
-            } else {
-                FailureCategory::Validation
-            }
-        }
+        ServerError::MergeVerification(error) => refusal_category(error.fault()),
+        ServerError::ChatAdmission(refusal) => refusal_category(refusal.fault()),
+        ServerError::ChatReplacementAdmission(refusal) => refusal_category(refusal.fault()),
         // A retained provider response needs an explicit language decision,
         // not another automatic attempt or a claim of malformed client input.
         ServerError::UnresolvedAsrLanguage(_) => FailureCategory::ProviderTerminal,
@@ -410,32 +397,31 @@ pub(crate) fn user_facing_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_memory::HostMemoryError;
 
-    /// A blocked spawn is memory pressure (retried after a backoff) only
-    /// when memory blocked it; a ledger the guard cannot use is ours to fix,
-    /// and retrying would meet it again.
+    /// A refused worker reservation is final either way: one the host can
+    /// never fit is a bootstrap failure (actionable, never retried), and a
+    /// ledger the coordinator cannot use is ours to fix. A full host is not
+    /// a failure at all; that wait queues.
     #[test]
-    fn a_blocked_spawn_is_pressure_only_when_memory_blocked_it() {
+    fn a_refused_reservation_is_final_and_names_its_cause() {
         let classify =
             |guard| classify_server_error(&ServerError::Worker(WorkerError::MemoryGuard(guard)));
-        let capacity = HostMemoryError::CapacityRejected {
-            label: "stanza".into(),
-            available_mb: 1_000,
-            pending_reserved_mb: 0,
-            requested_mb: 4_000,
-            reserve_mb: 2_000,
-            total_mb: 64_000,
-        };
         assert_eq!(
-            classify(MemoryGuardError::HostReservation(capacity)),
-            FailureCategory::MemoryPressure
+            classify(MemoryGuardError::ExceedsHost {
+                label: "model-load:fa".into(),
+                requested_mb: 80_000,
+                reserve_mb: 2_000,
+                total_mb: 64_000,
+            }),
+            FailureCategory::WorkerBootstrap
         );
         let ledger = HostMemoryError::Io {
             path: "ledger.json".into(),
             source: std::io::Error::other("read-only file system"),
         };
         assert_eq!(
-            classify(MemoryGuardError::HostReservation(ledger)),
+            classify(MemoryGuardError::LedgerUnusable(ledger)),
             FailureCategory::System
         );
         assert_eq!(

@@ -29,10 +29,6 @@ pub struct AlignOptions {
     #[serde(default = "default_wor_tier_include")]
     pub wor: WorTierPolicy,
 
-    /// Merge abbreviated forms during processing.
-    #[serde(default)]
-    pub merge_abbrev: MergeAbbrevPolicy,
-
     /// Apply post-FA bullet repair to fix timing violations.
     ///
     /// Uses boundary averaging, gap filling, and selective removal instead
@@ -62,7 +58,6 @@ impl Default for AlignOptions {
             pauses: false,
             boundaries: AlignBoundaryOptions::default(),
             wor: default_wor_tier_include(),
-            merge_abbrev: MergeAbbrevPolicy::default(),
             bullet_repair: false,
             review_level: crate::chat_ops::fa::ReviewLevel::default(),
             media_dir: None,

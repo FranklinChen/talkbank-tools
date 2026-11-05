@@ -14,7 +14,7 @@
   ],
   "$defs": {
     "SpeakerInferenceEvidenceV2": {
-      "description": "Raw evidence returned by one speaker-inference backend.\n\nThe three variants make backend provenance structural. In particular, a\nlocal backend cannot construct a pyannoteAI result without also supplying\nthe completed provider job evidence, and cloud evidence cannot masquerade\nas a normalized-only local segment list.",
+      "description": "Raw evidence returned by one speaker-inference backend.\n\nThe variants make backend provenance structural. In particular, a\nlocal backend cannot construct a pyannoteAI result without also supplying\nthe completed provider job evidence, and cloud evidence cannot masquerade\nas a normalized-only local segment list.",
       "oneOf": [
         {
           "description": "Complete successful pyannoteAI job output, before normalization.",
@@ -54,27 +54,6 @@
             "kind": {
               "type": "string",
               "const": "pyannote"
-            },
-            "segments": {
-              "description": "Ordered speaker segments.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/SpeakerSegmentV2"
-              }
-            }
-          },
-          "required": [
-            "kind",
-            "segments"
-          ]
-        },
-        {
-          "description": "Normalized segments from the local NeMo runtime.",
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "nemo"
             },
             "segments": {
               "description": "Ordered speaker segments.",

@@ -127,13 +127,13 @@ pub async fn start(
                 Some(n) => crate::host_facts::PerProfile::uniform(n as usize),
                 None => effective.max_workers_per_key_by_profile.map(|n| n as usize),
             },
-            ready_timeout_s: cfg.worker_ready_timeout_s,
+            startup_stall: cfg.worker_startup_stall(),
             // `recommend_max_total_workers` clamps to `[2, 32]` so the
             // `as usize` cast is always well-defined.
             max_total_workers: effective.max_total_workers as usize,
             checkout_wait_report_interval: None,
             task_timeouts: cfg.task_timeouts(),
-            ensure_task_timeout: cfg.ensure_task_timeout_s,
+            ensure_task_stall: cfg.ensure_task_stall(),
             worker_registry_path: cfg.worker_registry_path.clone(),
             test_delay_ms: 0,
         };

@@ -434,3 +434,106 @@ def test_serve_stdio_error_for_a_message_with_no_request_id_stays_uncorrelated()
 
     assert len(envelopes) == 1
     assert "request_id" not in envelopes[0]
+
+
+# ---------------------------------------------------------------------------
+# Every model loads inside ensure_task, so a load that fails there must reach
+# the server classified as it was when models loaded at startup.
+# ---------------------------------------------------------------------------
+
+
+def _run_real_ensure_task(monkeypatch, failure: BaseException) -> dict[str, object]:
+    """Send one real ``ensure_task`` through ``_serve_stdio`` and the real
+    dispatch, with the task's load raising ``failure``; return the one
+    envelope the worker wrote."""
+    from batchalign.worker._model_loading.bootstrap import start_worker
+    from batchalign.worker._types import (
+        WorkerBootstrapRuntime,
+        WorkerProfile,
+        _state,
+    )
+
+    _state.__init__()  # type: ignore[misc]
+    start_worker(
+        WorkerBootstrapRuntime(
+            task=None, lang="eng", num_speakers=1, profile=WorkerProfile.GPU
+        )
+    )
+
+    def fail(_load, _bootstrap, _loads):
+        raise failure
+
+    monkeypatch.setattr("batchalign.worker._model_loading.bootstrap.record_load", fail)
+    message = json.dumps(
+        {
+            "op": "ensure_task",
+            "request": {
+                "request_id": "control-1",
+                "task": "speaker",
+                "engine_overrides": {"speaker": "pyannote"},
+            },
+        }
+    )
+    fake_stdout = io.StringIO()
+    with (
+        mock.patch.object(sys, "stdin", io.StringIO(message + "\n")),
+        mock.patch.object(sys, "stdout", fake_stdout),
+        mock.patch.object(sys, "stderr", io.StringIO()),
+    ):
+        _serve_stdio()
+    _state.__init__()  # type: ignore[misc]
+    envelopes = [
+        json.loads(line) for line in fake_stdout.getvalue().splitlines() if line.strip()
+    ]
+    # The load announces itself (a phase event) before it fails; the failure
+    # is the one reply.
+    *progress, reply = envelopes
+    assert all(envelope["op"] == "progress_v2" for envelope in progress), envelopes
+    assert reply["request_id"] == "control-1"
+    return reply
+
+
+def test_a_load_whose_download_fails_in_transit_is_a_download(monkeypatch):
+    """RED FIRST for the startup path this replaces: a first download that
+    lost its connection is retried as a download, now from ``ensure_task``."""
+    import httpx2
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        try:
+            raise httpx2.ConnectError("connection refused")
+        except httpx2.ConnectError as cause:
+            raise LocalEntryNotFoundError("no cached copy") from cause
+    except LocalEntryNotFoundError as error:
+        failure = error
+
+    envelope = _run_real_ensure_task(monkeypatch, failure)
+
+    assert envelope["op"] == "error"
+    assert envelope["kind"] == "download"
+    assert "no cached copy" in envelope["error"]
+
+
+def test_a_load_refused_a_gated_model_is_an_access_denial(monkeypatch):
+    """A gated artifact refused at load is named as an access denial, which
+    the server reports with its remedy and does not retry."""
+    from batchalign.inference._model_access_errors import ModelAccessDeniedError
+
+    envelope = _run_real_ensure_task(
+        monkeypatch,
+        ModelAccessDeniedError(
+            "https://huggingface.co/owner/gated-model/resolve/main/config.yaml",
+            "401 Unauthorized",
+        ),
+    )
+
+    assert envelope["op"] == "error"
+    assert envelope["kind"] == "access_denied"
+    assert "owner/gated-model" in envelope["error"]
+
+
+def test_classify_a_model_access_denial_is_access_denied():
+    from batchalign.inference._model_access_errors import ModelAccessDeniedError
+
+    exc = ModelAccessDeniedError("https://huggingface.co/owner/name", "403")
+    assert _classify_dispatch_exception(exc) == "access_denied"

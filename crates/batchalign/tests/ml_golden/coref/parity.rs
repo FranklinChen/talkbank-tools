@@ -9,7 +9,6 @@ fn coref_opts() -> CommandOptions {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     })
 }
 

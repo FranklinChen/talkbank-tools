@@ -1,7 +1,7 @@
 # Network and Transfer Costs
 
 **Status:** Current
-**Last updated:** 2026-10-01 13:28 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 Batchalign moves bytes over a network in four distinct ways, and every
 command and engine combination decides which of them it uses. None of them
@@ -131,7 +131,7 @@ good connection are on
   other transcript commands, `--server` does this for you.
 - Prefer local engines: `whisper_rs` or `whisper` for most languages,
   `funaudio`, `paraformer` or `qwen` for Chinese varieties, `--speaker-engine
-  pyannote` or `nemo` for diarization, `nllb` for translation. Nothing then
+  pyannote` for diarization, `nllb` for translation. Nothing then
   leaves the machine after the first model download.
 - With Rev.AI, pass the language explicitly rather than `--lang auto`, which
   uploads the recording twice.

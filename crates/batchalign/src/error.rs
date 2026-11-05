@@ -944,15 +944,16 @@ pub enum ServerError {
         #[from] crate::worker::speaker_embedding_request_v2::SpeakerEmbeddingRequestBuildErrorV2,
     ),
 
-    /// Complete CHAT admission refused the input. The producing failure keeps
-    /// internal tool faults distinct from CHAT invalidity.
-    #[error("CHAT pre-validation failed: {}", chat_admission_details(.0))]
-    ChatAdmission(batchalign_transform::ValidatedParseError),
+    /// Complete CHAT admission refused the input. Whose fault that is (the
+    /// transcript's or the tool's) is [`RefusalFault`]'s verdict, read by the
+    /// message, the HTTP status and the failure category alike.
+    #[error("{0}")]
+    ChatAdmission(SourceRefusal<batchalign_transform::ValidatedParseError>),
 
-    /// Source-bound tier replacement refused retained input, without treating
-    /// an internal producer failure as invalid CHAT.
-    #[error("CHAT replacement admission failed: {}", chat_replacement_details(.0))]
-    ChatReplacementAdmission(talkbank_parser::ReplacementFailure),
+    /// Source-bound tier replacement refused retained input. Whose fault that
+    /// is: [`RefusalFault`].
+    #[error("{0}")]
+    ChatReplacementAdmission(SourceRefusal<talkbank_parser::ReplacementFailure>),
 
     /// A producer could not establish admission of its output. This is a tool
     /// failure, not a verdict that the caller submitted invalid CHAT.
@@ -1301,39 +1302,188 @@ impl From<crate::chat_ops::speaker_identity::SpeakerIdentityFailure> for ServerE
     }
 }
 
-pub(crate) fn chat_admission_is_internal(
-    error: &batchalign_transform::ValidatedParseError,
-) -> bool {
-    use batchalign_transform::ValidatedParseError;
-    match error {
-        ValidatedParseError::InternalFailure { .. } => true,
-        ValidatedParseError::Validation(failure) => failure.has_internal_failure(),
-        ValidatedParseError::Parse(_) => false,
+/// Whose problem a refused CHAT admission is, decided once from the failure's
+/// own variant by an exhaustive match. The message, the HTTP status, the
+/// failure category and the CLI exit code all read this verdict; none
+/// re-derives it.
+///
+/// It replaces a boolean (`has_internal_failure`) that three consumers each
+/// consulted, which called `SourceUnavailable` the user's fault although
+/// Chatter documents it as asserting no invalidity, and a message ("CHAT
+/// replacement admission failed: E316 ...") that named an internal stage, read
+/// as BA3 breaking the file, and dropped the line numbers Chatter reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalFault {
+    /// The submitted transcript is not valid CHAT; its author must correct it.
+    InvalidInput,
+    /// A tool failure prevented any verdict on the transcript.
+    ToolFailure,
+}
+
+/// A failure of one of Chatter's CHAT admissions: its verdict and the
+/// findings it retains.
+pub trait AdmissionFailure: std::fmt::Display {
+    /// Whose fault the refusal is.
+    fn fault(&self) -> RefusalFault;
+    /// The findings the failure retains, in the refused source's coordinates.
+    fn findings(&self) -> &[talkbank_model::ParseError];
+}
+
+impl AdmissionFailure for batchalign_transform::ValidatedParseError {
+    fn fault(&self) -> RefusalFault {
+        match self {
+            Self::InternalFailure { .. } => RefusalFault::ToolFailure,
+            Self::Validation(failure) if failure.has_internal_failure() => {
+                RefusalFault::ToolFailure
+            }
+            Self::Validation(_) | Self::Parse(_) => RefusalFault::InvalidInput,
+        }
+    }
+
+    fn findings(&self) -> &[talkbank_model::ParseError] {
+        match self {
+            Self::InternalFailure { product, .. } | Self::Parse(product) => product.diagnostics(),
+            Self::Validation(failure) => failure.diagnostics(),
+        }
     }
 }
 
-fn chat_admission_details(error: &batchalign_transform::ValidatedParseError) -> String {
-    match error {
-        batchalign_transform::ValidatedParseError::Parse(product) => product
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| format!("{} {}", diagnostic.code.as_str(), diagnostic.message))
-            .collect::<Vec<_>>()
-            .join("; "),
-        _ => error.to_string(),
+impl AdmissionFailure for talkbank_parser::ReplacementFailure {
+    fn fault(&self) -> RefusalFault {
+        match self {
+            Self::Internal(_) => RefusalFault::ToolFailure,
+            // Chatter: "producer diagnostics, retained without asserting CHAT
+            // invalidity". Not the transcript's fault.
+            Self::SourceUnavailable { .. } => RefusalFault::ToolFailure,
+            Self::Validation(failure) if failure.has_internal_failure() => {
+                RefusalFault::ToolFailure
+            }
+            Self::RetainedParse { .. } | Self::Validation(_) => RefusalFault::InvalidInput,
+        }
+    }
+
+    fn findings(&self) -> &[talkbank_model::ParseError] {
+        self.diagnostics()
     }
 }
 
-fn chat_replacement_details(error: &talkbank_parser::ReplacementFailure) -> String {
-    if error.diagnostics().is_empty() {
-        error.to_string()
-    } else {
-        error
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| format!("{} {}", diagnostic.code.as_str(), diagnostic.message))
-            .collect::<Vec<_>>()
-            .join("; ")
+/// A refused CHAT admission, bound to the source text it refused, so each
+/// finding is reported with the line it is on.
+///
+/// Chatter's findings carry byte spans in the refused source's coordinates
+/// and compute lines only when given that source, which only the refusing call
+/// site holds. [`Self::in_source`] is the one constructor, so a refusal cannot
+/// reach a message, a status or an exit code without each finding having been
+/// projected once, there, by Chatter's checked [`SourceDiagnostic`] projection
+/// (every span admitted against the source, or a typed reason it is not).
+///
+/// [`SourceDiagnostic`]: talkbank_model::SourceDiagnostic
+#[derive(Debug)]
+pub struct SourceRefusal<E> {
+    error: E,
+    /// `error`'s findings, each projected onto the refused source.
+    findings: Vec<talkbank_model::SourceDiagnostic>,
+}
+
+impl<E: AdmissionFailure> SourceRefusal<E> {
+    /// Bind `error` to the `source` it refused.
+    pub(crate) fn in_source(error: E, source: &str) -> Self {
+        use talkbank_model::DiagnosticSourceError;
+        let index = talkbank_model::SourceIndex::new(source);
+        let findings: Vec<_> =
+            talkbank_model::enhance_errors_with_index(error.findings(), &index).collect();
+        for finding in &findings {
+            match finding.presentation() {
+                Ok(_) | Err(DiagnosticSourceError::Unlocated) => {}
+                // A span the refused source does not contain is not this
+                // source's: a coordinate defect, reported without a line.
+                Err(
+                    reason @ (DiagnosticSourceError::PrimaryRange { .. }
+                    | DiagnosticSourceError::LabelRange { .. }
+                    | DiagnosticSourceError::EmptySource),
+                ) => tracing::warn!(
+                    code = finding.original().code.as_str(),
+                    %reason,
+                    "admission finding does not lie in the refused source; reported without a line"
+                ),
+            }
+        }
+        Self { error, findings }
+    }
+
+    /// Whose fault the refusal is.
+    pub(crate) fn fault(&self) -> RefusalFault {
+        self.error.fault()
+    }
+
+    /// The refusal as Chatter returned it, for tests that inspect its findings.
+    #[cfg(test)]
+    pub(crate) fn error(&self) -> &E {
+        &self.error
+    }
+}
+
+impl<E: AdmissionFailure> std::fmt::Display for SourceRefusal<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.fault() {
+            RefusalFault::InvalidInput => write!(
+                f,
+                "the input transcript is not valid CHAT: {}. Correct the transcript and \
+                 submit it again; nothing was written",
+                located_findings(&self.findings)
+            ),
+            RefusalFault::ToolFailure => {
+                write!(
+                    f,
+                    "internal fault reading the transcript ({}); this is a tool \
+                     problem, not a verdict on the transcript, and nothing was written",
+                    self.error
+                )?;
+                if !self.findings.is_empty() {
+                    write!(f, ": {}", located_findings(&self.findings))?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl<E> std::error::Error for SourceRefusal<E>
+where
+    E: AdmissionFailure + std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Each finding with the line it lies on in the refused source:
+/// "line 139: E316 ...". A finding with no admitted projection has no line.
+fn located_findings(findings: &[talkbank_model::SourceDiagnostic]) -> String {
+    if findings.is_empty() {
+        return "no findings were reported".to_string();
+    }
+    findings
+        .iter()
+        .map(|finding| {
+            let original = finding.original();
+            let text = format!("{} {}", original.code.as_str(), original.message);
+            match finding.presentation() {
+                Ok(presentation) => format!("line {}: {text}", presentation.position().line),
+                Err(_) => text,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The HTTP status of a refusal: the client's error when the input is at
+/// fault, the server's when a tool failed.
+#[cfg(feature = "server")]
+fn refusal_status(fault: RefusalFault) -> StatusCode {
+    match fault {
+        RefusalFault::InvalidInput => StatusCode::BAD_REQUEST,
+        RefusalFault::ToolFailure => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -1391,13 +1541,7 @@ impl ServerError {
             Self::FileNotReady(_) => StatusCode::CONFLICT,
             Self::UnknownCommand(_) => StatusCode::BAD_REQUEST,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
-            Self::MergeVerification(error) => {
-                if error.is_internal() {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                } else {
-                    StatusCode::BAD_REQUEST
-                }
-            }
+            Self::MergeVerification(error) => refusal_status(error.fault()),
             Self::SpeakerIdentity(_) => {
                 // One policy owner also drives the task's retry decision.
                 if crate::runner::util::classify_server_error(self)
@@ -1411,20 +1555,8 @@ impl ServerError {
             Self::SpeakerModelManifest(_) | Self::SpeakerAudioPreparation(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            Self::ChatAdmission(error) => {
-                if chat_admission_is_internal(error) {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                } else {
-                    StatusCode::BAD_REQUEST
-                }
-            }
-            Self::ChatReplacementAdmission(error) => {
-                if error.has_internal_failure() {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                } else {
-                    StatusCode::BAD_REQUEST
-                }
-            }
+            Self::ChatAdmission(refusal) => refusal_status(refusal.fault()),
+            Self::ChatReplacementAdmission(refusal) => refusal_status(refusal.fault()),
             Self::UnresolvedAsrLanguage(_) => StatusCode::BAD_GATEWAY,
             Self::OutputAdmission { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Worker(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1485,6 +1617,88 @@ impl IntoResponse for ServerError {
 
 #[cfg(test)]
 mod tests {
+    /// THE 2026-11-05 CASE. A transcript with a malformed language precode
+    /// (`[ -eng]`) is refused at align's input admission, before any media or
+    /// recognition, as the input's fault: the message says the transcript is
+    /// not valid CHAT, names the line, and is not an internal-stage name.
+    #[test]
+    fn an_invalid_input_transcript_is_refused_as_the_inputs_fault_with_its_line() {
+        use crate::runner::util::classify_server_error;
+        use crate::scheduling::FailureCategory;
+        let source = "@UTF8\n@Begin\n@Languages:\tyue, eng\n\
+@Participants:\tMOT Mother\n@ID:\tyue|test|MOT|||||Mother|||\n\
+@Media:\tsample, audio, unlinked\n*MOT:\t[ -eng] yeah .\n@End\n";
+        let error = crate::fa::read_fa_source(source)
+            .err()
+            .expect("an unparsable main tier is refused at input admission");
+        assert_eq!(classify_server_error(&error), FailureCategory::Validation);
+        let message = error.to_string();
+        // Chatter's finding carries a byte span; the refusal computed its line
+        // from the source it refused.
+        assert!(
+            message.starts_with(
+                "the input transcript is not valid CHAT: line 7: E316 Unparsable content on main tier: '[ -eng]'"
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("replacement admission"), "{message}");
+    }
+
+    /// A refused finding that Chatter located only by byte span is reported
+    /// with the line of that span in the refused source, the way an operator
+    /// finds it in an editor; one whose span lies outside the source is not
+    /// that source's, and keeps no line rather than a wrong one.
+    #[test]
+    fn a_refusal_names_each_findings_line_in_its_source() {
+        let source = "@UTF8\n@Begin\n*MOT:\t[ -eng] yeah .\n";
+        let start = source.find("[ -eng]").expect("present");
+        let finding = |span| {
+            talkbank_model::ParseError::at_span(
+                talkbank_model::ErrorCode::UnparsableContent,
+                talkbank_model::Severity::Error,
+                span,
+                "Unparsable content on main tier: '[ -eng]'",
+            )
+        };
+        let refusal = super::SourceRefusal::in_source(
+            talkbank_parser::ReplacementFailure::RetainedParse {
+                diagnostics: vec![
+                    finding(talkbank_model::Span::new(start, start + "[ -eng]".len())),
+                    finding(talkbank_model::Span::new(source.len(), source.len() + 4)),
+                ],
+            },
+            source,
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "the input transcript is not valid CHAT: \
+             line 3: E316 Unparsable content on main tier: '[ -eng]'; \
+             E316 Unparsable content on main tier: '[ -eng]'. \
+             Correct the transcript and submit it again; nothing was written"
+        );
+    }
+
+    /// Chatter documents `SourceUnavailable` as asserting no invalidity, so it
+    /// is a tool failure: never a 400 or a `Validation` verdict on the user's
+    /// transcript, which is what the old boolean made of it.
+    #[test]
+    fn an_unavailable_source_is_a_tool_failure_not_the_transcripts_fault() {
+        use crate::runner::util::classify_server_error;
+        use crate::scheduling::FailureCategory;
+        let error = super::ServerError::ChatReplacementAdmission(super::SourceRefusal::in_source(
+            talkbank_parser::ReplacementFailure::SourceUnavailable {
+                diagnostics: Vec::new(),
+            },
+            "",
+        ));
+        assert_eq!(classify_server_error(&error), FailureCategory::System);
+        assert!(
+            error
+                .to_string()
+                .starts_with("internal fault reading the transcript")
+        );
+    }
+
     #[tokio::test]
     async fn speaker_protocol_setup_and_enrollment_failures_keep_their_typed_dispositions() {
         use super::ServerError;

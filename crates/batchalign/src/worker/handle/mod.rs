@@ -11,6 +11,7 @@ pub mod config;
 mod ipc;
 mod lifecycle;
 mod progress_preamble;
+pub(crate) use progress_preamble::{ResponseSource, read_skipping_progress};
 mod protocol;
 pub mod spawn;
 
@@ -78,9 +79,9 @@ pub struct WorkerHandle {
     stdout: BufReader<ChildStdout>,
     /// Monotonic instant when the last request was dispatched.
     last_activity: tokio::time::Instant,
-    /// Rust-side cache of tasks loaded via `ensure_task`. Skips redundant IPC
-    /// round-trips for already-loaded tasks in LazyProfile mode.
-    loaded_tasks: std::collections::HashSet<crate::worker::InferTask>,
+    /// This worker's on-demand load states (`NotLoaded` by absence,
+    /// `Loaded` proofs); a repeated preparation reuses the proof.
+    loads: crate::worker::pool::TaskLoads,
     /// Receiver for stderr lines captured by the background drain task.
     ///
     /// The drain task sends each non-empty stderr line through this channel.
@@ -112,17 +113,26 @@ pub(crate) struct WorkerHandleParts {
 }
 
 impl WorkerHandle {
-    /// Spawn a new Python worker and wait for it to become ready.
-    pub async fn spawn(config: WorkerConfig) -> Result<Self, WorkerError> {
-        // Memory guard: acquire a serialized spawn permit and check available RAM.
-        // This prevents the TOCTOU race where N concurrent spawns all see "enough"
-        // memory before any model is loaded, then collectively exceed physical RAM.
-        // Crash history and design rationale:
+    /// Spawn a new Python worker and wait for it to become ready. A startup
+    /// that has to queue for host memory retires idle workers through
+    /// `reclaim` (the pool's own, or
+    /// [`crate::host_memory::NoIdleWorkers`] outside a pool).
+    pub async fn spawn(
+        config: WorkerConfig,
+        reclaim: std::sync::Arc<dyn crate::host_memory::MemoryReclaim>,
+    ) -> Result<Self, WorkerError> {
+        // Memory guard: acquire a serialized spawn permit and the host's
+        // startup lease for this worker's baseline (queued while the host
+        // cannot fit it). Each model the worker later loads takes its own
+        // lease. Crash history and design rationale:
         // `book/src/batchalign/developer/memory-safety.md`.
-        let startup_reservation = config.startup_reservation_mb();
-        let spawn_permit = crate::worker::memory_guard::acquire_spawn_permit(&config).await?;
+        let spawn_permit =
+            crate::worker::memory_guard::acquire_spawn_permit(&config, reclaim.as_ref()).await?;
 
         let mut cmd: tokio::process::Command = spawn::build_worker_command(&config).into();
+        // Before ready there is no WorkerHandle to own termination. The
+        // startup task owns the child, including when its caller cancels.
+        cmd.kill_on_drop(true);
 
         info!(
             target = %config.bootstrap_label(),
@@ -130,7 +140,7 @@ impl WorkerHandle {
             test_echo = config.test_echo,
             force_cpu = config.runtime.force_cpu,
             python = %config.python_path,
-            startup_reservation_mb = startup_reservation.0,
+            startup_reservation_mb = crate::worker::residency::WORKER_BASELINE.reserved().0,
             available_memory_mb = ?config
                 .runtime
                 .host
@@ -174,27 +184,14 @@ impl WorkerHandle {
                 .ok_or_else(|| WorkerError::SpawnFailed("child stderr not captured".into()))?,
         );
 
-        let ready = match tokio::time::timeout(
-            config.ready_timeout_s.duration(),
-            Self::read_ready_line(&mut stdout_reader),
-        )
-        .await
-        {
-            Ok(Ok(ready)) => ready,
-            Ok(Err(error)) => {
+        // The startup wait is a stall window over the worker's progress, not
+        // a total limit: see `read_ready_line`.
+        let ready = match Self::read_ready_line(&mut stdout_reader, config.startup_stall).await {
+            Ok(ready) => ready,
+            Err(error) => {
                 return Err(
                     Self::finalize_startup_failure(&mut child, &mut stderr_reader, error).await,
                 );
-            }
-            Err(_) => {
-                return Err(Self::finalize_startup_failure(
-                    &mut child,
-                    &mut stderr_reader,
-                    WorkerError::ReadyTimeout {
-                        timeout_s: config.ready_timeout_s,
-                    },
-                )
-                .await);
             }
         };
 
@@ -209,15 +206,18 @@ impl WorkerHandle {
             .await);
         }
 
-        if let Some(transport) = ready.transport.as_deref()
-            && transport != "stdio"
-        {
-            return Err(Self::finalize_startup_failure(
-                &mut child,
-                &mut stderr_reader,
-                WorkerError::ReadyParseFailed(format!("unexpected worker transport: {transport}")),
-            )
-            .await);
+        match ready.transport {
+            protocol::ReadyTransport::Stdio => {}
+            protocol::ReadyTransport::Tcp { .. } => {
+                return Err(Self::finalize_startup_failure(
+                    &mut child,
+                    &mut stderr_reader,
+                    WorkerError::ReadyParseFailed(
+                        "a worker spawned for stdio reported a TCP ready line".to_string(),
+                    ),
+                )
+                .await);
+            }
         }
 
         let stdin = child
@@ -269,7 +269,7 @@ impl WorkerHandle {
             stdin,
             stdout: stdout_reader,
             last_activity: tokio::time::Instant::now(),
-            loaded_tasks: std::collections::HashSet::new(),
+            loads: crate::worker::pool::TaskLoads::default(),
             stderr_rx,
             request_flight: RequestFlight::Idle,
         })
@@ -315,9 +315,12 @@ impl WorkerHandle {
         let stderr_reader = BufReader::new(child.stderr.take().expect("stub stderr captured"));
 
         #[allow(clippy::expect_used)]
-        let ready = Self::read_ready_line(&mut stdout_reader)
-            .await
-            .expect("stub must emit a valid ready line as its first stdout line");
+        let ready = Self::read_ready_line(
+            &mut stdout_reader,
+            crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<30>()),
+        )
+        .await
+        .expect("stub must emit a valid ready line as its first stdout line");
 
         #[allow(clippy::expect_used)]
         let stdin = child.stdin.take().expect("stub stdin captured");
@@ -344,7 +347,7 @@ impl WorkerHandle {
             stdin,
             stdout: stdout_reader,
             last_activity: tokio::time::Instant::now(),
-            loaded_tasks: std::collections::HashSet::new(),
+            loads: crate::worker::pool::TaskLoads::default(),
             stderr_rx,
             request_flight: RequestFlight::Idle,
         }
@@ -391,7 +394,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
             runtime: WorkerRuntimeConfig {
                 force_cpu: true,
@@ -412,7 +415,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
             runtime: WorkerRuntimeConfig {
                 allow_mps: true,
@@ -514,7 +517,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: String::new(),
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
             runtime: WorkerRuntimeConfig {
                 provider_accounts:
@@ -541,7 +544,7 @@ mod tests {
             num_speakers: NumSpeakers(1),
             engine_overrides: r#"{"asr":"tencent"}"#.to_string(),
             test_echo: false,
-            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
             runtime: WorkerRuntimeConfig {
                 provider_accounts: crate::worker::provider_credentials::ProviderAccounts::read(
@@ -578,14 +581,18 @@ mod tests {
     /// workers during long-running V2 tasks.
     #[test]
     fn deserialize_progress_v2_response() {
-        let json = r#"{"op": "progress_v2", "event": {"request_id": "req-001", "completed": 42, "total": 100, "stage": "stanza_processing"}}"#;
+        let json = r#"{"op": "progress_v2", "event": {"scope": "request", "request_id": "req-001", "stage": "stanza_processing", "progress": {"completed": 42, "total": 100}}}"#;
         let resp: super::protocol::WorkerResponse = serde_json::from_str(json).unwrap();
         match resp {
-            super::protocol::WorkerResponse::ProgressV2 { event } => {
-                assert_eq!(&*event.request_id, "req-001");
-                assert_eq!(event.completed, 42);
-                assert_eq!(event.total, 100);
-                assert_eq!(event.stage, "stanza_processing");
+            super::protocol::WorkerResponse::ProgressV2 {
+                event: crate::types::worker_v2::ProgressEventV2::Request(request),
+            } => {
+                assert_eq!(&**request.request_id(), "req-001");
+                assert_eq!(
+                    (request.progress().completed(), request.progress().total()),
+                    (42, 100)
+                );
+                assert_eq!(request.stage(), "stanza_processing");
             }
             other => panic!("Expected ProgressV2, got {other:?}"),
         }

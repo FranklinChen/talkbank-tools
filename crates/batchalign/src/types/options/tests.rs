@@ -46,7 +46,6 @@ fn align_roundtrip() {
             main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
         },
         wor: true.into(),
-        merge_abbrev: false.into(),
         bullet_repair: false,
         review_level: Default::default(),
         media_dir: None,
@@ -117,7 +116,6 @@ fn command_name_matches_tag() {
                 pauses: false,
                 boundaries: Default::default(),
                 wor: true.into(),
-                merge_abbrev: false.into(),
                 bullet_repair: false,
                 review_level: Default::default(),
                 media_dir: None,
@@ -142,7 +140,6 @@ fn command_name_matches_tag() {
         (
             CommandOptions::Compare(CompareOptions {
                 common: CommonOptions::default(),
-                merge_abbrev: false.into(),
             }),
             "compare",
         ),
@@ -277,7 +274,6 @@ fn benchmark_asr_override_effective_engine_prefers_override() {
         },
         asr_engine: AsrEngineName::RevAi,
         wor: true.into(),
-        merge_abbrev: false.into(),
     };
 
     assert_eq!(opts.effective_asr_engine(), AsrEngineName::HkAliyun);
@@ -291,7 +287,6 @@ fn minimal_json_deserializes_with_defaults() {
     if let CommandOptions::Morphotag(m) = &opts {
         assert!(!m.retokenize);
         assert!(!m.skipmultilang);
-        assert!(!m.merge_abbrev.should_merge());
     } else {
         panic!("expected Morphotag");
     }
@@ -371,7 +366,6 @@ fn a_diarization_count_below_two_has_no_representation() {
 fn compare_roundtrip() {
     let opts = CommandOptions::Compare(CompareOptions {
         common: CommonOptions::default(),
-        merge_abbrev: true.into(),
     });
     let json = serde_json::to_string(&opts).unwrap();
     let back: CommandOptions = serde_json::from_str(&json).unwrap();
@@ -384,7 +378,6 @@ fn translate_roundtrip() {
         common: CommonOptions::default(),
         translate_engine: TranslateEngineName::Google,
         target: crate::api::LanguageCode3::spa(),
-        merge_abbrev: true.into(),
     });
     let json = serde_json::to_string(&opts).unwrap();
     let back: CommandOptions = serde_json::from_str(&json).unwrap();
@@ -416,7 +409,6 @@ fn translate_options_effective_engine_prefers_explicit_field() {
         common: CommonOptions::default(),
         translate_engine: TranslateEngineName::Seamless,
         target: crate::api::LanguageCode3::eng(),
-        merge_abbrev: false.into(),
     };
     assert_eq!(
         opts.effective_translate_engine(),
@@ -435,7 +427,6 @@ fn translate_options_effective_engine_override_wins() {
         common,
         translate_engine: TranslateEngineName::Google,
         target: crate::api::LanguageCode3::eng(),
-        merge_abbrev: false.into(),
     };
     assert_eq!(
         opts.effective_translate_engine(),
@@ -449,7 +440,6 @@ fn translate_options_serializes_seamless_engine() {
         common: CommonOptions::default(),
         translate_engine: TranslateEngineName::Seamless,
         target: crate::api::LanguageCode3::eng(),
-        merge_abbrev: false.into(),
     };
     let json = serde_json::to_string(&opts).unwrap();
     assert!(
@@ -462,7 +452,6 @@ fn translate_options_serializes_seamless_engine() {
 fn coref_roundtrip() {
     let opts = CommandOptions::Coref(CorefOptions {
         common: CommonOptions::default(),
-        merge_abbrev: false.into(),
     });
     let json = serde_json::to_string(&opts).unwrap();
     let back: CommandOptions = serde_json::from_str(&json).unwrap();
@@ -473,7 +462,6 @@ fn coref_roundtrip() {
 fn utseg_roundtrip() {
     let opts = CommandOptions::Utseg(UtsegOptions {
         common: CommonOptions::default(),
-        merge_abbrev: true.into(),
         utseg_fallback: false.into(),
     });
     let json = serde_json::to_string(&opts).unwrap();
@@ -487,7 +475,6 @@ fn benchmark_roundtrip() {
         common: CommonOptions::default(),
         asr_engine: AsrEngineName::WhisperOai,
         wor: true.into(),
-        merge_abbrev: false.into(),
     });
     let json = serde_json::to_string(&opts).unwrap();
     let back: CommandOptions = serde_json::from_str(&json).unwrap();

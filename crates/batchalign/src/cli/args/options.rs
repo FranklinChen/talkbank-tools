@@ -251,7 +251,6 @@ fn build_typed_options_with_cwd(
                     main_bullets: a.boundaries.main_bullets,
                 },
                 wor: resolve_wor_tier_policy(a.wor, a.nowor),
-                merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
                 bullet_repair: a.bullet_repair,
                 review_level: resolve_review_level(a.review_level),
                 media_dir,
@@ -309,13 +308,11 @@ fn build_typed_options_with_cwd(
             // there is no match here to be exhaustive over the wrong type.
             translate_engine: a.translate_engine.clone(),
             target: a.target.clone(),
-            merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
         })),
         Commands::Morphotag(a) => Some(CommandOptions::Morphotag(MorphotagOptions {
             common,
             retokenize: a.retokenize && !a.keeptokens,
             skipmultilang: a.skipmultilang && !a.multilang,
-            merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
             // Keep the domain / JSON field name so the wire format remains
             // stable while the public CLI stays default-on with an explicit
             // opt-out flag.
@@ -326,13 +323,9 @@ fn build_typed_options_with_cwd(
             // opts in, symmetric with `align`.
             review_level: resolve_review_level(a.review_level),
         })),
-        Commands::Coref(a) => Some(CommandOptions::Coref(CorefOptions {
-            common,
-            merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
-        })),
+        Commands::Coref(_) => Some(CommandOptions::Coref(CorefOptions { common })),
         Commands::Utseg(a) => Some(CommandOptions::Utseg(UtsegOptions {
             common,
-            merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
             utseg_fallback: a.utseg_fallback_stanza.into(),
         })),
         Commands::Benchmark(a) => {
@@ -346,17 +339,13 @@ fn build_typed_options_with_cwd(
                 common,
                 asr_engine: selection.engine(),
                 wor: resolve_wor_tier_policy(a.wor, a.nowor),
-                merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
             }))
         }
         Commands::Opensmile(a) => Some(CommandOptions::Opensmile(OpensmileOptions {
             common,
             feature_set: a.feature_set.clone(),
         })),
-        Commands::Compare(a) => Some(CommandOptions::Compare(CompareOptions {
-            common,
-            merge_abbrev: resolve_merge_abbrev_policy(a.merge_abbrev, a.no_merge_abbrev),
-        })),
+        Commands::Compare(_) => Some(CommandOptions::Compare(CompareOptions { common })),
         Commands::Avqi(_) => Some(CommandOptions::Avqi(AvqiOptions { common })),
         // `?`, not `.ok()`. Clap validates each `--enroll` on its own; that
         // two of them share a label, or claim the same audio, is a relation

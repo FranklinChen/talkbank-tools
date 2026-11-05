@@ -1,7 +1,7 @@
 # CHAT Parsing (Rust)
 
 **Status:** Current
-**Last updated:** 2026-10-02 20:51 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 All CHAT parsing and serialization is handled by Rust. The CHAT lifecycle
 (parsing, word extraction, result injection, validation, serialization)
@@ -114,7 +114,7 @@ see [Errors, Batchalign Runtime](../../architecture/errors-and-validation/batcha
 | ASR transcription | `inference/asr.py` | transformers |
 | Forced alignment | `inference/fa.py` | transformers, torchaudio |
 | Morphosyntactic analysis | `inference/morphosyntax.py` | stanza |
-| Speaker diarization | `inference/speaker.py` | nemo, pyannote |
+| Speaker diarization | `inference/speaker.py` | pyannote, pyannoteAI client |
 | Utterance segmentation | `inference/utseg.py` | stanza |
 | Translation | `inference/translate.py` | googletrans, seamless |
 | Audio feature extraction | `inference/opensmile.py` | opensmile |

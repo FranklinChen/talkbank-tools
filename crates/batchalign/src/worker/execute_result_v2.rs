@@ -113,7 +113,7 @@ impl ModelLocality {
     pub(crate) fn of_speaker(backend: crate::types::worker_v2::SpeakerBackendV2) -> Self {
         use crate::types::worker_v2::SpeakerBackendV2;
         match backend {
-            SpeakerBackendV2::Pyannote | SpeakerBackendV2::Nemo => Self::Local,
+            SpeakerBackendV2::Pyannote => Self::Local,
             SpeakerBackendV2::PyannoteAi => Self::Remote,
         }
     }

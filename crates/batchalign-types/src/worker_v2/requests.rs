@@ -358,8 +358,6 @@ pub enum SpeakerBackendV2 {
     PyannoteAi,
     /// Pyannote diarization backend.
     Pyannote,
-    /// NeMo diarization backend.
-    Nemo,
 }
 
 impl SpeakerBackendV2 {
@@ -368,7 +366,7 @@ impl SpeakerBackendV2 {
     /// THE owner of "which speaker backends exist"; the fixture-coverage test
     /// iterated two literals and so never noticed that the DEFAULT engine,
     /// `pyannote_ai`, had no request fixture.
-    pub const ALL: [Self; 3] = [Self::PyannoteAi, Self::Pyannote, Self::Nemo];
+    pub const ALL: [Self; 2] = [Self::PyannoteAi, Self::Pyannote];
 }
 
 /// Speaker-embedding backend selected by the Rust control plane.
@@ -377,11 +375,29 @@ impl SpeakerBackendV2 {
 /// constant: the wire already has to say which acoustic model produced a
 /// vector, because vectors from two models are not comparable and a cache that
 /// could not tell them apart would replay one against the other.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SpeakerEmbeddingBackendV2 {
     /// The embedding node of the released local Pyannote model graph.
     Pyannote,
+}
+
+impl SpeakerEmbeddingBackendV2 {
+    /// The serde spelling, written out so the worker's `speaker_embedding`
+    /// engine override can name the model without a JSON round trip.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Pyannote => "pyannote",
+        }
+    }
+
+    /// Parse [`Self::wire_name`], or `None` for any other spelling.
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "pyannote" => Some(Self::Pyannote),
+            _ => None,
+        }
+    }
 }
 
 /// Small artifact-kind vocabulary advertised in task capabilities.
@@ -896,6 +912,8 @@ where
 /// V2 forced-alignment request payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ForcedAlignmentRequestV2 {
+    /// Candidate, metadata-only preparation, or admitted execution packet.
+    pub phase: super::FaRequestPhaseV2,
     /// Opt-in file-backed diagnostic capture, supported only by Whisper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_capture: Option<super::WhisperAttentionCaptureRequestV2>,

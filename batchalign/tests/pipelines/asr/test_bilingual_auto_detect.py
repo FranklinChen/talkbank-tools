@@ -74,14 +74,17 @@ class TestBilingualAutoDetect:
             _infer_whisper,
             load_whisper_asr,
         )
+        from batchalign.worker._model_loading.pinned_hub import (
+            resolve_transformers,
+            unpinned,
+        )
         from batchalign.worker._types_v2 import (
             DetectWhisperLanguageV2,
             NotRequestedDiarizationV2,
         )
 
         model = load_whisper_asr(
-            model="openai/whisper-large-v3",
-            base="openai/whisper-large-v3",
+            resolve_transformers(unpinned("openai/whisper-large-v3"), kind="ASR"),
             decoding=DetectWhisperLanguageV2(),
         )
 
@@ -115,14 +118,17 @@ class TestBilingualAutoDetect:
             _infer_whisper,
             load_whisper_asr,
         )
+        from batchalign.worker._model_loading.pinned_hub import (
+            resolve_transformers,
+            unpinned,
+        )
         from batchalign.worker._types_v2 import (
             ForceWhisperLanguageV2,
             NotRequestedDiarizationV2,
         )
 
         model = load_whisper_asr(
-            model="openai/whisper-large-v3",
-            base="openai/whisper-large-v3",
+            resolve_transformers(unpinned("openai/whisper-large-v3"), kind="ASR"),
             decoding=ForceWhisperLanguageV2(token="en"),
         )
 

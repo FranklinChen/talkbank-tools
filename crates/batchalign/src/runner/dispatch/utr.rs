@@ -11,7 +11,7 @@ use crate::revai::FetchedRevAsrEvidence;
 use std::path::Path;
 
 use super::options::ResolvedUtrStrategy;
-use crate::api::{DurationMs, LanguageCode3};
+use crate::api::LanguageCode3;
 use crate::cache::{
     InferenceLease, UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks,
 };
@@ -48,10 +48,10 @@ pub(in crate::runner) struct UtrPassContext<'a> {
     pub cache_policy: crate::params::UtrCachePolicies,
     /// How long the audio runs, when the pipeline already probed it.
     pub audio_duration: Option<AudioDuration>,
-    /// Maximum FA group duration in milliseconds. Used by the two-pass UTR
+    /// FA aggregation preference. Used by the two-pass UTR
     /// strategy to compare FA grouping outcomes and detect the wider-window
     /// regression on non-English files.
-    pub max_group_ms: Option<DurationMs>,
+    pub aggregation_target: Option<crate::types::engines::FaAggregationTarget>,
     /// Display filename for logging.
     pub filename: &'a str,
     /// Selected UTR backend.
@@ -101,10 +101,10 @@ fn resolve_strategy(
 ) -> Box<dyn crate::chat_ops::fa::UtrStrategy> {
     let grouping_context =
         context
-            .max_group_ms
-            .map(|max_group_ms| crate::chat_ops::fa::GroupingContext {
+            .aggregation_target
+            .map(|aggregation_target| crate::chat_ops::fa::GroupingContext {
                 recording,
-                max_group_ms: max_group_ms.0,
+                aggregation_target,
             });
 
     match context.strategy {
@@ -180,7 +180,7 @@ pub(in crate::runner) async fn run_utr_pass(
                     error = %why,
                     "Partial UTR needs a non-empty recording, falling back to full-file recovery"
                 );
-                return run_utr_pass_full(chat_file, context).await;
+                return run_utr_pass_full(chat_file, context, progress).await;
             }
         };
         // Named once, so every token recovered in this pass records the same
@@ -212,7 +212,7 @@ pub(in crate::runner) async fn run_utr_pass(
                     error = %why,
                     "Partial UTR window is not inside the recording, falling back to full-file recovery"
                 );
-                return run_utr_pass_full(chat_file, context).await;
+                return run_utr_pass_full(chat_file, context, progress).await;
             }
         };
 
@@ -276,7 +276,7 @@ pub(in crate::runner) async fn run_utr_pass(
                                 // now: a waiter for the same segment must not
                                 // sit behind a whole-file pass it is not part of.
                                 drop(miss);
-                                return run_utr_pass_full(chat_file, context).await;
+                                return run_utr_pass_full(chat_file, context, progress).await;
                             }
                         };
 
@@ -302,7 +302,7 @@ pub(in crate::runner) async fn run_utr_pass(
                                     error = %error,
                                     "UTR segment ASR failed, falling back to full-file recovery"
                                 );
-                                return run_utr_pass_full(chat_file, context).await;
+                                return run_utr_pass_full(chat_file, context, progress).await;
                             }
                         }
                     }
@@ -344,7 +344,7 @@ pub(in crate::runner) async fn run_utr_pass(
 
             let strategy = resolve_strategy(&context, recording);
             let utr_result = work::PendingUtr::new(chat_file, strategy, all_tokens)
-                .run()
+                .run(progress)
                 .await?;
 
             info!(
@@ -381,13 +381,14 @@ pub(in crate::runner) async fn run_utr_pass(
         ));
     }
 
-    run_utr_pass_full(chat_file, context).await
+    run_utr_pass_full(chat_file, context, progress).await
 }
 
 /// Run the full-file UTR path with cache reuse.
 async fn run_utr_pass_full(
     chat_file: &mut crate::chat_ops::ChatFile,
     context: UtrPassContext<'_>,
+    progress: Option<&super::super::util::ProgressSender>,
 ) -> Result<UtrPassOutcome, crate::error::ServerError> {
     let cache_key = crate::chat_ops::fa::utr_asr_cache_key(
         context.audio_identity,
@@ -468,7 +469,7 @@ async fn run_utr_pass_full(
 
     let strategy = resolve_strategy(&context, recording);
     let utr_result = work::PendingUtr::new(chat_file, strategy, asr_tokens)
-        .run()
+        .run(progress)
         .await?;
 
     info!(
@@ -493,64 +494,72 @@ async fn run_utr_pass_full(
 
 /// Fetch one UTR ASR response from the selected backend and map it into the
 /// shared `AsrResponse` cache format.
-async fn infer_utr_asr_response(
-    audio_path: &Path,
+fn infer_utr_asr_response<'run>(
+    audio_path: &'run Path,
     decode_budget: Option<DecodeBudgetSeconds>,
-    context: UtrPassContext<'_>,
-) -> Result<crate::transcribe::AsrResponse, crate::error::ServerError> {
-    match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
-        None => {
-            let lang = crate::types::revai_language::RevLanguage::admit(
-                &crate::api::AsrLanguageRequest::One(context.lang.clone()),
-            )
-            .map_err(|refusal| crate::error::ServerError::Validation(refusal.to_string()))?;
-            let provider_media = crate::revai::PreparedRevProviderMedia::from_source(audio_path)
-                .await
+    context: UtrPassContext<'run>,
+) -> futures::future::BoxFuture<
+    'run,
+    Result<crate::transcribe::AsrResponse, crate::error::ServerError>,
+> {
+    Box::pin(async move {
+        match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
+            None => {
+                let lang = crate::types::revai_language::RevLanguage::admit(
+                    &crate::api::AsrLanguageRequest::One(context.lang.clone()),
+                )
+                .map_err(|refusal| crate::error::ServerError::Validation(refusal.to_string()))?;
+                let provider_media =
+                    crate::revai::PreparedRevProviderMedia::from_source(audio_path)
+                        .await
+                        .map_err(|error| {
+                            crate::error::ServerError::Persistence(error.to_string())
+                        })?;
+                let request = crate::revai::RevAsrEvidenceRequest::new(
+                    provider_media,
+                    &lang,
+                    // One speaker: UTR recovers timing for a transcript whose
+                    // speakers are already known, and asks Rev.AI to separate none.
+                    crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
+                    &crate::revai::RevAsrModelRevision::current(),
+                )
                 .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
-            let request = crate::revai::RevAsrEvidenceRequest::new(
-                provider_media,
-                &lang,
-                // One speaker: UTR recovers timing for a transcript whose
-                // speakers are already known, and asks Rev.AI to separate none.
-                crate::transcribe::SpeakerCount::Known(std::num::NonZeroU8::MIN),
-                &crate::revai::RevAsrModelRevision::current(),
-            )
-            .map_err(|error| crate::error::ServerError::Persistence(error.to_string()))?;
-            let service = crate::revai::RevAsrService::new();
-            let evidence_identity =
-                rev_utr_evidence_identity(context.filename, request.cache_key());
-            resolve_rev_utr_asr_response(
-                &request,
-                context.services.pipeline.cache,
-                context.cache_policy.rev_evidence(),
-                &service,
-                context.dumper,
-                &evidence_identity,
-            )
-            .await
+                let service = crate::revai::RevAsrService::new();
+                let evidence_identity =
+                    rev_utr_evidence_identity(context.filename, request.cache_key());
+                resolve_rev_utr_asr_response(
+                    &request,
+                    context.services.pipeline.cache,
+                    context.cache_policy.rev_evidence(),
+                    &service,
+                    context.dumper,
+                    &evidence_identity,
+                )
+                .await
+            }
+            Some(backend) => {
+                // UTR runs each engine's default configuration: no extras.
+                // `GpuModelPlan::alignment` plans the same, and the route check
+                // refuses a UTR request whose extras differ from the plan's.
+                let no_extras = std::collections::BTreeMap::new();
+                crate::transcribe::infer_asr(
+                    context.services.pipeline.pool,
+                    &crate::transcribe::AsrInferParams {
+                        backend,
+                        audio_path,
+                        lang: &context.asr_language(),
+                        // UTR never asks a provider to separate speakers: the
+                        // count of one it used to pass meant exactly this.
+                        diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
+                        extras: &no_extras,
+                        gpu: context.services.gpu,
+                        decode_budget,
+                    },
+                )
+                .await
+            }
         }
-        Some(backend) => {
-            // UTR runs each engine's default configuration: no extras.
-            // `GpuModelPlan::alignment` plans the same, and the route check
-            // refuses a UTR request whose extras differ from the plan's.
-            let no_extras = std::collections::BTreeMap::new();
-            crate::transcribe::infer_asr(
-                context.services.pipeline.pool,
-                &crate::transcribe::AsrInferParams {
-                    backend,
-                    audio_path,
-                    lang: &context.asr_language(),
-                    // UTR never asks a provider to separate speakers: the
-                    // count of one it used to pass meant exactly this.
-                    diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
-                    extras: &no_extras,
-                    gpu: context.services.gpu,
-                    decode_budget,
-                },
-            )
-            .await
-        }
-    }
+    })
 }
 
 /// A normalized UTR cache read has exactly two safe outcomes: replay a valid

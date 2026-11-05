@@ -49,9 +49,13 @@ def _reported_engine(task: InferTask) -> str | None:
     """
     match task:
         case InferTask.FA:
-            # Unchanged byte for byte once loaded: FA cache rows and evidence
-            # envelopes are namespaced by exactly this string.
-            return _state.fa_model_name
+            # The identity of the FA host this worker's load built, read from
+            # that host: FA cache rows and evidence envelopes are namespaced
+            # by exactly this string.
+            from batchalign.worker._loads import FA_LOAD
+
+            fa = _state.loads.get(FA_LOAD)
+            return None if fa is None else fa.engine
         case (
             InferTask.MORPHOSYNTAX
             | InferTask.COREF
@@ -171,11 +175,10 @@ def _capabilities() -> CapabilitiesResponse:
             infer_tasks.append(task)
             engine_versions[task] = _reported_engine(task)
 
-    # Speaker is advertised when any diarization package imports. Which one a
-    # job runs is chosen per request, so this probe cannot name it.
-    if _module_importable("pyannote.audio") or _module_importable(
-        "nemo.collections.asr"
-    ):
+    # Speaker is advertised when the diarization package imports. Which
+    # engine a job runs (local pyannote or pyannoteAI) is chosen per request,
+    # so this probe cannot name it.
+    if _module_importable("pyannote.audio"):
         infer_tasks.append(InferTask.SPEAKER)
         engine_versions[InferTask.SPEAKER] = _reported_engine(InferTask.SPEAKER)
 
@@ -216,8 +219,9 @@ def _ensure_task(
 ) -> EnsureTaskResponse:
     """Load one task's models on demand.
 
-    Called by the Rust control plane before dispatching work to a LazyProfile
-    worker. Idempotent: if the task is already loaded, returns immediately.
+    Called by the Rust control plane before a worker's first request for a
+    task, in every bootstrap mode. Idempotent: if the task is already loaded,
+    returns immediately.
     Returns the Pydantic ``EnsureTaskResponse`` directly for JSON serialization.
     """
     from batchalign.worker._model_loading import ensure_task_loaded

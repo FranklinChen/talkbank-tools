@@ -24,23 +24,47 @@ from batchalign.inference.speaker import (
     SpeakerSegment,
 )
 from batchalign.inference.utseg import UtsegInferenceRequest
+from batchalign.inference.word_segmentation import segment_batch
 from batchalign.tests._asr_model_pins import (
     loaded_identity,
     request_models,
-    worker_loaded,
 )
-from batchalign.worker._asr_v2 import AsrExecutionHostV2
-from batchalign.worker._avqi_v2 import AvqiExecutionHostV2
-from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
-from batchalign.worker._fa_v2 import ForcedAlignmentExecutionHostV2
-from batchalign.worker._opensmile_v2 import OpenSmileExecutionHostV2
-from batchalign.worker._speaker_v2 import SpeakerExecutionHostV2
-from batchalign.worker._text_v2 import TextExecutionHostV2
+from batchalign.tests._loaded_hosts import (
+    diarization,
+    loads,
+    local_asr,
+    morphosyntax,
+    prepare_fa_fixture,
+    provider_asr,
+    whisper_fa,
+    word_fa,
+)
+from batchalign.worker._execute_v2 import execute_on_loads, execute_request_v2
+from batchalign.worker._loads import (
+    ASR_LOAD,
+    AVQI_LOAD,
+    COREF_LOAD,
+    FA_LOAD,
+    MORPHOSYNTAX_LOAD,
+    OPENSMILE_LOAD,
+    SPEAKER_LOCAL_PYANNOTE_LOAD,
+    TRANSLATE_LOAD,
+    UTSEG_LOAD,
+    WORD_SEGMENTATION_LOAD,
+    ControlPlaneAsr,
+    LoadedAvqi,
+    LoadedCoref,
+    LoadedOpenSmile,
+    LoadedTranslate,
+    LoadedUtseg,
+    LoadedWordSegmentation,
+)
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
     InferResponse,
     ItemProduced,
+    TaskLoadRegistry,
     _state,
 )
 from batchalign.worker._types_v2 import (
@@ -57,6 +81,7 @@ from batchalign.worker._types_v2 import (
     ExecuteResponseV2,
     ExecuteSuccessV2,
     FaBackendV2,
+    FaCandidateV2,
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     InferenceTaskV2,
@@ -66,6 +91,7 @@ from batchalign.worker._types_v2 import (
     MorphosyntaxAnalyzedItemV2,
     MorphosyntaxRequestV2,
     MorphosyntaxResultV2,
+    NotRequestedDiarizationV2,
     OpenSmileRequestV2,
     OpenSmileResultV2,
     PreparedAudioEncodingV2,
@@ -120,6 +146,20 @@ def _write_json_payload(path: Path, value: object) -> None:
     """Write one prepared JSON payload for live V2 router tests."""
 
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def _morphosyntax_that_must_not_run() -> TaskLoadRegistry:
+    """A loaded morphosyntax host whose runner fails the test if called.
+
+    For requests the Rust control plane must refuse before the runner runs
+    (a corrupt or malformed frozen batch): the load is present, so what is
+    under test is the artifact check, not the load resolution.
+    """
+
+    def _must_not_run(_req: object) -> BatchInferResponse:
+        raise AssertionError("the runner must not be called for this batch")
+
+    return loads((MORPHOSYNTAX_LOAD, morphosyntax(_must_not_run)))
 
 
 def _assert_runtime_failure_response(response, message_fragment: str) -> None:
@@ -228,6 +268,7 @@ def _make_fa_request(
             byte_len=16,
         ),
         ForcedAlignmentRequestV2(
+            phase=FaCandidateV2(),
             backend=FaBackendV2.WHISPER,
             payload_ref_id="payload-ref-1",
             audio_ref_id="audio-ref-1",
@@ -243,26 +284,25 @@ def test_routes_forced_alignment_execute_v2_request(tmp_path: Path) -> None:
 
     payload_attachment, audio_attachment, payload = _make_fa_request(tmp_path)
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
-            request_id="req-execute-v2-fa-1",
-            task=InferenceTaskV2.FORCED_ALIGNMENT,
-            payload=payload,
-            attachments=[payload_attachment, audio_attachment],
+    response = execute_on_loads(
+        prepare_fa_fixture(
+            ExecuteRequestV2(
+                request_id="req-execute-v2-fa-1",
+                task=InferenceTaskV2.FORCED_ALIGNMENT,
+                payload=payload,
+                attachments=[payload_attachment, audio_attachment],
+            )
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(
-                # The shaping the request asked for must have been applied
-                # before the host is called: with CHAR_SPACED, "hello world"
-                # arrives one character per token. Asserting on the text is
-                # what asserting on the old `pauses` flag was standing in for.
-                whisper_runner=lambda audio, text: [
-                    ("hello", 0.1 if audio.shape == (4,) else 0.0),
-                    ("world", 0.3 if text == "h e l l o   w o r l d" else 0.0),
-                ]
+        loads(
+            (
+                FA_LOAD,
+                whisper_fa(
+                    lambda audio, text: [
+                        ("hello", 0.1 if audio.shape == (4,) else 0.0),
+                        ("world", 0.3 if text == "h e l l o   w o r l d" else 0.0),
+                    ]
+                ),
             ),
-            speaker=SpeakerExecutionHostV2(),
         ),
     )
 
@@ -277,8 +317,8 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
 
     _payload_attachment, audio_attachment, _payload = _make_fa_request(tmp_path)
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-asr-1",
             task=InferenceTaskV2.ASR,
             payload=AsrRequestV2(
@@ -289,23 +329,24 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
             ),
             attachments=[audio_attachment],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(
-                local_whisper_runner=lambda audio, lang: WhisperChunkResultPayloadV2(
-                    lang=lang,
-                    text="hello",
-                    chunks=[
-                        WhisperChunkSpanV2(
-                            text="hello",
-                            start_s=0.0 if audio.shape == (4,) else 1.0,
-                            end_s=0.5,
-                        )
-                    ],
-                    model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
-                )
+        loads(
+            (
+                ASR_LOAD,
+                local_asr(
+                    lambda audio, lang: WhisperChunkResultPayloadV2(
+                        lang=lang,
+                        text="hello",
+                        chunks=[
+                            WhisperChunkSpanV2(
+                                text="hello",
+                                start_s=0.0 if audio.shape == (4,) else 1.0,
+                                end_s=0.5,
+                            )
+                        ],
+                        model=loaded_identity(AsrBackendV2.LOCAL_WHISPER),
+                    )
+                ),
             ),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
         ),
     )
 
@@ -314,12 +355,11 @@ def test_routes_asr_execute_v2_request(tmp_path: Path) -> None:
     assert response.result.text == "hello"
 
 
-@worker_loaded(AsrBackendV2.HK_TENCENT)
 def test_routes_provider_media_asr_execute_v2_request() -> None:
     """The live V2 router should hand provider-media ASR requests to ASR hosts."""
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-asr-provider-1",
             task=InferenceTaskV2.ASR,
             payload=AsrRequestV2(
@@ -333,20 +373,24 @@ def test_routes_provider_media_asr_execute_v2_request() -> None:
             ),
             attachments=[],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(
-                hk_tencent_runner=lambda item: MonologueAsrResponse(
-                    lang=item.lang,
-                    monologues=[
-                        AsrMonologue(
-                            speaker=AttributedSpeaker(label="1"),
-                            elements=[AsrElement(value=item.audio_path, type="text")],
-                        )
-                    ],
-                )
+        loads(
+            (
+                ASR_LOAD,
+                provider_asr(
+                    AsrBackendV2.HK_TENCENT,
+                    lambda item: MonologueAsrResponse(
+                        lang=item.lang,
+                        monologues=[
+                            AsrMonologue(
+                                speaker=AttributedSpeaker(label="1"),
+                                elements=[
+                                    AsrElement(value=item.audio_path, type="text")
+                                ],
+                            )
+                        ],
+                    ),
+                ),
             ),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
         ),
     )
 
@@ -361,8 +405,8 @@ def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
 
     audio_path = tmp_path / "speaker-audio.pcm"
     _write_pcm_f32le(audio_path, np.asarray([0.2, 0.1, 0.0, -0.1], dtype=np.float32))
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-speaker-1",
             task=InferenceTaskV2.SPEAKER,
             payload=SpeakerRequestV2(
@@ -383,12 +427,11 @@ def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(
-                pyannote_prepared_audio_runner=lambda audio, sample_rate_hz, num_speakers: (
-                    SpeakerResponse(
+        loads(
+            (
+                SPEAKER_LOCAL_PYANNOTE_LOAD,
+                diarization(
+                    lambda audio, sample_rate_hz, num_speakers: SpeakerResponse(
                         evidence=LocalPyannoteSpeakerEvidence(
                             segments=[
                                 SpeakerSegment(
@@ -399,7 +442,7 @@ def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
                             ]
                         )
                     )
-                )
+                ),
             ),
         ),
     )
@@ -417,8 +460,8 @@ def test_routes_opensmile_execute_v2_request(tmp_path: Path) -> None:
     audio_path = tmp_path / "opensmile-audio.pcm"
     _write_pcm_f32le(audio_path, np.asarray([0.0, 0.5, -0.5, 0.25], dtype=np.float32))
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-opensmile-1",
             task=InferenceTaskV2.OPENSMILE,
             payload=OpenSmileRequestV2(
@@ -439,19 +482,22 @@ def test_routes_opensmile_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            opensmile=OpenSmileExecutionHostV2(
-                prepared_audio_runner=lambda audio, sample_rate_hz, feature_set, feature_level, audio_label: (
-                    OpenSmileResponse(
-                        feature_set=feature_set,
-                        feature_level=feature_level,
-                        num_features=2 if sample_rate_hz == 16000 else 0,
-                        duration_segments=1 if audio.shape == (4,) else 0,
-                        audio_file=audio_label,
-                        rows=[{"f0_mean": 100.0, "jitter_local": 0.1}],
-                        success=True,
+        loads(
+            (
+                OPENSMILE_LOAD,
+                LoadedOpenSmile(
+                    runner=lambda audio, sample_rate_hz, feature_set, feature_level, audio_label: (
+                        OpenSmileResponse(
+                            feature_set=feature_set,
+                            feature_level=feature_level,
+                            num_features=2 if sample_rate_hz == 16000 else 0,
+                            duration_segments=1 if audio.shape == (4,) else 0,
+                            audio_file=audio_label,
+                            rows=[{"f0_mean": 100.0, "jitter_local": 0.1}],
+                            success=True,
+                        )
                     )
-                )
+                ),
             ),
         ),
     )
@@ -468,8 +514,8 @@ def test_invalid_opensmile_host_output_becomes_runtime_failure(tmp_path: Path) -
     audio_path = tmp_path / "opensmile-invalid-audio.pcm"
     _write_pcm_f32le(audio_path, np.asarray([0.0, 0.5, -0.5, 0.25], dtype=np.float32))
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-opensmile-invalid-1",
             task=InferenceTaskV2.OPENSMILE,
             payload=OpenSmileRequestV2(
@@ -490,17 +536,20 @@ def test_invalid_opensmile_host_output_becomes_runtime_failure(tmp_path: Path) -
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            opensmile=OpenSmileExecutionHostV2(
-                prepared_audio_runner=lambda *_args: OpenSmileResponse(
-                    feature_set="eGeMAPSv02",
-                    feature_level="functionals",
-                    num_features=1,
-                    duration_segments=1,
-                    audio_file="invalid.wav",
-                    rows=[{"f0_mean": float("nan")}],
-                    success=True,
-                )
+        loads(
+            (
+                OPENSMILE_LOAD,
+                LoadedOpenSmile(
+                    runner=lambda *_args: OpenSmileResponse(
+                        feature_set="eGeMAPSv02",
+                        feature_level="functionals",
+                        num_features=1,
+                        duration_segments=1,
+                        audio_file="invalid.wav",
+                        rows=[{"f0_mean": float("nan")}],
+                        success=True,
+                    )
+                ),
             ),
         ),
     )
@@ -516,8 +565,8 @@ def test_routes_avqi_execute_v2_request(tmp_path: Path) -> None:
     _write_pcm_f32le(cs_path, np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
     _write_pcm_f32le(sv_path, np.asarray([0.5, 0.6, 0.7, 0.8], dtype=np.float32))
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-avqi-1",
             task=InferenceTaskV2.AVQI,
             payload=AvqiRequestV2(
@@ -547,24 +596,27 @@ def test_routes_avqi_execute_v2_request(tmp_path: Path) -> None:
                 ),
             ],
         ),
-        host=WorkerExecutionHostV2(
-            avqi=AvqiExecutionHostV2(
-                prepared_audio_runner=lambda cs_audio, cs_rate, sv_audio, sv_rate, cs_label, sv_label: (
-                    AvqiResponse(
-                        avqi=3.14
-                        if cs_audio.shape == (4,) and sv_audio.shape == (4,)
-                        else 0.0,
-                        cpps=5.0,
-                        hnr=10.0,
-                        shimmer_local=0.2,
-                        shimmer_local_db=0.3,
-                        slope=0.4,
-                        tilt=0.5,
-                        cs_file=cs_label if cs_rate == 16000 else "bad",
-                        sv_file=sv_label if sv_rate == 16000 else "bad",
-                        success=True,
+        loads(
+            (
+                AVQI_LOAD,
+                LoadedAvqi(
+                    runner=lambda cs_audio, cs_rate, sv_audio, sv_rate, cs_label, sv_label: (
+                        AvqiResponse(
+                            avqi=3.14
+                            if cs_audio.shape == (4,) and sv_audio.shape == (4,)
+                            else 0.0,
+                            cpps=5.0,
+                            hnr=10.0,
+                            shimmer_local=0.2,
+                            shimmer_local_db=0.3,
+                            slope=0.4,
+                            tilt=0.5,
+                            cs_file=cs_label if cs_rate == 16000 else "bad",
+                            sv_file=sv_label if sv_rate == 16000 else "bad",
+                            success=True,
+                        )
                     )
-                )
+                ),
             ),
         ),
     )
@@ -583,8 +635,8 @@ def test_invalid_avqi_host_output_becomes_runtime_failure(tmp_path: Path) -> Non
     _write_pcm_f32le(cs_path, np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
     _write_pcm_f32le(sv_path, np.asarray([0.5, 0.6, 0.7, 0.8], dtype=np.float32))
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-avqi-invalid-1",
             task=InferenceTaskV2.AVQI,
             payload=AvqiRequestV2(
@@ -614,20 +666,23 @@ def test_invalid_avqi_host_output_becomes_runtime_failure(tmp_path: Path) -> Non
                 ),
             ],
         ),
-        host=WorkerExecutionHostV2(
-            avqi=AvqiExecutionHostV2(
-                prepared_audio_runner=lambda *_args: AvqiResponse(
-                    avqi=float("inf"),
-                    cpps=5.0,
-                    hnr=10.0,
-                    shimmer_local=0.2,
-                    shimmer_local_db=0.3,
-                    slope=0.4,
-                    tilt=0.5,
-                    cs_file="invalid.cs.pcm",
-                    sv_file="invalid.sv.pcm",
-                    success=True,
-                )
+        loads(
+            (
+                AVQI_LOAD,
+                LoadedAvqi(
+                    runner=lambda *_args: AvqiResponse(
+                        avqi=float("inf"),
+                        cpps=5.0,
+                        hnr=10.0,
+                        shimmer_local=0.2,
+                        shimmer_local_db=0.3,
+                        slope=0.4,
+                        tilt=0.5,
+                        cs_file="invalid.cs.pcm",
+                        sv_file="invalid.sv.pcm",
+                        success=True,
+                    )
+                ),
             ),
         ),
     )
@@ -655,8 +710,8 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
         },
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-1",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -674,56 +729,56 @@ def test_routes_morphosyntax_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(
-                morphosyntax_runner=lambda req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={
-                                    "kind": "analyzed",
-                                    "raw_sentences": [
-                                        [
-                                            {
-                                                "id": 1,
-                                                "text": "I",
-                                                "lemma": "I",
-                                                "upos": "PRON",
-                                                "head": 2,
-                                                "deprel": "nsubj",
-                                            },
-                                            {
-                                                "id": 2,
-                                                "text": "saw",
-                                                "lemma": "see",
-                                                "upos": "VERB",
-                                                "head": 0,
-                                                "deprel": "root",
-                                            },
-                                            {
-                                                "id": 3,
-                                                "text": "it",
-                                                "lemma": "it",
-                                                "upos": "PRON",
-                                                "head": 2,
-                                                "deprel": "obj",
-                                            },
-                                        ]
-                                    ],
-                                    "model": {
-                                        "stanza_version": "1.99.0",
-                                        "lang": "eng",
-                                        "pipeline": "standard",
-                                    },
-                                    "repairs": [],
-                                }
+        loads(
+            (
+                MORPHOSYNTAX_LOAD,
+                morphosyntax(
+                    lambda req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={
+                                        "kind": "analyzed",
+                                        "raw_sentences": [
+                                            [
+                                                {
+                                                    "id": 1,
+                                                    "text": "I",
+                                                    "lemma": "I",
+                                                    "upos": "PRON",
+                                                    "head": 2,
+                                                    "deprel": "nsubj",
+                                                },
+                                                {
+                                                    "id": 2,
+                                                    "text": "saw",
+                                                    "lemma": "see",
+                                                    "upos": "VERB",
+                                                    "head": 0,
+                                                    "deprel": "root",
+                                                },
+                                                {
+                                                    "id": 3,
+                                                    "text": "it",
+                                                    "lemma": "it",
+                                                    "upos": "PRON",
+                                                    "head": 2,
+                                                    "deprel": "obj",
+                                                },
+                                            ]
+                                        ],
+                                        "model": {
+                                            "stanza_version": "1.99.0",
+                                            "lang": "eng",
+                                            "pipeline": "standard",
+                                        },
+                                        "repairs": [],
+                                    }
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -813,8 +868,8 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
             ]
         )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-unicode-1",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -832,8 +887,8 @@ def test_routes_morphosyntax_unicode_special_forms_request(tmp_path: Path) -> No
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(morphosyntax_runner=runner),
+        loads(
+            (MORPHOSYNTAX_LOAD, morphosyntax(runner)),
         ),
     )
 
@@ -867,8 +922,8 @@ def test_invalid_morphosyntax_host_item_fails_only_that_item(
         },
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-invalid-1",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -886,15 +941,18 @@ def test_invalid_morphosyntax_host_item_fails_only_that_item(
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                morphosyntax_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(result={"raw_sentences": "bad"})
-                        )
-                    ]
-                )
+        loads(
+            (
+                MORPHOSYNTAX_LOAD,
+                morphosyntax(
+                    lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(result={"raw_sentences": "bad"})
+                            )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -924,8 +982,8 @@ def test_morphosyntax_item_count_mismatch_is_invalid_payload(tmp_path: Path) -> 
     def _must_not_run(_req: object) -> BatchInferResponse:
         raise AssertionError("the runner must not be called for a miscounted batch")
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-miscount",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -943,8 +1001,8 @@ def test_morphosyntax_item_count_mismatch_is_invalid_payload(tmp_path: Path) -> 
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(morphosyntax_runner=_must_not_run)
+        loads(
+            (MORPHOSYNTAX_LOAD, morphosyntax(_must_not_run)),
         ),
     )
 
@@ -957,15 +1015,16 @@ def test_morphosyntax_item_count_mismatch_is_invalid_payload(tmp_path: Path) -> 
 def test_malformed_batch_with_no_runner_reports_model_unavailable(
     tmp_path: Path,
 ) -> None:
-    """PRECEDENCE, stated as intended (2026-08-21 port): runner availability
-    is checked before the batch's per-item shape.
+    """PRECEDENCE, stated as intended (2026-08-21 port): whether the task
+    loaded is decided before the batch's per-item shape.
 
-    The Rust control plane checks only the item COUNT before requiring a
-    runner; per-item validation lives in the runner adapter, which cannot run
-    without a runner. So a shape-malformed batch on a host with no runner
-    reports model_unavailable, where the old Python order (pydantic first)
-    reported invalid_payload. Both facts are true of such a request; the
-    ruling here is that a host that cannot run the task says so first.
+    The request's load is resolved first, at the Python boundary, and an
+    absent load is refused there, before the Rust control plane reads the
+    batch; per-item validation lives in the runner adapter, which a worker
+    without the load has none of. So a shape-malformed batch on a worker
+    whose morphosyntax task never loaded reports model_unavailable. Both facts
+    are true of such a request; the ruling here is that a worker that cannot
+    run the task says so first.
     """
 
     payload_path = tmp_path / "morphosyntax-batch-malformed.json"
@@ -974,8 +1033,8 @@ def test_malformed_batch_with_no_runner_reports_model_unavailable(
         {"items": [{"words": 7}], "mwt": {}},
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-malformed-no-runner",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -993,12 +1052,12 @@ def test_malformed_batch_with_no_runner_reports_model_unavailable(
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(text=TextExecutionHostV2()),
+        loads(),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
-    assert "no morphosyntax host loaded" in response.outcome.message
+    assert "the morphosyntax load has not completed" in response.outcome.message
 
 
 def test_corrupt_prepared_batch_artifact_is_attachment_unreadable(
@@ -1015,8 +1074,8 @@ def test_corrupt_prepared_batch_artifact_is_attachment_unreadable(
     payload_path = tmp_path / "morphosyntax-batch-corrupt.json"
     payload_path.write_text("{not json", encoding="utf-8")
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-corrupt",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -1034,7 +1093,7 @@ def test_corrupt_prepared_batch_artifact_is_attachment_unreadable(
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(text=TextExecutionHostV2()),
+        _morphosyntax_that_must_not_run(),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -1048,8 +1107,8 @@ def test_batch_without_items_list_is_invalid_payload(tmp_path: Path) -> None:
     payload_path = tmp_path / "morphosyntax-batch-itemless.json"
     _write_json_payload(payload_path, {"mwt": {}})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-morphosyntax-itemless",
             task=InferenceTaskV2.MORPHOSYNTAX,
             payload=MorphosyntaxRequestV2(
@@ -1067,7 +1126,7 @@ def test_batch_without_items_list_is_invalid_payload(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(text=TextExecutionHostV2()),
+        _morphosyntax_that_must_not_run(),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -1101,8 +1160,8 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
         {"items": [{"words": ["hello", "world"], "text": "hello world"}]},
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-utseg-1",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -1121,11 +1180,8 @@ def test_routes_utseg_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(utseg_runner=_recording_runner),
+        loads(
+            (UTSEG_LOAD, LoadedUtseg(runner=_recording_runner)),
         ),
     )
 
@@ -1150,8 +1206,8 @@ def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> Non
         {"items": [{"words": ["hello", "world"], "text": "hello world"}]},
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-utseg-assignments-1",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -1170,17 +1226,23 @@ def test_routes_utseg_execute_v2_request_with_assignments(tmp_path: Path) -> Non
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                utseg_runner=lambda req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={"kind": "unattributed", "assignments": [0, 1]}
+        loads(
+            (
+                UTSEG_LOAD,
+                LoadedUtseg(
+                    runner=lambda req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={
+                                        "kind": "unattributed",
+                                        "assignments": [0, 1],
+                                    }
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1229,8 +1291,8 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
         ],
     }
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-utseg-boundary-evidence-1",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -1249,21 +1311,24 @@ def test_routes_utseg_execute_v2_request_with_boundary_evidence(tmp_path: Path) 
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                utseg_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={
-                                    "kind": "boundary_model",
-                                    "assignments": [0, 1, 1],
-                                    "boundary_model_evidence": evidence,
-                                }
+        loads(
+            (
+                UTSEG_LOAD,
+                LoadedUtseg(
+                    runner=lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={
+                                        "kind": "boundary_model",
+                                        "assignments": [0, 1, 1],
+                                        "boundary_model_evidence": evidence,
+                                    }
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1283,8 +1348,8 @@ def test_invalid_utseg_host_output_fails_its_item(tmp_path: Path) -> None:
         payload_path, {"items": [{"words": ["hello"], "text": "hello"}]}
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-utseg-invalid-1",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -1303,17 +1368,20 @@ def test_invalid_utseg_host_output_fails_its_item(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                utseg_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={"kind": "constituency", "trees": [1, 2]}
+        loads(
+            (
+                UTSEG_LOAD,
+                LoadedUtseg(
+                    runner=lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={"kind": "constituency", "trees": [1, 2]}
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1331,8 +1399,8 @@ def test_invalid_utseg_assignment_host_output_fails_its_item(
         payload_path, {"items": [{"words": ["hello"], "text": "hello"}]}
     )
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-utseg-invalid-assignments-1",
             task=InferenceTaskV2.UTSEG,
             payload=UtsegRequestV2(
@@ -1351,17 +1419,23 @@ def test_invalid_utseg_assignment_host_output_fails_its_item(
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                utseg_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={"kind": "unattributed", "assignments": ["bad"]}
+        loads(
+            (
+                UTSEG_LOAD,
+                LoadedUtseg(
+                    runner=lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={
+                                        "kind": "unattributed",
+                                        "assignments": ["bad"],
+                                    }
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1393,8 +1467,8 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
     payload_path = tmp_path / "translate-batch.json"
     _write_json_payload(payload_path, {"items": [{"text": "hello there"}]})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-translate-1",
             task=InferenceTaskV2.TRANSLATE,
             payload=TranslateRequestV2(
@@ -1414,11 +1488,8 @@ def test_routes_translate_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(translate_runner=translate_runner),
+        loads(
+            (TRANSLATE_LOAD, LoadedTranslate(runner=translate_runner)),
         ),
     )
 
@@ -1437,8 +1508,8 @@ def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> Non
     payload_path = tmp_path / "translate-invalid-batch.json"
     _write_json_payload(payload_path, {"items": [{"text": "hello there"}]})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-translate-invalid-1",
             task=InferenceTaskV2.TRANSLATE,
             payload=TranslateRequestV2(
@@ -1458,15 +1529,20 @@ def test_invalid_translate_host_item_fails_only_that_item(tmp_path: Path) -> Non
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                translate_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(result={"raw_translation": ["hola"]})
-                        )
-                    ]
-                )
+        loads(
+            (
+                TRANSLATE_LOAD,
+                LoadedTranslate(
+                    runner=lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={"raw_translation": ["hola"]}
+                                )
+                            )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1480,8 +1556,8 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
     payload_path = tmp_path / "coref-batch.json"
     _write_json_payload(payload_path, {"items": [{"sentences": [["she"]]}]})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-coref-1",
             task=InferenceTaskV2.COREF,
             payload=CorefRequestV2(
@@ -1499,37 +1575,37 @@ def test_routes_coref_execute_v2_request(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(
-                coref_runner=lambda req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(
-                                result={
-                                    "kind": "resolved",
-                                    "engine": "stanza-1.99.0",
-                                    "annotations": [
-                                        {
-                                            "sentence_idx": 0,
-                                            "words": [
-                                                [
-                                                    {
-                                                        "chain_id": 0,
-                                                        "is_start": True,
-                                                        "is_end": True,
-                                                    }
-                                                ]
-                                            ],
-                                        }
-                                    ],
-                                }
+        loads(
+            (
+                COREF_LOAD,
+                LoadedCoref(
+                    runner=lambda req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(
+                                    result={
+                                        "kind": "resolved",
+                                        "engine": "stanza-1.99.0",
+                                        "annotations": [
+                                            {
+                                                "sentence_idx": 0,
+                                                "words": [
+                                                    [
+                                                        {
+                                                            "chain_id": 0,
+                                                            "is_start": True,
+                                                            "is_end": True,
+                                                        }
+                                                    ]
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                )
                             )
-                        )
-                    ]
-                )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1546,8 +1622,8 @@ def test_invalid_coref_host_item_fails_only_that_item(tmp_path: Path) -> None:
     payload_path = tmp_path / "coref-invalid-batch.json"
     _write_json_payload(payload_path, {"items": [{"sentences": [["she"]]}]})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-coref-invalid-1",
             task=InferenceTaskV2.COREF,
             payload=CorefRequestV2(
@@ -1565,15 +1641,18 @@ def test_invalid_coref_host_item_fails_only_that_item(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            text=TextExecutionHostV2(
-                coref_runner=lambda _req: BatchInferResponse(
-                    results=[
-                        InferResponse.timed(
-                            lambda: ItemProduced(result={"annotations": "bad"})
-                        )
-                    ]
-                )
+        loads(
+            (
+                COREF_LOAD,
+                LoadedCoref(
+                    runner=lambda _req: BatchInferResponse(
+                        results=[
+                            InferResponse.timed(
+                                lambda: ItemProduced(result={"annotations": "bad"})
+                            )
+                        ]
+                    )
+                ),
             ),
         ),
     )
@@ -1582,13 +1661,13 @@ def test_invalid_coref_host_item_fails_only_that_item(tmp_path: Path) -> None:
 
 
 def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
-    """Text tasks without a live V2 host should fail explicitly."""
+    """A text task whose load has not completed is refused by name."""
 
     payload_path = tmp_path / "unsupported-text-batch.json"
     _write_json_payload(payload_path, {"items": [{"text": "hello"}]})
 
-    response = execute_request_v2(
-        request=ExecuteRequestV2(
+    response = execute_on_loads(
+        ExecuteRequestV2(
             request_id="req-execute-v2-unsupported-1",
             task=InferenceTaskV2.TRANSLATE,
             payload=TranslateRequestV2(
@@ -1608,18 +1687,13 @@ def test_returns_typed_error_for_missing_text_v2_host(tmp_path: Path) -> None:
                 )
             ],
         ),
-        host=WorkerExecutionHostV2(
-            asr=AsrExecutionHostV2(),
-            forced_alignment=ForcedAlignmentExecutionHostV2(),
-            speaker=SpeakerExecutionHostV2(),
-            text=TextExecutionHostV2(),
-        ),
+        loads(),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
     assert response.result is None
-    assert "no translate host loaded" in response.outcome.message
+    assert "the translate load has not completed" in response.outcome.message
 
 
 def _word_segmentation_request(runs: list[str], item_count: int) -> ExecuteRequestV2:
@@ -1642,23 +1716,18 @@ def _word_segmentation_request(runs: list[str], item_count: int) -> ExecuteReque
     )
 
 
-def _no_loaded_host() -> WorkerExecutionHostV2:
-    """A host with no model loaded: word segmentation needs none."""
+def _word_segmentation_loads() -> TaskLoadRegistry:
+    """The model-free word-segmentation load, as its load records it."""
 
-    return WorkerExecutionHostV2(
-        asr=AsrExecutionHostV2(),
-        forced_alignment=ForcedAlignmentExecutionHostV2(),
-        speaker=SpeakerExecutionHostV2(),
-        text=TextExecutionHostV2(),
-    )
+    return loads((WORD_SEGMENTATION_LOAD, LoadedWordSegmentation(runner=segment_batch)))
 
 
 def test_routes_word_segmentation_execute_v2_request() -> None:
-    """The live V2 router segments with the named segmenter; no host is loaded."""
+    """The live V2 router segments with the named segmenter; no model is loaded."""
 
-    response = execute_request_v2(
-        request=_word_segmentation_request(["你食飽未", "臺灣"], item_count=2),
-        host=_no_loaded_host(),
+    response = execute_on_loads(
+        _word_segmentation_request(["你食飽未", "臺灣"], item_count=2),
+        _word_segmentation_loads(),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -1670,9 +1739,9 @@ def test_routes_word_segmentation_execute_v2_request() -> None:
 def test_word_segmentation_item_count_mismatch_is_invalid_payload() -> None:
     """A batch whose run count disagrees with the request is refused before segmenting."""
 
-    response = execute_request_v2(
-        request=_word_segmentation_request(["你食飽未"], item_count=2),
-        host=_no_loaded_host(),
+    response = execute_on_loads(
+        _word_segmentation_request(["你食飽未"], item_count=2),
+        _word_segmentation_loads(),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -1692,3 +1761,118 @@ def _assert_item_failure(response: ExecuteResponseV2, message_fragment: str) -> 
     item = response.result.items[0]
     assert item.kind == "failed"
     assert message_fragment in item.error
+
+
+def _provider_asr_request(backend: AsrBackendV2) -> ExecuteRequestV2:
+    """A provider-media ASR request for ``backend``, with its own pin.
+
+    Asks for no speaker separation, which every provider backend accepts, so
+    the request is admissible and only the load decides its fate.
+    """
+
+    return ExecuteRequestV2(
+        request_id=f"req-execute-v2-asr-{backend.value}",
+        task=InferenceTaskV2.ASR,
+        payload=AsrRequestV2(
+            lang="yue",
+            backend=backend,
+            input=ProviderMediaInputV2(
+                media_path="/tmp/provider.wav",
+                diarization=NotRequestedDiarizationV2(),
+            ),
+            models=request_models(backend),
+        ),
+        attachments=[],
+    )
+
+
+def _asr_runner_must_not_run(_item: object) -> MonologueAsrResponse:
+    raise AssertionError("no ASR runner may be called for a refused request")
+
+
+def test_a_control_plane_asr_load_refuses_an_asr_request_by_name() -> None:
+    """A worker whose plan's ASR runs in Rust loaded nothing for ASR, and an
+    ASR request reaching it is refused naming that, never run on a guess."""
+
+    response = execute_on_loads(
+        _provider_asr_request(AsrBackendV2.HK_TENCENT),
+        loads((ASR_LOAD, ControlPlaneAsr())),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
+    assert "hosts no ASR engine" in response.outcome.message
+    assert "hk_tencent" in response.outcome.message
+    assert response.result is None
+
+
+def test_an_asr_request_for_another_backend_than_the_loaded_one_is_refused() -> None:
+    """The Rust executor checks the request's backend against the host's, and
+    refuses a mismatch by name before any provider call is spent."""
+
+    response = execute_on_loads(
+        _provider_asr_request(AsrBackendV2.HK_ALIYUN),
+        loads(
+            (
+                ASR_LOAD,
+                provider_asr(AsrBackendV2.HK_TENCENT, _asr_runner_must_not_run),
+            )
+        ),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
+    assert "this worker loaded the hk_tencent ASR backend" in response.outcome.message
+    assert "request asks for hk_aliyun" in response.outcome.message
+
+
+def test_a_rev_ai_request_is_refused_by_name_even_with_an_asr_host_loaded() -> None:
+    """Rev.AI runs in the control plane, so a Rev.AI request reaching a worker
+    is refused naming where it runs, whatever ASR host the worker loaded."""
+
+    response = execute_on_loads(
+        _provider_asr_request(AsrBackendV2.REVAI),
+        loads(
+            (
+                ASR_LOAD,
+                provider_asr(AsrBackendV2.HK_TENCENT, _asr_runner_must_not_run),
+            )
+        ),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
+    assert "Rev.AI is handled directly by the Rust control plane" in (
+        response.outcome.message
+    )
+
+
+def test_an_fa_request_for_another_backend_than_the_loaded_one_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A Whisper FA request reaching a worker whose FA load built Wave2Vec is
+    refused by name, never aligned by the model it did not ask for."""
+
+    payload_attachment, audio_attachment, payload = _make_fa_request(tmp_path)
+
+    def _must_not_align(_audio: object, _words: object) -> object:
+        raise AssertionError("the loaded aligner must not run for another backend")
+
+    response = execute_on_loads(
+        prepare_fa_fixture(
+            ExecuteRequestV2(
+                request_id="req-execute-v2-fa-mismatch",
+                task=InferenceTaskV2.FORCED_ALIGNMENT,
+                payload=payload,
+                attachments=[payload_attachment, audio_attachment],
+            )
+        ),
+        loads((FA_LOAD, word_fa(_must_not_align))),
+    )
+
+    assert isinstance(response.outcome, ExecuteErrorV2)
+    assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
+    assert "this worker loaded the wave2vec forced-alignment backend" in (
+        response.outcome.message
+    )
+    assert "request asks for whisper" in response.outcome.message

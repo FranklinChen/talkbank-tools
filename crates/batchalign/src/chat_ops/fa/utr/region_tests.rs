@@ -846,8 +846,12 @@ fn an_unheard_utterance_between_measured_neighbours_is_searched_between_their_ed
     }
     "#);
     let anchors = AnchorIndex::from_plan(plan);
-    let grouped =
-        crate::chat_ops::fa::group_utterances(&document, 15_000, &recording(60_000), &anchors);
+    let grouped = crate::chat_ops::fa::group_with_declared_window_limit(
+        &document,
+        15_000,
+        &recording(60_000),
+        &anchors,
+    );
     assert!(
         over_budget_refusals(&grouped).is_empty(),
         "a 13650 ms corridor fits the 15000 ms budget: {:?}",
@@ -945,8 +949,12 @@ fn a_bounded_corridor_over_the_budget_is_still_refused_by_name() {
         panic!("global plan");
     };
     let anchors = AnchorIndex::from_plan(plan);
-    let grouped =
-        crate::chat_ops::fa::group_utterances(&document, 15_000, &recording(60_000), &anchors);
+    let grouped = crate::chat_ops::fa::group_with_declared_window_limit(
+        &document,
+        15_000,
+        &recording(60_000),
+        &anchors,
+    );
     assert_eq!(
         over_budget_refusals(&grouped),
         vec![

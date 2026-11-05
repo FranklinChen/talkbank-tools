@@ -27,18 +27,105 @@
       "description": "Reference to the prepared text/JSON payload for the word arrays.",
       "$ref": "#/$defs/WorkerArtifactIdV2"
     },
+    "phase": {
+      "description": "Candidate, metadata-only preparation, or admitted execution packet.",
+      "$ref": "#/$defs/FaRequestPhaseV2"
+    },
     "text_mode": {
       "description": "Text shaping mode requested by Rust.",
       "$ref": "#/$defs/FaTextModeV2"
     }
   },
   "required": [
+    "phase",
     "backend",
     "payload_ref_id",
     "audio_ref_id",
     "text_mode"
   ],
   "$defs": {
+    "FaAllocationBasisV2": {
+      "description": "How additional allocation demand was obtained. No duration proxy exists.",
+      "oneOf": [
+        {
+          "description": "Virtual tensor lifetimes plus the qualified native CPU CTC layout.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "mms_cpu"
+            },
+            "torch_version": {
+              "description": "PyTorch that performed the virtual projection.",
+              "type": "string"
+            },
+            "torchaudio_revision": {
+              "description": "Source revision of the installed native CTC implementation.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "torch_version",
+            "torchaudio_revision"
+          ]
+        },
+        {
+          "description": "Loaded Whisper's encoder/decoder configuration and virtual tensors.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "whisper"
+            },
+            "torch_version": {
+              "description": "PyTorch that performed the projection.",
+              "type": "string"
+            },
+            "transformers_version": {
+              "description": "Transformers that owns the loaded model implementation.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "torch_version",
+            "transformers_version"
+          ]
+        },
+        {
+          "description": "Loaded Qwen encoder/tokenizer configuration and virtual tensors.",
+          "type": "object",
+          "properties": {
+            "allocation_graph": {
+              "description": "Qualified native component graph used for shape projection.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "qwen"
+            },
+            "torch_version": {
+              "description": "PyTorch that performed the projection.",
+              "type": "string"
+            },
+            "transformers_version": {
+              "description": "Transformers that owns the loaded model implementation.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "torch_version",
+            "transformers_version",
+            "allocation_graph"
+          ]
+        }
+      ]
+    },
     "FaBackendV2": {
       "description": "Forced-alignment backend selected by the Rust control plane.",
       "oneOf": [
@@ -64,6 +151,202 @@
         }
       ]
     },
+    "FaModelBytesV2": {
+      "description": "Persistent model tensor storage, in bytes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
+    "FaPreparationBindingV2": {
+      "description": "The actual request and prepared inputs whose allocation was projected.",
+      "type": "object",
+      "properties": {
+        "attention_capture": {
+          "description": "Diagnostic capture changes output allocations and cannot be substituted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WhisperAttentionCaptureRequestV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "audio_ref_id": {
+          "description": "Immutable prepared audio window.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "backend": {
+          "description": "The model family the loaded host admitted.",
+          "$ref": "#/$defs/FaBackendV2"
+        },
+        "engine": {
+          "description": "The loaded algorithm/model identity used by FA caches.",
+          "$ref": "#/$defs/ReportedEngineName"
+        },
+        "execution_request_id": {
+          "description": "The execution request being prepared, not the preparation RPC's id.",
+          "$ref": "#/$defs/WorkerRequestIdV2"
+        },
+        "payload_ref_id": {
+          "description": "Immutable prepared source words.",
+          "$ref": "#/$defs/WorkerArtifactIdV2"
+        },
+        "sample_rate_hz": {
+          "description": "The prepared waveform's actual sample rate.",
+          "$ref": "#/$defs/SampleRateHzV2"
+        },
+        "samples": {
+          "description": "Actual prepared samples, not an inferred duration.",
+          "$ref": "#/$defs/FaSampleCountV2"
+        },
+        "text_mode": {
+          "description": "The exact transcript shaping used to prepare model labels.",
+          "$ref": "#/$defs/FaTextModeV2"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "execution_request_id",
+        "backend",
+        "engine",
+        "payload_ref_id",
+        "audio_ref_id",
+        "samples",
+        "sample_rate_hz",
+        "text_mode"
+      ]
+    },
+    "FaPreparationPlanV2": {
+      "description": "The worker's report, still requiring request/model binding and a host lease.",
+      "type": "object",
+      "properties": {
+        "binding": {
+          "description": "Its complete input/model scope.",
+          "$ref": "#/$defs/FaPreparationBindingV2"
+        },
+        "memory": {
+          "description": "Memory demand, never permission to allocate it.",
+          "$ref": "#/$defs/FaRequestMemoryV2"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "memory"
+      ]
+    },
+    "FaRequestMemoryV2": {
+      "description": "Preparation's memory evidence. Model-free test transports say so explicitly.",
+      "oneOf": [
+        {
+          "description": "No model runs. Admission must independently establish test-echo hosting.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_model"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A real loaded model's request-shaped demand, before host admission.",
+          "type": "object",
+          "properties": {
+            "basis": {
+              "description": "Named derivation and native implementation identity.",
+              "$ref": "#/$defs/FaAllocationBasisV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "projected"
+            },
+            "model": {
+              "description": "Model storage needed alongside that workspace.",
+              "$ref": "#/$defs/FaModelBytesV2"
+            },
+            "workspace": {
+              "description": "Additional memory for this request, excluding already leased weights.",
+              "$ref": "#/$defs/FaWorkspaceBytesV2"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "workspace",
+            "model",
+            "basis"
+          ]
+        }
+      ]
+    },
+    "FaRequestPhaseV2": {
+      "description": "A candidate cannot execute; preparation reports demand before admission.",
+      "oneOf": [
+        {
+          "description": "Immutable inputs awaiting the loaded worker's preparation.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "candidate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A metadata-only preparation RPC for this later execution request.",
+          "type": "object",
+          "properties": {
+            "execution_request_id": {
+              "description": "The candidate's id; the preparation RPC has a distinct id.",
+              "$ref": "#/$defs/WorkerRequestIdV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prepare"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "execution_request_id"
+          ]
+        },
+        {
+          "description": "Prepared inputs, still requiring a lease-owning host execution permit.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "execute"
+            },
+            "plan": {
+              "description": "The loaded worker's input-bound allocation evidence.",
+              "$ref": "#/$defs/FaPreparationPlanV2"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "plan"
+          ]
+        }
+      ]
+    },
+    "FaSampleCountV2": {
+      "description": "Prepared mono audio samples.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
     "FaTextModeV2": {
       "description": "Text-joining mode for forced-alignment payloads.",
       "oneOf": [
@@ -83,6 +366,23 @@
           "const": "char_spaced"
         }
       ]
+    },
+    "FaWorkspaceBytesV2": {
+      "description": "Additional request workspace, in bytes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 1
+    },
+    "ReportedEngineName": {
+      "description": "An engine identity as a worker reported it, written into cache namespaces and provenance fields byte for byte: not blank, no surrounding whitespace, and none of `|`, `;`, `]` or a line break.",
+      "type": "string",
+      "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
+    },
+    "SampleRateHzV2": {
+      "description": "Audio sample rate in Hz carried by prepared artifacts.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
     },
     "WhisperAttentionCaptureRequestV2": {
       "description": "A request-bound destination for a new diagnostic SQLite artifact.",
@@ -106,6 +406,10 @@
     },
     "WorkerArtifactPathV2": {
       "description": "Filesystem path to a prepared worker artifact.",
+      "type": "string"
+    },
+    "WorkerRequestIdV2": {
+      "description": "Stable identifier for one V2 protocol request/response pair.",
       "type": "string"
     }
   }

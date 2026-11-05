@@ -38,7 +38,6 @@ pub(crate) async fn dispatch_utseg_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     gateway: Arc<dyn WorkerGateway>,
-    should_merge_abbrev: bool,
     route: &ServableUtsegRoute,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
@@ -99,7 +98,6 @@ pub(crate) async fn dispatch_utseg_job(
         let host_for_task = host.clone();
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
-        let merge_abbrev = should_merge_abbrev;
         // This file's events (pipeline decisions above all) carry its file
         // and job, as every supervised file task's do.
         let file_span = crate::runner::current_file_span(&file_input.filename, "utseg");
@@ -124,7 +122,6 @@ pub(crate) async fn dispatch_utseg_job(
                     &host_for_task,
                     &plan_for_task,
                     results,
-                    merge_abbrev,
                     "Utseg",
                 )
                 .await;
@@ -251,10 +248,7 @@ mod tests {
         }
     }
 
-    fn utseg_snapshot(staging_dir: &std::path::Path, merge_abbrev: bool) -> RunnerJobSnapshot {
-        // L1-valid on purpose: the write path re-gates when it merges
-        // abbreviations, so a fixture the real gate would refuse could not
-        // exercise the merge at all.
+    fn utseg_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
         let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
 @ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I .\n@End\n";
         let input_dir = staging_dir.join("input");
@@ -273,7 +267,6 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Utseg(UtsegOptions {
                     common: CommonOptions::default(),
-                    merge_abbrev: merge_abbrev.into(),
                     utseg_fallback: false.into(),
                 }),
                 runtime_state: BTreeMap::new(),
@@ -348,13 +341,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let host = host();
         let gateway = Arc::new(FakeUtsegGateway::default());
-        let job = utseg_snapshot(temp.path(), false);
+        let job = utseg_snapshot(temp.path());
 
         dispatch_utseg_job(
             &job,
             &host,
             Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
-            false,
             &route(),
         )
         .await
@@ -377,7 +369,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let host = host();
             let gateway = Arc::new(FakeUtsegGateway::default());
-            let mut job = utseg_snapshot(temp.path(), false);
+            let mut job = utseg_snapshot(temp.path());
             let language = LanguageCode3::try_new(code).unwrap();
             job.dispatch.lang = LanguageSpec::Resolved(language.clone());
             let route =
@@ -389,7 +381,6 @@ mod tests {
                 &job,
                 &host,
                 Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
-                false,
                 &route,
             )
             .await
@@ -405,27 +396,6 @@ mod tests {
             };
             assert!(routes.iter().all(|sent| sent.segmenter() == expected));
         }
-    }
-
-    #[tokio::test]
-    async fn utseg_write_path_can_merge_abbrev() {
-        let temp = tempfile::tempdir().unwrap();
-        let host = host();
-        let gateway = Arc::new(FakeUtsegGateway::default());
-        let job = utseg_snapshot(temp.path(), true);
-
-        dispatch_utseg_job(
-            &job,
-            &host,
-            gateway as Arc<dyn WorkerGateway>,
-            true,
-            &route(),
-        )
-        .await
-        .expect("utseg dispatch");
-
-        let output = std::fs::read_to_string(temp.path().join("output").join("a.cha")).unwrap();
-        assert!(output.contains("*PAR:\tFBI ."));
     }
 
     // Note: the prior `utseg_writes_files_incrementally` probing-

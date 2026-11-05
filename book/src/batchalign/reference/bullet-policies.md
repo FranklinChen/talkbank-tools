@@ -94,6 +94,12 @@ not the quality of the evidence.
   initially unbulleted utterance remain in alignment context but lose their
   timing at projection; the utterance stays unbulleted. Requires `--no-utr`.
 
+For `keep` and `exact`, missing positive word timing inside a supplied interval
+may receive one terminal retry over the complete original utterance and exact
+source window. Accepted primary timings cannot be overwritten. Normal model,
+memory and cache admission still apply; cache-required runs never infer. An
+optional retry cache miss leaves accepted primary partial output intact.
+
 Kept authority is captured at admission, before provisional grouping edits.
 It takes precedence over rebuilding, repair, and overlap projection. A kept
 conflict is recorded rather than silently moving the supplied boundary, and

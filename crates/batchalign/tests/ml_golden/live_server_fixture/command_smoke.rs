@@ -25,7 +25,6 @@ async fn live_fixture_runs_utseg_job_when_available() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
         utseg_fallback: false.into(),
     });
 
@@ -65,7 +64,6 @@ async fn live_fixture_runs_translate_job_when_available() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
         ..TranslateOptions::default()
     });
 
@@ -109,7 +107,6 @@ async fn live_fixture_runs_coref_job_when_available() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
     let (info, results) = submit_and_complete(
         server.client(),

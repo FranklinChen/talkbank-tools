@@ -173,6 +173,13 @@ pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
             WhisperTokenTimingV2,
             SpeakerSegmentV2,
             ProgressEventV2,
+            // Progress scopes and measures: registered as named types so the
+            // Python conformance test reads each union and record as a file.
+            LoadProgressV2,
+            LoadMeasureV2,
+            PhaseEdgeV2,
+            RequestProgressV2,
+            UnitProgressV2,
             // Enums
             WorkerKindV2,
             InferenceTaskV2,

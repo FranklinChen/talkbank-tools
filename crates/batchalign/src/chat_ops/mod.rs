@@ -4,7 +4,7 @@
 //!
 //! Pure deterministic CHAT/text logic (parse, serialize, extract, inject,
 //! diff, dp_align, asr_postprocess, build_chat, validate, compare,
-//! benchmark, merge_abbreviations, constituency, tokenizer_realign,
+//! benchmark, constituency, tokenizer_realign,
 //! utseg_compute, and the canonical `coref` / `translate` / `utseg` task
 //! surfaces) lives in `talkbank-transform`. Import those directly from
 //! `batchalign_transform`; this crate no longer re-exports them.

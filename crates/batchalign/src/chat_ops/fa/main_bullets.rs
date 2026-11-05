@@ -415,6 +415,61 @@ impl KeptBulletError {
 }
 
 impl MainBulletAuthority {
+    /// Capture original supplied windows and complete lexical populations.
+    /// UTR-derived working bullets cannot create this retry authority.
+    pub(crate) fn supplied_retry_sources(
+        &self,
+        chat: &ChatFile,
+        recording: &super::coordinates::Recording,
+    ) -> Result<SuppliedRetrySources, KeptBulletError> {
+        let mut sources = Vec::new();
+        if let Self::Keep(_) = self {
+            for (_, index, utterance) in utterances_indexed(chat) {
+                let Some(GivenSlot::Kept(kept)) = self.slot(index)? else {
+                    continue;
+                };
+                let Kept::Extent { start_ms, end_ms } = kept.0 else {
+                    continue;
+                };
+                let Ok(window) = super::coordinates::FaWindow::within(
+                    recording,
+                    super::coordinates::FileMs::new(start_ms),
+                    super::coordinates::FileMs::new(end_ms),
+                ) else {
+                    continue;
+                };
+                let mut text = Vec::new();
+                super::collect_fa_words(&utterance.main.content.content, &mut text);
+                let words = text
+                    .into_iter()
+                    .enumerate()
+                    .map(|(word, text)| super::FaWord {
+                        utterance_index: index,
+                        utterance_word_index: talkbank_model::WordIdx::new(word),
+                        text,
+                    })
+                    .collect();
+                if let Some(words) = super::split::NonEmptyWords::from_vec(words) {
+                    sources.push(SuppliedRetrySource {
+                        index,
+                        words,
+                        window,
+                    });
+                }
+            }
+        }
+        Ok(SuppliedRetrySources(sources))
+    }
+
+    /// Own the imposed authority across an asynchronous source retry without a
+    /// self-reference or a second source-fit pass.
+    pub(super) fn impose_owned(
+        self,
+        chat: &mut ChatFile,
+    ) -> Result<(OwnedImposedBullets, KeptWordCuts, Vec<DecisionRecord>), KeptBulletError> {
+        let (_, cuts, records) = self.impose(chat)?.into_parts();
+        Ok((OwnedImposedBullets(self), cuts, records))
+    }
     /// Bind the policy to the input document AS PARSED, before any pre-pass.
     ///
     /// The one place [`MainBulletPolicy`] is read for the projection. The
@@ -695,6 +750,56 @@ impl MainBulletAuthority {
                 working_utterances,
             }),
         }
+    }
+}
+
+/// Source-bound retry candidates; only original main-bullet admission builds it.
+pub(crate) struct SuppliedRetrySources(Vec<SuppliedRetrySource>);
+
+/// Complete original words paired with one positive, recording-contained,
+/// supplied window. Only the original main-bullet authority constructs it.
+pub(crate) struct SuppliedRetrySource {
+    index: UtteranceIdx,
+    words: super::split::NonEmptyWords,
+    window: super::coordinates::FaWindow,
+}
+
+impl SuppliedRetrySource {
+    pub(crate) fn index(&self) -> UtteranceIdx {
+        self.index
+    }
+    pub(crate) fn words(&self) -> &[super::FaWord] {
+        self.words.as_slice()
+    }
+    pub(crate) fn window(&self) -> super::coordinates::FaWindow {
+        self.window
+    }
+    pub(crate) fn request(&self) -> super::GroupUnit<'_> {
+        super::GroupUnit::from_supplied(self)
+    }
+}
+
+impl SuppliedRetrySources {
+    #[cfg(test)]
+    pub(crate) fn sources(&self) -> &[SuppliedRetrySource] {
+        &self.0
+    }
+    pub(crate) fn into_sources(self) -> Vec<SuppliedRetrySource> {
+        self.0
+    }
+}
+
+pub(super) struct OwnedImposedBullets(MainBulletAuthority);
+
+impl OwnedImposedBullets {
+    pub(super) fn proof(&self) -> ImposedBullets<'_> {
+        ImposedBullets { authority: &self.0 }
+    }
+    pub(super) fn restore_and_verify(
+        self,
+        chat: &mut ChatFile,
+    ) -> Result<KeptBulletsHeld, KeptBulletError> {
+        self.0.restore_and_verify(chat)
     }
 }
 

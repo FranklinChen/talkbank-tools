@@ -1,6 +1,13 @@
 """Stanza coreference inference: sentences -> coref chains.
 
-Pure inference, no CHAT, no caching, no pipeline.
+Pure inference, no CHAT, no caching.
+
+Model residency is scoped to the batch that uses it. The coref task load
+(``prepare_coref``, through ``ensure_task``) builds the pipeline once so its
+files download inside the loading stall window, then releases it; each batch
+builds it from those local files and releases it when the batch ends
+(``PreparedCoref.opened``). A coref job sends one cross-file batch, so this is
+one build per job, and an idle worker holds no coreference model.
 
 Each resolved item names the engine that resolved it, so the Rust server
 derives coref provenance from the responses it applies rather than from a
@@ -9,7 +16,11 @@ worker-wide report taken before dispatch.
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import logging
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -34,30 +45,103 @@ _COREF_PACKAGE = "ontonotes-singletons_roberta-large-lora"
 """The Stanza coreference package this producer loads."""
 
 
-def coref_engine() -> str | None:
-    """The coreference model identity this worker runs, or ``None``.
+def coref_engine() -> str:
+    """The coreference model identity this worker runs.
 
     ``stanza-<version>/<package>``: the installed Stanza release plus the
     coreference package the pipeline is built with (``_COREF_PACKAGE``, the
-    same constant ``batch_infer_coref`` passes to ``stanza.Pipeline``), so a
+    same constant ``_build_pipeline`` passes to ``stanza.Pipeline``), so a
     stamp names the model that resolved the chains and not only the library.
-    ``None`` when no Stanza version can be named. Admitted by
-    ``reported_engine_name``, so a name that would break a stamp raises.
-    Shared by the producer and the capability report, which spell it one way.
+    Admitted by ``reported_engine_name``, so a name that would break a stamp
+    raises. Raises ``RuntimeError`` when no Stanza version can be named: a
+    model whose results could not say what resolved them is never loaded.
     """
     from batchalign.worker._types import _state
 
     stanza_engine = _state.stanza_engine()
     if stanza_engine is None:
-        return None
+        raise RuntimeError(
+            "coref cannot name the Stanza version that would resolve documents; "
+            "refusing to load a coreference model whose results could not name "
+            "their engine"
+        )
     return reported_engine_name(f"{stanza_engine}/{_COREF_PACKAGE}")
 
 
-_NO_COREF_ENGINE_ERROR = (
-    "coref cannot name the Stanza version that would resolve this document; "
-    "refusing to report a resolution without its engine identity"
-)
-"""Failure for a document whose resolution could not name its engine."""
+def _build_pipeline() -> Callable[[str], Document]:
+    """Build the coreference pipeline, watched by ``download_liveness``.
+
+    RoBERTa-large comes from the Hugging Face hub and the coref package from
+    Stanza's resources; both trees are watched, so a download is announced
+    when bytes arrive and its growth re-arms a loading stall window.
+    """
+    import stanza
+
+    from batchalign.worker._download_liveness import (
+        StanzaWithTransformer,
+        download_liveness,
+    )
+    from batchalign.worker._stanza_capabilities import (
+        processors_argument,
+        requirement_processors,
+    )
+
+    with download_liveness(
+        StanzaWithTransformer("coref_eng"),
+        what="the Stanza English coreference model (~1.5 GB)",
+    ):
+        pipeline: Callable[[str], Document] = stanza.Pipeline(
+            lang="en",
+            processors=processors_argument(requirement_processors("coreference")),
+            package={"coref": _COREF_PACKAGE},
+            tokenize_pretokenized=True,
+        )
+    return pipeline
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCoref:
+    """Proof that the coref task load prepared this worker's coreference model.
+
+    Built only by ``prepare_coref``: the model's files are local, and
+    ``engine`` is the identity every resolved item reports, named before
+    anything downloaded. It holds no pipeline. The only way to one is
+    :meth:`opened`, whose block is one batch: the pipeline is built on entry
+    and released (with a cycle collection, since Stanza pipelines are
+    reference cycles) on exit, so no worker holds a reference to it between
+    batches. Measured with ``scripts/measure_model_residency.py``, a built
+    pipeline adds about 0.5 GB and resolving a document raises that to 2.5 GB
+    or more (its weights are read on first use, and the peak grows with the
+    document); a release after use returns about 1.6 GB. The Rust side leases
+    each batch (``worker/residency.rs``).
+    """
+
+    engine: str
+
+    @contextlib.contextmanager
+    def opened(self) -> Iterator[Callable[[str], Document]]:
+        """The pipeline, for one batch, built from the prepared local files."""
+        pipeline = _build_pipeline()
+        try:
+            yield pipeline
+        finally:
+            del pipeline
+            gc.collect()
+
+
+def prepare_coref() -> PreparedCoref:
+    """Prepare the coreference model: name it, then materialize its files.
+
+    Runs at the coref task load (``ensure_task``), inside the loading stall
+    window, so a slow first download never runs inside a request's fixed
+    budget. The pipeline is built once to fetch exactly what the library
+    reads, then released: residency belongs to the batches
+    (:meth:`PreparedCoref.opened`).
+    """
+    engine = coref_engine()
+    with PreparedCoref(engine).opened():
+        pass
+    return PreparedCoref(engine)
 
 
 class CorefBatchItem(BaseModel):
@@ -149,81 +233,55 @@ class _CompletedCorefAnalysis:
         )
 
 
-def batch_infer_coref(req: BatchInferRequest) -> BatchInferResponse:
+def batch_infer_coref(
+    req: BatchInferRequest, coref: PreparedCoref
+) -> BatchInferResponse:
     """Batch Stanza coref inference: sentences -> structured chain annotations.
 
-    Each item is one complete document (list of sentences, each a list of words).
-    Pipeline is lazily initialized and reused across documents in the batch.
+    Each item is one complete document (list of sentences, each a list of
+    words), resolved on a pipeline built for this batch from the files the
+    coref task load prepared (``coref``) and released when the batch ends.
+    The pipeline is opened by the first document that reaches the model, so
+    a batch of invalid or empty documents builds nothing.
 
     Each item becomes one of:
 
     - ``{"kind": "resolved", "annotations": [...], "engine": "stanza-<version>/<package>"}``
     - ``{"kind": "no_sentences"}`` for a document with no sentences, which
       never reached the model and so names no engine
-    - an item ``error`` when the payload is invalid, the engine cannot be
-      named, or Stanza raised. A raise used to become an EMPTY annotation
-      list, which is indistinguishable on the wire from a document that
-      genuinely has no coreference chains, so the file was written without
-      its ``%xcoref`` tiers and reported as a success.
+    - an item ``error`` when the payload is invalid or Stanza raised. A raise
+      used to become an EMPTY annotation list, which is indistinguishable on
+      the wire from a document that genuinely has no coreference chains, so
+      the file was written without its ``%xcoref`` tiers and reported as a
+      success.
     """
 
-    import stanza
+    with contextlib.ExitStack() as batch:
+        opened: list[Callable[[str], Document]] = []
 
-    # The identity every resolved item reports: the coreference model this
-    # batch builds its pipeline with. Resolved once, because neither the
-    # installed Stanza nor the package can change mid-batch.
-    engine = coref_engine()
+        def nlp() -> Callable[[str], Document]:
+            """This batch's pipeline, opened on first use, closed with the batch."""
+            if not opened:
+                opened.append(batch.enter_context(coref.opened()))
+                # Registered after the pipeline, so it runs FIRST on exit
+                # (last in, first out): this batch's own reference is gone
+                # before `opened` releases the pipeline and collects it.
+                batch.callback(opened.clear)
+            return opened[0]
 
-    pipeline: stanza.Pipeline | None = None
+        def _resolve(item_idx: int, item: CorefBatchItem) -> ItemOutcome:
+            """Resolve one item's coreference on this batch's pipeline."""
+            try:
+                text = "\n\n".join(" ".join(s) for s in item.sentences)
+                document = nlp()(text)
+                return _CompletedCorefAnalysis(item, document).resolved(coref.engine)
+            except Exception as e:
+                L.warning("Coref infer failed for item %d: %s", item_idx, e)
+                return ItemFailed(error=f"Coref failed: {e}")
 
-    def _resolve(item_idx: int, item: CorefBatchItem, engine: str) -> ItemOutcome:
-        """Resolve one item's coreference, building the pipeline on first use.
+        def work_for(item_idx: int, item: CorefBatchItem) -> ItemWork:
+            if not item.sentences:
+                return Unexecuted(ItemProduced(result={"kind": "no_sentences"}))
+            return partial(_resolve, item_idx, item)
 
-        The pipeline build lands inside the first resolved item's time: that
-        item's call is the one that waited for it.
-        """
-        nonlocal pipeline
-        try:
-            if pipeline is None:
-                # Coref pipeline downloads its own model files (RoBERTa-large
-                # plus the ontonotes coref package) on first use; surface the
-                # wait through the progress channel.
-                from batchalign.worker._progress import emit_download_event
-                from batchalign.worker._stanza_capabilities import (
-                    processors_argument,
-                    requirement_processors,
-                )
-
-                emit_download_event(
-                    stage="downloading_stanza_coref_eng",
-                    user_message=(
-                        "Downloading Stanza English coreference model "
-                        "(one-time, ~1.5 GB; future runs will use the local "
-                        "cache)…"
-                    ),
-                )
-                pipeline = stanza.Pipeline(
-                    lang="en",
-                    processors=processors_argument(
-                        requirement_processors("coreference")
-                    ),
-                    package={"coref": _COREF_PACKAGE},
-                    tokenize_pretokenized=True,
-                )
-
-            text = "\n\n".join(" ".join(s) for s in item.sentences)
-            result = pipeline(text)
-
-            return _CompletedCorefAnalysis(item, result).resolved(engine)
-        except Exception as e:
-            L.warning("Coref infer failed for item %d: %s", item_idx, e)
-            return ItemFailed(error=f"Coref failed: {e}")
-
-    def work_for(item_idx: int, item: CorefBatchItem) -> ItemWork:
-        if not item.sentences:
-            return Unexecuted(ItemProduced(result={"kind": "no_sentences"}))
-        if engine is None:
-            return Unexecuted(ItemFailed(error=_NO_COREF_ENGINE_ERROR))
-        return partial(_resolve, item_idx, item, engine)
-
-    return answer_batch("coref", req.items, CorefBatchItem, work_for)
+        return answer_batch("coref", req.items, CorefBatchItem, work_for)

@@ -372,7 +372,7 @@ files. It has the longest pipeline: ASR → post-processing → CHAT assembly
 **Speaker label handling:** `convert_asr_response()` **always** uses speaker
 labels from the ASR engine when present (matching BA2's `process_generation()`
 which unconditionally reads `utterance["speaker"]`). The `--diarization` flag
-only controls whether a dedicated Pyannote/NeMo stage runs, it does not
+only controls whether a dedicated pyannoteAI/Pyannote stage runs, it does not
 suppress ASR-provided labels. This means `batchalign3 transcribe` (without
 `--diarization`) still produces multi-speaker output when Rev.AI returns
 speaker-labeled monologues. When `--diarization enabled` is explicitly
@@ -503,7 +503,7 @@ sequenceDiagram
    not the use of ASR-provided labels.
 2c. **Dedicated diarization** (optional): If `--diarization enabled` is set, the
    server dispatches `execute_v2(task="speaker")`. The typed backend is
-   pyannoteAI Precision-2 by default, with local Pyannote and NeMo alternatives.
+   pyannoteAI Precision-2 by default, with a local Pyannote alternative.
    ASR-provided labels are read first, but the explicit dedicated result is
    authoritative.
 2d. **Same-job turn retention** (optional): If `--debug-dir` is configured,

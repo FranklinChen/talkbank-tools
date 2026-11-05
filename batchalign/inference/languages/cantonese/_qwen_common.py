@@ -32,12 +32,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, assert_never
+from typing import TYPE_CHECKING, Any, assert_never
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
-    QWEN_FORCED_ALIGNER_MODEL_ID,
     ForcedAligner,
     QwenForcedAligner,
     QwenTimingInvalid,
@@ -55,6 +54,9 @@ from batchalign.inference.qwen_timing import (
     WindowAlignment,
 )
 from batchalign.worker._types_v2 import QwenRecognitionV2, RecognitionPunctuationV2
+
+if TYPE_CHECKING:
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 from ._asr_types import (
     AsrElement,
@@ -88,8 +90,11 @@ L = logging.getLogger("batchalign.hk.qwen")
 # to disagree.
 
 
-def _check_native_checkpoint(model_id: str) -> None:
+def admit_qwen_checkpoint(model_id: str) -> None:
     """Refuse a pre-migration checkpoint id with an instruction, not a stack trace.
+
+    Called on the requested member BEFORE its snapshot is resolved, so a stale
+    id is refused before its download rather than after.
 
     The native ``transformers`` module targets the ``-hf`` repositories; the
     bare ones are the sidecar's. Both exist on the Hub, so an operator who
@@ -155,23 +160,39 @@ class LoadedQwen:
     aligner: ForcedAligner
 
     @classmethod
-    def load(
-        cls, model_id: str, aligner_id: str, device: str, dtype: Any
-    ) -> LoadedQwen:
+    def load(cls, snapshots: QwenSnapshots, device: str, dtype: Any) -> LoadedQwen:
+        """Load both models from their resolved snapshots, or raise."""
         from transformers import (  # type: ignore[import-not-found]
             AutoModelForMultimodalLM,
             AutoProcessor,
         )
 
         return cls(
-            processor=AutoProcessor.from_pretrained(model_id),
+            processor=AutoProcessor.from_pretrained(snapshots.asr.path),
             model=AutoModelForMultimodalLM.from_pretrained(
-                model_id, device_map=device, dtype=dtype
+                snapshots.asr.path, device_map=device, dtype=dtype
             ),
             aligner=QwenForcedAligner.load(
-                aligner_id=aligner_id, device=device, dtype=dtype
+                snapshots.aligner, device=device, dtype=dtype
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class QwenSnapshots:
+    """The two Qwen models, already on local disk.
+
+    The only input ``QwenRecognizerConfig.load`` accepts for its weights.
+    Both members are ``TransformersSnapshot``s, which the worker bootstrap
+    gets from ``pinned_hub.resolve_transformers`` under ``download_liveness``,
+    so a load reads finished files and never downloads. The config used to
+    carry optional paths and fall back to the hub id when one was missing;
+    that fallback downloaded inside ``from_pretrained``, unwatched by the
+    startup stall window, and is now unrepresentable.
+    """
+
+    asr: TransformersSnapshot
+    aligner: TransformersSnapshot
 
 
 class _RecordingMaxTimeCriteria:
@@ -224,17 +245,13 @@ class QwenRecognizerConfig:
     """
 
     lang: LanguageCode = "yue"
-    model_id: str = "Qwen/Qwen3-ASR-1.7B-hf"
     device: str = "cpu"
-    model_path: str | None = None
-    aligner_path: str | None = None
     context_override: str | None = None
     # Decided by the control plane for this language; required, never defaulted.
     recognition: QwenRecognitionV2 = field(kw_only=True)
     profile: QwenAsrProfile = field(init=False)
 
     def __post_init__(self) -> None:
-        _check_native_checkpoint(self.model_id)
         object.__setattr__(
             self,
             "profile",
@@ -243,8 +260,9 @@ class QwenRecognizerConfig:
             ),
         )
 
-    def load(self) -> ReadyQwenRecognizer:
-        """Transition from validated configuration to inference-ready state."""
+    def load(self, snapshots: QwenSnapshots) -> ReadyQwenRecognizer:
+        """Transition from validated configuration to inference-ready state,
+        reading both models from ``snapshots``."""
         try:
             import torch  # type: ignore[import-not-found]
         except ImportError as exc:
@@ -270,16 +288,14 @@ class QwenRecognizerConfig:
         else:
             dtype = torch.float32
 
-        models = LoadedQwen.load(
-            model_id=self.model_path or self.model_id,
-            aligner_id=self.aligner_path or QWEN_FORCED_ALIGNER_MODEL_ID,
-            device=self.device,
-            dtype=dtype,
-        )
+        models = LoadedQwen.load(snapshots=snapshots, device=self.device, dtype=dtype)
         L.info(
-            "Qwen3-ASR loaded: model=%s, aligner=%s, lang=%s (%s), device=%s, dtype=%s",
-            self.model_id,
-            QWEN_FORCED_ALIGNER_MODEL_ID,
+            "Qwen3-ASR loaded: model=%s at %s, aligner=%s at %s, lang=%s (%s), "
+            "device=%s, dtype=%s",
+            snapshots.asr.model_id,
+            snapshots.asr.commit,
+            snapshots.aligner.model_id,
+            snapshots.aligner.commit,
             self.lang,
             self.profile.recognition_language,
             self.device,

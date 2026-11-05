@@ -253,7 +253,9 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
             python_path: python_path.into(),
             test_echo: true,
             health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-            ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+            startup_stall: batchalign::worker::LoadingStall::new(
+                batchalign::api::PositiveSeconds::literal::<30>(),
+            ),
             max_workers_per_key: PerProfile::uniform(1),
             verbose: 0,
             ..PoolConfig::for_tests()
@@ -320,7 +322,6 @@ fn test_submission() -> JobSubmission {
         source_dir: Default::default(),
         options: CommandOptions::Morphotag(MorphotagOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
 
             ..Default::default()
         }),

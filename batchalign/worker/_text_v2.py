@@ -7,10 +7,10 @@ batch loading, item-count checks, result normalization and the failure
 taxonomy are all owned there. This module keeps only what genuinely needs
 Python:
 
-- the injected host of loaded model runners
-- one runner ADAPTER per task, which parses the Rust-frozen batch into the
-  typed batch items, builds the host's ``BatchInferRequest``, manages the
-  progress callback where the host reads one, and calls the model
+- one runner ADAPTER per task over the host that task's load built
+  (``batchalign.worker._loads``), which parses the Rust-frozen batch into the
+  typed batch items, builds the host's request, hands morphosyntax the
+  request's own progress callback, and calls the model
 
 **See also:** `../../INTERFACE_MAP.md` section "7. Text Task Result
 Normalization" for the full Rust/Python responsibility split.
@@ -19,28 +19,27 @@ Normalization" for the full Rust/Python responsibility split.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from batchalign.inference.coref import (
-    CorefBatchItem,
-    batch_infer_coref,
-)
+from batchalign.inference.coref import CorefBatchItem
 from batchalign.inference.morphosyntax import MorphosyntaxBatchItem
 from batchalign.inference.translate import TranslateBatchItem, TranslateInferenceRequest
 from batchalign.inference.utseg import UtsegBatchItem, UtsegInferenceRequest
-from batchalign.worker._infer_hosts import (
-    build_morphosyntax_batch_infer_handler,
-    build_translate_inference_handler,
-    build_utseg_inference_handler,
-)
 from batchalign.worker._types import BatchInferRequest, BatchInferResponse, InferTask
 from batchalign.worker._types_v2 import ExecuteRequestV2, ExecuteResponseV2
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from batchalign.worker._loads import (
+        LoadedCoref,
+        LoadedMorphosyntax,
+        LoadedTranslate,
+        LoadedUtseg,
+        LoadedWordSegmentation,
+    )
 
 
 class MorphosyntaxPreparedBatchV2(BaseModel):
@@ -68,46 +67,25 @@ class CorefPreparedBatchV2(BaseModel):
     items: list[CorefBatchItem]
 
 
-@dataclass(frozen=True, slots=True)
-class TextExecutionHostV2:
-    """Injected text-task execution hooks for the live V2 path."""
-
-    morphosyntax_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
-    utseg_runner: Callable[[UtsegInferenceRequest], BatchInferResponse] | None = None
-    translate_runner: (
-        Callable[[TranslateInferenceRequest], BatchInferResponse] | None
-    ) = None
-    coref_runner: Callable[[BatchInferRequest], BatchInferResponse] | None = None
-
-
-def build_default_text_execution_host_v2() -> TextExecutionHostV2:
-    """Build the live text-task V2 host from already loaded worker state."""
-
-    return TextExecutionHostV2(
-        morphosyntax_runner=build_morphosyntax_batch_infer_handler(),
-        utseg_runner=build_utseg_inference_handler(),
-        translate_runner=build_translate_inference_handler(),
-        coref_runner=batch_infer_coref,
-    )
-
-
 def _morphosyntax_adapter(
-    runner: Callable[[BatchInferRequest], BatchInferResponse],
+    host: LoadedMorphosyntax,
 ) -> Callable[[str, str, str, bool], BatchInferResponse]:
-    """Adapt one loaded morphosyntax runner to the Rust control plane's call.
+    """Adapt the loaded morphosyntax runner to the Rust control plane's call.
 
     Owns the two things the Rust side cannot: parsing the frozen batch into
     the typed batch items (a pydantic ``ValidationError``, which the Rust
-    taxonomy reports as ``invalid_payload``), and the throttled progress callback the
-    morphosyntax handler reads from worker state (thread-local-safe because
-    the sequential stdio loop is single-threaded).
+    taxonomy reports as ``invalid_payload``), and the throttled progress
+    callback this request's progress events come from, handed to the runner
+    as an argument. It used to travel through a worker-state field the
+    handler read, which was safe only while the sequential loop ran one
+    request at a time.
     """
 
     def _run(
         request_id: str, lang: str, batch_json: str, retokenize: bool
     ) -> BatchInferResponse:
-        from batchalign.worker._protocol import write_progress_event
-        from batchalign.worker._types import _state
+        from batchalign.worker._protocol import write_request_progress
+        from batchalign.worker._types_v2 import UnitProgressV2
 
         batch = MorphosyntaxPreparedBatchV2.model_validate_json(batch_json)
 
@@ -118,29 +96,30 @@ def _morphosyntax_adapter(
             if now - _last_progress_time[0] < 1.0 and completed < total:
                 return
             _last_progress_time[0] = now
-            write_progress_event(request_id, completed, total)
-
-        _state.active_progress_callback = _on_progress
-        try:
-            return runner(
-                BatchInferRequest(
-                    task=InferTask.MORPHOSYNTAX,
-                    lang=lang,
-                    items=[item.model_dump(mode="json") for item in batch.items],
-                    mwt=batch.mwt,
-                    retokenize=retokenize,
-                )
+            write_request_progress(
+                request_id,
+                "stanza_processing",
+                UnitProgressV2(completed=completed, total=total),
             )
-        finally:
-            _state.active_progress_callback = None
+
+        return host.runner(
+            BatchInferRequest(
+                task=InferTask.MORPHOSYNTAX,
+                lang=lang,
+                items=[item.model_dump(mode="json") for item in batch.items],
+                mwt=batch.mwt,
+                retokenize=retokenize,
+            ),
+            _on_progress,
+        )
 
     return _run
 
 
 def _utseg_adapter(
-    runner: Callable[[UtsegInferenceRequest], BatchInferResponse],
+    host: LoadedUtseg,
 ) -> Callable[[str, str, str], BatchInferResponse]:
-    """Adapt one loaded utseg runner to the Rust control plane's call.
+    """Adapt the loaded utseg runner to the Rust control plane's call.
 
     ``segmenter`` is the wire spelling of the request's
     ``UtsegSegmenterV2``; an unknown spelling fails pydantic validation here
@@ -149,7 +128,7 @@ def _utseg_adapter(
 
     def _run(lang: str, batch_json: str, segmenter: str) -> BatchInferResponse:
         batch = UtsegPreparedBatchV2.model_validate_json(batch_json)
-        return runner(
+        return host.runner(
             UtsegInferenceRequest.model_validate(
                 {
                     "lang": lang,
@@ -165,13 +144,13 @@ def _utseg_adapter(
 
 
 def _translate_adapter(
-    runner: Callable[[TranslateInferenceRequest], BatchInferResponse],
+    host: LoadedTranslate,
 ) -> Callable[[str, str, str], BatchInferResponse]:
-    """Adapt one loaded translation runner to the Rust control plane's call."""
+    """Adapt the loaded translation runner to the Rust control plane's call."""
 
     def _run(source_lang: str, target_lang: str, batch_json: str) -> BatchInferResponse:
         batch = TranslatePreparedBatchV2.model_validate_json(batch_json)
-        return runner(
+        return host.runner(
             TranslateInferenceRequest(
                 source_lang=source_lang,
                 target_lang=target_lang,
@@ -183,13 +162,13 @@ def _translate_adapter(
 
 
 def _coref_adapter(
-    runner: Callable[[BatchInferRequest], BatchInferResponse],
+    host: LoadedCoref,
 ) -> Callable[[str, str], BatchInferResponse]:
-    """Adapt one loaded coreference runner to the Rust control plane's call."""
+    """Adapt the loaded coreference runner to the Rust control plane's call."""
 
     def _run(lang: str, batch_json: str) -> BatchInferResponse:
         batch = CorefPreparedBatchV2.model_validate_json(batch_json)
-        return runner(
+        return host.runner(
             BatchInferRequest(
                 task=InferTask.COREF,
                 lang=lang,
@@ -202,92 +181,76 @@ def _coref_adapter(
 
 def execute_morphosyntax_request_v2(
     request: ExecuteRequestV2,
-    host: TextExecutionHostV2,
+    host: LoadedMorphosyntax,
 ) -> ExecuteResponseV2:
     """Execute one batched morphosyntax V2 request through the Rust control plane."""
 
     import batchalign_core
 
-    runner = host.morphosyntax_runner
     return ExecuteResponseV2.model_validate_json(
         batchalign_core.execute_morphosyntax_request_v2(
-            request,
-            _morphosyntax_adapter(runner) if runner is not None else None,
+            request, _morphosyntax_adapter(host)
         )
     )
 
 
 def execute_utseg_request_v2(
     request: ExecuteRequestV2,
-    host: TextExecutionHostV2,
+    host: LoadedUtseg,
 ) -> ExecuteResponseV2:
     """Execute one batched utterance-segmentation V2 request through the Rust control plane."""
 
     import batchalign_core
 
-    runner = host.utseg_runner
     return ExecuteResponseV2.model_validate_json(
-        batchalign_core.execute_utseg_request_v2(
-            request,
-            _utseg_adapter(runner) if runner is not None else None,
-        )
+        batchalign_core.execute_utseg_request_v2(request, _utseg_adapter(host))
     )
 
 
 def execute_translate_request_v2(
     request: ExecuteRequestV2,
-    host: TextExecutionHostV2,
+    host: LoadedTranslate,
 ) -> ExecuteResponseV2:
     """Execute one batched translation V2 request through the Rust control plane."""
 
     import batchalign_core
 
-    runner = host.translate_runner
     return ExecuteResponseV2.model_validate_json(
-        batchalign_core.execute_translate_request_v2(
-            request,
-            _translate_adapter(runner) if runner is not None else None,
-        )
+        batchalign_core.execute_translate_request_v2(request, _translate_adapter(host))
     )
 
 
 def execute_coref_request_v2(
     request: ExecuteRequestV2,
-    host: TextExecutionHostV2,
+    host: LoadedCoref,
 ) -> ExecuteResponseV2:
     """Execute one batched coreference V2 request through the Rust control plane."""
 
     import batchalign_core
 
-    runner = host.coref_runner
     return ExecuteResponseV2.model_validate_json(
-        batchalign_core.execute_coref_request_v2(
-            request,
-            _coref_adapter(runner) if runner is not None else None,
-        )
+        batchalign_core.execute_coref_request_v2(request, _coref_adapter(host))
     )
 
 
 def execute_word_segmentation_request_v2(
     request: ExecuteRequestV2,
+    host: LoadedWordSegmentation,
 ) -> ExecuteResponseV2:
     """Execute one batched word-segmentation V2 request through the Rust control plane.
 
-    The runner is the pure segmentation function itself: it holds no loaded
-    model state, so it needs no execution host.
+    The host's runner is the pure segmentation function: it holds no model,
+    and applies the segmenter each request names.
     """
 
     import batchalign_core
-    from batchalign.inference.word_segmentation import segment_batch
 
     return ExecuteResponseV2.model_validate_json(
-        batchalign_core.execute_word_segmentation_request_v2(request, segment_batch)
+        batchalign_core.execute_word_segmentation_request_v2(request, host.runner)
     )
 
 
 __all__ = [
-    "TextExecutionHostV2",
-    "build_default_text_execution_host_v2",
     "execute_coref_request_v2",
     "execute_morphosyntax_request_v2",
     "execute_translate_request_v2",

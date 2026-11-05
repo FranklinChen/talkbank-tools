@@ -8,15 +8,6 @@ pub(super) async fn write_morphotag_results(
     host: &DispatchHostContext,
     plan: &planning::JobPlan,
     results: TextBatchFileResults,
-    should_merge_abbrev: bool,
 ) {
-    crate::execution::text_io::write_text_results(
-        job,
-        host,
-        plan,
-        results,
-        should_merge_abbrev,
-        "Morphotag",
-    )
-    .await;
+    crate::execution::text_io::write_text_results(job, host, plan, results, "Morphotag").await;
 }

@@ -143,18 +143,18 @@ pub(crate) async fn dispatch_audio_export(
                 let filename = work.file.filename.clone();
                 let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, filename.as_ref());
                 let Ok(_slot) = limit.acquire_owned().await else {
-                    lifecycle
+                    return lifecycle
                         .record_setup_failure(
                             "native execution capacity closed",
                             FailureCategory::System,
                         )
-                        .await;
-                    return FileTaskOutcome::TerminalStateRecorded;
+                        .await
+                        .into();
                 };
                 lifecycle
                     .begin_first_attempt(WorkUnitKind::NativeMedia, FileStage::Processing)
                     .await;
-                match work.encode_and_publish(&lifecycle).await {
+                let recorded = match work.encode_and_publish(&lifecycle).await {
                     Ok(artifact) => {
                         lifecycle
                             .complete_with_result(artifact.display_path, artifact.content_type)
@@ -165,8 +165,8 @@ pub(crate) async fn dispatch_audio_export(
                             .fail(&error.to_string(), export_failure_category(&error))
                             .await
                     }
-                }
-                FileTaskOutcome::TerminalStateRecorded
+                };
+                FileTaskOutcome::from(recorded)
             },
         ));
     }

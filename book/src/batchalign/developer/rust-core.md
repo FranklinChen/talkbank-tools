@@ -1,7 +1,7 @@
 # Rust Core (`batchalign_core`)
 
 **Status:** Current
-**Last updated:** 2026-10-15 15:25 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 For new contributors, start with:
 
@@ -75,7 +75,7 @@ the source under `crates/batchalign-pyo3/src/`.
 |----------|---------|
 | `execute_asr_request_v2(...)` | Load prepared audio, call Whisper / Cantonese provider |
 | `execute_forced_alignment_request_v2(...)` | Load prepared audio + text, call FA model |
-| `execute_speaker_request_v2(...)` | Load prepared audio, call pyannote / NeMo |
+| `execute_speaker_request_v2(...)` | Load prepared audio, call local pyannote / pyannoteAI |
 | `execute_opensmile_request_v2(...)` | Load prepared audio, extract acoustic features |
 | `execute_avqi_request_v2(...)` | Load paired audio, calculate voice quality |
 | `execute_morphosyntax_request_v2(...)`, `execute_utseg_request_v2(...)`, `execute_translate_request_v2(...)`, `execute_coref_request_v2(...)` | Load the prepared text batch and check its item count, call the Python runner adapter, then normalize the host's `BatchInferResponse` into the typed V2 result (`normalize_<task>_result` in `worker_text_results.rs`) |

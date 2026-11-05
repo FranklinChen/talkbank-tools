@@ -1063,6 +1063,9 @@ pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
     ///
     /// Defaults to `false` (BA2 parity: `--wor` was opt-in for transcribe).
     pub write_wor: bool,
+    /// Whether single letters spelling a known abbreviation are merged on
+    /// the recognizer's tokens before CHAT is built (`--merge-abbrev`).
+    pub merge_abbrev: crate::params::MergeAbbrevPolicy,
     /// Media filename for the @Media header.
     pub media_name: Option<String>,
     /// Per-engine configuration extras drawn from
@@ -1086,18 +1089,18 @@ impl<P: TranscribePlan> TranscribeOptions<P> {
     }
 
     /// The GPU-profile engines this job's requests name: its admitted ASR
-    /// backend, when a worker hosts it, with the job's engine extras.
+    /// backend, when a worker hosts it, with the job's engine extras, and its
+    /// dedicated diarization engine, when one runs after recognition.
     ///
-    /// Derived from the two fields that already hold the choice, never stored
+    /// Derived from the fields that already hold the choices, never stored
     /// beside them, so the capability probe and every request site read the
     /// same plan.
     pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
-        match self.plan.asr().recognition_backend() {
-            Some(backend) => {
-                crate::worker::pool::GpuModelPlan::transcription(backend, &self.engine_extras)
-            }
-            None => crate::worker::pool::GpuModelPlan::without_engines(),
-        }
+        crate::worker::pool::GpuModelPlan::transcription(
+            self.plan.asr().recognition_backend(),
+            &self.engine_extras,
+            self.speakers.dedicated(),
+        )
     }
 }
 
@@ -1435,14 +1438,14 @@ mod speaker_plan_tests {
         assert_eq!(
             SpeakerSeparation::from_request(
                 true,
-                Some(crate::types::engines::SpeakerEngineName::Nemo)
+                Some(crate::types::engines::SpeakerEngineName::Pyannote)
             ),
-            SpeakerSeparation::Dedicated(SpeakerBackendV2::Nemo)
+            SpeakerSeparation::Dedicated(SpeakerBackendV2::Pyannote)
         );
         assert_eq!(
             SpeakerSeparation::from_request(
                 false,
-                Some(crate::types::engines::SpeakerEngineName::Nemo)
+                Some(crate::types::engines::SpeakerEngineName::Pyannote)
             ),
             SpeakerSeparation::RecognizerOnly
         );

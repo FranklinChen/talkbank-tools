@@ -28,7 +28,7 @@ fn default_config() {
     );
     assert_eq!(cfg.max_concurrent_worker_startups.get(), 1);
     assert_eq!(cfg.max_workers_per_key, None);
-    assert_eq!(cfg.worker_ready_timeout_s.get(), 300);
+    assert_eq!(cfg.worker_startup_stall_s.get(), 300);
     assert_eq!(cfg.max_body_bytes_mb, MemoryMb(512));
     assert_eq!(cfg.memory_gate_timeout_s.get(), 120);
     assert_eq!(cfg.memory_gate_poll_s.get(), 5);
@@ -41,7 +41,7 @@ fn default_config() {
     assert_eq!(cfg.local_lease_ttl, crate::config::LeaseTtl::DEFAULT);
     assert_eq!(cfg.audio_task_timeout_s, None);
     assert_eq!(cfg.analysis_task_timeout_s, None);
-    assert_eq!(cfg.ensure_task_timeout_s, None);
+    assert_eq!(cfg.ensure_task_stall_s.get(), 120);
     assert_eq!(cfg.worker_registry_path, None);
 }
 

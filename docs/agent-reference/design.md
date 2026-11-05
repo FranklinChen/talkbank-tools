@@ -1,6 +1,6 @@
 # Design reference
 
-**Last modified:** 2026-09-09 20:37 EDT
+**Last modified:** 2026-11-05 19:57 EST
 
 Read the sections relevant to your task. [AGENTS.md](../../AGENTS.md)
 is the canonical policy entry point and resolves workflow conflicts here.
@@ -94,7 +94,8 @@ existing violations get fixed when work brings you to them.
    `Last modified` field. **Always run `date '+%Y-%m-%d %H:%M %Z'`**, never guess.
 10. **Time transparency.** Operations longer than ~1 second must surface to all
     UI channels (console, TUI, desktop, dashboard) via the `progress_v2` event
-    channel (`batchalign/worker/_protocol.py:write_progress_event`,
+    channel (`batchalign/worker/_protocol.py`: `write_load_progress` for a
+    model load's growth or phase, `write_request_progress` for request units;
     `batchalign/worker/_progress.py`). Silent waits are UX bugs. Applies to model
     downloads, model loads, external API calls, any blocking wait. Full rationale:
     [`book/src/batchalign/architecture/time-transparency.md`](../../book/src/batchalign/architecture/time-transparency.md).

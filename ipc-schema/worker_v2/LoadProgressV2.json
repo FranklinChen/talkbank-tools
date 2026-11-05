@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadProgressV2",
+  "description": "A model load's progress: what moved, under which stage.\n\nA record of its own (not two fields of the enum variant) so a channel that\ncarries only a load's progress, such as a shared GPU worker's waiting\nload, is typed to carry nothing else.",
+  "type": "object",
+  "properties": {
+    "measure": {
+      "description": "What this event measures.",
+      "$ref": "#/$defs/LoadMeasureV2"
+    },
+    "stage": {
+      "description": "Stable stage name (for a phase, without any edge suffix).",
+      "type": "string"
+    }
+  },
+  "required": [
+    "stage",
+    "measure"
+  ],
+  "$defs": {
+    "LoadMeasureV2": {
+      "description": "What a model load's progress event measures.",
+      "oneOf": [
+        {
+          "description": "A model download's measured growth so far, in KiB.",
+          "type": "object",
+          "properties": {
+            "grown_kib": {
+              "description": "KiB the download's cache trees have grown since it started.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "download_growth"
+            }
+          },
+          "required": [
+            "kind",
+            "grown_kib"
+          ]
+        },
+        {
+          "description": "A named phase boundary.",
+          "type": "object",
+          "properties": {
+            "edge": {
+              "description": "Which end of the phase this event marks.",
+              "$ref": "#/$defs/PhaseEdgeV2"
+            },
+            "kind": {
+              "type": "string",
+              "const": "phase"
+            }
+          },
+          "required": [
+            "kind",
+            "edge"
+          ]
+        }
+      ]
+    },
+    "PhaseEdgeV2": {
+      "description": "Which end of a phase a [`LoadMeasureV2::Phase`] event marks.",
+      "oneOf": [
+        {
+          "description": "The phase began.",
+          "type": "string",
+          "const": "begin"
+        },
+        {
+          "description": "The phase finished.",
+          "type": "string",
+          "const": "complete"
+        }
+      ]
+    }
+  }
+}

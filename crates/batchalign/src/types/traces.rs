@@ -211,7 +211,7 @@ pub enum UtteranceEndTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 11;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +458,16 @@ impl From<batchalign_transform::decisions::SplitWindow> for SplitWindowTrace {
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "cause", rename_all = "snake_case")]
 pub enum RefusedWindowTrace {
+    /// Actual loaded-model or physical-host refusal, with original quantities
+    /// and identity. This is never inferred from a duration preference.
+    Resource {
+        /// Original source-owned range start in file milliseconds.
+        start_ms: u64,
+        /// Original source-owned range end in file milliseconds.
+        end_ms: u64,
+        /// The actual request constraint that prevented execution.
+        constraint: crate::types::worker_v2::FaResourceConstraintV2,
+    },
     /// Longer than the engine's alignment budget.
     OverBudget {
         /// Start of the window, in file milliseconds.

@@ -99,7 +99,6 @@ def _ready_qwen(aligner):
     return qwen_common.ReadyQwenRecognizer(
         qwen_common.QwenRecognizerConfig(
             lang="eng",
-            model_id="Qwen/Qwen3-ASR-0.6B-hf",
             device="cpu",
             recognition=SEGMENTATION_MODEL_POLICY,
         ),

@@ -40,10 +40,18 @@
 //!   ([`WorkerError::UnroutedGpuRequest`]), so there is no route around the
 //!   plan in production code.
 //!
+//! - The speaker slot ([`PlannedSpeaker`]) names the one speaker model the
+//!   job's speaker requests need. It is NOT worker identity: GPU workers are
+//!   shared across speaker models, so splitting them by one would add workers
+//!   under concurrency. It reaches the worker in the speaker task's
+//!   `ensure_task` instead ([`GpuModelPlan::load_overrides`],
+//!   `TaskLoad::for_request`), which builds exactly that model, once per
+//!   worker; a second speaker model on the same worker is a second load. A
+//!   job that declares no speaker model cannot route a speaker request.
+//!
 //! Later phases replace exact-key matching with monotone per-slot loadouts,
-//! give speaker engines a slot of their own, have request builders read their
-//! engines from the route, and move every engine default out of the Python
-//! worker.
+//! have request builders read their engines from the route, and move every
+//! engine default out of the Python worker.
 
 use std::collections::BTreeMap;
 
@@ -51,8 +59,10 @@ use batchalign_types::worker::InferTask;
 
 use crate::api::WorkerLanguage;
 use crate::transcribe::{AsrBackend, AsrWorkerMode};
-use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName};
-use crate::types::worker_v2::{ExecuteRequestV2, TaskRequestV2};
+use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName, SpeakerEngineName};
+use crate::types::worker_v2::{
+    ExecuteRequestV2, SpeakerBackendV2, SpeakerEmbeddingBackendV2, TaskRequestV2,
+};
 use crate::worker::error::WorkerError;
 use crate::worker::{WorkerBootstrapMode, WorkerTarget};
 
@@ -71,6 +81,48 @@ pub struct GpuModelPlan {
     /// The forced-alignment engine, for alignment jobs. Its fallback is read
     /// from the engine's own row when needed, never stored beside it.
     fa: Option<FaEngineName>,
+    /// The speaker model the job's speaker requests need: diarization on one
+    /// engine, or the embedding model. Absent when the job runs no speaker
+    /// requests, and then it cannot route one.
+    speaker: Option<PlannedSpeaker>,
+}
+
+/// The one speaker model a job's speaker requests need.
+///
+/// The speaker task's load builds what this names, and nothing else: local
+/// pyannote builds its pipeline, the embedding model builds the embedding
+/// model, pyannoteAI (a hosted API) builds nothing. A request on the route
+/// must ask for exactly this model ([`RouteEngines::named_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedSpeaker {
+    /// Speaker diarization on this backend.
+    Diarization(SpeakerBackendV2),
+    /// Speaker embedding on this model (`speaker-identify`).
+    Embedding(SpeakerEmbeddingBackendV2),
+}
+
+impl PlannedSpeaker {
+    /// The engine overrides that select the model a speaker task's load
+    /// builds: `speaker` for local pyannote, `speaker_embedding` for the
+    /// embedding model, and nothing for pyannoteAI, a hosted API with no
+    /// model. They travel only in `ensure_task`, never in a worker key.
+    ///
+    /// The one derivation, for the probe's load
+    /// ([`GpuModelPlan::load_overrides`]) and for a request's
+    /// (`execute_request_overrides`) alike.
+    pub(super) fn loaded_model_overrides(self) -> EngineOverrides {
+        match self {
+            Self::Diarization(SpeakerBackendV2::Pyannote) => EngineOverrides {
+                speaker: Some(SpeakerEngineName::Pyannote),
+                ..EngineOverrides::default()
+            },
+            Self::Diarization(SpeakerBackendV2::PyannoteAi) => EngineOverrides::default(),
+            Self::Embedding(backend) => EngineOverrides {
+                speaker_embedding: Some(backend),
+                ..EngineOverrides::default()
+            },
+        }
+    }
 }
 
 /// One worker-hosted ASR engine and the configuration its requests carry.
@@ -99,22 +151,50 @@ impl PlannedWorkerAsr {
 }
 
 impl GpuModelPlan {
-    /// A job whose GPU requests select no engine: diarization, speaker
-    /// identity, replayed transcription, and every command with no GPU
-    /// requests at all. Speaker requests remain routable; they select nothing.
+    /// A job with no GPU requests: openSMILE, AVQI and the batched text
+    /// commands, whose workers are not GPU workers.
     pub(crate) const fn without_engines() -> Self {
         Self {
             asr: None,
             fa: None,
+            speaker: None,
         }
     }
 
     /// A transcription or benchmark job: the ASR backend its admitted plan
-    /// selected, with the job's engine extras.
-    pub(crate) fn transcription(asr: AsrBackend, extras: &BTreeMap<String, String>) -> Self {
+    /// selected (`None` when nothing is recognized, as in a replay), with the
+    /// job's engine extras, and the dedicated diarization engine when one
+    /// runs after recognition.
+    pub(crate) fn transcription(
+        asr: Option<AsrBackend>,
+        extras: &BTreeMap<String, String>,
+        diarization: Option<SpeakerBackendV2>,
+    ) -> Self {
         Self {
-            asr: PlannedWorkerAsr::worker_hosted(asr, extras.clone()),
+            asr: asr.and_then(|backend| PlannedWorkerAsr::worker_hosted(backend, extras.clone())),
             fa: None,
+            speaker: diarization.map(PlannedSpeaker::Diarization),
+        }
+    }
+
+    /// A standalone diarization job on `backend`.
+    pub(crate) const fn diarization(backend: SpeakerBackendV2) -> Self {
+        Self {
+            asr: None,
+            fa: None,
+            speaker: Some(PlannedSpeaker::Diarization(backend)),
+        }
+    }
+
+    /// A speaker-identification job: the embedding model, the one node of
+    /// the released local model graph it reads.
+    pub(crate) const fn speaker_identity() -> Self {
+        Self {
+            asr: None,
+            fa: None,
+            speaker: Some(PlannedSpeaker::Embedding(
+                SpeakerEmbeddingBackendV2::Pyannote,
+            )),
         }
     }
 
@@ -126,6 +206,7 @@ impl GpuModelPlan {
         Self {
             asr: utr.and_then(|backend| PlannedWorkerAsr::worker_hosted(backend, BTreeMap::new())),
             fa: Some(fa),
+            speaker: None,
         }
     }
 
@@ -135,8 +216,9 @@ impl GpuModelPlan {
     #[doc(hidden)]
     pub fn local_whisper_for_test() -> Self {
         Self::transcription(
-            AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2),
+            Some(AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2)),
             &BTreeMap::new(),
+            None,
         )
     }
 
@@ -155,8 +237,20 @@ impl GpuModelPlan {
             }),
             GpuTask::Fa => self.fa.map(RouteEngines::Fa),
             GpuTask::FaFallback => self.fa_fallback().map(RouteEngines::Fa),
-            // Speaker requests select no engine; any job may send them.
-            GpuTask::Speaker => Some(RouteEngines::Speaker),
+            GpuTask::Speaker => self.speaker.map(RouteEngines::Speaker),
+        }
+    }
+
+    /// What `task`'s load reads on this plan's worker: the worker's identity
+    /// for the task, and for the speaker task the speaker model too, which
+    /// is not identity. The capability probe prepares its worker with it, so
+    /// the probe loads the very model the job's requests then need.
+    pub(super) fn load_overrides(&self, task: GpuTask) -> EngineOverrides {
+        match (task, self.speaker) {
+            (GpuTask::Speaker, Some(speaker)) => speaker.loaded_model_overrides(),
+            (GpuTask::Speaker, None) | (GpuTask::Asr | GpuTask::Fa | GpuTask::FaFallback, _) => {
+                self.identity(task)
+            }
         }
     }
 
@@ -251,7 +345,7 @@ enum RouteEngines {
         extras: BTreeMap<String, String>,
     },
     Fa(FaEngineName),
-    Speaker,
+    Speaker(PlannedSpeaker),
 }
 
 impl RouteEngines {
@@ -265,11 +359,20 @@ impl RouteEngines {
             (Self::Fa(engine), TaskRequestV2::ForcedAlignment(request)) => {
                 FaEngineName::from_worker_backend(request.backend) == *engine
             }
-            (Self::Speaker, TaskRequestV2::Speaker(_) | TaskRequestV2::SpeakerEmbedding(_)) => true,
+            (
+                Self::Speaker(PlannedSpeaker::Diarization(backend)),
+                TaskRequestV2::Speaker(request),
+            ) => request.backend == *backend,
+            (
+                Self::Speaker(PlannedSpeaker::Embedding(backend)),
+                TaskRequestV2::SpeakerEmbedding(request),
+            ) => request.backend == *backend,
             // The request's task was already matched against the route's, so
             // a payload of another shape is a request whose task and payload
-            // disagree: it names nothing this route expects.
-            (Self::Asr { .. } | Self::Fa(_) | Self::Speaker, _) => false,
+            // disagree: it names nothing this route expects. A diarization
+            // request on an embedding route (or the reverse) names a model
+            // the worker was not prepared with.
+            (Self::Asr { .. } | Self::Fa(_) | Self::Speaker(_), _) => false,
         }
     }
 }
@@ -304,7 +407,7 @@ impl GpuRoute {
         WorkerKey {
             target,
             language,
-            engine_selection: EngineSelection::for_job_plan(plan.identity(task), target, mode),
+            engine_selection: EngineSelection::for_job_plan(plan.identity(task), target),
         }
     }
 
@@ -443,18 +546,20 @@ mod tests {
     }
 
     /// A Rev.AI transcription declares no worker ASR, yet its probe still has
-    /// a worker to select: the one its speaker requests would reach, keyed
-    /// exactly as before plans existed (`{fa}` from the profile preload).
+    /// a worker to select: the one its speaker requests would reach. Nothing
+    /// is filled into its key: the worker loads only what a request asks for,
+    /// so it is keyed by no engine at all.
     #[test]
     fn a_rust_hosted_transcription_still_has_a_probe_worker() {
-        let plan = GpuModelPlan::transcription(AsrBackend::RustRevAi, &BTreeMap::new());
+        let plan = GpuModelPlan::transcription(
+            Some(AsrBackend::RustRevAi),
+            &BTreeMap::new(),
+            Some(SpeakerBackendV2::PyannoteAi),
+        );
         let probe =
             GpuRoute::worker_key(&plan, GpuTask::Asr, english(), WorkerBootstrapMode::Profile);
         assert_eq!(probe.engine_selection.overrides().asr, None);
-        assert_eq!(
-            probe.engine_selection.overrides().fa,
-            Some(<FaEngineName as crate::types::engines::SelectableEngine>::DEFAULT)
-        );
+        assert_eq!(probe.engine_selection.overrides().fa, None);
         assert_eq!(
             probe,
             route(&plan, GpuTask::Speaker, WorkerBootstrapMode::Profile).key
@@ -464,10 +569,179 @@ mod tests {
     /// A transcription job's diarization requests reach its ASR worker.
     #[test]
     fn a_transcription_jobs_speaker_requests_share_its_asr_worker_key() {
-        let plan = GpuModelPlan::transcription(whisper(), &BTreeMap::new());
+        let plan = GpuModelPlan::transcription(
+            Some(whisper()),
+            &BTreeMap::new(),
+            Some(SpeakerBackendV2::Pyannote),
+        );
         let asr = route(&plan, GpuTask::Asr, WorkerBootstrapMode::Profile);
         let speaker = route(&plan, GpuTask::Speaker, WorkerBootstrapMode::Profile);
         assert_eq!(asr.key, speaker.key);
+    }
+
+    /// A job that runs no speaker requests declares no speaker model, so it
+    /// cannot send one to a worker that was never prepared with one.
+    #[test]
+    fn a_plan_without_a_speaker_model_cannot_route_speaker_requests() {
+        for plan in [
+            GpuModelPlan::transcription(Some(whisper()), &BTreeMap::new(), None),
+            GpuModelPlan::alignment(FaEngineName::Wave2Vec, None),
+            GpuModelPlan::without_engines(),
+        ] {
+            assert_eq!(
+                GpuRoute::new(
+                    &plan,
+                    GpuTask::Speaker,
+                    english(),
+                    WorkerBootstrapMode::Profile
+                )
+                .map(|_| ()),
+                Err(GpuRouteRefusal::Undeclared {
+                    task: GpuTask::Speaker
+                })
+            );
+        }
+    }
+
+    /// The speaker model is NOT worker identity: every speaker plan reaches
+    /// the same worker in every mode, so concurrent jobs on different speaker
+    /// models share it. The model travels in the speaker task's load
+    /// instead: `speaker` for local pyannote, `speaker_embedding` for the
+    /// embedding model, and nothing for pyannoteAI, which loads nothing.
+    #[test]
+    fn the_speaker_model_is_a_load_not_a_worker_key() {
+        let plans = [
+            GpuModelPlan::diarization(SpeakerBackendV2::Pyannote),
+            GpuModelPlan::diarization(SpeakerBackendV2::PyannoteAi),
+            GpuModelPlan::speaker_identity(),
+        ];
+        for mode in [
+            WorkerBootstrapMode::Profile,
+            WorkerBootstrapMode::LazyProfile,
+            WorkerBootstrapMode::Task,
+        ] {
+            let keys: Vec<WorkerKey> = plans
+                .iter()
+                .map(|plan| route(plan, GpuTask::Speaker, mode).key)
+                .collect();
+            assert_eq!(keys[0], keys[1], "{mode:?}");
+            assert_eq!(keys[0], keys[2], "{mode:?}");
+        }
+        let load = |plan: &GpuModelPlan| {
+            crate::worker::pool::TaskLoad::new(
+                InferTask::Speaker,
+                plan.load_overrides(GpuTask::Speaker),
+            )
+        };
+        let [local, hosted, embedding] = plans.each_ref().map(load);
+        assert_eq!(
+            local
+                .wire_overrides()
+                .and_then(|o| o.get("speaker"))
+                .map(String::as_str),
+            Some("pyannote")
+        );
+        assert_eq!(
+            embedding
+                .wire_overrides()
+                .and_then(|o| o.get("speaker_embedding"))
+                .map(String::as_str),
+            Some("pyannote")
+        );
+        assert_eq!(hosted.wire_overrides(), None);
+        assert_ne!(local, embedding);
+        assert_ne!(local, hosted);
+        // A diarized transcription shares the worker of one that runs no
+        // diarization.
+        let plain = GpuModelPlan::transcription(Some(whisper()), &BTreeMap::new(), None);
+        let diarized = GpuModelPlan::transcription(
+            Some(whisper()),
+            &BTreeMap::new(),
+            Some(SpeakerBackendV2::Pyannote),
+        );
+        assert_eq!(
+            route(&plain, GpuTask::Asr, WorkerBootstrapMode::Profile).key,
+            route(&diarized, GpuTask::Asr, WorkerBootstrapMode::Profile).key
+        );
+    }
+
+    /// The probe prepares the model a request then needs: its load and a
+    /// request's are one load.
+    #[test]
+    fn a_speaker_requests_load_is_its_plans_probe_load() {
+        let plan = GpuModelPlan::diarization(SpeakerBackendV2::Pyannote);
+        assert_eq!(
+            crate::worker::pool::TaskLoad::for_request(&speaker_request(
+                SpeakerBackendV2::Pyannote
+            )),
+            crate::worker::pool::TaskLoad::new(
+                InferTask::Speaker,
+                plan.load_overrides(GpuTask::Speaker)
+            )
+        );
+    }
+
+    /// A request's `ensure_task` overrides are the plan's: the two
+    /// derivations of one speaker model cannot disagree.
+    #[test]
+    fn a_speaker_requests_load_overrides_are_its_plans() {
+        for backend in SpeakerBackendV2::ALL.iter().copied() {
+            assert_eq!(
+                super::super::execute_v2::execute_request_overrides(&speaker_request(backend)),
+                PlannedSpeaker::Diarization(backend).loaded_model_overrides(),
+                "{backend:?}"
+            );
+        }
+    }
+
+    fn speaker_request(backend: SpeakerBackendV2) -> ExecuteRequestV2 {
+        use crate::types::worker_v2::{
+            InferenceTaskV2, SpeakerInputV2, SpeakerPreparedAudioInputV2, SpeakerRequestV2,
+            WorkerArtifactIdV2, WorkerRequestIdV2,
+        };
+        ExecuteRequestV2 {
+            request_id: WorkerRequestIdV2::from("speaker-plan-test"),
+            task: InferenceTaskV2::Speaker,
+            payload: TaskRequestV2::Speaker(SpeakerRequestV2 {
+                backend,
+                input: SpeakerInputV2::PreparedAudio(SpeakerPreparedAudioInputV2 {
+                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
+                }),
+                expected_speakers: None,
+            }),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A speaker request must ask for the model its route was prepared with.
+    #[test]
+    fn a_speaker_request_naming_another_model_than_its_route_is_refused() {
+        let local = route(
+            &GpuModelPlan::diarization(SpeakerBackendV2::Pyannote),
+            GpuTask::Speaker,
+            WorkerBootstrapMode::Profile,
+        );
+        assert!(
+            local
+                .admit(&speaker_request(SpeakerBackendV2::Pyannote))
+                .is_ok()
+        );
+        assert!(matches!(
+            local.admit(&speaker_request(SpeakerBackendV2::PyannoteAi)),
+            Err(WorkerError::PlanMismatch(PlanMismatch::Engines {
+                route: GpuTask::Speaker,
+                ..
+            }))
+        ));
+        let identity = route(
+            &GpuModelPlan::speaker_identity(),
+            GpuTask::Speaker,
+            WorkerBootstrapMode::Profile,
+        );
+        assert!(matches!(
+            identity.admit(&speaker_request(SpeakerBackendV2::Pyannote)),
+            Err(WorkerError::PlanMismatch(PlanMismatch::Engines { .. }))
+        ));
     }
 
     /// Small hosts load one task per worker, so the keys stay per task there.
@@ -492,8 +766,8 @@ mod tests {
         );
         for plan in [
             rev_utr,
-            GpuModelPlan::transcription(AsrBackend::RustRevAi, &BTreeMap::new()),
-            GpuModelPlan::transcription(AsrBackend::RustWhisperRs, &BTreeMap::new()),
+            GpuModelPlan::transcription(Some(AsrBackend::RustRevAi), &BTreeMap::new(), None),
+            GpuModelPlan::transcription(Some(AsrBackend::RustWhisperRs), &BTreeMap::new(), None),
         ] {
             assert_eq!(
                 GpuRoute::new(&plan, GpuTask::Asr, english(), WorkerBootstrapMode::Profile)
@@ -506,7 +780,7 @@ mod tests {
     /// A transcription job never declared FA, so it cannot route FA requests.
     #[test]
     fn an_undeclared_task_is_refused() {
-        let plan = GpuModelPlan::transcription(whisper(), &BTreeMap::new());
+        let plan = GpuModelPlan::transcription(Some(whisper()), &BTreeMap::new(), None);
         assert_eq!(
             GpuRoute::new(&plan, GpuTask::Fa, english(), WorkerBootstrapMode::Profile).map(|_| ()),
             Err(GpuRouteRefusal::Undeclared { task: GpuTask::Fa })
@@ -517,12 +791,14 @@ mod tests {
     #[test]
     fn asr_extras_are_part_of_the_worker_key() {
         let plain = GpuModelPlan::transcription(
-            AsrBackend::Worker(AsrWorkerMode::HkQwenV2),
+            Some(AsrBackend::Worker(AsrWorkerMode::HkQwenV2)),
             &BTreeMap::new(),
+            None,
         );
         let large = GpuModelPlan::transcription(
-            AsrBackend::Worker(AsrWorkerMode::HkQwenV2),
+            Some(AsrBackend::Worker(AsrWorkerMode::HkQwenV2)),
             &BTreeMap::from([("qwen_model".to_owned(), "Qwen/Qwen3-ASR-1.7B".to_owned())]),
+            None,
         );
         assert_ne!(
             route(&plain, GpuTask::Asr, WorkerBootstrapMode::Profile).key,
@@ -603,7 +879,7 @@ mod tests {
     #[test]
     fn a_request_naming_other_engines_than_its_route_is_refused() {
         use crate::types::worker_v2::AsrBackendV2;
-        let plan = GpuModelPlan::transcription(whisper(), &BTreeMap::new());
+        let plan = GpuModelPlan::transcription(Some(whisper()), &BTreeMap::new(), None);
         let asr = route(&plan, GpuTask::Asr, WorkerBootstrapMode::Profile);
         assert!(
             asr.admit(&asr_request(AsrBackendV2::LocalWhisper, BTreeMap::new()))

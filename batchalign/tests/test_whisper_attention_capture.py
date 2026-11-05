@@ -10,14 +10,15 @@ import pytest
 
 from batchalign.inference.types import WhisperModelIdentity
 from batchalign.inference.whisper_attention import WhisperAttentionCapture
+from batchalign.tests._loaded_hosts import prepare_fa_fixture_on, whisper_fa, word_fa
 from batchalign.tests.pipelines.fa.test_fa_inference import (
     _FakeWhisperModel,
     _FakeWhisperProcessor,
 )
 from batchalign.tests.test_worker_fa_v2 import _make_request
 from batchalign.worker._fa_v2 import (
-    build_default_fa_execution_host_v2,
     execute_forced_alignment_request_v2,
+    whisper_fa_runner,
 )
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
@@ -36,12 +37,7 @@ def test_actual_worker_capture_preserves_timings_and_binds_audio(tmp_path):
         sample_rate=16000,
         model_identity=WhisperModelIdentity("example/whisper", "a" * 40),
     )
-    host = build_default_fa_execution_host_v2(
-        whisper_model=handle,
-        wave2vec_model=None,
-        canto_host=None,
-        qwen_host=None,
-    )
+    host = whisper_fa(whisper_fa_runner(handle))
     request = _make_request(
         tmp_path, backend=FaBackendV2.WHISPER, text_mode=FaTextModeV2.SPACE_JOINED
     )
@@ -49,6 +45,7 @@ def test_actual_worker_capture_preserves_timings_and_binds_audio(tmp_path):
     audio.tofile(tmp_path / "audio.pcm")
     request.attachments[1].frame_count = 1280
     request.attachments[1].byte_len = 5120
+    request = prepare_fa_fixture_on(request, host)
     baseline = execute_forced_alignment_request_v2(request, host)
     assert isinstance(baseline.outcome, ExecuteSuccessV2)
     assert baseline.result.attention_capture is None
@@ -57,6 +54,7 @@ def test_actual_worker_capture_preserves_timings_and_binds_audio(tmp_path):
         destination=str(destination),
         semantic_key="a" * 64,
     )
+    request = prepare_fa_fixture_on(request, host)
     captured = execute_forced_alignment_request_v2(request, host)
     assert isinstance(captured.outcome, ExecuteSuccessV2)
     assert captured.result.tokens == baseline.result.tokens
@@ -138,29 +136,18 @@ def test_worker_refuses_capture_for_another_backend(tmp_path):
         destination=str(tmp_path / "attention.sqlite"),
         semantic_key="a" * 64,
     )
-    host = build_default_fa_execution_host_v2(
-        whisper_model=None,
-        wave2vec_model=None,
-        canto_host=None,
-        qwen_host=None,
-    )
+
+    def must_not_run(*_args):
+        raise AssertionError("a refused capture request runs no aligner")
+
+    host = word_fa(must_not_run)
     response = execute_forced_alignment_request_v2(request, host)
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code.value == "invalid_payload"
 
 
-def test_identity_resolves_snapshot_before_load_without_config_private_fields(
-    monkeypatch, tmp_path
-):
-    from batchalign.inference.fa import _resolve_whisper_identity
-
-    config = tmp_path / "snapshots" / ("b" * 40) / "config.json"
-    monkeypatch.setattr(
-        "huggingface_hub.hf_hub_download", lambda model, filename: str(config)
-    )
-    assert _resolve_whisper_identity("example/whisper") == WhisperModelIdentity(
-        "example/whisper", "b" * 40
-    )
-    assert _resolve_whisper_identity(str(tmp_path)) is None
+def test_a_whisper_identity_admits_only_a_resolved_commit():
+    # Where the commit comes from (the snapshot `load_whisper_fa` is handed)
+    # is now its signature; what remains to test is the constructor.
     with pytest.raises(ValueError, match="resolved hub commit"):
         WhisperModelIdentity("example/whisper", "main")

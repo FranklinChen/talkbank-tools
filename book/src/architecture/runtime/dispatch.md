@@ -405,8 +405,8 @@ combines:
 - Target-aware worker reuse keyed by actual `WorkerTarget`.
 
 On large hosts this favors profile reuse; on small hosts it favors
-task bootstrap so a laptop does not speculatively preload a whole
-profile. See
+task bootstrap. On every host a worker starts empty and loads each
+task's models in that task's `ensure_task`, before its first request. See
 [Batchalign Workers](batchalign-workers.md)
 for pool structure, pre-scaling behavior, and host-policy details.
 

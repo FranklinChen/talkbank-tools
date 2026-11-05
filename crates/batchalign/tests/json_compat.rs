@@ -77,7 +77,6 @@ fn snapshot_job_submission_with_files() {
             boundaries: Default::default(),
             pauses: true,
             wor: true.into(),
-            merge_abbrev: false.into(),
             bullet_repair: false,
             review_level: Default::default(),
             media_dir: None,

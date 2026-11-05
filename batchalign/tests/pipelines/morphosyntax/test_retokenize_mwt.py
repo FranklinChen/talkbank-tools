@@ -267,10 +267,8 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
     import json
 
     from batchalign.inference.morphosyntax import batch_infer_morphosyntax
-    from batchalign.worker._text_v2 import (
-        TextExecutionHostV2,
-        execute_morphosyntax_request_v2,
-    )
+    from batchalign.tests._loaded_hosts import morphosyntax
+    from batchalign.worker._text_v2 import execute_morphosyntax_request_v2
     from batchalign.worker._types import BatchInferRequest, BatchInferResponse
     from batchalign.worker._types_v2 import (
         ExecuteRequestV2,
@@ -286,7 +284,7 @@ def _run_v2_morphosyntax(nlp, ctx, tmp_path, *, retokenize, request_id):
             pipelines=static_pipelines({"eng": nlp}, {"eng": ctx}),
         )
 
-    host = TextExecutionHostV2(morphosyntax_runner=_runner)
+    host = morphosyntax(_runner)
 
     batch_payload = {
         "items": [morphosyntax_item(["gonna", "eat", "cookies"])],

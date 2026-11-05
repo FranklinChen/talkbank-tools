@@ -73,7 +73,7 @@ fn apply_fa_produces_no_double_bullets_after_utr() {
     utr::inject_spaced(&mut chat, &tokens);
 
     // Group and create synthetic FA timings
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         30_000,
         &test_recording(10_000),

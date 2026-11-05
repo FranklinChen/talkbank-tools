@@ -148,11 +148,6 @@ def test_mwt_is_requested_exactly_when_the_entry_ships_it(
     monkeypatch.setitem(sys.modules, "stanza", fake_stanza)
     monkeypatch.setattr(_stanza_loading, "lemma_pretrain_options", lambda *_: {})
     monkeypatch.setattr(
-        _stanza_loading,
-        "_emit_stanza_lang_download_event_if_missing",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
         _stanza_loading, "pipeline_cache", lambda: _stanza_loading.StanzaPipelineCache()
     )
 
@@ -235,11 +230,6 @@ def test_two_threads_loading_one_retokenize_key_build_it_once(
 
     cache = StanzaPipelineCache()
     monkeypatch.setattr(_stanza_loading, "pipeline_cache", lambda: cache)
-    monkeypatch.setattr(
-        _stanza_loading,
-        "_emit_stanza_lang_download_event_if_missing",
-        lambda *args, **kwargs: None,
-    )
 
     builds: list[str] = []
     first_is_inside = threading.Event()

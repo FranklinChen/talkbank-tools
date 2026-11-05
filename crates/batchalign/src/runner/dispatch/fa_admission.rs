@@ -21,17 +21,23 @@
 //! and a job whose Cantonese model cannot load fails every Cantonese file by
 //! the same name while its English files proceed.
 //!
-//! The memo is a `tokio::sync::Mutex` held across the probe, and only the
-//! probe. That is deliberate: it makes "one probe per language per job" true
-//! by construction (two files of the same language reaching the gate together
-//! wait for one probe instead of racing two). Files of OTHER languages wait
-//! too while a probe runs; a probe is one worker's `ensure_task`, bounded by
-//! the pool's timeout. The pre-scale that follows a successful probe runs
-//! after the lock is released, by the one task that probed, so the memo is
-//! served while the extra workers come up.
+//! The memo is one `tokio::sync::OnceCell` per language, in a map whose lock
+//! is held only to find or insert a cell, never across a probe. The cell
+//! makes "one probe per language per job" true by construction: two files of
+//! the same language reaching the gate together wait on one initialization
+//! instead of racing two probes. Files of OTHER languages do not wait: their
+//! cells are their own. (The memo used to be one map-wide `tokio::sync::Mutex`
+//! held across the probe, so every language queued behind one language's
+//! probe, and a first probe can include a model download measured in
+//! minutes.) The pre-scale that follows a successful probe is started in the
+//! background by the one task that probed, under the job's cancellation, so
+//! the memo is served, and that file proceeds, while the extra workers come
+//! up.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::OnceCell;
 
 use crate::api::{LanguageCode3, NumWorkers, ReleasedCommand};
 use crate::engine_reports::FaCacheNamespace;
@@ -83,8 +89,67 @@ pub(crate) struct FaWorkerAdmission {
     num_workers: NumWorkers,
     /// Outcome per language, successes and refusals alike, so each language
     /// is probed once however many files declare it.
-    probed:
-        tokio::sync::Mutex<BTreeMap<LanguageCode3, Result<FaCacheNamespace, Arc<FaWorkerRefusal>>>>,
+    probed: ProbeMemo<LanguageCode3, AdmissionOutcome>,
+}
+
+/// What one language's admission came to.
+type AdmissionOutcome = Result<FaCacheNamespace, Arc<FaWorkerRefusal>>;
+
+/// Whether this caller ran the probe, or was answered by another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probed {
+    /// This caller's probe produced the value.
+    Here,
+    /// Another caller's probe did, before or while this one waited.
+    Elsewhere,
+}
+
+/// One value per key, computed once.
+///
+/// Concurrent askers of one key wait on one computation (a
+/// `tokio::sync::OnceCell` per key); askers of other keys never wait, because
+/// the map's lock is held only to find or insert a key's cell, never across a
+/// computation. A computation whose task is dropped leaves its cell empty, so
+/// the next asker computes.
+struct ProbeMemo<K, V> {
+    cells: Mutex<BTreeMap<K, Arc<OnceCell<V>>>>,
+}
+
+impl<K: Ord + Clone, V: Clone> ProbeMemo<K, V> {
+    fn new() -> Self {
+        Self {
+            cells: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// `key`'s value, computed by `probe` if no caller has yet, and who
+    /// computed it.
+    async fn get_or_probe<F, Fut>(&self, key: &K, probe: F) -> (V, Probed)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = V>,
+    {
+        let cell = {
+            let mut cells = self
+                .cells
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The key is cloned only for the first file of a language.
+            match cells.get(key) {
+                Some(cell) => Arc::clone(cell),
+                None => Arc::clone(cells.entry(key.clone()).or_default()),
+            }
+        };
+        let mut probed = Probed::Elsewhere;
+        let value = cell
+            .get_or_init(|| async {
+                probed = Probed::Here;
+                probe().await
+            })
+            .await
+            .clone();
+        (value, probed)
+    }
 }
 
 impl FaWorkerAdmission {
@@ -100,7 +165,7 @@ impl FaWorkerAdmission {
             options,
             gpu,
             num_workers,
-            probed: tokio::sync::Mutex::new(BTreeMap::new()),
+            probed: ProbeMemo::new(),
         }
     }
 
@@ -115,42 +180,104 @@ impl FaWorkerAdmission {
         lang: &LanguageCode3,
     ) -> Result<FaCacheNamespace, Arc<FaWorkerRefusal>> {
         let command = ReleasedCommand::Align;
-        let outcome = {
-            let mut probed = self.probed.lock().await;
-            if let Some(outcome) = probed.get(lang) {
-                return outcome.clone();
-            }
-            let outcome =
-                probe_command_worker(&self.pool, command, lang.clone(), &self.options, &self.gpu)
-                    .await
-                    .and_then(|loaded| {
-                        FaCacheNamespace::from_loaded(&loaded)
-                            .map_err(WorkerProbeRefusal::Unavailable)
+        let (outcome, probed) = self
+            .probed
+            .get_or_probe(lang, || async {
+                probe_command_worker(
+                    &self.pool,
+                    command,
+                    lang.clone(),
+                    &self.options,
+                    &self.gpu,
+                    // Admission runs inside a supervised file task, which is
+                    // dropped the moment the job is cancelled (`job_scope`).
+                    crate::infer_retry::Cancellation::NotWired {
+                        reason: "align admission runs in a supervised file task, dropped on cancel",
+                    },
+                )
+                .await
+                .and_then(|loaded| {
+                    FaCacheNamespace::from_loaded(&loaded).map_err(WorkerProbeRefusal::Unavailable)
+                })
+                .map_err(|cause| {
+                    Arc::new(FaWorkerRefusal {
+                        lang: lang.clone(),
+                        cause,
                     })
-                    .map_err(|cause| {
-                        Arc::new(FaWorkerRefusal {
-                            lang: lang.clone(),
-                            cause,
-                        })
-                    });
-            probed.insert(lang.clone(), outcome.clone());
-            outcome
-        };
-        // The lock is released: the memo serves the other files while the
-        // probing task alone warms this language's workers, the same
-        // pre-scale a job-level command gets after its probe, on the key this
-        // language's files dispatch to.
-        if outcome.is_ok() {
-            super::pre_scale_workers(
-                &self.pool,
-                command,
-                lang.clone(),
-                self.num_workers,
-                &self.options,
-                &self.gpu,
-            )
+                })
+            })
             .await;
+        // The memo is set and serves the other files. The task whose probe
+        // ran starts warming this language's extra workers in the background
+        // (the pre-scale a job-level command gets after its probe, on the key
+        // this language's files dispatch to) and goes on to its own file: the
+        // pre-scale starts workers one at a time, minutes on a cold host.
+        match (probed, &outcome) {
+            (Probed::Here, Ok(_)) => {
+                let pool = Arc::clone(&self.pool);
+                let options = self.options.clone();
+                let gpu = Arc::clone(&self.gpu);
+                let num_workers = self.num_workers;
+                let lang = lang.clone();
+                crate::runner::job_scope::spawn_background(async move {
+                    super::pre_scale_workers(&pool, command, lang, num_workers, &options, &gpu)
+                        .await;
+                });
+            }
+            (Probed::Here, Err(_)) | (Probed::Elsewhere, _) => {}
         }
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::{ProbeMemo, Probed};
+
+    /// Files of one language reaching the gate together wait on one probe.
+    #[tokio::test]
+    async fn concurrent_askers_of_one_key_share_one_probe() {
+        let memo = ProbeMemo::<&str, u32>::new();
+        let runs = AtomicUsize::new(0);
+        let ask = || {
+            memo.get_or_probe(&"eng", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                7
+            })
+        };
+        let (a, b, c) = tokio::join!(ask(), ask(), ask());
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!([a.0, b.0, c.0], [7, 7, 7]);
+        let here = [a.1, b.1, c.1]
+            .iter()
+            .filter(|probed| **probed == Probed::Here)
+            .count();
+        assert_eq!(here, 1, "exactly one asker ran the probe");
+    }
+
+    /// A slow probe of one language does not hold up another language.
+    #[tokio::test]
+    async fn another_key_does_not_wait_for_a_running_probe() {
+        let memo = ProbeMemo::<&str, u32>::new();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let slow = memo.get_or_probe(&"yue", || async {
+            held.await.expect("the test releases the slow probe");
+            1
+        });
+        let fast = async {
+            let answer = memo.get_or_probe(&"eng", || async { 2 }).await;
+            // Only once the other language is answered is the slow one let go.
+            release.send(()).expect("the slow probe is still waiting");
+            answer
+        };
+        let (slow, fast) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(slow, fast) })
+                .await
+                .expect("a probe of one key never blocks another key");
+        assert_eq!((slow.0, fast.0), (1, 2));
     }
 }

@@ -121,11 +121,11 @@ pub(crate) async fn drain_supervised_file_tasks(
     let mut abnormal_exits = 0usize;
 
     for task in tasks {
-        // A task that returned or died without a terminal state is attributed
-        // to the cancellation when the job was cancelled: it may have seen the
-        // token itself and returned early.
+        // A task that died without a terminal state is attributed to the
+        // cancellation when the job was cancelled: an abort is how a cancelled
+        // task ends.
         let exit = match (task.handle.await, cancel_token.is_cancelled()) {
-            (Ok(FileTaskOutcome::TerminalStateRecorded), _) => continue,
+            (Ok(FileTaskOutcome::TerminalStateRecorded(_)), _) => continue,
             // The supervisor stopped it: an expected consequence of the
             // cancel, not an abnormal exit.
             (Ok(FileTaskOutcome::StoppedByCancellation), _) => {
@@ -139,8 +139,7 @@ pub(crate) async fn drain_supervised_file_tasks(
                 .await;
                 continue;
             }
-            (Ok(FileTaskOutcome::MissingTerminalState) | Err(_), true) => FileTaskExit::Cancelled,
-            (Ok(FileTaskOutcome::MissingTerminalState), false) => FileTaskExit::NoTerminalState,
+            (Err(_), true) => FileTaskExit::Cancelled,
             (Err(join_error), false) => FileTaskExit::Panicked(join_error.to_string()),
         };
         abnormal_exits += 1;
@@ -157,9 +156,10 @@ pub(crate) async fn drain_supervised_file_tasks(
 /// Create a progress channel and spawn a forwarder task that routes updates
 /// to the store for a specific `(job_id, filename)`.
 ///
-/// Also returns the observer that records each of the file's checkouts
-/// starting and stopping a wait on a saturated pool (install it around the
-/// attempt with `worker::pool::checkout_wait::observing_checkout_waits`),
+/// Also returns the observer that records each of the file's pool waits (a
+/// checkout on a saturated pool, a load queued for host memory) starting and
+/// stopping (install it around the attempt with
+/// `worker::pool::checkout_wait::observing_pool_waits`),
 /// and the forwarder itself. The store keeps the reported stage and the open
 /// waits as two facts and shows "waiting for a worker" while any wait is
 /// open, so the forwarder publishes each as it comes, in order, and nothing
@@ -175,7 +175,7 @@ pub(crate) fn spawn_observed_progress_forwarder(
     filename: String,
 ) -> (
     super::ProgressSender,
-    Arc<dyn crate::worker::pool::checkout_wait::CheckoutWaitObserver>,
+    Arc<dyn crate::worker::pool::checkout_wait::PoolWaitObserver>,
     FileProgressForwarder,
 ) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<super::ProgressUpdate>();
@@ -254,7 +254,7 @@ pub(crate) async fn observing_file_waits<F: std::future::Future>(
             (observer, forwarder)
         })
         .unzip();
-    let output = crate::worker::pool::checkout_wait::observing_checkout_waits(
+    let output = crate::worker::pool::checkout_wait::observing_pool_waits(
         Arc::new(FannedOutWaits(observers)),
         work,
     )
@@ -266,18 +266,24 @@ pub(crate) async fn observing_file_waits<F: std::future::Future>(
 }
 
 /// One wait, shown on several files.
-struct FannedOutWaits(Vec<Arc<dyn crate::worker::pool::checkout_wait::CheckoutWaitObserver>>);
+struct FannedOutWaits(Vec<Arc<dyn crate::worker::pool::checkout_wait::PoolWaitObserver>>);
 
-impl crate::worker::pool::checkout_wait::CheckoutWaitObserver for FannedOutWaits {
-    fn waiting(&self, target: &crate::worker::WorkerTarget, lang: &crate::api::WorkerLanguage) {
+impl crate::worker::pool::checkout_wait::PoolWaitObserver for FannedOutWaits {
+    fn model_load(&self, change: crate::store::ModelLoadChange) {
         for observer in &self.0 {
-            observer.waiting(target, lang);
+            observer.model_load(change);
         }
     }
 
-    fn resumed(&self) {
+    fn waiting(&self, wait: crate::store::PoolWait) {
         for observer in &self.0 {
-            observer.resumed();
+            observer.waiting(wait);
+        }
+    }
+
+    fn resumed(&self, wait: crate::store::PoolWait) {
+        for observer in &self.0 {
+            observer.resumed(wait);
         }
     }
 }
@@ -287,23 +293,43 @@ struct ForwardedWaits {
     events: tokio::sync::mpsc::UnboundedSender<crate::store::WorkerWaitChange>,
 }
 
-impl crate::worker::pool::checkout_wait::CheckoutWaitObserver for ForwardedWaits {
-    fn waiting(&self, _target: &crate::worker::WorkerTarget, _lang: &crate::api::WorkerLanguage) {
+impl crate::worker::pool::checkout_wait::PoolWaitObserver for ForwardedWaits {
+    fn model_load(&self, change: crate::store::ModelLoadChange) {
+        let _ = self
+            .events
+            .send(crate::store::WorkerWaitChange::ModelLoad(change));
+    }
+
+    fn waiting(&self, wait: crate::store::PoolWait) {
         // A send fails only when the forwarder has stopped, which it does
         // only after this observer is dropped: unreachable while it is
         // called. The pool logs the wait regardless.
-        let _ = self.events.send(crate::store::WorkerWaitChange::Started);
+        let _ = self
+            .events
+            .send(crate::store::WorkerWaitChange::Started(wait));
     }
 
-    fn resumed(&self) {
+    fn resumed(&self, wait: crate::store::PoolWait) {
         // As for `waiting`.
-        let _ = self.events.send(crate::store::WorkerWaitChange::Ended);
+        let _ = self
+            .events
+            .send(crate::store::WorkerWaitChange::Ended(wait));
     }
 }
 
 // ---------------------------------------------------------------------------
 // force_terminal_file_states: last-resort cleanup for leaked tasks
 // ---------------------------------------------------------------------------
+
+/// Why an ended runner has files without a terminal result. Cancellation is
+/// an expected exit, not evidence of a system failure in each queued file.
+#[derive(Clone, Copy)]
+pub(crate) enum UnfinishedFileCause {
+    /// The user stopped the job.
+    Cancelled,
+    /// Dispatch ended without accounting for all its work.
+    UnexpectedExit,
+}
 
 /// Fallback cleanup for any files that still failed to reach a terminal state.
 ///
@@ -313,6 +339,7 @@ impl crate::worker::pool::checkout_wait::CheckoutWaitObserver for ForwardedWaits
 pub(crate) async fn force_terminal_file_states(
     sink: &dyn RunnerEventSink,
     job_id: &JobId,
+    cause: UnfinishedFileCause,
 ) -> usize {
     let unfinished: Vec<DisplayPath> = sink.unfinished_files(job_id).await;
 
@@ -322,6 +349,11 @@ pub(crate) async fn force_terminal_file_states(
 
     let now = sink.now();
     for filename in &unfinished {
+        if let UnfinishedFileCause::Cancelled = cause {
+            record_abnormal_file_task_exit(sink, job_id, filename, "File", FileTaskExit::Cancelled)
+                .await;
+            continue;
+        }
         let last_status = sink
             .file_status_label(job_id, filename)
             .await
@@ -331,8 +363,13 @@ pub(crate) async fn force_terminal_file_states(
             .await;
     }
 
-    sink.bump_forced_terminal_errors(unfinished.len()).await;
-    unfinished.len()
+    match cause {
+        UnfinishedFileCause::Cancelled => 0,
+        UnfinishedFileCause::UnexpectedExit => {
+            sink.bump_forced_terminal_errors(unfinished.len()).await;
+            unfinished.len()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,14 +423,12 @@ enum FileTaskExit {
     Cancelled,
     /// The task panicked or was aborted; the join error says which.
     Panicked(String),
-    /// The task returned without recording a terminal state.
-    NoTerminalState,
 }
 
 /// Record a non-standard file-task exit as an explicit terminal failure.
 ///
-/// This path is only for supervision failures: task panic, task cancellation,
-/// or a task returning without ever marking its file done/error.
+/// This path is only for supervision failures: a task panic or a task
+/// cancellation.
 async fn record_abnormal_file_task_exit(
     sink: &dyn RunnerEventSink,
     job_id: &JobId,
@@ -410,11 +445,6 @@ async fn record_abnormal_file_task_exit(
         ),
         FileTaskExit::Panicked(join_error) => (
             format!("{role} panicked before recording a terminal file state: {join_error}"),
-            FailureCategory::System,
-            AttemptOutcome::Failed,
-        ),
-        FileTaskExit::NoTerminalState => (
-            format!("{role} exited without recording a terminal file state"),
             FailureCategory::System,
             AttemptOutcome::Failed,
         ),

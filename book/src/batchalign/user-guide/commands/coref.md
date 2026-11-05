@@ -1,7 +1,7 @@
 # coref
 
 **Status:** Current
-**Last updated:** 2026-10-02 22:01 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Add sparse coreference annotation tiers (`%xcoref`) to CHAT transcripts.
 English-only. Uses full document context, all utterances in the file are
@@ -42,10 +42,7 @@ flowchart TD
     parse --> collect[collect_payloads\nExtract sentences: full document context]
     collect --> worker[execute_v2(task="coref")\nprepared_text batch → structured chain refs]
     worker --> inject[inject %xcoref tiers, sparse\nOnly utterances with coreferent mentions]
-    inject --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    inject --> serialize[Serialize → .cha output]
     serialize --> done([Output .cha files])
 
     style collect fill:#ffd,stroke:#aa0
@@ -70,7 +67,6 @@ flowchart TD
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--merge-abbrev` / `--no-merge-abbrev` | off | Merge abbreviations in the output |
 
 **`coref` has no `--lang` flag.** It is English-only, and each file's
 English-ness is read from that file's own `@Languages` header after full Chatter

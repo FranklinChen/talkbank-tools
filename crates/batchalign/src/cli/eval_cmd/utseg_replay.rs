@@ -994,6 +994,12 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
         .map_err(|error| UtsegReplayRefusal::Preparation {
             details: error.to_string(),
         })?;
+    // The recorded run segmented the words after `--merge-abbrev`, when it was
+    // asked for; its stamp says whether it was, so the items bind.
+    let (chunks, _merging) = crate::pipeline::transcribe::resolve_abbreviations(
+        crate::provenance::stamped_abbreviation_policy(&retained_chat)?,
+        chunks,
+    );
     let collected: Vec<(usize, UtsegBatchItem)> =
         crate::pipeline::transcribe::build_prechat_utseg_items(&chunks)
             .into_iter()

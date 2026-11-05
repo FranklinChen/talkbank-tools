@@ -4,8 +4,8 @@ This module is the request-time counterpart to the worker bootstrap modules.
 Its job is deliberately narrow:
 
 - accept typed inference requests from the stdio protocol layer
-- route each task to the correct pure inference helper
-- inject only the preloaded runtime state that task actually needs
+- route each task to the host its load built (``_state.loads``)
+- refuse a task that has not loaded, or that this route does not serve
 
 It must not grow into a pipeline-orchestration layer. CHAT parsing, job
 ownership, retries, and workflow policy remain on the Rust side.
@@ -13,6 +13,14 @@ ownership, retries, and workflow policy remain on the Rust side.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, TypeVar, assert_never
+
+from batchalign.worker._infer_hosts import (
+    UTSEG_IS_V2_ONLY,
+    legacy_translate,
+    refuse_batch,
+)
+from batchalign.worker._loads import COREF_LOAD, MORPHOSYNTAX_LOAD, TRANSLATE_LOAD
 from batchalign.worker._types import (
     BatchInferRequest,
     BatchInferResponse,
@@ -23,8 +31,16 @@ from batchalign.worker._types import (
     ItemOutcome,
     ItemProduced,
     _state,
+    not_loaded_message,
     sleep_test_delay,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from batchalign.worker._types import LoadKey, TaskLoadRegistry
+
+Host = TypeVar("Host")
 
 
 def _infer(req: InferRequest) -> InferResponse:
@@ -64,26 +80,50 @@ def _batch_infer(req: BatchInferRequest) -> BatchInferResponse:
             ]
         )
 
-    handler = _state.batch_infer_handler(req.task) or _STATIC_BATCH_INFER_DISPATCH.get(
-        req.task
-    )
-    if handler is None:
-        return BatchInferResponse(
-            results=[
-                InferResponse.unexecuted(ItemFailed(error=f"Unknown task: {req.task}"))
-                for _ in req.items
-            ]
-        )
-    return handler(req)
+    return batch_infer_on(req, _state.loads)
 
 
-def _dispatch_coref(req: BatchInferRequest) -> BatchInferResponse:
-    """Coref needs no model wiring, uses direct Stanza import."""
-    from batchalign.inference.coref import batch_infer_coref
+def batch_infer_on(
+    req: BatchInferRequest, loads: TaskLoadRegistry
+) -> BatchInferResponse:
+    """Answer one legacy batch from the hosts ``loads`` holds.
 
-    return batch_infer_coref(req)
+    The task's load is resolved once, here: a task that has not loaded is
+    refused for every item, and the host it built is what answers otherwise.
+    Morphosyntax, translate and coref have a legacy route; utseg is refused
+    (its request cannot name a segmenter), and every other task runs only
+    through worker protocol V2.
+    """
 
+    def on(
+        key: LoadKey[Host], answer: Callable[[Host], BatchInferResponse]
+    ) -> BatchInferResponse:
+        host = loads.get(key)
+        if host is None:
+            return refuse_batch(req, not_loaded_message(key.load))
+        return answer(host)
 
-_STATIC_BATCH_INFER_DISPATCH = {
-    InferTask.COREF: _dispatch_coref,
-}
+    match req.task:
+        case InferTask.MORPHOSYNTAX:
+            # The legacy route has no progress channel.
+            return on(MORPHOSYNTAX_LOAD, lambda host: host.runner(req, None))
+        case InferTask.TRANSLATE:
+            return on(TRANSLATE_LOAD, lambda host: legacy_translate(host, req))
+        case InferTask.COREF:
+            return on(COREF_LOAD, lambda host: host.runner(req))
+        case InferTask.UTSEG:
+            return refuse_batch(req, UTSEG_IS_V2_ONLY)
+        case (
+            InferTask.FA
+            | InferTask.ASR
+            | InferTask.OPENSMILE
+            | InferTask.AVQI
+            | InferTask.SPEAKER
+            | InferTask.WORD_SEGMENTATION
+        ):
+            return refuse_batch(
+                req,
+                f"{req.task.value} runs only through worker protocol V2",
+            )
+        case _:
+            assert_never(req.task)

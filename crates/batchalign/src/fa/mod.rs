@@ -37,7 +37,9 @@
 mod completion;
 pub(crate) use completion::DurableFaTimingCensus;
 mod input;
+mod preparation;
 mod raw_evidence;
+mod supplied_retry;
 mod transport;
 mod units;
 
@@ -54,10 +56,9 @@ pub(crate) use input::{FaWorkingDocument, read_fa_source};
 use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::{
-    BulletRepairPolicy, WordTiming, apply_fa_results_with_projection_policy,
-    expand_bullets_for_edge_fillers, finalize_without_injection, find_reusable_utterance_indices,
-    group_utterances, projection_without_injection_with_touched, refresh_reusable_alignment,
-    refresh_reusable_utterances, rescue_narrow_bullets,
+    BulletRepairPolicy, WordTiming, expand_bullets_for_edge_fillers, finalize_without_injection,
+    find_reusable_utterance_indices, group_utterances, projection_without_injection_with_touched,
+    refresh_reusable_alignment, refresh_reusable_utterances, rescue_narrow_bullets,
     strip_wor_from_monotonicity_stripped_utterances,
 };
 use crate::engine_reports::FaCacheNamespace;
@@ -455,26 +456,26 @@ impl AdmittedCachedFaTimings {
 }
 
 /// Re-admit and locally reparse immutable FA worker evidence for one request.
-fn replay_cached_raw_evidence<'a>(
+fn replay_cached_raw_evidence(
     value: serde_json::Value,
     engine: crate::types::engines::FaEngineName,
     cache_namespace: &FaCacheNamespace,
-    unit: &'a DispatchUnit<'a>,
-) -> Result<transport::FaWorkerEvidenceResult<'a>, ServerError> {
+    request: crate::chat_ops::fa::GroupUnit<'_>,
+    key: &crate::chat_ops::CacheKey,
+) -> Result<transport::ReplayedFaTimings, ServerError> {
     let evidence = raw_evidence::ReplayableFaRawEvidence::decode(
         value,
         engine,
         cache_namespace,
-        raw_evidence::ExpectedFaWords::new(unit.words().len()),
-        unit.cache_key(),
+        raw_evidence::ExpectedFaWords::new(request.words().len()),
+        key,
     )
     .map_err(|error| {
         ServerError::Validation(format!(
-            "cached raw FA evidence for request {} was refused: {error}",
-            unit.ordinal()
+            "cached raw FA evidence for {key:?} was refused: {error}"
         ))
     })?;
-    transport::replay_unit_evidence(evidence, unit)
+    transport::replay_input_evidence(evidence, request)
 }
 
 /// A cache layer whose value was present but could not be admitted.
@@ -491,16 +492,16 @@ struct RefusedFaCacheLayer {
 /// model inference. The derived timing layer remains a compatibility and
 /// resilience fallback when raw evidence is absent or corrupt.
 #[derive(Debug)]
-enum AdmittedFaCacheGroup<'a> {
-    RawEvidence(Box<transport::FaWorkerEvidenceResult<'a>>),
+enum AdmittedFaCacheGroup {
+    RawEvidence(transport::ReplayedFaTimings),
     DerivedTimings(AdmittedCachedFaTimings),
     Miss,
 }
 
 /// Result of checking both cache layers for one current FA request.
 #[derive(Debug)]
-struct FaCacheResolution<'a> {
-    admitted: AdmittedFaCacheGroup<'a>,
+struct FaCacheResolution {
+    admitted: AdmittedFaCacheGroup,
     refusals: Vec<RefusedFaCacheLayer>,
 }
 
@@ -510,7 +511,8 @@ struct FaCacheResolution<'a> {
 /// The unit carries its own key, words and window, so raw and derived
 /// candidates are admitted against one request.
 struct FaCacheUnitAdmission<'a> {
-    unit: &'a DispatchUnit<'a>,
+    request: crate::chat_ops::fa::GroupUnit<'a>,
+    key: crate::chat_ops::CacheKey,
     engine: crate::types::engines::FaEngineName,
     cache_namespace: &'a FaCacheNamespace,
 }
@@ -522,9 +524,35 @@ impl<'a> FaCacheUnitAdmission<'a> {
         cache_namespace: &'a FaCacheNamespace,
     ) -> Self {
         Self {
-            unit,
+            request: unit.input(),
+            key: unit.cache_key().clone(),
             engine,
             cache_namespace,
+        }
+    }
+
+    fn proposed(
+        request: crate::chat_ops::fa::GroupUnit<'a>,
+        context: preparation::FaPreparationContext<'a>,
+    ) -> Self {
+        let words: Vec<_> = request
+            .words()
+            .iter()
+            .map(|word| word.text.clone())
+            .collect();
+        let key = crate::chat_ops::fa::cache_key(
+            &words,
+            context.audio.audio_identity,
+            request.window().audio_start().get(),
+            request.window().end().get(),
+            context.params.whisper_text,
+            context.params.engine,
+        );
+        Self {
+            request,
+            key,
+            engine: context.params.engine,
+            cache_namespace: context.services.cache_namespace,
         }
     }
 
@@ -532,7 +560,7 @@ impl<'a> FaCacheUnitAdmission<'a> {
         &self,
         raw_value: Option<&serde_json::Value>,
         derived_value: Option<&serde_json::Value>,
-    ) -> FaCacheResolution<'a> {
+    ) -> FaCacheResolution {
         let mut refusals = Vec::new();
 
         if let Some(value) = raw_value {
@@ -540,11 +568,12 @@ impl<'a> FaCacheUnitAdmission<'a> {
                 value.clone(),
                 self.engine,
                 self.cache_namespace,
-                self.unit,
+                self.request,
+                &self.key,
             ) {
                 Ok(evidence) => {
                     return FaCacheResolution {
-                        admitted: AdmittedFaCacheGroup::RawEvidence(Box::new(evidence)),
+                        admitted: AdmittedFaCacheGroup::RawEvidence(evidence),
                         refusals,
                     };
                 }
@@ -560,8 +589,8 @@ impl<'a> FaCacheUnitAdmission<'a> {
                 value.clone(),
                 self.engine,
                 self.cache_namespace,
-                self.unit.words().len(),
-                self.unit.cache_key(),
+                self.request.words().len(),
+                &self.key,
             ) {
                 Ok(timings) => {
                     return FaCacheResolution {
@@ -626,6 +655,12 @@ pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -
     ServerError::Validation(error.to_string())
 }
 
+/// One heap-owned alignment execution. Producers consume the active input
+/// before issuing this compact, non-cloneable future; callers never embed the
+/// complete full/incremental pipeline in their own async state machines.
+pub(crate) type FaExecution<'run> =
+    futures::future::BoxFuture<'run, Result<AdmittedFaResult, ServerError>>;
+
 /// Run forced alignment on a pre-parsed `ChatFile`.
 ///
 /// THE FA entry point, and the only one. There used to be a `process_fa(&str)`
@@ -648,14 +683,165 @@ pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -
 /// 6. Apply timings + postprocessing (`apply_fa_results`).
 /// 7. Hand the draft to `FaAdmission::finish`: media/timing transition, then
 ///    full post-validation.
-pub(crate) async fn run_fa_from_ast(
-    active: ActiveFaInput<'_>,
-    audio: &AudioContext<'_>,
-    worker_lang: &crate::api::LanguageCode3,
-    services: FaServices<'_>,
-    fa_params: &FaParams,
-    progress: Option<&ProgressSender>,
-) -> Result<AdmittedFaResult, ServerError> {
+pub(crate) fn run_fa_from_ast<'run>(
+    active: ActiveFaInput<'run>,
+    audio: &'run AudioContext<'run>,
+    worker_lang: &'run crate::api::LanguageCode3,
+    services: FaServices<'run>,
+    fa_params: &'run FaParams,
+    progress: Option<&'run ProgressSender>,
+) -> FaExecution<'run> {
+    Box::pin(async move {
+        let prepared = prepare_fa_grouping(active, fa_params)?;
+        let recording = audio.recording().await?;
+        let grouped = prepared.aggregate(&recording)?;
+        run_grouped_fa_candidates(grouped, audio, worker_lang, services, progress).await
+    })
+}
+
+/// Source preparation owns its policies, source obligations and anchor view.
+/// Grouping consumes this owner; downstream execution cannot substitute a
+/// separately selected projection or engine policy.
+struct FaGroupingInput<'a> {
+    chat_file: crate::chat_ops::ChatFile,
+    admission: FaAdmission,
+    projection: crate::chat_ops::fa::FaProjection,
+    anchors: &'a crate::chat_ops::fa::AnchorIndex,
+    params: &'a FaParams,
+    wor_tier: crate::params::WorTierPolicy,
+    reusable_indices: std::collections::HashSet<usize>,
+    partially_reused_touched: Vec<crate::chat_ops::UtteranceIdx>,
+    rescue_decisions: Vec<batchalign_transform::decisions::DecisionRecord>,
+}
+
+/// Grouped source candidates, not resource permits. Only source preparation's
+/// consuming grouping transition constructs this phase.
+struct GroupedFaCandidates<'a> {
+    input: FaGroupingInput<'a>,
+    grouping: Grouping,
+    sources: crate::chat_ops::fa::SuppliedRetrySources,
+}
+
+impl<'a> FaGroupingInput<'a> {
+    fn aggregate(
+        self,
+        recording: &crate::chat_ops::fa::coordinates::Recording,
+    ) -> Result<GroupedFaCandidates<'a>, ServerError> {
+        let grouping = group_utterances(
+            &self.chat_file,
+            self.params.aggregation_target(),
+            recording,
+            self.anchors,
+        );
+        self.admit(grouping, recording)
+    }
+
+    fn admit(
+        mut self,
+        grouping: Grouping,
+        recording: &crate::chat_ops::fa::coordinates::Recording,
+    ) -> Result<GroupedFaCandidates<'a>, ServerError> {
+        let sources = self
+            .projection
+            .main_bullets()
+            .supplied_retry_sources(&self.chat_file, recording)
+            .map_err(kept_bullets_failed)?;
+        let (admission, grouping) = self.admission.admit_grouping(grouping, &self.chat_file)?;
+        self.admission = admission;
+        Ok(GroupedFaCandidates {
+            input: self,
+            grouping,
+            sources,
+        })
+    }
+
+    /// Cache-only controls cannot acquire a live-inference policy later.
+    #[cfg(test)]
+    fn for_cache_replay(self) -> Result<CacheReplayGrouping<'a>, ServerError> {
+        match self.params.cache_policy {
+            crate::params::CachePolicy::RequireCache => Ok(CacheReplayGrouping { input: self }),
+            crate::params::CachePolicy::UseCache | crate::params::CachePolicy::SkipCache => {
+                Err(ServerError::Validation(
+                    "declared resource controls require cache-only policy".into(),
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+struct CacheReplayGrouping<'a> {
+    input: FaGroupingInput<'a>,
+}
+
+#[cfg(test)]
+impl<'a> CacheReplayGrouping<'a> {
+    fn under_declared_limit(
+        self,
+        recording: &crate::chat_ops::fa::coordinates::Recording,
+        capacity: crate::chat_ops::fa::coordinates::Ms,
+    ) -> Result<GroupedFaCandidates<'a>, ServerError> {
+        let grouping = crate::chat_ops::fa::group_with_declared_window_limit(
+            &self.input.chat_file,
+            capacity.0,
+            recording,
+            self.input.anchors,
+        );
+        self.input.admit(grouping, recording)
+    }
+
+    async fn under_declared_resources(
+        self,
+        recording: &crate::chat_ops::fa::coordinates::Recording,
+        model: &mut crate::chat_ops::fa::resource_partition::test_support::DeclaredModel,
+    ) -> Result<GroupedFaCandidates<'a>, ServerError> {
+        let Grouping {
+            groups,
+            decisions,
+            windows_clamped,
+        } = group_utterances(
+            &self.input.chat_file,
+            self.input.params.aggregation_target(),
+            recording,
+            self.input.anchors,
+        );
+        let mut planned = Vec::new();
+        for input in crate::chat_ops::fa::resource_partition::planning_queue(groups) {
+            planned.extend(
+                crate::chat_ops::fa::resource_partition::prepare_group(
+                    input,
+                    self.input.anchors,
+                    model,
+                    |request, proof| proof.verify_request(request),
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::chat_ops::fa::resource_partition::ResourcePlanError::Probe(never) => {
+                        match never {}
+                    }
+                    crate::chat_ops::fa::resource_partition::ResourcePlanError::InvalidCut(_) => {
+                        ServerError::Validation(
+                            "declared resource control produced an invalid source cut".into(),
+                        )
+                    }
+                })?,
+            );
+        }
+        self.input.admit(
+            Grouping {
+                groups: planned,
+                decisions,
+                windows_clamped,
+            },
+            recording,
+        )
+    }
+}
+
+fn prepare_fa_grouping<'a>(
+    active: ActiveFaInput<'a>,
+    fa_params: &'a FaParams,
+) -> Result<FaGroupingInput<'a>, ServerError> {
     let ActiveFaInput {
         mut chat_file,
         admission,
@@ -666,11 +852,11 @@ pub(crate) async fn run_fa_from_ast(
     // CA transcripts (@Options: CA) use prosodic notation (⌈⌉⌊⌋, arrows,
     // lengthening marks) that %wor cannot represent. Generating %wor for
     // these files adds noise that CA researchers must manually remove.
-    let write_wor = if is_ca(&chat_file) {
+    let wor_tier = if is_ca(&chat_file) {
         info!("@Options: CA detected: suppressing %wor generation");
-        false
+        crate::params::WorTierPolicy::Omit
     } else {
-        fa_params.wor_tier.should_write()
+        fa_params.wor_tier
     };
 
     // 1d'. Pair the projection policy with the main bullets bound at the
@@ -744,17 +930,43 @@ pub(crate) async fn run_fa_from_ast(
     // whose audio lives in the gap between utterances.
     expand_bullets_for_edge_fillers(&mut chat_file);
 
-    // Resolved once, here, and used for BOTH grouping and the containment
-    // checks on what the engine returns. Grouping used to take an
-    // `Option<u64>` and invent its own behaviour when it was absent; there is
-    // one recording and one answer.
-    let recording = audio.recording().await?;
-    // 2c. Group utterances. An utterance over the engine budget is split at
-    // the UTR anchors when they allow it; see `chat_ops::fa::split`.
-    let (admission, grouping) = admission.admit_grouping(
-        group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors),
-        &chat_file,
-    )?;
+    Ok(FaGroupingInput {
+        chat_file,
+        admission,
+        projection,
+        anchors,
+        params: fa_params,
+        wor_tier,
+        reusable_indices,
+        partially_reused_touched,
+        rescue_decisions,
+    })
+}
+
+async fn run_grouped_fa_candidates(
+    grouped: GroupedFaCandidates<'_>,
+    audio: &AudioContext<'_>,
+    worker_lang: &crate::api::LanguageCode3,
+    services: FaServices<'_>,
+    progress: Option<&ProgressSender>,
+) -> Result<AdmittedFaResult, ServerError> {
+    let GroupedFaCandidates {
+        input,
+        grouping,
+        sources,
+    } = grouped;
+    let FaGroupingInput {
+        mut chat_file,
+        admission,
+        projection,
+        anchors,
+        params: fa_params,
+        wor_tier,
+        reusable_indices,
+        partially_reused_touched,
+        rescue_decisions,
+    } = input;
+    let write_wor = wor_tier.should_write();
     let Grouping {
         groups,
         decisions: grouping_decisions,
@@ -830,35 +1042,40 @@ pub(crate) async fn run_fa_from_ast(
     // 3-7. Resolve every group's timings: `%wor` reuse for whole groups, then
     // cache and worker inference per request (an anchored group is one
     // request per piece), then reassembly into group timings in word order.
-    let mut resolved = resolve_group_timings(FaDispatchInputs {
-        groups: &groups,
+    let population = preparation::prepare_population(
+        groups,
+        sources,
+        &chat_file,
+        &reusable_indices,
+        anchors,
+        preparation::FaPreparationContext {
+            audio,
+            worker_lang,
+            services,
+            params: fa_params,
+        },
+        progress,
+    )
+    .await?;
+    let resolved = resolve_group_timings(FaDispatchInputs {
+        population,
         chat_file: &chat_file,
         reusable_utterances: &reusable_indices,
-        audio,
-        worker_lang,
-        services,
-        fa_params,
         progress,
         context: "forced alignment",
     })
     .await?;
-    let fallback_events = std::mem::take(&mut resolved.fallback_events);
-    // Injection consumes the timings; the evidence keeps the pre-injection
-    // snapshot taken from them inside `into_parts`.
-    let (final_timings, group_evidence) = resolved.into_parts();
-
-    let fa_applied = apply_fa_results_with_projection_policy(
-        &mut chat_file,
-        &groups,
-        &final_timings,
-        projection,
-        write_wor,
-    )
-    .map_err(kept_bullets_failed)?
-    // Utterances 1f refreshed from reusable `%wor` before grouping: their
-    // `%wor` (if requested) is written by the SAME phase this run's own
-    // fresh injections are, after monotonicity resolves.
-    .also_touched(partially_reused_touched);
+    let units::InjectedFaPopulation {
+        applied,
+        evidence: group_evidence,
+        mut fallback_events,
+        retry,
+    } = resolved.inject(&mut chat_file, projection, write_wor)?;
+    let fa_applied = applied
+        // Utterances 1f refreshed from reusable `%wor` before grouping: their
+        // `%wor` (if requested) is written by the SAME phase this run's own
+        // fresh injections are, after monotonicity resolves.
+        .also_touched(partially_reused_touched);
 
     // 9. Apply optional repair, then enforce monotonicity: strip non-monotonic start times and clamp
     //    end-time overlaps. The old enforcement was removed (see comment in
@@ -866,12 +1083,15 @@ pub(crate) async fn run_fa_from_ast(
     //    version strips every start-time regression and clamps end times to
     //    the next utterance's start. Timing removal is now retained as a typed
     //    decision in both the optional CHAT projection and durable evidence.
-    let finalized = fa_applied
-        .then_finalize(
+    let (finalized, retry_fallbacks) = retry
+        .finalize(
+            fa_applied,
             &mut chat_file,
             BulletRepairPolicy::from(fa_params.bullet_repair),
+            progress,
         )
-        .map_err(kept_bullets_failed)?;
+        .await?;
+    fallback_events.extend(retry_fallbacks);
     if fa_params.bullet_repair {
         tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied");
     }
@@ -1961,7 +2181,7 @@ mod tests {
         assert!(resolution.refusals.is_empty());
         match resolution.admitted {
             AdmittedFaCacheGroup::RawEvidence(evidence) => {
-                assert_eq!(evidence.timings, vec![None]);
+                assert_eq!(evidence.into_timings(), vec![None]);
             }
             other => panic!("raw evidence must win over derived timings, got {other:?}"),
         }

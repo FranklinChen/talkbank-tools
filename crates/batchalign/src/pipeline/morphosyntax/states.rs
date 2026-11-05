@@ -230,7 +230,11 @@ impl ParsedFile {
                 };
                 planned
             })
-            .map_err(ServerError::ChatReplacementAdmission)?;
+            .map_err(|failure| {
+                ServerError::ChatReplacementAdmission(crate::error::SourceRefusal::in_source(
+                    failure, text,
+                ))
+            })?;
         let selected = admitted.selection();
         let contradicted = || ServerError::ReplacementPlanContradicted {
             planned,

@@ -1,7 +1,7 @@
 # Caching
 
 **Status:** Current
-**Last updated:** 2026-09-22 14:10 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 ## What gets cached
 
@@ -48,8 +48,8 @@ transcript evidence locally.
 ### Dedicated speaker evidence
 
 The speaker cache applies to the dedicated diarization stage of `transcribe`
-and to standalone `diarize`, for all three speaker engines (`pyannote-ai`,
-`pyannote`, and `nemo`). It is especially useful with the paid pyannoteAI
+and to standalone `diarize`, for both speaker engines (`pyannote-ai` and
+`pyannote`). It is especially useful with the paid pyannoteAI
 service.
 
 The key includes:
@@ -68,8 +68,8 @@ recording changes its bytes and causes a miss even if it sounds identical.
 BA3 stores two different artifacts:
 
 1. **Raw inference evidence.** For pyannoteAI this is the completed provider
-   job ID, complete output object, and optional warning. Local Pyannote and
-   NeMo retain their backend-specific segment evidence.
+   job ID, complete output object, and optional warning. Local Pyannote
+   retains its backend-specific segment evidence.
 2. **Derived speaker segments.** These are the sorted millisecond intervals
    consumed by transcript speaker projection. Their identity includes both
    the raw-evidence fingerprint and a separate normalization-algorithm
@@ -305,9 +305,11 @@ pyannoteAI currently exposes the `precision-2` model alias, but not an
 immutable backend build hash. BA3 scopes cloud evidence to that alias and its
 own evidence schema. If the provider changes the implementation behind the
 same alias and you want fresh evidence, use `--override-media-cache`. The
-local Pyannote and NeMo identifiers likewise include their configured model
-identity and the BA3 package version; floating external model revisions remain
-a reason to force a refresh during controlled experiments.
+local Pyannote identifier is a digest of its pinned model manifest, so a
+change to any pinned pipeline, segmentation or embedding commit changes the
+identity. The unpinned PLDA calibration artifact that `pyannote.audio` also
+fetches (see the `transcribe` page) is not part of that identity, which
+remains a reason to force a refresh during controlled experiments.
 
 ## How to force fresh results
 

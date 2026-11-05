@@ -384,6 +384,27 @@ export interface components {
          */
         CorrelationId: string;
         /**
+         * @description Wire representation of an admitted empty decoder observation. It grants no
+         *     audio or inference capability and never claims the source was past EOF.
+         */
+        DecodedAudioShortfallV2: {
+            /** @enum {string} */
+            kind: "no_bytes";
+        } | {
+            /**
+             * Format: int64
+             * @description Measured nonzero output bytes.
+             */
+            decoded_bytes: number;
+            /** @enum {string} */
+            kind: "partial_sample";
+            /**
+             * Format: int64
+             * @description Bytes per whole sample in the actual decoder encoding.
+             */
+            sample_bytes: number;
+        };
+        /**
          * @description Display path for a file within a job: either a bare basename
          *     (`"sample.cha"`) for single-file input or a relative forward-slash path
          *     (`"PWA/TYO_a1.cha"`) for directory input with subdirectories.
@@ -505,6 +526,87 @@ export interface components {
          */
         ExecutionStage: "staging" | "executing" | "copying_back" | "done" | "failed";
         /**
+         * @description The quantities an actual model constraint can limit.
+         * @enum {string}
+         */
+        FaConstraintUnitV2: "audio_samples" | "encoded_frames" | "text_labels";
+        /** @description Preparation cannot produce an executable model request. */
+        FaPreparationRefusalV2: {
+            /** @description Which loaded model imposed it. */
+            engine: string;
+            /** @enum {string} */
+            kind: "model_constraint";
+            /**
+             * Format: int64
+             * @description The actual model bound.
+             */
+            maximum: number;
+            /**
+             * Format: int64
+             * @description Requested population.
+             */
+            provided: number;
+            /** @description Units of both populations. */
+            unit: components["schemas"]["FaConstraintUnitV2"];
+        } | {
+            /** @description The loaded model imposing the constraint. */
+            engine: string;
+            /** @enum {string} */
+            kind: "insufficient_input";
+            /**
+             * Format: int64
+             * @description The model's required minimum.
+             */
+            minimum: number;
+            /**
+             * Format: int64
+             * @description Actual input population.
+             */
+            provided: number;
+            /** @description Units of both populations. */
+            unit: components["schemas"]["FaConstraintUnitV2"];
+        } | {
+            /** @enum {string} */
+            kind: "projection_unavailable";
+            /** @description The original qualified diagnostic. */
+            message: string;
+        };
+        /**
+         * @description Exact loaded-model or physical-host constraint retained for unavailable
+         *     source words. These quantities describe a request, not a duration policy.
+         */
+        FaResourceConstraintV2: {
+            /** @enum {string} */
+            kind: "empty_decoded_audio";
+            /** @description Preserve no bytes versus a partial sample; infer no acoustic cause. */
+            shortfall: components["schemas"]["DecodedAudioShortfallV2"];
+        } | {
+            /** @description The original quantities, model identity and diagnostic. */
+            cause: components["schemas"]["FaPreparationRefusalV2"];
+            /** @enum {string} */
+            kind: "model";
+        } | {
+            /** @description The loaded model that projected this request. */
+            engine: string;
+            /** @enum {string} */
+            kind: "host_memory";
+            /**
+             * Format: int64
+             * @description Model, request workspace, activation margin and worker baseline.
+             */
+            required_mb: number;
+            /**
+             * Format: int64
+             * @description Capacity unavailable to model requests by host policy.
+             */
+            reserve_mb: number;
+            /**
+             * Format: int64
+             * @description Physical capacity, independent of transient memory pressure.
+             */
+            total_mb: number;
+        };
+        /**
          * @description Broad classification for failures seen by the control plane.
          *
          *     Retry behavior should be defined against these categories rather than raw
@@ -557,7 +659,7 @@ export interface components {
          *     without parsing human-facing display labels.
          * @enum {string}
          */
-        FileProgressStage: "processing" | "reading" | "resolving_audio" | "recovering_utterance_timing" | "recovering_timing_fallback" | "aligning" | "transcribing" | "benchmarking" | "checking_cache" | "applying_results" | "post_processing" | "building_chat" | "segmenting_utterances" | "analyzing_morphosyntax" | "finalizing" | "writing" | "parsing" | "analyzing" | "segmenting" | "translating" | "resolving_coreference" | "comparing" | "retry_scheduled" | "waiting_for_worker";
+        FileProgressStage: "processing" | "reading" | "resolving_audio" | "recovering_utterance_timing" | "recovering_timing_fallback" | "preparing_alignment" | "aligning" | "transcribing" | "benchmarking" | "checking_cache" | "applying_results" | "post_processing" | "building_chat" | "segmenting_utterances" | "analyzing_morphosyntax" | "finalizing" | "writing" | "parsing" | "analyzing" | "segmenting" | "translating" | "resolving_coreference" | "comparing" | "retry_scheduled" | "waiting_for_worker" | "waiting_for_host_memory" | "preparing_worker" | "downloading_model";
         /**
          * @description The provenance stamps read from one result file.
          *
@@ -1552,6 +1654,21 @@ export interface components {
          *     variant per cause, tagged by `cause`, each carrying only its own numbers.
          */
         RefusedWindowTrace: {
+            /** @enum {string} */
+            cause: "resource";
+            /** @description The actual request constraint that prevented execution. */
+            constraint: components["schemas"]["FaResourceConstraintV2"];
+            /**
+             * Format: int64
+             * @description Original source-owned range end in file milliseconds.
+             */
+            end_ms: number;
+            /**
+             * Format: int64
+             * @description Original source-owned range start in file milliseconds.
+             */
+            start_ms: number;
+        } | {
             /**
              * Format: int64
              * @description The budget exceeded, in milliseconds.

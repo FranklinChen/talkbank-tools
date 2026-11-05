@@ -6,8 +6,8 @@
 
 use super::fixture::{DriftParams, OverlapConvention, build_scenario};
 use crate::chat_ops::fa::coordinates::{Ms, Recording};
-use crate::chat_ops::fa::group_utterances;
-use crate::chat_ops::fa::grouping::{GroupUnit, GroupUnits};
+use crate::chat_ops::fa::group_with_declared_window_limit;
+use crate::chat_ops::fa::grouping::GroupUnit;
 use crate::chat_ops::fa::utr::{collect_utr_utterance_info, inject_spaced};
 
 #[test]
@@ -55,7 +55,7 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
             _ => None,
         };
         println!("{name}: strategy={:?}", plan.map(|p| p.strategy));
-        let grouping = group_utterances(&chat, 15_000, &recording, &anchors);
+        let grouping = group_with_declared_window_limit(&chat, 15_000, &recording, &anchors);
         let mut requested: Vec<Vec<usize>> = census
             .iter()
             .map(|utterance| vec![0; utterance.words().len()])
@@ -63,7 +63,7 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
         let mut contained = 0usize;
         let mut outside = 0usize;
         let mut inspect = |unit: GroupUnit<'_>| {
-            for word in unit.words {
+            for word in unit.words() {
                 let utterance = word.utterance_index.raw();
                 let index = word.utterance_word_index.raw();
                 assert_eq!(
@@ -83,7 +83,7 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                 } else {
                     start + step
                 };
-                if unit.window.audio_start().get() <= start && unit.window.end().get() >= end {
+                if unit.window().audio_start().get() <= start && unit.window().end().get() >= end {
                     contained += 1;
                 } else {
                     outside += 1;
@@ -95,72 +95,13 @@ fn joint_recovery_request_windows_retain_the_complete_source_population() {
                     }
                     violations.push(format!(
                         "{name} U{utterance} W{index}: [{start},{end}] outside request {:?}",
-                        unit.window
+                        unit.window()
                     ));
                 }
             }
         };
-        for group in &grouping.groups {
-            match group.units() {
-                GroupUnits::Whole(unit) => inspect(unit),
-                GroupUnits::Pieces(pieces) => {
-                    for piece in pieces {
-                        match piece {
-                            crate::chat_ops::fa::AnchoredPart::Request(piece) => {
-                                inspect(GroupUnit {
-                                    words: piece.words(),
-                                    window: piece.window(),
-                                })
-                            }
-                            crate::chat_ops::fa::AnchoredPart::Unavailable(_) => {}
-                        }
-                    }
-                }
-            }
-        }
-        let missing = requested
-            .iter()
-            .flatten()
-            .filter(|&&count| count == 0)
-            .count();
-        let repeated = requested
-            .iter()
-            .flatten()
-            .filter(|&&count| count > 1)
-            .count();
-        println!(
-            "{name}: hints={} required_words={} contained={contained} outside={outside} unrequested={missing} repeated={repeated} groups={}",
-            observed.injected(),
-            requested.iter().map(Vec::len).sum::<usize>(),
-            grouping.groups.len()
-        );
-        if missing != 0 || repeated != 0 {
-            for (utterance, words) in requested
-                .iter()
-                .enumerate()
-                .filter(|(_, words)| words.contains(&0))
-            {
-                println!(
-                    "{name} unrequested U{utterance}: count={} envelope={:?} anchors={:?}",
-                    words.iter().filter(|&&n| n == 0).count(),
-                    plan.and_then(|p| p.search_envelopes[utterance].as_ref()),
-                    anchors.lookup(talkbank_model::UtteranceIdx::new(utterance))
-                );
-                println!(
-                    "{name} residual U{utterance}: missing_indices={:?} surviving_asr_words={} expected_window={:?} correspondence={:?}",
-                    words
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, &count)| (count == 0).then_some(index))
-                        .collect::<Vec<_>>(),
-                    scenario.expected[utterance].surviving_asr_words,
-                    scenario.expected[utterance],
-                    plan.map(|p| &p.utterances[utterance]),
-                );
-            }
-            violations.push(format!(
-                "{name}: {missing} missing requests, {repeated} duplicate requests"
-            ));
+        for unit in grouping.groups.iter().flat_map(|group| group.requests()) {
+            inspect(unit);
         }
     }
     assert!(

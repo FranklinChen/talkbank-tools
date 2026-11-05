@@ -42,7 +42,9 @@ fn test_pool(python: String) -> WorkerPool {
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -200,11 +202,18 @@ async fn cross_platform_worker_spawn_and_shutdown() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let handle = WorkerHandle::spawn(config).await.expect("spawn failed");
+    let handle = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("spawn failed");
     assert!(*handle.pid() > 0, "should have a valid pid");
     assert_eq!(handle.transport(), "stdio");
 
@@ -250,7 +259,9 @@ async fn cross_platform_worker_health_check() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -271,7 +282,9 @@ async fn cross_platform_worker_capabilities() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 

@@ -1,0 +1,36 @@
+{
+  "request_id": "req-fa-0003:prepare",
+  "outcome": {
+    "kind": "success"
+  },
+  "result": {
+    "kind": "fa_preparation",
+    "outcome": {
+      "kind": "prepared",
+      "plan": {
+        "binding": {
+          "execution_request_id": "req-fa-0003",
+          "backend": "wave2vec",
+          "engine": "declared-mms-fixture",
+          "payload_ref_id": "inline-ref-0003",
+          "audio_ref_id": "audio-ref-0003",
+          "samples": 32000,
+          "sample_rate_hz": 16000,
+          "text_mode": "space_joined",
+          "attention_capture": null
+        },
+        "memory": {
+          "kind": "projected",
+          "workspace": 1048576,
+          "model": 2097152,
+          "basis": {
+            "kind": "mms_cpu",
+            "torch_version": "declared-fixture",
+            "torchaudio_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    }
+  },
+  "elapsed_s": 0.012
+}

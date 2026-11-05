@@ -1,0 +1,20 @@
+{
+  "request_id": "declared-short-input:prepare",
+  "outcome": {
+    "kind": "success"
+  },
+  "result": {
+    "kind": "fa_preparation",
+    "outcome": {
+      "kind": "refused",
+      "cause": {
+        "kind": "insufficient_input",
+        "unit": "audio_samples",
+        "provided": 1,
+        "minimum": 2,
+        "engine": "declared-mms-fixture"
+      }
+    }
+  },
+  "elapsed_s": 0.001
+}

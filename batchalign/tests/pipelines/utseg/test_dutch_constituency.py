@@ -49,17 +49,11 @@ def _fake_stanza(monkeypatch) -> list[dict[str, object]]:
 
 @pytest.fixture
 def fresh_cache(monkeypatch):
-    """A fresh pipeline cache, and no download notice from the probe."""
-    from batchalign.worker import _stanza_loading
+    """A fresh pipeline cache, and no real Stanza directory measured."""
     from batchalign.worker._pipeline_cache import StanzaPipelineCache
     from batchalign.worker._types import _state
 
     monkeypatch.setattr(_state, "stanza_pipelines", StanzaPipelineCache())
-    monkeypatch.setattr(
-        _stanza_loading,
-        "_emit_stanza_lang_download_event_if_missing",
-        lambda lang, alpha2: None,
-    )
 
 
 def test_a_language_without_a_constituency_parser_is_refused_not_loaded(
@@ -125,13 +119,13 @@ def test_a_worker_never_prepared_for_a_language_still_serves_the_stanza_route(
     with "No utseg Stanza loader installed". The handler now calls the
     loader itself, which builds the request language's pipeline on first use,
     whatever language the worker was started for."""
-    from batchalign.inference.utseg import UtsegInferenceRequest
-    from batchalign.worker._infer_hosts import build_utseg_inference_handler
+    from batchalign.inference.utseg import NoPinnedBoundaryModel, UtsegInferenceRequest
+    from batchalign.worker._infer_hosts import build_utseg_runner
     from batchalign.worker._types_v2 import UtsegSegmenterV2
 
     _table(monkeypatch, "spa", "es", {"tokenize", "pos", "constituency"})
     built = _fake_stanza(monkeypatch)
-    response = build_utseg_inference_handler()(
+    response = build_utseg_runner(NoPinnedBoundaryModel())(
         UtsegInferenceRequest(
             lang="spa",
             segmenter=UtsegSegmenterV2.STANZA_CONSTITUENCY,

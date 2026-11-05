@@ -39,8 +39,8 @@ use super::{
 ///
 /// When provided, the best-of-both fallback in [`TwoPassOverlapUtr`] uses
 /// `group_utterances()` to compare how many FA groups each strategy would
-/// produce. Fewer groups means wider FA windows and worse alignment, the
-/// specific failure mode observed on non-English files.
+/// propose. This retains the existing preference for more, narrower groups;
+/// group counts prove neither model feasibility nor acoustic accuracy.
 #[derive(Debug, Clone, Copy)]
 pub struct GroupingContext {
     /// The recording both strategies' groups are formed against (its end
@@ -51,8 +51,8 @@ pub struct GroupingContext {
     /// silently abandoned when that failed. The UTR pass hands over the one it
     /// already derived.
     pub recording: Recording,
-    /// Maximum FA group duration in milliseconds.
-    pub max_group_ms: u64,
+    /// FA aggregation preference, independent of model/resource feasibility.
+    pub aggregation_target: crate::types::engines::FaAggregationTarget,
 }
 
 /// Whether CA overlap markers (⌈⌉⌊⌋) are used for onset windowing.
@@ -315,11 +315,14 @@ impl TwoPassOverlapUtr {
     }
 
     /// Create a `TwoPassOverlapUtr` with grouping context for FA stability.
-    pub fn with_grouping_context(recording: Recording, max_group_ms: u64) -> Self {
+    pub fn with_grouping_context(
+        recording: Recording,
+        aggregation_target: crate::types::engines::FaAggregationTarget,
+    ) -> Self {
         Self {
             grouping_context: Some(GroupingContext {
                 recording,
-                max_group_ms,
+                aggregation_target,
             }),
             config: TwoPassConfig::default(),
         }
@@ -394,15 +397,20 @@ impl TwoPassOverlapUtr {
             (
                 group_utterances(
                     &two_pass_file,
-                    ctx.max_group_ms,
+                    ctx.aggregation_target,
                     &ctx.recording,
                     &no_anchors,
                 )
                 .groups
                 .len(),
-                group_utterances(&global_file, ctx.max_group_ms, &ctx.recording, &no_anchors)
-                    .groups
-                    .len(),
+                group_utterances(
+                    &global_file,
+                    ctx.aggregation_target,
+                    &ctx.recording,
+                    &no_anchors,
+                )
+                .groups
+                .len(),
             )
         });
 
@@ -1474,9 +1482,12 @@ mod tests {
         ];
 
         // With grouping context: the recording covers the full range,
-        // max_group_ms is small enough to create multiple groups when
+        // aggregation_target is small enough to create multiple groups when
         // all utterances are timed.
-        let strategy = TwoPassOverlapUtr::with_grouping_context(sixty_second_recording(), 15000);
+        let strategy = TwoPassOverlapUtr::with_grouping_context(
+            sixty_second_recording(),
+            crate::options::FaEngineName::Wave2Vec.aggregation_target(),
+        );
         let result = strategy.inject(
             &mut chat,
             &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
@@ -1571,11 +1582,14 @@ mod tests {
             },
         ];
 
-        let strategy = TwoPassOverlapUtr::with_grouping_context(sixty_second_recording(), 15000)
-            .with_config(TwoPassConfig {
-                max_exclusion_density: UtrOverlapDensityThreshold::MAX,
-                ..TwoPassConfig::default()
-            });
+        let strategy = TwoPassOverlapUtr::with_grouping_context(
+            sixty_second_recording(),
+            crate::options::FaEngineName::Wave2Vec.aggregation_target(),
+        )
+        .with_config(TwoPassConfig {
+            max_exclusion_density: UtrOverlapDensityThreshold::MAX,
+            ..TwoPassConfig::default()
+        });
         let result = strategy.inject(
             &mut chat,
             &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),

@@ -236,30 +236,12 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/cli/args/commands.rs",
         struct_name: "AlignArgs",
-        max_fields: 16,
-        max_bool_fields: 8,
+        max_fields: 14,
+        max_bool_fields: 6,
         disposition: WideStructDisposition::RefactorTarget,
         reason: "UTR selection/tuning and boundary policy now have owned flattened types; the \
-                 remaining --flag/--no-flag pairs (wor, merge_abbrev) and BA2 compatibility \
-                 switches still make the outer clap boundary a refactor target",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/cli/args/commands.rs",
-        struct_name: "BenchmarkArgs",
-        max_fields: 14,
-        max_bool_fields: 7,
-        disposition: WideStructDisposition::RefactorTarget,
-        reason: "same two --flag/--no-flag pairs as AlignArgs (wor, merge_abbrev); fix them \
-                 together",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/cli/args/commands.rs",
-        struct_name: "MorphotagArgs",
-        max_fields: 12,
-        max_bool_fields: 8,
-        disposition: WideStructDisposition::RefactorTarget,
-        reason: "two --flag/--no-flag pairs (merge_abbrev, and skipmultilang against multilang, \
-                 which is the same pattern under an unrelated pair of names)",
+                 remaining --wor/--nowor pair and BA2 compatibility switches still make the \
+                 outer clap boundary a refactor target",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/cli/args/commands.rs",
@@ -386,12 +368,12 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/runner/dispatch/fa_pipeline.rs",
         struct_name: "FaFileContext",
-        max_fields: 13,
-        max_bool_fields: 1,
+        max_fields: 12,
+        max_bool_fields: 0,
         disposition: WideStructDisposition::RefactorTarget,
         reason: "forced-alignment per-file context still bundles several workflow concerns \
-                 (UTR policy, abbreviation merge, before-file, debug dumper beside the engine \
-                 admission and media root)",
+                 (UTR policy, before-file, debug dumper beside the engine admission and media \
+                 root)",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/store/job/types.rs",
@@ -437,15 +419,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         disposition: WideStructDisposition::BoundaryShim,
         reason: "server configuration boundary intentionally mirrors a broad operator-facing \
                  config file; its width is the width of server.yaml",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/types/options/align.rs",
-        struct_name: "AlignOptions",
-        max_fields: 10,
-        max_bool_fields: 2,
-        disposition: WideStructDisposition::BoundaryShim,
-        reason: "alignment option boundary retains its flat JSON contract while typed UTR and \
-                 boundary sub-capabilities own the related Rust fields",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/types/request.rs",

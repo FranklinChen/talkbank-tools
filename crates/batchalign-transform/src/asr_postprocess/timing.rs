@@ -156,6 +156,22 @@ impl WordTiming {
     }
 }
 
+/// The one interval a merged word takes from its parts: the smallest covering
+/// every part, when every part is timed (see [`WordTiming::interval`]).
+///
+/// `None` when any part is untimed, or when there are no parts. A merge whose
+/// parts are not all timed must be declined rather than given a span from the
+/// timed ones: such a span claims the word starts or ends where a part heard at
+/// an unknown time did not. The result covers real time because each part
+/// does. The compound and abbreviation merges both take their timing here.
+pub fn covering_all_timed(
+    parts: impl IntoIterator<Item = Option<AdmittedInterval>>,
+) -> Option<AdmittedInterval> {
+    let mut parts = parts.into_iter();
+    let first = parts.next()??;
+    parts.try_fold(first, |union, part| part.map(|part| union.covering(part)))
+}
+
 /// An interval that covers real time: admitted, with its end after its start.
 ///
 /// The one input a generated CHAT bullet is built from ([`Self::bullet`]).
@@ -221,6 +237,19 @@ impl PositiveInterval {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A merge's span covers every part only when every part is timed; one
+    /// untimed part, or no parts at all, leaves the merge without a span.
+    #[test]
+    fn a_merged_span_covers_every_part_or_none() {
+        let admit = |start, end| AdmittedInterval::admit_millis(start, end).ok();
+        let union = covering_all_timed([admit(300, 400), admit(100, 200), admit(500, 650)])
+            .expect("every part is timed");
+        assert_eq!((union.start_ms(), union.end_ms()), (100, 650));
+        assert_eq!(covering_all_timed([admit(100, 200), None]), None);
+        assert_eq!(covering_all_timed([None, admit(100, 200)]), None);
+        assert_eq!(covering_all_timed(std::iter::empty()), None);
+    }
 
     #[test]
     fn a_positive_interval_is_only_built_from_real_duration() {

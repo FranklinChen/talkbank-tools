@@ -142,7 +142,9 @@ async fn measure_stanza_per_key_throughput() {
         // don't trip the readiness gate. We're measuring steady-state
         // throughput, not warmup.
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<180>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<180>(),
+        ),
         ..PoolConfig::for_tests()
     }));
 

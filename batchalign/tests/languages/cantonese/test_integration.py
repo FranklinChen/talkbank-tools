@@ -1,6 +1,7 @@
 """Integration tests for HK engine providers.
 
-These tests exercise the real load/infer function pairs against audio fixtures.
+These tests exercise each real provider (the object its load returns) against
+audio fixtures.
 Each test auto-skips if its required dependencies or credentials are unavailable.
 
 Fixtures (in tests/languages/cantonese/fixtures/):
@@ -22,7 +23,7 @@ import re
 
 import pytest
 
-from batchalign.worker._types import BatchInferRequest, InferTask
+from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
 
 from .conftest import CLIP_MP3, CLIP_WAV
 
@@ -112,44 +113,28 @@ def _require_fixtures() -> bool:
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 
-def _make_asr_request(audio_path: str, lang: str = "yue") -> BatchInferRequest:
-    """Build a BatchInferRequest with one AsrBatchItem."""
-    from batchalign.inference.asr import AsrBatchItem
+def _make_asr_request(audio_path: str, lang: str = "yue") -> AsrBatchItem:
+    """One provider ASR item."""
     from batchalign.worker._types_v2 import NotRequestedDiarizationV2
 
     # These engines separate no speakers, so the request says that, rather than
     # asking for a count of one: that count is the contradiction submission
     # refuses, and it has no spelling on this boundary any more.
-    item = AsrBatchItem(
+    return AsrBatchItem(
         audio_path=audio_path, lang=lang, diarization=NotRequestedDiarizationV2()
     )
-    return BatchInferRequest(
-        task=InferTask.ASR,
-        lang=lang,
-        items=[item.model_dump()],
-    )
 
 
-def _extract_tokens(response: object) -> list[dict[str, object]]:
-    """Extract flat token dicts from the raw monologue worker payload.
+def _extract_tokens(response: MonologueAsrResponse) -> list[dict[str, object]]:
+    """Extract flat token dicts from the raw monologue provider payload.
 
     HK provider tests still assert text/timing/speaker behavior, but the
-    production worker contract now returns tagged monologue payloads instead of
-    a flattened shared token schema. This helper mirrors the Rust-side
+    production worker contract returns tagged monologue payloads instead of a
+    flattened shared token schema. This helper mirrors the Rust-side
     normalization only as far as these integration assertions need.
     """
-    from batchalign.inference.asr import MonologueAsrResponse
-    from batchalign.worker._types import BatchInferResponse
-
-    assert isinstance(response, BatchInferResponse)
-    assert len(response.results) == 1, f"Expected 1 result, got {len(response.results)}"
-    result = response.results[0]
-    assert result.error is None, f"Inference error: {result.error}"
-    assert result.result is not None, "No result returned"
-
-    asr = MonologueAsrResponse.model_validate(result.result)
     tokens: list[dict[str, object]] = []
-    for monologue in asr.monologues:
+    for monologue in response.monologues:
         speaker = str(monologue.speaker)
         for element in monologue.elements:
             if element.type != "text":
@@ -181,12 +166,28 @@ class TestFunAudioASR:
     @pytest.fixture(autouse=True)
     def _load_engine(self) -> None:
         from batchalign.inference.languages.cantonese._funaudio_asr import (
-            infer_funaudio_asr,
             load_funaudio_asr,
         )
+        from batchalign.inference.languages.cantonese._funaudio_common import (
+            SenseVoiceSnapshots,
+        )
+        from batchalign.worker._model_loading.pinned_hub import (
+            resolve_repository,
+            unpinned,
+        )
 
-        load_funaudio_asr("yue", None)
-        self._infer = infer_funaudio_asr
+        # The worker materializes both members before loading; so does this.
+        asr = resolve_repository(unpinned("FunAudioLLM/SenseVoiceSmall"), kind="ASR")
+        vad = resolve_repository(
+            unpinned("funasr/fsmn-vad"), kind="voice activity detection"
+        )
+        provider = load_funaudio_asr(
+            "yue",
+            None,
+            snapshots=SenseVoiceSnapshots(asr=asr, vad=vad),
+            label="FunAudioLLM/SenseVoiceSmall",
+        )
+        self._infer = provider.transcribe
 
     def test_produces_tokens(self) -> None:
         req = _make_asr_request(str(CLIP_MP3))
@@ -227,11 +228,6 @@ class TestFunAudioASR:
                     f"Full text: {all_text}"
                 )
 
-    def test_elapsed_time_recorded(self) -> None:
-        req = _make_asr_request(str(CLIP_MP3))
-        resp = self._infer(req)
-        assert resp.results[0].elapsed_s > 0
-
 
 # ---------------------------------------------------------------------------
 # Tencent Cloud ASR
@@ -249,12 +245,11 @@ class TestTencentASR:
     @pytest.fixture(autouse=True)
     def _load_engine(self) -> None:
         from batchalign.inference.languages.cantonese._tencent_asr import (
-            infer_tencent_asr,
             load_tencent_asr,
         )
 
-        load_tencent_asr("yue", engine_model_type="16k_zh_en_2.0")
-        self._infer = infer_tencent_asr
+        provider = load_tencent_asr("yue", engine_model_type="16k_zh_en_2.0")
+        self._infer = provider.transcribe
 
     def test_produces_tokens(self) -> None:
         req = _make_asr_request(str(CLIP_MP3))
@@ -309,12 +304,11 @@ class TestAliyunASR:
     @pytest.fixture(autouse=True)
     def _load_engine(self) -> None:
         from batchalign.inference.languages.cantonese._aliyun_asr import (
-            infer_aliyun_asr,
             load_aliyun_asr,
         )
 
-        load_aliyun_asr("yue", None)
-        self._infer = infer_aliyun_asr
+        provider = load_aliyun_asr("yue", None)
+        self._infer = provider.transcribe
 
     def test_produces_tokens(self) -> None:
         req = _make_asr_request(str(CLIP_WAV))
@@ -361,61 +355,24 @@ class TestCantoneseFAProvider:
     @pytest.fixture(autouse=True)
     def _load_engine(self) -> None:
         from batchalign.inference.languages.cantonese._cantonese_fa import (
-            infer_cantonese_fa,
             load_cantonese_fa,
         )
 
-        load_cantonese_fa("yue", None)
-        self._infer = infer_cantonese_fa
+        self._host = load_cantonese_fa("yue", None)
+
+    def _window(self, start_ms: int, end_ms: int) -> object:
+        from batchalign.inference.audio import load_audio_file
+
+        return load_audio_file(str(CLIP_MP3)).chunk(start_ms, end_ms)
 
     def test_empty_words_returns_empty_timings(self) -> None:
-        from batchalign.inference.fa import FaInferItem
-
-        item = FaInferItem(
-            words=[],
-            word_ids=[],
-            word_utterance_indices=[],
-            word_utterance_word_indices=[],
-            audio_path=str(CLIP_MP3),
-            audio_start_ms=0,
-            audio_end_ms=1000,
-        )
-        req = BatchInferRequest(
-            task=InferTask.FA,
-            lang="yue",
-            items=[item.model_dump()],
-        )
-        resp = self._infer(req)
-        assert len(resp.results) == 1
-        assert resp.results[0].error is None
-        assert resp.results[0].result["indexed_timings"] == []
+        assert self._host.align_words(self._window(0, 1000), []) == []
 
     def test_cantonese_words_produce_timings(self) -> None:
-        from batchalign.inference.fa import FaInferItem, Wave2VecIndexedResponse
+        rows = self._host.align_words(self._window(350, 1375), ["咁", "搞", "笑", "嘅"])
 
-        item = FaInferItem(
-            words=["咁", "搞", "笑", "嘅"],
-            word_ids=["w0", "w1", "w2", "w3"],
-            word_utterance_indices=[0, 0, 0, 0],
-            word_utterance_word_indices=[0, 1, 2, 3],
-            audio_path=str(CLIP_MP3),
-            audio_start_ms=350,
-            audio_end_ms=1375,
-        )
-        req = BatchInferRequest(
-            task=InferTask.FA,
-            lang="yue",
-            items=[item.model_dump()],
-        )
-        resp = self._infer(req)
-        assert len(resp.results) == 1
-        result = resp.results[0]
-        assert result.error is None, f"FA error: {result.error}"
-
-        fa_resp = Wave2VecIndexedResponse.model_validate(result.result)
-        assert len(fa_resp.indexed_timings) == 4
-        non_none = [t for t in fa_resp.indexed_timings if t is not None]
-        assert len(non_none) > 0
+        assert len(rows) == 4
+        assert all(end >= start for _word, (start, end), _score in rows)
 
 
 # Cantonese normalization has no Python surface to integrate against any more:

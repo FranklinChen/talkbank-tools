@@ -18,10 +18,20 @@ from types import SimpleNamespace
 import pytest
 
 from batchalign.inference.translate import LoadedTranslation
+from batchalign.tests._loaded_hosts import loads, whisper_fa
 from batchalign.worker._handlers import _reported_engine
+from batchalign.worker._loads import (
+    COREF_LOAD,
+    FA_LOAD,
+    MORPHOSYNTAX_LOAD,
+    LoadedCoref,
+    LoadedMorphosyntax,
+    LoadedWhisperFa,
+)
 from batchalign.worker._types import (
     InferTask,
     InvalidReportedEngineName,
+    TaskLoadRegistry,
     _state,
     reported_engine_name,
 )
@@ -29,16 +39,23 @@ from batchalign.worker._types import (
 
 def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) -> None:
     from batchalign.inference.fa import WHISPER_FA_ENGINE_ID
+    from batchalign.tests.test_whisper_fa_resources import tiny_whisper_handle
     from batchalign.worker._model_loading.forced_alignment import load_fa_engine
     from batchalign.worker._types import WorkerBootstrapRuntime
 
-    handle = object()
-    monkeypatch.setattr(_state, "fa_model_name", None)
-    monkeypatch.setattr(_state, "whisper_fa_model", None)
+    handle = tiny_whisper_handle()
+    registry = TaskLoadRegistry()
+    monkeypatch.setattr(_state, "loads", registry)
+    from batchalign.tests._snapshots import fake_resolve_transformers
+
     monkeypatch.setattr(
-        "batchalign.inference.fa.load_whisper_fa", lambda **_kwargs: handle
+        "batchalign.worker._model_loading.forced_alignment.resolve_transformers",
+        fake_resolve_transformers,
     )
-    load_fa_engine(
+    monkeypatch.setattr(
+        "batchalign.inference.fa.load_whisper_fa", lambda *_args, **_kwargs: handle
+    )
+    host = load_fa_engine(
         WorkerBootstrapRuntime(
             task=InferTask.FA,
             lang="eng",
@@ -46,7 +63,12 @@ def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) 
             engine_overrides={"fa": "whisper"},
         )
     )
-    assert _state.whisper_fa_model is handle
+    assert isinstance(host, LoadedWhisperFa)
+    assert host.engine == WHISPER_FA_ENGINE_ID
+    # Nothing is reported until the load is recorded; then the report reads
+    # the identity from the host the load built.
+    assert _reported_engine(InferTask.FA) is None
+    registry.record(FA_LOAD, host)
     assert _reported_engine(InferTask.FA) == WHISPER_FA_ENGINE_ID
     assert WHISPER_FA_ENGINE_ID != "whisper-fa-large-v2"
     assert WHISPER_FA_ENGINE_ID != "whisper-fa-large-v2-lexical-window-v2"
@@ -58,6 +80,44 @@ def test_stanza_version_reads_the_installed_package() -> None:
 
     assert _state.stanza_version() == stanza.__version__
     assert _state.stanza_engine() == f"stanza-{stanza.__version__}"
+
+
+def test_source_preserving_cantonese_load_reports_a_new_cache_namespace(
+    monkeypatch,
+) -> None:
+    from batchalign.inference.fa import infer_wave2vec_fa
+    from batchalign.inference.languages.cantonese._cantonese_fa import (
+        CANTONESE_FA_ENGINE_ID,
+        CantoneseFaHost,
+    )
+    from batchalign.tests.languages.cantonese.conftest import PyCantoneseFake
+    from batchalign.tests.test_fa_resource_projection import MetadataEncoder, mms_handle
+    from batchalign.worker._model_loading.forced_alignment import load_fa_engine
+    from batchalign.worker._types import WorkerBootstrapRuntime
+
+    registry = TaskLoadRegistry()
+    monkeypatch.setattr(_state, "loads", registry)
+    monkeypatch.setattr(
+        "batchalign.inference.languages.cantonese._cantonese_fa.load_cantonese_fa",
+        lambda *_args, **_kwargs: CantoneseFaHost(
+            model=mms_handle(MetadataEncoder()),
+            romanizer=PyCantoneseFake(),
+            infer_wave2vec_fa=infer_wave2vec_fa,
+            lang="yue",
+        ),
+    )
+    host = load_fa_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.FA,
+            lang="yue",
+            num_speakers=1,
+            engine_overrides={"fa": "cantonese_fa"},
+        )
+    )
+    assert host.engine != "wav2vec-canto-v1", "old results used different model input"
+    assert _reported_engine(InferTask.FA) is None
+    registry.record(FA_LOAD, host)
+    assert _reported_engine(InferTask.FA) == CANTONESE_FA_ENGINE_ID
 
 
 def test_coref_engine_names_the_coref_model_that_runs(
@@ -82,7 +142,15 @@ def test_only_forced_alignment_names_an_engine_in_capabilities(
     Those stages name their engines on each result, and the Rust capability
     gate refuses a report that names one, so nothing loaded may leak a name in.
     """
-    monkeypatch.setattr(_state, "loaded_tasks", {task.value for task in InferTask})
+    monkeypatch.setattr(
+        _state,
+        "loads",
+        loads(
+            (FA_LOAD, whisper_fa(lambda *_args: [])),
+            (MORPHOSYNTAX_LOAD, LoadedMorphosyntax(runner=lambda *_args: None)),
+            (COREF_LOAD, LoadedCoref(runner=lambda *_args: None)),
+        ),
+    )
     for task in InferTask:
         if task is not InferTask.FA:
             assert _reported_engine(task) is None, task
@@ -125,17 +193,20 @@ def test_reported_engine_name_admits_real_names_unchanged(name: str) -> None:
     assert reported_engine_name(name) == name
 
 
-def test_fa_is_unreported_until_an_fa_engine_loads() -> None:
-    """Before loading, FA names nothing; after, exactly the loader's string."""
-    saved = _state.fa_model_name
-    try:
-        _state.fa_model_name = None
-        assert _reported_engine(InferTask.FA) is None
+def test_fa_is_unreported_until_an_fa_engine_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before loading, FA names nothing; after, exactly the loaded host's
+    identity."""
+    registry = TaskLoadRegistry()
+    monkeypatch.setattr(_state, "loads", registry)
+    assert _reported_engine(InferTask.FA) is None
 
-        _state.fa_model_name = "whisper-fa-large-v2"
-        assert _reported_engine(InferTask.FA) == "whisper-fa-large-v2"
-    finally:
-        _state.fa_model_name = saved
+    from batchalign.inference.fa import WHISPER_FA_ENGINE_ID
+    from batchalign.tests.test_whisper_fa_resources import tiny_whisper_handle
+
+    registry.record(FA_LOAD, LoadedWhisperFa.from_model(tiny_whisper_handle()))
+    assert _reported_engine(InferTask.FA) == WHISPER_FA_ENGINE_ID
 
 
 def test_a_loaded_translation_refuses_an_unreportable_engine() -> None:

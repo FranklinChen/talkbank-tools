@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from transformers import AutoTokenizer, BertForTokenClassification
@@ -21,6 +22,9 @@ from batchalign.models.utterance.evidence import (
     UtteranceBoundaryPrediction,
     apply_boundary_adjacency_policy,
 )
+
+if TYPE_CHECKING:
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 _STRIP_PUNCT_RE = re.compile(r"[.?!,]")
@@ -125,20 +129,19 @@ class BertUtteranceModel:
     def __init__(
         self,
         *,
-        model_id: str,
-        model_path: str,
-        model_revision: str,
+        snapshot: TransformersSnapshot,
         lang: LanguageCode | None = None,
     ) -> None:
         # The id is what provenance records; the path is only where the bytes
         # happen to live on this machine and must never be reported, or a
         # stamp would carry a local directory layout.
-        self.model_id = model_id
+        self.model_id = snapshot.model_id
         # The revision the plan pinned and the snapshot resolver verified on
         # disk. It is NOT read back from ``config._commit_hash``: that is a
         # library internal which can be absent, and its absence is exactly why
-        # a boundary model's revision used to be optional.
-        self.model_revision = model_revision
+        # a boundary model's revision used to be optional. Path and revision
+        # arrive as one proof, so they cannot come from different snapshots.
+        self.model_revision = snapshot.commit
         # `lang` is optional for backward compatibility with any caller
         # that constructs a model without one. yue-specific particle
         # pre-chunking only fires when `lang == "yue"`.
@@ -146,8 +149,10 @@ class BertUtteranceModel:
 
         # Loaded from the resolved local snapshot, never by name: a load by
         # name is the floating load this pin exists to remove.
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = BertForTokenClassification.from_pretrained(model_path).to(DEVICE)
+        self.tokenizer = AutoTokenizer.from_pretrained(snapshot.path)
+        self.model = BertForTokenClassification.from_pretrained(snapshot.path).to(
+            DEVICE
+        )
         self.model.eval()
 
     def predict_actions(self, words: Sequence[str]) -> list[int]:

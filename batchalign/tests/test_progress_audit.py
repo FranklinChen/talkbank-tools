@@ -1,9 +1,12 @@
 """Static regression gate for the on-demand download contract.
 
-Asserts that no code in the ``batchalign`` package opts out of the upstream
-libraries' default auto-download behavior. Every model family must download
-on first use; every blocking wait must surface to the UI through the
-``progress_v2`` event channel.
+Asserts that no code in the ``batchalign`` package switches a download off.
+Every model a worker needs is fetched when it is missing: a Hugging Face or
+ModelScope model by its resolve edge (``pinned_hub.resolve_transformers``,
+``resolve_repository``, ``modelscope_hub.resolve_modelscope_snapshot``), a
+Stanza pack or torch hub bundle by its own library, all under
+``download_liveness``. An offline switch on any of those turns a first run
+into a failure.
 
 If a future PR needs an exception (e.g., an offline-test fixture), it must
 be opt-in via a code-path-specific flag, not a default, the matchers below
@@ -20,13 +23,9 @@ daemon log into many gigabytes per day.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
-
-from batchalign.worker._progress import emit_hf_download_if_missing
 
 # Path resolution: this test file lives at
 # ``batchalign/tests/test_progress_audit.py``; the package root is its
@@ -62,9 +61,10 @@ def _python_sources_under(root: Path) -> list[Path]:
 _BANNED_PATTERNS: list[tuple[str, str]] = [
     (
         r"local_files_only\s*=\s*True",
-        "Disables HuggingFace auto-download. The on-demand contract requires "
-        "every model to download on first use. If you need a model present, "
-        "trust from_pretrained() to fetch it.",
+        "Disables HuggingFace downloads. A Hugging Face model is fetched by "
+        "its resolve edge (pinned_hub.resolve_transformers / resolve_repository) "
+        "and loaded from the snapshot it returns; an offline switch would turn "
+        "a first run into a failure.",
     ),
     (
         r"DownloadMethod\.NONE",
@@ -89,9 +89,10 @@ _BANNED_PATTERNS: list[tuple[str, str]] = [
 def _line_is_exempt(line: str) -> bool:
     """Return True iff the line carries an explicit allowlist comment.
 
-    We do not currently have any legitimate exceptions, but the mechanism
-    exists so future contributors can opt in to a banned pattern with a
-    documented reason rather than disabling the test wholesale. Format:
+    The one current exception is ModelScope's cache probe
+    (``modelscope_hub.resolve_modelscope_snapshot``), whose miss downloads
+    under liveness. A new one opts in to a banned pattern with a documented
+    reason rather than disabling the test wholesale. Format:
     ``# audit: allow <reason>``.
     """
     return "# audit: allow" in line
@@ -128,40 +129,3 @@ def test_no_download_opt_outs(pattern: str, reason: str) -> None:
             f"If you genuinely need an exception, add ``# audit: allow <reason>`` "
             f"to the line and document why in the PR description."
         )
-
-
-def test_pinned_hub_probe_uses_the_loader_revision(monkeypatch) -> None:
-    """A moving-head cache hit cannot suppress progress for a pinned miss."""
-
-    observed: list[tuple[str, str, str | None]] = []
-    hub = ModuleType("huggingface_hub")
-    constants = ModuleType("huggingface_hub.constants")
-    constants.HF_HUB_CACHE = "/tmp/test-hf-cache"
-
-    def fake_probe(*, repo_id, filename, cache_dir, revision=None):
-        assert cache_dir == constants.HF_HUB_CACHE
-        observed.append((repo_id, filename, revision))
-        return "/tmp/cached-artifact"
-
-    hub.try_to_load_from_cache = fake_probe
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
-    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", constants)
-    monkeypatch.setattr(
-        "batchalign.worker._progress.emit_download_event",
-        lambda *_args, **_kwargs: pytest.fail("a pinned cache hit must not emit"),
-    )
-
-    emit_hf_download_if_missing(
-        "talkbank/dia-fork",
-        kind="speaker diarization",
-        artifacts=("config.yaml",),
-        revision="df67acf78543ba69e9d120a3a06ad5e0e56fac41",
-    )
-
-    assert observed == [
-        (
-            "talkbank/dia-fork",
-            "config.yaml",
-            "df67acf78543ba69e9d120a3a06ad5e0e56fac41",
-        )
-    ]

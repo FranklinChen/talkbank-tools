@@ -32,6 +32,11 @@ pub enum WorkerErrorKind {
     /// The accelerator ran out of memory (`torch.OutOfMemoryError`): the work
     /// is sound and may fit once other work releases memory.
     OutOfMemory,
+    /// The worker is refused a model it was asked to load: a gated or private
+    /// repository with no accepted terms or no credential
+    /// (`ModelAccessDeniedError`). The same load is refused again until an
+    /// operator grants access, so it is not retried.
+    AccessDenied,
     /// The worker refused the request as sent: the line was not JSON, the op
     /// or its `request` mapping was missing, or the payload failed the
     /// worker's request model. Sending the same request again is refused
@@ -41,11 +46,12 @@ pub enum WorkerErrorKind {
 
 impl WorkerErrorKind {
     /// Every kind, so the spelling table below is the only one.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Runtime,
         Self::Bootstrap,
         Self::Download,
         Self::OutOfMemory,
+        Self::AccessDenied,
         Self::InvalidRequest,
     ];
 
@@ -57,6 +63,7 @@ impl WorkerErrorKind {
             Self::Bootstrap => "bootstrap",
             Self::Download => "download",
             Self::OutOfMemory => "out_of_memory",
+            Self::AccessDenied => "access_denied",
             Self::InvalidRequest => "invalid_request",
         }
     }
@@ -72,7 +79,7 @@ impl WorkerErrorKind {
     /// connection the error was written on.
     pub const fn worker_after(self) -> WorkerAfterError {
         match self {
-            Self::Bootstrap | Self::Download => WorkerAfterError::Exits,
+            Self::Bootstrap | Self::Download | Self::AccessDenied => WorkerAfterError::Exits,
             Self::Runtime | Self::OutOfMemory | Self::InvalidRequest => WorkerAfterError::Serves,
         }
     }

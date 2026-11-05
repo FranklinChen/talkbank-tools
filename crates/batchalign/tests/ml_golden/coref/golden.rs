@@ -21,7 +21,6 @@ async fn golden_coref_eng() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
 
     let (info, results) = jobs
@@ -70,7 +69,6 @@ async fn golden_coref_spa_passthrough() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
     });
 
     let (info, results) = jobs

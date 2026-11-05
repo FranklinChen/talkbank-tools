@@ -38,8 +38,9 @@ async fn completed_candidate_matches_both_synchronous_strategies() {
         let mut original = source();
         let mut expected = original.clone();
         let expected_result = strategy.inject(&mut expected, &tokens());
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
         let observed = PendingUtr::new(&mut original, strategy, tokens())
-            .run()
+            .run(Some(&progress))
             .await
             .expect("completed");
         assert_eq!(
@@ -49,6 +50,11 @@ async fn completed_candidate_matches_both_synchronous_strategies() {
         assert_eq!(observed.injected(), expected_result.injected());
         assert_eq!(observed.unmatched(), expected_result.unmatched());
         assert_eq!(observed.injected(), 1);
+        assert_eq!(
+            updates.try_recv().unwrap(),
+            ProgressUpdate::new(FileStage::RecoveringUtteranceTiming, None, None,)
+        );
+        assert!(updates.try_recv().is_err());
     }
 }
 
@@ -70,7 +76,7 @@ async fn long_document_owned_execution_preserves_recovery_and_budget_results() {
         );
         let tokens = PreparedUtrTokens::spaced(&tokens);
         let result = PendingUtr::new(&mut document, Box::new(GlobalUtr), tokens)
-            .run()
+            .run(None)
             .await
             .unwrap();
         assert_eq!(
@@ -139,7 +145,7 @@ async fn dropping_pending_work_stops_the_search_and_preserves_source() {
         release: std::sync::Mutex::new(release_rx),
         stopped: std::sync::Mutex::new(Some(stopped_tx)),
     };
-    let mut work = Box::pin(PendingUtr::new(&mut original, Box::new(strategy), tokens()).run());
+    let mut work = Box::pin(PendingUtr::new(&mut original, Box::new(strategy), tokens()).run(None));
     assert!(futures::poll!(&mut work).is_pending());
     assert_ne!(entered_rx.await.unwrap(), std::thread::current().id());
     drop(work);
@@ -170,7 +176,7 @@ async fn producer_panic_is_system_failure_and_cannot_install_candidate() {
     let mut original = source();
     let before = serde_json::to_value(&original).unwrap();
     let error = PendingUtr::new(&mut original, Box::new(Panics), tokens())
-        .run()
+        .run(None)
         .await
         .expect_err("failed task");
     assert!(matches!(error, ServerError::UtrTask(_)));
@@ -273,7 +279,7 @@ fn cancellation_aborts_queued_work_before_search_entry() {
                 Box::new(NeverStarted(Some(dropped_tx), AtomicBool::new(false))),
                 tokens(),
             )
-            .run(),
+            .run(None),
         );
         assert!(futures::poll!(&mut pending).is_pending());
         drop(pending);

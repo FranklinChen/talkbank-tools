@@ -59,6 +59,14 @@ class TestExceptionHierarchy:
         assert not issubclass(SkipFileWarning, BatchalignError)
 
 
+_UNREAD_HOST = object()
+"""The loaded host these calls pass. A malformed request is refused while it
+is parsed, before the executor reads anything of its host, so any object
+serves; the argument is required, so it must be given for the request to be
+the thing under test (a missing argument is a ``TypeError``, which would pass
+the not-a-``ValueError`` check below for the wrong reason)."""
+
+
 class TestExecuteAsrRequestV2BoundaryErrors:
     """``execute_asr_request_v2`` malformed-input rejection lands as
     ``BatchalignError``, not ``ValueError``."""
@@ -71,7 +79,7 @@ class TestExecuteAsrRequestV2BoundaryErrors:
         """
         with pytest.raises(BatchalignError):
             # Empty dict is missing every required field of ExecuteRequestV2.
-            batchalign_core.execute_asr_request_v2({})
+            batchalign_core.execute_asr_request_v2({}, _UNREAD_HOST)
 
     def test_malformed_payload_does_not_raise_plain_value_error(self):
         """The legacy `PyValueError(error.to_string())` shape is gone.
@@ -83,7 +91,7 @@ class TestExecuteAsrRequestV2BoundaryErrors:
         """
         # Establish that catching ValueError specifically would NOT work:
         with pytest.raises(BaseException) as exc_info:
-            batchalign_core.execute_asr_request_v2({})
+            batchalign_core.execute_asr_request_v2({}, _UNREAD_HOST)
         assert not isinstance(exc_info.value, ValueError), (
             f"Expected typed BatchalignError, got plain {type(exc_info.value).__name__}"
         )
@@ -92,7 +100,7 @@ class TestExecuteAsrRequestV2BoundaryErrors:
         """The pilot's two ``BatchalignBoundaryError::Internal`` sites
         raise ``BatchalignError`` directly (not a more-specific subclass)."""
         with pytest.raises(BatchalignError) as exc_info:
-            batchalign_core.execute_asr_request_v2({})
+            batchalign_core.execute_asr_request_v2({}, _UNREAD_HOST)
         # The pilot raises `BatchalignError` directly. When other variants
         # (CHATValidationException etc.) are wired by subsequent sweeps,
         # this assertion gets per-site narrowing.

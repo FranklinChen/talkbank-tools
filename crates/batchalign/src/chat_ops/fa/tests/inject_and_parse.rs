@@ -876,7 +876,7 @@ fn neighbouring_bullets_do_not_authorize_untimed_requests() {
     let input =
         include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
     let chat = parse_chat(input);
-    let grouped = group_utterances(
+    let grouped = group_with_declared_window_limit(
         &chat,
         20_000,
         &test_recording(50_000),
@@ -885,7 +885,12 @@ fn neighbouring_bullets_do_not_authorize_untimed_requests() {
     let requested: Vec<_> = grouped
         .groups
         .iter()
-        .flat_map(|group| group.utterance_indices().iter().map(|index| index.raw()))
+        .flat_map(|group| {
+            group
+                .utterance_indices()
+                .into_iter()
+                .map(|index| index.raw())
+        })
         .collect();
     assert_eq!(requested, [0, 2, 5]);
     assert_eq!(grouped.decisions.len(), 3);

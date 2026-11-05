@@ -1,4 +1,4 @@
-"""ASR-engine bootstrap helpers for worker startup."""
+"""The ASR load: builds the ASR host one worker's requests use."""
 
 from __future__ import annotations
 
@@ -6,27 +6,33 @@ import logging
 import os
 import typing
 from collections.abc import Mapping
+from functools import partial
 
 from pydantic import BaseModel, TypeAdapter
 
 from batchalign.inference._domain_types import (
-    LanguageCode,
     RevAiApiKey,
     WhisperCpuPrecision,
     parse_choice,
 )
-from batchalign.worker._model_loading.pinned_hub import (
-    HubFiles,
-    hub_commit_of,
-    resolve_pinned_snapshot,
+from batchalign.worker._loads import (
+    AsrLoad,
+    ControlPlaneAsr,
+    LoadedLocalAsr,
+    LoadedProviderAsr,
 )
-from batchalign.worker._types import AsrEngine, WorkerBootstrapRuntime, _state
+from batchalign.worker._model_loading.pinned_hub import (
+    resolve_repository,
+    resolve_transformers,
+    unpinned,
+)
+from batchalign.worker._types import AsrEngine, WorkerBootstrapRuntime
 from batchalign.worker._types_v2 import (
     AliyunModelIdentityV2,
     AliyunModelsV2,
+    AsrBackendV2,
     AsrRequestedModelsV2,
     LoadedModelV2,
-    ObservedCommitV2,
     ObservedNotExposedV2,
     ParaformerModelIdentityV2,
     ParaformerModelsV2,
@@ -41,7 +47,6 @@ from batchalign.worker._types_v2 import (
     TencentModelIdentityV2,
     TencentModelsV2,
     WhisperDecodeLanguageV2,
-    WhisperModelIdentityV2,
     WhisperModelsV2,
 )
 
@@ -125,13 +130,12 @@ def pinned_asr_models(
 ) -> AsrRequestedModelsV2 | None:
     """Return the models Rust pinned for this worker, or ``None``.
 
-    ``None`` is a real state rather than a missing value. The control plane
-    injects the pin only when it named an ASR engine for the spawn, and it
-    deliberately does not name one for a worker that merely PRELOADS ASR as
-    part of its profile (an align job's GPU worker is the case; see
-    ``EngineSelection::for_target``, which explains why filling in an ASR
-    default there would overrule a better-informed per-language choice).
-    Such a worker resolves its own engine and reports an unpinned identity.
+    A load input, read once by ``load_asr_engine`` and passed to the arm that
+    loads. The control plane injects the pin at spawn whenever the worker key
+    names a worker-hosted ASR engine (``spawn_engine_overrides``), and an ASR
+    load names its engine only then, so a named engine arrives with its pin.
+    ``None`` reaches the arms only from a direct caller; each arm then loads
+    its engine's default checkpoint and reports an unpinned identity.
 
     A malformed value is NOT tolerated: it means the control plane and this
     worker disagree about the wire, and loading some other revision because
@@ -145,13 +149,13 @@ def pinned_asr_models(
 
 
 # The stock Whisper checkpoint, mirroring `model_manifest::WHISPER_LARGE_V3`.
-# Read ONLY when the control plane pinned nothing (an align job's GPU worker
-# preloading ASR); a pinned load always uses the id Rust sent.
-_STOCK_WHISPER_ID = "openai/whisper-large-v3"
+# Read ONLY when nothing was pinned (a direct caller); a pinned load always
+# uses the id Rust sent.
+STOCK_WHISPER_ID = "openai/whisper-large-v3"
 
 # The default Qwen3-ASR checkpoint, mirroring `model_manifest::QWEN_DEFAULT_ID`.
 # Same rule: consulted only when nothing was pinned.
-_DEFAULT_QWEN_ID = "Qwen/Qwen3-ASR-1.7B-hf"
+DEFAULT_QWEN_ASR_ID = "Qwen/Qwen3-ASR-1.7B-hf"
 
 # The default FunAudio composition, mirroring `model_manifest::SENSEVOICE` and
 # `SENSEVOICE_VAD`. The VAD is the HUGGING FACE `fsmn-vad`, which is a
@@ -159,6 +163,11 @@ _DEFAULT_QWEN_ID = "Qwen/Qwen3-ASR-1.7B-hf"
 # alias; pinning both to one id would load the wrong weights for one of them.
 _DEFAULT_SENSEVOICE_ID = "FunAudioLLM/SenseVoiceSmall"
 _DEFAULT_SENSEVOICE_VAD_ID = "funasr/fsmn-vad"
+
+# The file a FunASR model directory loads its weights from. Without it FunASR
+# builds the model with untrained weights and transcribes nonsense without an
+# error, so a ModelScope snapshot is admitted only with it present.
+_FUNASR_CHECKPOINT = ("model.pt",)
 
 # Aliyun's identity, mirroring `model_manifest::ALIYUN_SERVICE`. A service, never
 # the appkey, which identifies an account rather than a model.
@@ -189,6 +198,7 @@ def _tag_of(member: RequestedModelV2) -> str | None:
 
 
 def _pinned_composition[Composition: BaseModel](
+    pinned: AsrRequestedModelsV2 | None,
     expected: type[Composition],
 ) -> Composition | None:
     """The pinned composition for the engine being loaded, if there is one.
@@ -202,56 +212,15 @@ def _pinned_composition[Composition: BaseModel](
     this process is, and loading anyway would produce a transcript whose
     recorded identity belongs to another engine.
     """
-    models = _state.asr_pinned_models
-    if models is None:
+    if pinned is None:
         return None
-    if not isinstance(models, expected):
+    if not isinstance(pinned, expected):
         wanted = expected.model_fields["engine"].default
         raise ValueError(
-            f"the control plane pinned a {models.engine!r} ASR composition but "
+            f"the control plane pinned a {pinned.engine!r} ASR composition but "
             f"this worker is loading {wanted!r}"
         )
-    return models
-
-
-def _load_hub_member(
-    member: RequestedModelV2,
-    *,
-    kind: str,
-    files: HubFiles,
-    artifacts: tuple[str, ...] | None = None,
-) -> tuple[str, LoadedModelV2]:
-    """Materialize one Hugging Face member, and record what actually loaded.
-
-    Returns the local path a loader should be pointed at. Resolving the
-    snapshot here rather than passing a revision down is what makes the
-    observation real: the commit comes from the directory on disk, not from a
-    library internal that may be absent, and FunASR's Hugging Face path
-    ignores revisions entirely.
-
-    The download event belongs here for the same reason: this is the call that
-    can block for minutes on a cold cache, and it is the only place that knows
-    both the model id and the revision being fetched. Announcing it downstream,
-    where the loader has been handed a local path, asks whether a DIRECTORY is
-    a cached repository, which it never is.
-
-    ``kind`` names this member's role for the operator; ``files`` names which
-    of the repository's files the loader reads, and only those download;
-    ``artifacts`` widens the cache probe for loaders that pull more than
-    ``config.json``.
-    """
-    from batchalign.worker._progress import emit_hf_download_if_missing
-
-    commit = hub_commit_of(member)
-    emit_hf_download_if_missing(
-        member.id, kind=kind, artifacts=artifacts, revision=commit
-    )
-    resolved = resolve_pinned_snapshot(member.id, commit, files)
-    return resolved.path, LoadedModelV2(
-        id=member.id,
-        requested=member.revision,
-        observed=ObservedCommitV2(commit=resolved.commit),
-    )
+    return pinned
 
 
 def _declared_member(member: RequestedModelV2) -> LoadedModelV2:
@@ -268,31 +237,29 @@ def _declared_member(member: RequestedModelV2) -> LoadedModelV2:
     )
 
 
-def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
-    """Load the ASR engine for this worker.
+def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> AsrLoad:
+    """Load the ASR engine the control plane named, and return its host.
 
-    The control plane may inject a resolved Rev.AI key directly into the worker
-    bootstrap runtime. When it does, that injected value is authoritative and
-    the worker does not rediscover credentials from ambient process state.
+    The host carries the runner over the loaded model and the identity of
+    what loaded (``model_identity``), which the Rust executor reads from the
+    host it is handed. With no engine named, the plan's ASR runs in the
+    control plane and this load builds nothing (:class:`ControlPlaneAsr`).
 
     Dispatches on the resolved ``AsrEngine`` so adding a new variant later
     forces a missing-arm error rather than silently loading Whisper.
     """
     lang = bootstrap.lang
     engine_overrides = bootstrap.engine_overrides or None
-    rev_api_key = bootstrap.revai_api_key
-    _state.rev_api_key = None
     # Read once, before any loader runs, so every engine loads the revision
-    # the plan chose rather than whatever the hub currently serves.
-    _state.asr_pinned_models = pinned_asr_models(engine_overrides)
+    # the plan chose rather than whatever the hub currently serves. A load
+    # input, passed to the arm that reads it; never worker state.
+    pinned = pinned_asr_models(engine_overrides)
 
-    backend = resolve_asr_engine(engine_overrides, rev_api_key, lang=lang)
+    backend = resolve_asr_engine(engine_overrides)
 
-    if backend is AsrEngine.REV:
-        _state.rev_api_key = rev_api_key
-        if rev_api_key is None:
-            L.error("Rev.AI key not configured")
-        _state.asr_engine = AsrEngine.REV
+    if isinstance(backend, ControlPlaneAsr):
+        L.info("No worker-hosted ASR engine named: the plan's ASR runs in Rust")
+        return backend
     elif backend is AsrEngine.TENCENT:
         from batchalign.inference.languages.cantonese._tencent_asr import (
             load_tencent_asr,
@@ -303,7 +270,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # derives it: the derivation it replaces had its own five-code Chinese
         # list that omitted Mandarin, so `cmn` asked for a `16k_cmn` model that
         # Tencent does not define.
-        tencent_pinned = _pinned_composition(TencentModelsV2)
+        tencent_pinned = _pinned_composition(pinned, TencentModelsV2)
         if tencent_pinned is None:
             raise ValueError(
                 "the Tencent ASR engine needs the engine-model type the control "
@@ -315,14 +282,14 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
                 f"Tencent selects its model by provider parameter, but the plan "
                 f"asked for a {revision.kind!r} revision"
             )
-        load_tencent_asr(
-            lang,
-            engine_model_type=revision.parameter,
+        tencent = load_tencent_asr(lang, engine_model_type=revision.parameter)
+        return LoadedProviderAsr(
+            backend=AsrBackendV2.HK_TENCENT,
+            runner=tencent.transcribe,
+            model_identity=TencentModelIdentityV2(
+                engine_model_type=_declared_member(tencent_pinned.engine_model_type)
+            ),
         )
-        _state.asr_model_identity = TencentModelIdentityV2(
-            engine_model_type=_declared_member(tencent_pinned.engine_model_type)
-        )
-        _state.asr_engine = AsrEngine.TENCENT
     elif backend is AsrEngine.ALIYUN:
         from batchalign.inference.languages.cantonese._aliyun_asr import load_aliyun_asr
 
@@ -330,8 +297,8 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # identity is the service it was asked for and an explicitly unexposed
         # revision. The appkey identifies an ACCOUNT rather than a model and is
         # never recorded, which is why the manifest names the service instead.
-        load_aliyun_asr(lang, engine_overrides)
-        aliyun_pinned = _pinned_composition(AliyunModelsV2)
+        aliyun = load_aliyun_asr(lang, engine_overrides)
+        aliyun_pinned = _pinned_composition(pinned, AliyunModelsV2)
         service = (
             aliyun_pinned.service
             if aliyun_pinned is not None
@@ -342,13 +309,21 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
                 ),
             )
         )
-        _state.asr_model_identity = AliyunModelIdentityV2(
-            service=_declared_member(service)
+        return LoadedProviderAsr(
+            backend=AsrBackendV2.HK_ALIYUN,
+            runner=aliyun.transcribe,
+            model_identity=AliyunModelIdentityV2(service=_declared_member(service)),
         )
-        _state.asr_engine = AsrEngine.ALIYUN
     elif backend is AsrEngine.FUNAUDIO:
         from batchalign.inference.languages.cantonese._funaudio_asr import (
             load_funaudio_asr,
+        )
+        from batchalign.inference.languages.cantonese._funaudio_common import (
+            ParaformerSnapshots,
+            SenseVoiceSnapshots,
+        )
+        from batchalign.worker._model_loading.modelscope_hub import (
+            resolve_modelscope_snapshot,
         )
 
         # FunAudio spans two materially different compositions, and the
@@ -356,30 +331,53 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # voice-activity model on Hugging Face, or Paraformer with a
         # voice-activity AND a punctuation model on ModelScope. That is why
         # the manifest resolves a composition rather than an engine alone.
-        funaudio_pinned = _state.asr_pinned_models
-        if isinstance(funaudio_pinned, ParaformerModelsV2):
-            # ModelScope honours the revisions it is given, so the ids and
-            # tags go straight down; nothing reports a commit back.
-            load_funaudio_asr(
+        #
+        # Either way every member is materialized HERE, inside the load, and
+        # the recognizer is given local paths only: a download is a load phase
+        # the supervisor watches for progress, never a side effect of the
+        # first transcription request.
+        if isinstance(pinned, ParaformerModelsV2):
+            # ModelScope honours the tags it is given and reports no commit
+            # back, so the identity is the declared one.
+            paraformer = load_funaudio_asr(
                 lang,
                 engine_overrides,
-                model=funaudio_pinned.asr.id,
-                model_revision=_tag_of(funaudio_pinned.asr),
-                vad_model=funaudio_pinned.vad.id,
-                vad_revision=_tag_of(funaudio_pinned.vad),
-                punc_model=funaudio_pinned.punc.id,
-                punc_revision=_tag_of(funaudio_pinned.punc),
+                snapshots=ParaformerSnapshots(
+                    asr=resolve_modelscope_snapshot(
+                        pinned.asr.id,
+                        _tag_of(pinned.asr),
+                        kind="ASR (Paraformer)",
+                        requires=_FUNASR_CHECKPOINT,
+                    ),
+                    vad=resolve_modelscope_snapshot(
+                        pinned.vad.id,
+                        _tag_of(pinned.vad),
+                        kind="voice activity detection",
+                        requires=_FUNASR_CHECKPOINT,
+                    ),
+                    punc=resolve_modelscope_snapshot(
+                        pinned.punc.id,
+                        _tag_of(pinned.punc),
+                        kind="punctuation",
+                        requires=_FUNASR_CHECKPOINT,
+                    ),
+                ),
+                label=pinned.asr.id,
             )
-            _state.asr_model_identity = ParaformerModelIdentityV2(
-                asr=_declared_member(funaudio_pinned.asr),
-                vad=_declared_member(funaudio_pinned.vad),
-                punc=_declared_member(funaudio_pinned.punc),
+            return LoadedProviderAsr(
+                backend=AsrBackendV2.HK_FUNAUDIO,
+                runner=paraformer.transcribe,
+                model_identity=ParaformerModelIdentityV2(
+                    asr=_declared_member(pinned.asr),
+                    vad=_declared_member(pinned.vad),
+                    punc=_declared_member(pinned.punc),
+                ),
             )
         else:
-            if isinstance(funaudio_pinned, SenseVoiceModelsV2):
-                asr_member = funaudio_pinned.asr
-                vad_member = funaudio_pinned.vad
-            elif funaudio_pinned is None:
+            if isinstance(pinned, SenseVoiceModelsV2):
+                asr_member = pinned.asr
+                vad_member = pinned.vad
+            elif pinned is None:
                 asr_member = RequestedModelV2(
                     id=_DEFAULT_SENSEVOICE_ID, revision=RequestedUnpinnedV2()
                 )
@@ -388,7 +386,7 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
                 )
             else:
                 raise ValueError(
-                    f"the control plane pinned a {funaudio_pinned.engine!r} ASR "
+                    f"the control plane pinned a {pinned.engine!r} ASR "
                     f"composition but this worker is loading 'funaudio'"
                 )
             # FunASR's Hugging Face path IGNORES the revision it is handed
@@ -396,26 +394,29 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             # pin nothing. The snapshots are resolved here instead and the
             # loader is given local paths, which is also what makes the
             # observed commit a fact about the bytes on disk.
-            asr_path, asr_loaded = _load_hub_member(
-                asr_member, kind="ASR", files=HubFiles.WHOLE_REPOSITORY
+            asr_snapshot = resolve_repository(asr_member, kind="ASR")
+            vad_snapshot = resolve_repository(
+                vad_member, kind="voice activity detection"
             )
-            vad_path, vad_loaded = _load_hub_member(
-                vad_member,
-                kind="voice activity detection",
-                files=HubFiles.WHOLE_REPOSITORY,
-            )
-            load_funaudio_asr(
+            sensevoice = load_funaudio_asr(
                 lang,
                 engine_overrides,
-                model_path=asr_path,
-                vad_model_path=vad_path,
+                snapshots=SenseVoiceSnapshots(asr=asr_snapshot, vad=vad_snapshot),
+                label=asr_member.id,
             )
-            _state.asr_model_identity = SenseVoiceModelIdentityV2(
-                asr=asr_loaded, vad=vad_loaded
+            return LoadedProviderAsr(
+                backend=AsrBackendV2.HK_FUNAUDIO,
+                runner=sensevoice.transcribe,
+                model_identity=SenseVoiceModelIdentityV2(
+                    asr=asr_snapshot.loaded, vad=vad_snapshot.loaded
+                ),
             )
-        _state.asr_engine = AsrEngine.FUNAUDIO
     elif backend is AsrEngine.QWEN:
         from batchalign.inference.languages.cantonese._qwen_asr import load_qwen_asr
+        from batchalign.inference.languages.cantonese._qwen_common import (
+            QwenSnapshots,
+            admit_qwen_checkpoint,
+        )
         from batchalign.inference.qwen_forced_alignment import (
             QWEN_FORCED_ALIGNER_MODEL_ID,
         )
@@ -426,101 +427,86 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         # Named per arm rather than reusing one `pinned`: each arm narrows to a
         # DIFFERENT composition type, and Python has no block scope, so one
         # shared name would take the type of whichever arm was written first.
-        qwen_pinned = _pinned_composition(QwenModelsV2)
+        qwen_pinned = _pinned_composition(pinned, QwenModelsV2)
         if qwen_pinned is None:
-            asr_member = RequestedModelV2(
-                id=_DEFAULT_QWEN_ID, revision=RequestedUnpinnedV2()
-            )
-            aligner_member = RequestedModelV2(
-                id=QWEN_FORCED_ALIGNER_MODEL_ID, revision=RequestedUnpinnedV2()
-            )
+            asr_member = unpinned(DEFAULT_QWEN_ASR_ID)
+            aligner_member = unpinned(QWEN_FORCED_ALIGNER_MODEL_ID)
         else:
             asr_member = qwen_pinned.asr
             aligner_member = qwen_pinned.aligner
-        asr_path, asr_loaded = _load_hub_member(
-            asr_member, kind="ASR", files=HubFiles.TRANSFORMERS
-        )
-        aligner_path, aligner_loaded = _load_hub_member(
-            aligner_member, kind="forced alignment", files=HubFiles.TRANSFORMERS
-        )
-        load_qwen_asr(
+        # Before the download: a pre-migration checkpoint id is refused with
+        # an instruction, not after gigabytes of the wrong repository arrive.
+        admit_qwen_checkpoint(asr_member.id)
+        # Names of their own: the FunASR arm's `asr_snapshot` is a
+        # RepositorySnapshot, and one name across arms takes one type.
+        qwen_asr = resolve_transformers(asr_member, kind="ASR")
+        qwen_aligner = resolve_transformers(aligner_member, kind="forced alignment")
+        qwen = load_qwen_asr(
             lang,
             engine_overrides,
             recognition=qwen_recognition(engine_overrides),
-            model_path=asr_path,
-            aligner_path=aligner_path,
+            snapshots=QwenSnapshots(asr=qwen_asr, aligner=qwen_aligner),
         )
-        _state.asr_model_identity = QwenModelIdentityV2(
-            asr=asr_loaded, aligner=aligner_loaded
+        return LoadedProviderAsr(
+            backend=AsrBackendV2.HK_QWEN,
+            runner=qwen.transcribe,
+            model_identity=QwenModelIdentityV2(
+                asr=qwen_asr.loaded, aligner=qwen_aligner.loaded
+            ),
         )
-        _state.asr_engine = AsrEngine.QWEN
     elif backend is AsrEngine.WHISPER_HUB:
         # Community HF Whisper fine-tune. Rust owns WHICH fine-tune a language
         # gets and pins its revision; the handle is the same
         # ``WhisperASRHandle`` stock Whisper uses, so downstream V2 inference
         # needs no branching on engine identity after load time.
+        from batchalign.inference.asr import infer_whisper_prepared_audio
         from batchalign.inference.whisper_hub import (
             load_whisper_hub_asr,
             resolve_whisper_hub_model_id,
         )
-        from batchalign.worker._progress import HF_ARTIFACTS_WHISPER
 
-        hub_pinned = _pinned_composition(WhisperModelsV2)
+        hub_pinned = _pinned_composition(pinned, WhisperModelsV2)
         if hub_pinned is None:
-            # Unpinned (this worker merely preloads ASR): resolve the id the
+            # Unpinned (a direct caller): resolve the id the
             # way a direct caller would, and report the commit that lands.
-            member = RequestedModelV2(
-                id=resolve_whisper_hub_model_id(lang, engine_overrides),
-                revision=RequestedUnpinnedV2(),
-            )
+            member = unpinned(resolve_whisper_hub_model_id(lang, engine_overrides))
         else:
             member = hub_pinned.asr
-        path, loaded = _load_hub_member(
-            member,
-            kind="ASR",
-            files=HubFiles.TRANSFORMERS,
-            artifacts=HF_ARTIFACTS_WHISPER,
-        )
         handle = load_whisper_hub_asr(
-            lang,
-            engine_overrides,
+            resolve_transformers(member, kind="ASR"),
             device_policy=bootstrap.device_policy,
-            model_path=path,
         )
-        handle.model_identity = WhisperModelIdentityV2(asr=loaded)
-        _state.whisper_asr_model = handle
-        _state.asr_model_identity = handle.model_identity
-        _state.asr_engine = AsrEngine.WHISPER_HUB
+        return LoadedLocalAsr(
+            backend=AsrBackendV2.WHISPER_HUB,
+            runner=partial(infer_whisper_prepared_audio, handle),
+            model_identity=handle.model_identity,
+        )
     elif backend is AsrEngine.WHISPER:
-        from batchalign.inference.asr import load_whisper_asr
-        from batchalign.worker._progress import HF_ARTIFACTS_WHISPER
+        from batchalign.inference.asr import (
+            infer_whisper_prepared_audio,
+            load_whisper_asr,
+        )
 
         # Stock Whisper loads ONE checkpoint whatever the language; only the
         # decode language differs, and the control plane decided it.
         decoding = whisper_decode_language(engine_overrides)
-        whisper_pinned = _pinned_composition(WhisperModelsV2)
+        whisper_pinned = _pinned_composition(pinned, WhisperModelsV2)
         member = (
             whisper_pinned.asr
             if whisper_pinned is not None
-            else RequestedModelV2(id=_STOCK_WHISPER_ID, revision=RequestedUnpinnedV2())
-        )
-        path, loaded = _load_hub_member(
-            member,
-            kind="ASR",
-            files=HubFiles.TRANSFORMERS,
-            artifacts=HF_ARTIFACTS_WHISPER,
+            else unpinned(STOCK_WHISPER_ID)
         )
         handle = load_whisper_asr(
-            model=path,
-            base=path,
+            resolve_transformers(member, kind="ASR"),
             decoding=decoding,
             device_policy=bootstrap.device_policy,
             cpu_precision=WhisperCpuPrecision.from_overrides(engine_overrides),
         )
-        handle.model_identity = WhisperModelIdentityV2(asr=loaded)
-        _state.whisper_asr_model = handle
-        _state.asr_model_identity = handle.model_identity
-        _state.asr_engine = AsrEngine.WHISPER
+        return LoadedLocalAsr(
+            backend=AsrBackendV2.LOCAL_WHISPER,
+            runner=partial(infer_whisper_prepared_audio, handle),
+            model_identity=handle.model_identity,
+        )
     else:
         # Exhaustive match. ``typing.assert_never`` makes the type
         # checker prove this branch is unreachable; if a new AsrEngine
@@ -531,49 +517,26 @@ def load_asr_engine(bootstrap: WorkerBootstrapRuntime) -> None:
         typing.assert_never(backend)
 
 
-# Per-language default ASR engine, consulted only when no explicit
-# ``--engine-overrides`` and no Rev.AI key are present.
-#
-# Why ``yue → FUNAUDIO``: the 2026-05-26 v2 Cantonese ASR benchmark
-# measured vanilla Whisper-large-v3 at 81.9% CER on Tier 3 child
-# speech (worst of every engine measured), while FunASR/SenseVoiceSmall
-# came in at 42.8% (best open engine). Defaulting yue workers to
-# Whisper silently shipped the worst-measured engine to operators who
-# never passed an override flag.
-_LANG_DEFAULTS: dict[LanguageCode, AsrEngine] = {
-    "yue": AsrEngine.FUNAUDIO,
-}
-
-
 def resolve_asr_engine(
     engine_overrides: dict[str, str] | None,
-    rev_api_key: RevAiApiKey | None,
-    *,
-    lang: LanguageCode,
-) -> AsrEngine:
-    """Resolve which ASR engine this worker should load.
+) -> AsrEngine | ControlPlaneAsr:
+    """Which ASR engine this load builds, as the control plane named it.
 
-    Precedence:
+    The control plane names the engine (``asr``) for every worker-hosted ASR
+    load. It names none when the plan's ASR runs in Rust (Rev.AI,
+    whisper.cpp), which is :class:`ControlPlaneAsr`: build nothing. An
+    unknown name raises ``ValueError`` rather than loading anything else: a
+    typo in a per-host override would otherwise produce wrong-model output.
 
-    1. Explicit engine override from the Rust control plane. Unknown
-       wire strings raise ``ValueError`` rather than silently loading
-       Whisper: a typo in a per-host override would otherwise produce
-       wrong-model output.
-    2. Rev.AI when a key is available.
-    3. Per-language default from ``_LANG_DEFAULTS`` (currently
-       ``yue → FUNAUDIO``).
-    4. Local Whisper fallback for every other language.
-
-    ``lang`` is required (keyword-only) so a future caller cannot
-    accidentally trigger the global Whisper fallback by forgetting
-    to pass the language: that silent mis-selection is exactly the
-    bug Fix 3 closes.
+    There is no default and no second chooser. This used to fall back to
+    Rev.AI when a key was in the environment, then to a per-language table
+    (Cantonese to FunAudio), then to Whisper, so a Rev.AI job's capability
+    probe could load a multi-gigabyte model the job never used.
     """
-    if engine_overrides and "asr" in engine_overrides:
-        return parse_choice(AsrEngine, engine_overrides["asr"], "asr engine")
-    if rev_api_key:
-        return AsrEngine.REV
-    return _LANG_DEFAULTS.get(lang, AsrEngine.WHISPER)
+    named = (engine_overrides or {}).get("asr")
+    if named is None:
+        return ControlPlaneAsr()
+    return parse_choice(AsrEngine, named, "asr engine")
 
 
 def resolve_injected_revai_api_key(

@@ -27,8 +27,8 @@ use pyo3::prelude::*;
 
 use crate::worker_artifacts::{ArtifactFailure, load_json_attachment_text};
 use crate::worker_execute::{
-    ExecuteFailure, ValidatedRequestV2, execute_request_v2, extract_task_payload,
-    parse_host_output, require_runner,
+    ExecuteFailure, LoadedRunner, ValidatedRequestV2, execute_request_v2, extract_task_payload,
+    parse_host_output,
 };
 use crate::worker_text_results::{
     TextResultShapeError, normalize_coref_result, normalize_morphosyntax_result,
@@ -103,7 +103,7 @@ fn host_output_error(task: &str, error: TextResultShapeError) -> ExecuteFailure 
 fn run_morphosyntax(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let task_request = extract_task_payload(
         &request,
@@ -119,7 +119,6 @@ fn run_morphosyntax(
         task_request.item_count,
         "morphosyntax",
     )?;
-    let runner = require_runner(runner, "no morphosyntax host loaded for worker protocol V2")?;
     let response = runner.call1(
         py,
         (
@@ -139,7 +138,7 @@ fn run_morphosyntax(
 fn run_utseg(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let task_request = extract_task_payload(
         &request,
@@ -155,7 +154,6 @@ fn run_utseg(
         task_request.item_count,
         "utseg",
     )?;
-    let runner = require_runner(runner, "no utseg host loaded for worker protocol V2")?;
     let response = runner.call1(
         py,
         (
@@ -174,7 +172,7 @@ fn run_utseg(
 fn run_translate(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let task_request = extract_task_payload(
         &request,
@@ -190,7 +188,6 @@ fn run_translate(
         task_request.item_count,
         "translate",
     )?;
-    let runner = require_runner(runner, "no translate host loaded for worker protocol V2")?;
     let response = runner.call1(
         py,
         (
@@ -209,7 +206,7 @@ fn run_translate(
 fn run_coref(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let task_request = extract_task_payload(
         &request,
@@ -225,7 +222,6 @@ fn run_coref(
         task_request.item_count,
         "coref",
     )?;
-    let runner = require_runner(runner, "no coref host loaded for worker protocol V2")?;
     let response = runner.call1(py, (task_request.lang.as_ref(), batch.json.as_str()))?;
     let response: BatchInferResponse = parse_host_output(&response, "coref")?;
     Ok(TaskResultV2::CorefResult(
@@ -243,7 +239,7 @@ fn run_coref(
 fn run_word_segmentation(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let task_request = extract_task_payload(
         &request,
@@ -259,7 +255,6 @@ fn run_word_segmentation(
         task_request.item_count,
         "word segmentation",
     )?;
-    let runner = require_runner(runner, "no word segmenter for worker protocol V2")?;
     let response = runner.call1(
         py,
         (task_request.segmenter.as_wire_str(), batch.json.as_str()),
@@ -268,54 +263,58 @@ fn run_word_segmentation(
     Ok(TaskResultV2::WordSegmentationResult(result))
 }
 
+// Each text executor takes the runner of the host its load built, never an
+// absent one: Python resolves the request's load once, at its boundary, and
+// refuses an absent load there as `model_unavailable`.
+
 #[pyfunction]
-#[pyo3(signature = (request, runner=None))]
 pub(crate) fn execute_word_segmentation_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    runner: Option<Py<PyAny>>,
+    runner: Py<PyAny>,
 ) -> PyResult<String> {
+    let runner = LoadedRunner::of_host(runner);
     execute_request_v2(request, |request| {
         run_word_segmentation(py, request, runner)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (request, runner=None))]
 pub(crate) fn execute_morphosyntax_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    runner: Option<Py<PyAny>>,
+    runner: Py<PyAny>,
 ) -> PyResult<String> {
+    let runner = LoadedRunner::of_host(runner);
     execute_request_v2(request, |request| run_morphosyntax(py, request, runner))
 }
 
 #[pyfunction]
-#[pyo3(signature = (request, runner=None))]
 pub(crate) fn execute_utseg_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    runner: Option<Py<PyAny>>,
+    runner: Py<PyAny>,
 ) -> PyResult<String> {
+    let runner = LoadedRunner::of_host(runner);
     execute_request_v2(request, |request| run_utseg(py, request, runner))
 }
 
 #[pyfunction]
-#[pyo3(signature = (request, runner=None))]
 pub(crate) fn execute_translate_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    runner: Option<Py<PyAny>>,
+    runner: Py<PyAny>,
 ) -> PyResult<String> {
+    let runner = LoadedRunner::of_host(runner);
     execute_request_v2(request, |request| run_translate(py, request, runner))
 }
 
 #[pyfunction]
-#[pyo3(signature = (request, runner=None))]
 pub(crate) fn execute_coref_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    runner: Option<Py<PyAny>>,
+    runner: Py<PyAny>,
 ) -> PyResult<String> {
+    let runner = LoadedRunner::of_host(runner);
     execute_request_v2(request, |request| run_coref(py, request, runner))
 }

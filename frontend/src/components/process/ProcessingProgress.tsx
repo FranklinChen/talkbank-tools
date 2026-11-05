@@ -321,7 +321,7 @@ function ObservedProcessingProgress({ totalFiles, command, outputFolder, onReset
                   <span className="text-xs text-gray-400 flex-shrink-0">
                     {f.review?.needs_review
                       ? f.review.needs_review.headline
-                      : displayProgressLabel(f.progress_stage, f.progress_label)}
+                  : displayProgressLabel(f.progress_stage, f.progress_label, f.progress_current)}
                   </span>
                   {f.review?.left_out && (
                     <span className="text-xs text-gray-400 flex-shrink-0">

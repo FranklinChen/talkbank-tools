@@ -82,7 +82,6 @@ pub mod decisions;
 pub mod diff;
 pub mod dp_align;
 pub mod inject;
-pub mod merge_abbrev;
 pub mod morphosyntax;
 pub mod retokenize;
 pub mod tokenizer_realign;
@@ -91,11 +90,25 @@ pub mod utseg;
 pub mod utseg_compute;
 pub mod wer_conform;
 
+/// The embedded abbreviation list (`data/abbrev.json`), parsed once for the
+/// two stages that read it: WER normalization matches it in original case,
+/// and transcribe's abbreviation merge matches it uppercased.
+mod abbreviation_data {
+    use std::sync::LazyLock;
+
+    /// The list's entries as written.
+    // Data is compile-time-constant: `include_str!` embeds the JSON at build
+    // time, and the crate's own tests load it, so a malformed list fails there.
+    #[allow(clippy::expect_used)]
+    pub(crate) static ENTRIES: LazyLock<Vec<String>> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../data/abbrev.json"))
+            .expect("embedded abbrev.json is valid")
+    });
+}
+
 // The generic convenience re-exports (corpus, json, pipeline, rendering,
-// caching, validation_runner) now come from chatter via the `pub use
-// talkbank_transform::*` glob above. Only the batchalign-specific convenience
-// re-export stays here.
-pub use self::merge_abbrev::{merge_abbreviations, merge_abbreviations_in_chat_text};
+// caching, validation_runner) come from chatter via the `pub use
+// talkbank_transform::*` glob above.
 
 /// A `ChatCleanedText` / `ChatRawText` pair built the way production builds
 /// them: by PARSING.

@@ -46,10 +46,10 @@ _TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
 
 def _emit_progress(stage: str) -> None:
     # The speaker runner callback does not receive the enclosing V2 request id,
-    # so it cannot emit a well-formed progress_v2 frame. An empty id makes the
-    # Rust worker reject the frame as unrelated to the live request. Keep these
-    # lifecycle markers in the worker log until that id is part of the typed
-    # callback boundary.
+    # so it cannot emit a well-formed progress_v2 frame: request progress must
+    # name its request (an empty id is refused at the wire), and these markers
+    # are not a model load's progress either. Keep them in the worker log until
+    # that id is part of the typed callback boundary.
     L.info("pyannoteAI stage: %s", stage)
 
 

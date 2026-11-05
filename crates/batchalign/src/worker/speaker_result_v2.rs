@@ -55,6 +55,9 @@ pub fn parse_speaker_result_v2(
     let result = require_success_result(response, "speaker")?;
 
     match result {
+        TaskResultV2::FaPreparation(_) => Err(SpeakerResultParseError::UnexpectedPayload(
+            "worker protocol V2 speaker response returned FA preparation data".into(),
+        )),
         TaskResultV2::SpeakerResult(result) => Ok(result),
         TaskResultV2::MorphosyntaxResult(_) => Err(SpeakerResultParseError::UnexpectedPayload(
             "worker protocol V2 speaker response returned morphosyntax data".into(),
@@ -162,8 +165,7 @@ pub(crate) fn normalize_speaker_evidence_v2(
                 })
                 .collect::<Result<Vec<_>, String>>()?
         }
-        SpeakerInferenceEvidenceV2::Pyannote { segments }
-        | SpeakerInferenceEvidenceV2::Nemo { segments } => segments.clone(),
+        SpeakerInferenceEvidenceV2::Pyannote { segments } => segments.clone(),
     };
     segments.sort_by(|left, right| {
         (left.interval, left.speaker.as_str()).cmp(&(right.interval, right.speaker.as_str()))

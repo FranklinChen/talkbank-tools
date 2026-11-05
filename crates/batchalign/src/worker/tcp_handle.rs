@@ -21,10 +21,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
-use crate::api::{PositiveSeconds, WorkerLanguage};
-use crate::types::worker_v2::{
-    ExecuteRequestV2, ExecuteResponseV2, ProgressEventV2, batched_items_timeout,
-};
+use crate::api::WorkerLanguage;
+use crate::types::worker_v2::{ExecuteResponseV2, ProgressEventV2, batched_items_timeout};
 use crate::worker::error::{WorkerError, WorkerWait};
 use crate::worker::handle::{
     EnsureTaskRequest, NoiseLimit, NoiseRun, WireLine, WorkerRequest, WorkerResponse, excerpt,
@@ -92,6 +90,9 @@ pub struct TcpWorkerHandle {
     writer: tokio::io::WriteHalf<TcpStream>,
     /// Monotonic instant when the last request was dispatched.
     last_activity: tokio::time::Instant,
+    /// This connection's on-demand load states. The daemon answers a load it
+    /// already completed at once; a fresh connection asks again.
+    loads: crate::worker::pool::TaskLoads,
 }
 
 impl TcpWorkerHandle {
@@ -116,6 +117,7 @@ impl TcpWorkerHandle {
             reader: BufReader::new(read_half),
             writer: write_half,
             last_activity: tokio::time::Instant::now(),
+            loads: crate::worker::pool::TaskLoads::default(),
         })
     }
 
@@ -181,34 +183,14 @@ impl TcpWorkerHandle {
         }
     }
 
-    /// Twin of `WorkerHandle::read_response_skipping_progress_via_self`
-    /// for the TCP transport. Skip every `ProgressV2` event, optionally
-    /// forward to a channel, return the first non-progress response, or
-    /// time out at the deadline. See `worker/handle/progress_preamble.rs`
-    /// for the bug-class rationale and the unit-tested static twin.
+    /// The shared progress loop
+    /// (`crate::worker::handle::read_skipping_progress`) on this connection.
     async fn read_response_skipping_progress(
         &mut self,
-        waited_for: WorkerWait,
-        limit: PositiveSeconds,
+        wait: crate::worker::ResponseWait,
         progress_tx: Option<&tokio::sync::mpsc::Sender<ProgressEventV2>>,
     ) -> Result<WorkerResponse, WorkerError> {
-        let deadline = crate::worker::Deadline::after(limit);
-        loop {
-            let response = match deadline.within(self.read_response()).await {
-                Some(read) => read?,
-                None => return Err(WorkerError::Timeout { waited_for, limit }),
-            };
-
-            match response {
-                WorkerResponse::ProgressV2 { event } => {
-                    if let Some(tx) = progress_tx {
-                        let _ = tx.try_send(event);
-                    }
-                    continue;
-                }
-                other => return Ok(other),
-            }
-        }
+        crate::worker::handle::read_skipping_progress(self, wait, progress_tx).await
     }
 
     /// Check if the worker is healthy.
@@ -217,8 +199,10 @@ impl TcpWorkerHandle {
 
         let response = self
             .read_response_skipping_progress(
-                WorkerWait::Health,
-                crate::worker::HEALTH_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Health,
+                    limit: crate::worker::HEALTH_TIMEOUT,
+                },
                 None,
             )
             .await?;
@@ -247,7 +231,13 @@ impl TcpWorkerHandle {
             .await?;
 
         let response = self
-            .read_response_skipping_progress(WorkerWait::Infer, crate::worker::INFER_TIMEOUT, None)
+            .read_response_skipping_progress(
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Infer,
+                    limit: crate::worker::INFER_TIMEOUT,
+                },
+                None,
+            )
             .await?;
 
         match response {
@@ -271,8 +261,10 @@ impl TcpWorkerHandle {
         let items = request.items.len();
         let response = self
             .read_response_skipping_progress(
-                WorkerWait::BatchInfer { items },
-                batched_items_timeout(items as u64),
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::BatchInfer { items },
+                    limit: batched_items_timeout(items as u64),
+                },
                 None,
             )
             .await?;
@@ -289,18 +281,19 @@ impl TcpWorkerHandle {
     /// Send one typed V2 execute request.
     pub async fn execute_v2(
         &mut self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.execute_v2_with_progress(request, None).await
+        self.execute_v2_with_progress(permit, None).await
     }
 
     /// Send an `execute_v2` request over TCP, forwarding intermediate
     /// progress events through an optional async channel.
     pub async fn execute_v2_with_progress(
         &mut self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
         progress_tx: Option<&tokio::sync::mpsc::Sender<ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
+        let request = permit.request();
         self.last_activity = tokio::time::Instant::now();
         self.write_request(&WorkerRequest::ExecuteV2 { request })
             .await?;
@@ -350,8 +343,10 @@ impl TcpWorkerHandle {
         // progress_v2 preamble during cold-cache catalog/model loads.
         let response = self
             .read_response_skipping_progress(
-                WorkerWait::Capabilities,
-                crate::worker::CAPABILITY_TIMEOUT,
+                crate::worker::ResponseWait::Budget {
+                    waited_for: WorkerWait::Capabilities,
+                    limit: crate::worker::CAPABILITY_TIMEOUT,
+                },
                 None,
             )
             .await?;
@@ -365,13 +360,23 @@ impl TcpWorkerHandle {
         }
     }
 
-    /// Load one task in a lazy-profile TCP worker.
+    /// Prepare the daemon for `load` (`ensure_task`): the `NotLoaded` to
+    /// `Loaded` transition, returning the proof every execute takes. The
+    /// load's host-memory lease is granted first and owned by the proof, as
+    /// for a stdio worker. The lease lives with this connection's proof, not
+    /// with the daemon: a reconnection asks again, the daemon answers at once,
+    /// and the new proof takes a new lease.
     pub async fn ensure_task(
         &mut self,
-        task: crate::worker::InferTask,
-        engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout: crate::api::PositiveSeconds,
-    ) -> Result<(), WorkerError> {
+        load: &crate::worker::pool::TaskLoad,
+        preparation: &crate::worker::pool::LoadPreparation,
+    ) -> Result<std::sync::Arc<crate::worker::pool::Loaded>, WorkerError> {
+        if let Some(loaded) = self.loads.get(load) {
+            return Ok(loaded);
+        }
+        let admitted = preparation.admission.admit(load, self.info.pid).await?;
+        let task = admitted.load().task();
+        let engine_overrides = admitted.load().wire_overrides();
         self.write_request(&WorkerRequest::EnsureTask {
             request: EnsureTaskRequest {
                 request_id: &crate::worker::handle::ControlRequestId::next(),
@@ -381,7 +386,13 @@ impl TcpWorkerHandle {
         })
         .await?;
         let response = self
-            .read_response_skipping_progress(WorkerWait::EnsureTask { task }, timeout, None)
+            .read_response_skipping_progress(
+                crate::worker::ResponseWait::Loading {
+                    waited_for: crate::worker::LoadingWait::EnsureTask { task },
+                    stall: preparation.stall,
+                },
+                None,
+            )
             .await?;
         match response {
             WorkerResponse::EnsureTask { response } => {
@@ -392,7 +403,7 @@ impl TcpWorkerHandle {
                     elapsed_s = response.elapsed_s.get(),
                     "ensure_task completed (TCP worker)"
                 );
-                Ok(())
+                Ok(self.loads.record(admitted.confirm().await))
             }
             WorkerResponse::Error(failure) => Err(failure.into_ensure_task_error()),
             other => Err(WorkerError::Protocol(format!(
@@ -443,5 +454,10 @@ impl TcpWorkerHandle {
     /// The TCP connection info.
     pub fn info(&self) -> &TcpWorkerInfo {
         &self.info
+    }
+}
+impl crate::worker::handle::ResponseSource for TcpWorkerHandle {
+    async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError> {
+        TcpWorkerHandle::read_response(self).await
     }
 }

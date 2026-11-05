@@ -102,7 +102,6 @@ class SpeakerBackendV2(str, Enum):
 
     PYANNOTE_AI = "pyannote_ai"
     PYANNOTE = "pyannote"
-    NEMO = "nemo"
 
 
 class SpeakerEmbeddingBackendV2(str, Enum):
@@ -346,10 +345,155 @@ class WhisperAttentionCaptureReceiptV2(BaseModel):
     blake3: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class FaMmsCpuBasisV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["mms_cpu"] = "mms_cpu"
+    torch_version: str
+    torchaudio_revision: str
+
+
+class FaWhisperBasisV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["whisper"] = "whisper"
+    torch_version: str
+    transformers_version: str
+
+
+class FaQwenBasisV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["qwen"] = "qwen"
+    torch_version: str
+    transformers_version: str
+    allocation_graph: str
+
+
+FaAllocationBasisV2 = Annotated[
+    FaMmsCpuBasisV2 | FaWhisperBasisV2 | FaQwenBasisV2, Field(discriminator="kind")
+]
+
+
+class FaNoModelMemoryV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["no_model"] = "no_model"
+
+
+class FaProjectedMemoryV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["projected"] = "projected"
+    workspace: int = Field(gt=0)
+    model: int = Field(gt=0)
+    basis: FaAllocationBasisV2
+
+
+FaRequestMemoryV2 = Annotated[
+    FaNoModelMemoryV2 | FaProjectedMemoryV2, Field(discriminator="kind")
+]
+
+
+class FaPreparationBindingV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    execution_request_id: WorkerRequestIdV2
+    backend: FaBackendV2
+    engine: ReportedEngineName
+    payload_ref_id: WorkerArtifactIdV2
+    audio_ref_id: WorkerArtifactIdV2
+    samples: int = Field(gt=0)
+    sample_rate_hz: int = Field(gt=0)
+    text_mode: FaTextModeV2
+    attention_capture: WhisperAttentionCaptureRequestV2 | None
+
+
+class FaPreparationPlanV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    binding: FaPreparationBindingV2
+    memory: FaRequestMemoryV2
+
+
+class FaConstraintUnitV2(str, Enum):
+    AUDIO_SAMPLES = "audio_samples"
+    ENCODED_FRAMES = "encoded_frames"
+    TEXT_LABELS = "text_labels"
+
+
+class FaModelConstraintV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["model_constraint"] = "model_constraint"
+    unit: FaConstraintUnitV2
+    provided: int = Field(ge=0)
+    maximum: int = Field(ge=0)
+    engine: ReportedEngineName
+
+
+class FaProjectionUnavailableV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["projection_unavailable"] = "projection_unavailable"
+    message: str
+
+
+class FaInsufficientInputV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["insufficient_input"] = "insufficient_input"
+    unit: FaConstraintUnitV2
+    provided: int = Field(ge=0)
+    minimum: int = Field(gt=0)
+    engine: ReportedEngineName
+
+
+FaPreparationRefusalV2 = Annotated[
+    FaModelConstraintV2 | FaInsufficientInputV2 | FaProjectionUnavailableV2,
+    Field(discriminator="kind"),
+]
+
+
+class FaPreparedV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["prepared"] = "prepared"
+    plan: FaPreparationPlanV2
+
+
+class FaRefusedV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["refused"] = "refused"
+    cause: FaPreparationRefusalV2
+
+
+FaPreparationOutcomeV2 = Annotated[
+    FaPreparedV2 | FaRefusedV2, Field(discriminator="kind")
+]
+
+
+class FaPreparationResultPayloadV2(BaseModel):
+    kind: Literal["fa_preparation"] = "fa_preparation"
+    outcome: FaPreparationOutcomeV2
+
+
+class FaCandidateV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["candidate"] = "candidate"
+
+
+class FaPrepareV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["prepare"] = "prepare"
+    execution_request_id: WorkerRequestIdV2
+
+
+class FaExecuteV2(BaseModel):
+    model_config = {"extra": "forbid", "frozen": True}
+    kind: Literal["execute"] = "execute"
+    plan: FaPreparationPlanV2
+
+
+FaRequestPhaseV2 = Annotated[
+    FaCandidateV2 | FaPrepareV2 | FaExecuteV2, Field(discriminator="kind")
+]
+
+
 class ForcedAlignmentRequestV2(BaseModel):
     """V2 forced-alignment request payload (internally tagged as ``"forced_alignment"``)."""
 
     kind: Literal["forced_alignment"] = "forced_alignment"
+    phase: FaRequestPhaseV2
     backend: FaBackendV2
     payload_ref_id: WorkerArtifactIdV2
     audio_ref_id: WorkerArtifactIdV2
@@ -1542,17 +1686,8 @@ class LocalPyannoteSpeakerEvidenceV2(BaseModel):
     segments: list[SpeakerSegmentV2]
 
 
-class NemoSpeakerEvidenceV2(BaseModel):
-    """Segments returned by the local NeMo runtime."""
-
-    kind: Literal["nemo"] = "nemo"
-    segments: list[SpeakerSegmentV2]
-
-
 SpeakerInferenceEvidenceV2: TypeAlias = Annotated[
-    PyannoteAISpeakerEvidenceV2
-    | LocalPyannoteSpeakerEvidenceV2
-    | NemoSpeakerEvidenceV2,
+    PyannoteAISpeakerEvidenceV2 | LocalPyannoteSpeakerEvidenceV2,
     Field(discriminator="kind"),
 ]
 
@@ -1653,7 +1788,8 @@ OpenSmileResultV2 = OpenSmileResultPayloadV2
 AvqiResultV2 = AvqiResultPayloadV2
 
 TaskResultV2: TypeAlias = Annotated[
-    WhisperChunkResultPayloadV2
+    FaPreparationResultPayloadV2
+    | WhisperChunkResultPayloadV2
     | MonologueAsrResultPayloadV2
     | WhisperTokenTimingResultPayloadV2
     | IndexedWordTimingResultPayloadV2
@@ -1720,13 +1856,86 @@ class ExecuteResponseV2(BaseModel):
         return self
 
 
-class ProgressEventV2(BaseModel):
-    """Progress event emitted by long-running V2 tasks."""
+ProgressCountV2: TypeAlias = Annotated[int, Field(ge=0, le=2**32 - 1)]
+"""A progress count: the Rust side reads it as a ``u32``."""
 
-    request_id: WorkerRequestIdV2
-    completed: int = Field(ge=0)
-    total: int = Field(ge=0)
+
+class DownloadGrowthV2(BaseModel):
+    """A model download's measured growth so far, in KiB."""
+
+    kind: Literal["download_growth"] = "download_growth"
+    grown_kib: ProgressCountV2
+
+
+class PhaseEdgeV2(str, Enum):
+    """Which end of a phase a ``PhaseV2`` event marks."""
+
+    BEGIN = "begin"
+    COMPLETE = "complete"
+
+
+class PhaseV2(BaseModel):
+    """A named phase boundary."""
+
+    kind: Literal["phase"] = "phase"
+    edge: PhaseEdgeV2
+
+
+LoadMeasureV2: TypeAlias = Annotated[
+    DownloadGrowthV2 | PhaseV2,
+    Field(discriminator="kind"),
+]
+"""What a model load's progress measures: a download's growth, or a phase
+boundary. Never items: request work is ``RequestProgressV2``."""
+
+
+class UnitProgressV2(BaseModel):
+    """Request work counted in items: how many of a request's items are done.
+
+    Admitted only with ``completed <= total``, as on the Rust side, so a
+    producer that counts past its total fails where it builds the count
+    instead of as a refused wire line.
+    """
+
+    completed: ProgressCountV2
+    total: ProgressCountV2
+
+    @model_validator(mode="after")
+    def _completed_within_total(self) -> UnitProgressV2:
+        if self.completed > self.total:
+            raise ValueError(
+                f"progress reports {self.completed} of {self.total} items done"
+            )
+        return self
+
+
+class LoadProgressV2(BaseModel):
+    """A model load's progress (worker startup, ``ensure_task``, or a download
+    inside one): no request owns it. The supervisor's stall window reads it."""
+
+    scope: Literal["load"] = "load"
     stage: str
+    """Stable stage name; for a phase, without any edge suffix."""
+    measure: LoadMeasureV2
+
+
+class RequestProgressV2(BaseModel):
+    """One request's work, counted in items, under that request's (non-empty)
+    id. Never extends a model load's stall window."""
+
+    scope: Literal["request"] = "request"
+    request_id: WorkerRequestIdV2
+    stage: str
+    progress: UnitProgressV2
+
+
+ProgressEventV2: TypeAlias = Annotated[
+    LoadProgressV2 | RequestProgressV2,
+    Field(discriminator="scope"),
+]
+"""One progress event, by scope. The scope decides what the number can be:
+units in a load, growth in a request, and request progress with no request are
+not values of this union."""
 
 
 class ShutdownRequestV2(BaseModel):

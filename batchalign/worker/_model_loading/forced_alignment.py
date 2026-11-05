@@ -1,19 +1,28 @@
-"""Forced-alignment engine bootstrap helpers for worker startup."""
+"""The forced-alignment load: builds the FA host one worker's requests use."""
 
 from __future__ import annotations
 
 import typing
 
 from batchalign.inference._domain_types import parse_choice
-from batchalign.worker._types import FaEngine, WorkerBootstrapRuntime, _state
+from batchalign.worker._loads import FaLoad, LoadedWhisperFa, LoadedWordFa
+from batchalign.worker._model_loading.pinned_hub import (
+    resolve_transformers,
+    unpinned,
+)
+from batchalign.worker._types import FaEngine, WorkerBootstrapRuntime
 
 
-def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
-    """Load the forced-alignment engine for this worker.
+def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> FaLoad:
+    """Load the forced-alignment engine the control plane named, and return
+    its host: the runner over the loaded model and the FA identity it reports.
 
     Dispatches on the resolved ``FaEngine`` so adding a new variant later
-    forces a missing-arm error rather than silently loading Wave2Vec.
+    forces a missing-arm error rather than silently loading Wave2Vec. The
+    identity (``engine``) is the FA cache namespace on the Rust side, named
+    by the arm that loaded the model, never guessed.
     """
+
     lang = bootstrap.lang
     engine_overrides = bootstrap.engine_overrides or None
     backend = resolve_fa_engine(engine_overrides)
@@ -23,39 +32,47 @@ def load_fa_engine(bootstrap: WorkerBootstrapRuntime) -> None:
             load_cantonese_fa,
         )
 
-        load_cantonese_fa(
-            lang,
-            engine_overrides,
-            device_policy=bootstrap.device_policy,
+        host = load_cantonese_fa(
+            lang, engine_overrides, device_policy=bootstrap.device_policy
         )
-        _state.fa_model_name = "wav2vec-canto-v1"
+        return LoadedWordFa.from_cantonese(host)
     elif backend is FaEngine.QWEN3:
-        from batchalign.inference.qwen_forced_alignment import load_qwen_fa
+        from batchalign.inference.qwen_forced_alignment import (
+            QWEN_FORCED_ALIGNER_MODEL_ID,
+            load_qwen_fa,
+            resolve_qwen_language,
+        )
 
         # The SAME aligner the Qwen3-ASR engine loads for its own word
-        # timestamps, here on its own. `lang` fixes the model's language label
-        # at bootstrap, so an unsupported language fails before the download
-        # rather than after it.
-        _state.qwen_fa_host = load_qwen_fa(lang, device_policy=bootstrap.device_policy)
-        _state.fa_model_name = _state.qwen_fa_host.cache_identity.wire_name
+        # timestamps, here on its own. The language label is resolved first,
+        # and `load_qwen_fa` takes the label rather than the code, so an
+        # unsupported language fails before the download by construction.
+        language = resolve_qwen_language(lang)
+        snapshot = resolve_transformers(
+            unpinned(QWEN_FORCED_ALIGNER_MODEL_ID), kind="forced alignment"
+        )
+        qwen_host = load_qwen_fa(
+            language, snapshot, device_policy=bootstrap.device_policy
+        )
+        return LoadedWordFa.from_qwen(qwen_host)
     elif backend is FaEngine.WHISPER:
-        from batchalign.inference.fa import WHISPER_FA_ENGINE_ID, load_whisper_fa
+        from batchalign.inference.fa import (
+            WHISPER_FA_MODEL_ID,
+            load_whisper_fa,
+        )
 
-        _state.whisper_fa_model = load_whisper_fa(device_policy=bootstrap.device_policy)
-        _state.fa_model_name = WHISPER_FA_ENGINE_ID
+        whisper_handle = load_whisper_fa(
+            resolve_transformers(
+                unpinned(WHISPER_FA_MODEL_ID), kind="forced alignment"
+            ),
+            device_policy=bootstrap.device_policy,
+        )
+        return LoadedWhisperFa.from_model(whisper_handle)
     elif backend is FaEngine.WAVE2VEC:
-        import importlib.metadata as importlib_metadata
-
         from batchalign.inference.fa import load_wave2vec_fa
 
-        _state.wave2vec_fa_model = load_wave2vec_fa(
-            device_policy=bootstrap.device_policy
-        )
-        try:
-            torchaudio_version = importlib_metadata.version("torchaudio")
-            _state.fa_model_name = f"wave2vec-fa-mms-{torchaudio_version}"
-        except importlib_metadata.PackageNotFoundError:
-            _state.fa_model_name = "wave2vec-fa-mms"
+        model = load_wave2vec_fa(device_policy=bootstrap.device_policy)
+        return LoadedWordFa.from_wave2vec(model)
     else:
         # Exhaustive match: see the equivalent comment in
         # ``_model_loading.asr.load_asr_engine``.
@@ -89,14 +106,10 @@ def resolve_fa_engine(engine_overrides: dict[str, str] | None) -> FaEngine:
        strings raise ``ValueError`` rather than silently loading
        Wave2Vec: a typo in a per-host override would otherwise
        produce wrong-model output.
-    2. Otherwise a warm preload, because a missing key is not a choice.
-
-    2. Nothing. There is no default, because there is no case left that needs
-       one: the control plane names an engine for every task the worker's
-       target preloads (`EngineSelection::for_target`), and a lazy-profile
-       worker preloads nothing and names its engine per request. A missing
-       ``fa`` key therefore means the boundary is broken, and guessing would
-       load a model the request did not ask for.
+    2. Nothing. There is no default: the control plane names the FA engine
+       in every FA load (``ensure_task``), so a missing ``fa`` key means the
+       boundary is broken, and guessing would load a model the request did
+       not ask for.
     """
     if not engine_overrides or "fa" not in engine_overrides:
         raise ValueError(

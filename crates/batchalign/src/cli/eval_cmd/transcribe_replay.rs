@@ -131,6 +131,10 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
             // them fail-closed protects against a future routing regression.
             cache_policies: TranscribeCachePolicies::uniform(CachePolicy::RequireCache),
             write_wor: args.wor,
+            // Legacy projected evidence was recorded before transcribe merged
+            // abbreviations on the recognized words, so it replays with the
+            // merge off. A run that should merge is a fresh transcribe.
+            merge_abbrev: crate::params::MergeAbbrevPolicy::Keep,
             media_name,
             engine_extras: Default::default(),
         };

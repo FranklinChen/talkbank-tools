@@ -82,8 +82,9 @@ An answered alignment request does not mean every returned timing survives
 into the output. Finalization can remove a backwards-starting utterance's
 timings or discard words when resolving same-speaker overlap. Those words
 remain in the transcript and count as untimed. A short acknowledgement can
-also receive no request when its uncertain search window exceeds the engine
-budget; this does not mean the spoken acknowledgement itself was long.
+also remain untimed when its uncertain search window cannot pass the selected
+model's input or resource checks; this does not mean the spoken acknowledgement
+itself was long.
 Keep the diagnostic or debug evidence when asking which stage left a word
 untimed; the missing-timing count alone does not identify an acoustic failure.
 
@@ -107,13 +108,23 @@ alignment by design: ..."), and a file whose only untimed utterances are notes
 is done, with exit code 0.
 
 When corrupt `%wor` was the only timing, regeneration must establish real
-timing before output can be written. A fallback window longer than the selected
-aligner's budget is refused, not clipped to invent word positions. The error
-names the actual window and budget; use a compatible UTR backend to recover
-narrower acoustic timing or supply corrected timing. A planned alignment
+timing before output can be written. A fallback window that cannot be admitted
+is refused, not clipped to invent word positions. Keep the diagnostic naming
+the affected window and constraint; a compatible UTR backend or corrected
+supplied timing may provide better localization. A planned alignment
 request alone is not evidence of successful regeneration.
 If the model produces no usable timing, the same obligation remains outstanding
 and the file is refused as unavailable evidence, with no output written.
+
+**Adaptive admission is implemented in development source.** Joining nearby utterances into a
+request is a preference, not a fixed duration limit on one utterance. The new
+path keeps a long supplied window intact for checks against the loaded model
+and host resources. Temporary memory pressure waits rather than changing the
+transcript. Source-anchor partitioning and context checks now use actual model admission.
+Real-input qualification is still pending; this is not a claim about an already
+deployed release. Cached answers skip preparation, and fallback reuses prepared
+audio and text. The CLI shows `Preparing alignment` during that work. The [developer explanation](../../developer/adaptive-fa-admission.md)
+records those boundaries.
 
 Whisper alignment uses only the supplied audio's real duration, not the silence
 its model adds to fill a fixed input window. This prevents padding from acquiring
@@ -209,9 +220,9 @@ flowchart TD
     full --> engine_select
 
     engine_select{--fa-engine?}
-    engine_select -->|whisper| whisper_fa[Whisper engine\nonset times only\nmax_group_ms from the engine = 20000]
-    engine_select -->|wav2vec / cantonese| wav2vec_fa[Wave2Vec engines\nword start+end\nmax_group_ms from the engine = 15000]
-    engine_select -->|qwen3_fa| qwen3_fa[Qwen3 aligner\nword start+end\nyue/zho/cmn/eng only\nmax_group_ms from the engine = 15000]
+    engine_select -->|whisper| whisper_fa[Whisper engine\nonset times only\nloaded-model input and memory checks]
+    engine_select -->|wav2vec / cantonese| wav2vec_fa[Wave2Vec engines\nword start+end\nloaded-model input and memory checks]
+    engine_select -->|qwen3_fa| qwen3_fa[Qwen3 aligner\nword start+end\nyue/zho/cmn/eng only\nloaded-model input and memory checks]
 
     whisper_fa --> pause_check
     wav2vec_fa --> pause_check
@@ -256,14 +267,9 @@ flowchart TD
     wor_check -->|--wor| gen_wor["Generate %wor tier\n(from the RESOLVED state)"]
     wor_check -->|--nowor| skip_wor[Omit %wor tier]
 
-    gen_wor --> merge_check
-    skip_wor --> merge_check
+    gen_wor --> validate[Post-validate → serialize CHAT output]
+    skip_wor --> validate
 
-    merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations transform]
-    merge_check -->|No| validate
-
-    merge --> validate[Post-validate → serialize CHAT output]
     validate --> done([Output .cha file])
 ```
 
@@ -568,8 +574,7 @@ the same cached alignment evidence.
 | `--pauses` | off | Select legacy character-spaced Whisper input independently of gap policy. No effect on interval-model input. |
 | `--existing-wor-boundaries {preserve,rebuild-from-evidence}` | `preserve` | v0.4.0 option controlling how a rerun projects fresh FA evidence when the input already has `%wor`. `preserve` keeps compatibility; the experimental rebuild mode keeps fresh word extents and reconstructs the main bullet from their hull. It is a local projection only and does not change raw-evidence cache identity. |
 | `--end-overlap-policy {clamp-all-adjacent,preserve-cross-speaker}` | `preserve-cross-speaker` | Controls the same-speaker/cross-speaker resolution described above. The default leaves cross-speaker overlap alone; `clamp-all-adjacent` resolves it the same way as a same-speaker pair. It does not change raw-evidence cache identity. |
-| `--main-bullets {derive,keep,exact}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; `exact` also leaves every utterance without a bullet without one; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). A local projection only: it does not change raw-evidence cache identity or what is sent for inference. |
-| `--merge-abbrev` | off | Merge abbreviations in the output CHAT |
+| `--main-bullets {derive,keep,exact}` | `derive` | Whether utterance bullets already on the input may change. `derive` recomputes each bullet from its aligned words (it may be widened, cut or stripped). `keep` leaves every bullet the input carried exactly as given and fits the `%wor` word timings inside it; `exact` also leaves every utterance without a bullet without one; see [Keeping the input's utterance bullets](#keeping-the-inputs-utterance-bullets). Primary requests retain their normal cache identity. Missing positive timings inside a supplied bullet may receive one exact-window retry, with a separate request key; accepted timings stay unchanged. Cache-only runs never infer. |
 | `--before PATH` |: | Previous version of the file for incremental alignment (skip unchanged utterances) |
 
 Both UTR fraction options are validated before a command is constructed:
@@ -586,6 +591,13 @@ are rejected by the CLI and by configuration deserialization.
 - Utterance-level bullet times (`·start_end·`) updated (see below for how)
 - Existing `%mor` and `%gra` tiers are preserved and untouched
 - The audio file is read but never modified
+
+During **Aligning**, the counter advances as each request's result is retained.
+It includes reused and cached results. A long utterance may need several
+requests, while shared requests may resolve several output units. An unaligned
+result also counts as processed: `N/N` means those units were handled, not that
+every word received timing. Check the final file status and diagnostics for
+remaining untimed words.
 
 ### Research evidence without CHAT clutter
 
@@ -611,7 +623,7 @@ discarded. Schema version 5 adds a `refused_window` object to each
 refused window's length is data rather than prose in `reason`. Schema version 6
 records how each group was executed: every entry of `groups` carries a `span`,
 `single` (one request, with its evidence source and cache key) or `anchored`
-(an utterance longer than the engine budget, aligned as several requests cut at
+(an utterance partitioned under a declared capacity, aligned as several requests cut at
 words utterance timing recovery heard, each piece with its window, first and
 last word, source and cache key); the top-level `evidence_sources` and
 `cache_keys` arrays are gone. Such a split is a `window_split_at_anchors`
@@ -621,7 +633,7 @@ anchors leave a stretch longer than the budget, `gap_start_ms` to
 `gap_end_ms`; the utterance's placement needs review) and `anchors_unusable`
 (recovery matched the utterance but gave no usable cut; `unusable` is
 `no_reliable_anchors`, `anchors_refused`, `anchors_describe_other_words` or
-`no_interior_cut`). `over_budget` now means recovery had nothing to say about
+`no_interior_cut`). In retained sidecars from the earlier duration-budget policy, `over_budget` means recovery had nothing to say about
 the utterance. All of them record the selected engine and build/model version,
 the cache key and evidence source for every request (`wor_reuse`, `cache`,
 `raw_evidence_replay`, `inference`, or `unaligned`), stable word identifiers, pre-injection timings, Wave2Vec-family
@@ -645,6 +657,27 @@ one or more `*_rev_evidence.json` sidecars. They record the exact prepared
 media, provider presentation, raw cache key/outcome, request identity, and
 named UTR projection revision. A partial-window run keys each filename by its
 raw evidence identity so several windows cannot overwrite one another.
+
+### Bounded recovery inside a supplied bullet
+
+With `--main-bullets keep` or `exact`, a contextual model answer can point to
+nearby speech outside the supplied utterance interval. If fitting the primary
+answer leaves positive word timing missing, Batchalign may try that utterance
+once over its **complete original words and exact supplied interval**, with no
+trailing padding or neighbouring audio. Only missing word slots can be filled;
+accepted timings are retained. A recovered timing must fit the source interval
+and retained neighbours. Unsuccessful recovery leaves an honest missing timing.
+
+This uses the same loaded-model constraints, host-memory admission and cache
+validation as primary alignment. An identical scope already evaluated is not
+executed again; an unused prepared exact scope is reused. The retry has its own
+actual text/window cache key. `--require-cache` never authorizes inference, and
+an optional retry cache miss preserves the accepted primary partial output.
+Empty, out-of-record and absent source bullets provide no retry authority; a
+UTR-generated working bullet cannot substitute for an original supplied one.
+Full and incremental alignment share this behavior. Durable timing-provenance
+decisions record the exact window, terminal outcome and filled slots. Primary
+group evidence remains the primary pre-injection snapshot.
 
 ### How utterance bullet times are set
 

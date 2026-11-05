@@ -53,17 +53,16 @@ class TestResolveWhisperHubModelId:
 
 
 class TestWhisperHubLoaderDispatch:
-    """``load_whisper_hub_asr`` delegates through resolve_whisper_hub_model_id."""
+    """``load_whisper_hub_asr`` loads exactly the snapshot it is handed."""
 
-    def test_loader_resolves_model_id_from_lang(self, monkeypatch) -> None:
+    def test_loader_loads_the_resolved_snapshot_with_its_pinned_language(
+        self, monkeypatch
+    ) -> None:
         captured: dict[str, object] = {}
         sentinel = object()
 
-        def fake_load_whisper_asr(
-            *, model, base, decoding, device_policy, timestamp_mode
-        ):
-            captured["model"] = model
-            captured["base"] = base
+        def fake_load_whisper_asr(snapshot, *, decoding, device_policy, timestamp_mode):
+            captured["snapshot"] = snapshot
             captured["decoding"] = decoding
             captured["device_policy"] = device_policy
             captured["timestamp_mode"] = timestamp_mode
@@ -77,16 +76,15 @@ class TestWhisperHubLoaderDispatch:
         from batchalign.inference._domain_types import WhisperTimestampMode
         from batchalign.inference.types import CheckpointPinnedLanguage
         from batchalign.inference.whisper_hub import load_whisper_hub_asr
+        from batchalign.tests._snapshots import transformers_snapshot
 
+        snapshot = transformers_snapshot("thennal/whisper-medium-ml")
         handle = load_whisper_hub_asr(
-            lang="mal",
-            engine_overrides={"asr": "whisper_hub"},
-            device_policy=DevicePolicy(force_cpu=True),
+            snapshot, device_policy=DevicePolicy(force_cpu=True)
         )
 
         assert handle is sentinel
-        assert captured["model"] == "thennal/whisper-medium-ml"
-        assert captured["base"] == "thennal/whisper-medium-ml"
+        assert captured["snapshot"] is snapshot
         # The fine-tune decodes with its own pinned language and task: the
         # handle cannot be told otherwise, by the request or anyone else.
         assert captured["decoding"] == CheckpointPinnedLanguage()

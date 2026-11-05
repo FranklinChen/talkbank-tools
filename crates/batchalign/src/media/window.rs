@@ -128,6 +128,24 @@ pub(in crate::media) fn seek_args(start: FileMs, end: FileMs) -> [OsString; 4] {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EmptyReason(Emptiness);
 
+impl EmptyReason {
+    /// Lower the producer's admitted observation, without guessing EOF or
+    /// turning a partial sample into a zero-byte decode.
+    pub(crate) fn into_wire(self) -> crate::types::worker_v2::DecodedAudioShortfallV2 {
+        use crate::types::worker_v2::DecodedAudioShortfallV2;
+        match self.0 {
+            Emptiness::NoBytesDecoded => DecodedAudioShortfallV2::NoBytes,
+            Emptiness::PartialFrame(PartialFrame {
+                byte_len,
+                sample_bytes,
+            }) => DecodedAudioShortfallV2::PartialSample {
+                decoded_bytes: byte_len,
+                sample_bytes,
+            },
+        }
+    }
+}
+
 /// What a decode measurement saw, kept private so the reason travels as
 /// EVIDENCE and not as an assertion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,16 +196,7 @@ impl PartialFrame {
 
 impl std::fmt::Display for EmptyReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            Emptiness::NoBytesDecoded => write!(f, "the decoder produced no bytes"),
-            Emptiness::PartialFrame(PartialFrame {
-                byte_len,
-                sample_bytes,
-            }) => write!(
-                f,
-                "the decoder produced {byte_len} bytes, less than one {sample_bytes}-byte sample"
-            ),
-        }
+        std::fmt::Display::fmt(&self.into_wire(), f)
     }
 }
 

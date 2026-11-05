@@ -3,6 +3,7 @@
   "task": "forced_alignment",
   "payload": {
     "kind": "forced_alignment",
+    "phase": {"kind": "candidate"},
     "backend": "wav2vec_canto",
     "payload_ref_id": "inline-ref-0004",
     "audio_ref_id": "audio-ref-0004",

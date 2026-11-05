@@ -11,7 +11,15 @@ import pytest
 
 from batchalign.device import DevicePolicy
 from batchalign.inference._domain_types import WhisperCpuPrecision
-from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
+from batchalign.tests._qwen_recognition import (
+    FAKE_QWEN_SNAPSHOTS,
+    SEGMENTATION_MODEL_POLICY,
+)
+from batchalign.tests._snapshots import (
+    fake_resolve_repository,
+    fake_resolve_transformers,
+)
+from batchalign.worker._loads import ControlPlaneAsr, LoadedLocalAsr, LoadedProviderAsr
 from batchalign.worker._model_loading import asr as asr_loading
 from batchalign.worker._model_loading.asr import (
     PINNED_ASR_MODELS_KEY,
@@ -20,17 +28,19 @@ from batchalign.worker._model_loading.asr import (
     resolve_asr_engine,
     resolve_injected_revai_api_key,
 )
-from batchalign.worker._model_loading.pinned_hub import ResolvedSnapshot
 from batchalign.worker._types import (
     AsrEngine,
     InferTask,
     WorkerBootstrapRuntime,
-    _state,
 )
 from batchalign.worker._types_v2 import (
+    AsrBackendV2,
     ForceWhisperLanguageV2,
+    LoadedModelV2,
+    ObservedNotExposedV2,
     RequestedModelV2,
     RequestedProviderParameterV2,
+    TencentModelIdentityV2,
     TencentModelsV2,
 )
 
@@ -38,8 +48,6 @@ from batchalign.worker._types_v2 import (
 # that directory holds. These tests are about DISPATCH: which engine a
 # bootstrap loads. Resolving a real snapshot would make them depend on a warm
 # Hugging Face cache, which is not a property a unit test may rely on.
-_FAKE_SNAPSHOT_PATH = "/cache/models--fake/snapshots/" + "a" * 40
-_FAKE_SNAPSHOT_COMMIT = "a" * 40
 
 # What the control plane sends an English stock Whisper worker.
 _ENGLISH_DECODING = ForceWhisperLanguageV2(token="en")
@@ -47,24 +55,17 @@ _ENGLISH_SPAWN = {WHISPER_DECODE_LANGUAGE_KEY: _ENGLISH_DECODING.model_dump_json
 
 
 class _FakeHandle:
-    """A loaded-model stand-in with settable attributes.
+    """A loaded-model stand-in carrying the identity a real handle is built
+    with, which the load puts on the host it returns."""
 
-    The loader records the identity it resolved onto the handle it got back,
-    so a bare string here would fail with `AttributeError` and say nothing
-    about dispatch.
-    """
+    model_identity = "stand-in identity"
 
 
 @pytest.fixture(autouse=True)
 def _no_hub_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every test in this module off the network and the model cache."""
-    monkeypatch.setattr(
-        asr_loading,
-        "resolve_pinned_snapshot",
-        lambda model_id, commit, files: ResolvedSnapshot(
-            path=_FAKE_SNAPSHOT_PATH, commit=commit or _FAKE_SNAPSHOT_COMMIT
-        ),
-    )
+    monkeypatch.setattr(asr_loading, "resolve_transformers", fake_resolve_transformers)
+    monkeypatch.setattr(asr_loading, "resolve_repository", fake_resolve_repository)
 
 
 class TestResolveInjectedRevaiApiKey:
@@ -80,68 +81,52 @@ class TestResolveInjectedRevaiApiKey:
 
 
 class TestResolveAsrEngine:
-    """Engine selection must stay deterministic, typed, and loud on bad input."""
+    """Engine selection is the control plane's: typed, and loud on bad input.
+
+    There is no default and no second chooser. The per-language default table
+    (Cantonese to FunAudio), the Rev.AI-when-a-key-is-present rule and the
+    Whisper fallback are gone, with their tests: the control plane names the
+    engine for every worker-hosted ASR load, and names none only when the
+    plan's ASR runs in Rust, which is ``ControlPlaneAsr``.
+    """
 
     def test_override_wins(self) -> None:
-        assert (
-            resolve_asr_engine({"asr": "whisper"}, "from-config", lang="eng")
-            is AsrEngine.WHISPER
-        )
-
-    def test_rev_is_selected_when_key_present(self) -> None:
-        assert resolve_asr_engine(None, "from-config", lang="eng") is AsrEngine.REV
-
-    def test_whisper_is_default_without_key(self) -> None:
-        assert resolve_asr_engine(None, None, lang="eng") is AsrEngine.WHISPER
+        assert resolve_asr_engine({"asr": "whisper"}) is AsrEngine.WHISPER
 
     def test_whisper_hub_override_wins(self) -> None:
-        assert (
-            resolve_asr_engine({"asr": "whisper_hub"}, "from-config", lang="eng")
-            is AsrEngine.WHISPER_HUB
-        )
+        assert resolve_asr_engine({"asr": "whisper_hub"}) is AsrEngine.WHISPER_HUB
 
     def test_resolve_returns_typed_enum_not_string(self) -> None:
         # Pin the return-type contract so a future refactor that
         # accidentally returns ``str`` (the historical shape) breaks
         # immediately rather than at the dispatch site.
-        result = resolve_asr_engine({"asr": "tencent"}, None, lang="yue")
+        result = resolve_asr_engine({"asr": "tencent"})
         assert isinstance(result, AsrEngine)
         assert result is AsrEngine.TENCENT
 
     def test_qwen_override_wins(self) -> None:
-        # Qwen3-ASR is an open-weight Cantonese-capable ASR option;
-        # this test pins that an explicit override routes to it
-        # regardless of the per-language default for ``yue``.
-        assert resolve_asr_engine({"asr": "qwen"}, None, lang="yue") is AsrEngine.QWEN
+        assert resolve_asr_engine({"asr": "qwen"}) is AsrEngine.QWEN
 
-    # Per-language defaults (yue → FunASR). Explicit overrides and
-    # Rev key still win; languages absent from the table fall through
-    # to Whisper.
+    def test_no_engine_named_is_the_control_plane_not_a_default(self) -> None:
+        # No `asr` named: the plan's ASR runs in Rust. Not Whisper, not a
+        # per-language engine, whatever else the overrides carry.
+        assert isinstance(resolve_asr_engine(None), ControlPlaneAsr)
+        assert isinstance(resolve_asr_engine(_ENGLISH_SPAWN), ControlPlaneAsr)
 
-    def test_yue_without_rev_key_or_override_defaults_to_funaudio(self) -> None:
-        assert resolve_asr_engine(None, None, lang="yue") is AsrEngine.FUNAUDIO
-
-    def test_yue_with_explicit_override_still_uses_override(self) -> None:
-        assert resolve_asr_engine({"asr": "qwen"}, None, lang="yue") is AsrEngine.QWEN
-
-    def test_yue_with_rev_key_still_uses_rev(self) -> None:
-        assert resolve_asr_engine(None, "from-config", lang="yue") is AsrEngine.REV
-
-    def test_eng_without_rev_key_still_defaults_to_whisper(self) -> None:
-        assert resolve_asr_engine(None, None, lang="eng") is AsrEngine.WHISPER
-
-    def test_unknown_lang_falls_back_to_global_default(self) -> None:
-        assert resolve_asr_engine(None, None, lang="mri") is AsrEngine.WHISPER
+    def test_rev_is_not_a_worker_engine(self) -> None:
+        # Rev.AI runs in the control plane, which never names it to a worker.
+        with pytest.raises(ValueError, match="unknown asr engine 'rev'"):
+            resolve_asr_engine({"asr": "rev"})
 
     def test_unknown_engine_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="unknown asr engine 'wisper'"):
-            resolve_asr_engine({"asr": "wisper"}, None, lang="eng")
+            resolve_asr_engine({"asr": "wisper"})
 
     def test_unknown_engine_error_mentions_supported_options(self) -> None:
         # The supported-engines list is derived from the AsrEngine
-        # enum, so adding a 7th variant requires zero changes here.
+        # enum, so adding a variant requires zero changes here.
         with pytest.raises(ValueError) as exc_info:
-            resolve_asr_engine({"asr": "x"}, None, lang="eng")
+            resolve_asr_engine({"asr": "x"})
         msg = str(exc_info.value)
         for variant in AsrEngine:
             assert variant.value in msg, (
@@ -149,316 +134,243 @@ class TestResolveAsrEngine:
             )
 
 
+def _refuse_every_loader(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace every ASR loader with one that records its own name.
+
+    For tests that assert NOTHING loads: a call is recorded rather than
+    raised, so a regression reports which model it would have loaded.
+    """
+    called: list[str] = []
+
+    def recorder(name: str):
+        def _load(*_args, **_kwargs):
+            called.append(name)
+            return _FakeHandle()
+
+        return _load
+
+    for target in (
+        "batchalign.inference.asr.load_whisper_asr",
+        "batchalign.inference.whisper_hub.load_whisper_hub_asr",
+        "batchalign.inference.languages.cantonese._funaudio_asr.load_funaudio_asr",
+        "batchalign.inference.languages.cantonese._tencent_asr.load_tencent_asr",
+        "batchalign.inference.languages.cantonese._aliyun_asr.load_aliyun_asr",
+        "batchalign.inference.languages.cantonese._qwen_asr.load_qwen_asr",
+    ):
+        monkeypatch.setattr(target, recorder(target.rsplit(".", 1)[1]))
+    return called
+
+
+@pytest.mark.parametrize("revai_api_key", [None, "from-rust"])
+@pytest.mark.parametrize("lang", ["eng", "yue"])
+def test_an_asr_load_naming_no_engine_loads_no_model(
+    monkeypatch: pytest.MonkeyPatch, revai_api_key: str | None, lang: str
+) -> None:
+    """The capability probe of a job whose ASR runs in Rust (Rev.AI) prepares
+    the ASR task naming no engine. That load builds nothing, with or without
+    a Rev.AI key in the worker's environment and whatever the language.
+
+    It used to fall through to Rev.AI when a key was present and otherwise to
+    a guessed engine (FunAudio for Cantonese, Whisper for anything else),
+    loading a multi-gigabyte model the job never used.
+    """
+    called = _refuse_every_loader(monkeypatch)
+
+    host = load_asr_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.ASR,
+            lang=lang,
+            num_speakers=1,
+            engine_overrides=_ENGLISH_SPAWN if lang == "eng" else {},
+            revai_api_key=revai_api_key,
+        )
+    )
+
+    assert isinstance(host, ControlPlaneAsr)
+    assert called == []
+
+
 def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
     """Whisper bootstrap should not touch legacy config-discovery paths."""
 
-    def fake_load_whisper_asr(*, model, base, decoding, device_policy, cpu_precision):
+    def fake_load_whisper_asr(snapshot, *, decoding, device_policy, cpu_precision):
         assert decoding == _ENGLISH_DECODING
         assert device_policy == DevicePolicy(force_cpu=True)
         # No `whisper_cpu_dtype` extra on this job: the default precision.
         assert cpu_precision is WhisperCpuPrecision.FLOAT32
-        # The worker resolves the snapshot and hands the loader a local path,
-        # so both coordinates are the resolved directory rather than an id.
-        assert model == base == _FAKE_SNAPSHOT_PATH
+        # The worker resolves the snapshot and hands the loader that proof,
+        # never an id it could download by; unpinned, it is the stock model.
+        assert snapshot.model_id == asr_loading.STOCK_WHISPER_ID
         return _FakeHandle()
 
-    old_model = _state.whisper_asr_model
-    old_engine = _state.asr_engine
-    old_key = _state.rev_api_key
-    try:
-        monkeypatch.setattr(
-            "batchalign.inference.asr.load_whisper_asr",
-            fake_load_whisper_asr,
+    monkeypatch.setattr(
+        "batchalign.inference.asr.load_whisper_asr",
+        fake_load_whisper_asr,
+    )
+
+    host = load_asr_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.ASR,
+            lang="eng",
+            num_speakers=1,
+            engine_overrides={"asr": "whisper", **_ENGLISH_SPAWN},
+            device_policy=DevicePolicy(force_cpu=True),
         )
+    )
 
-        load_asr_engine(
-            WorkerBootstrapRuntime(
-                task=InferTask.ASR,
-                lang="eng",
-                num_speakers=1,
-                engine_overrides={"asr": "whisper", **_ENGLISH_SPAWN},
-                device_policy=DevicePolicy(force_cpu=True),
-            )
-        )
-
-        assert isinstance(_state.whisper_asr_model, _FakeHandle)
-        assert _state.asr_engine is AsrEngine.WHISPER
-        # The loaded identity travels with the handle and on the worker state.
-        assert _state.asr_model_identity is not None
-    finally:
-        _state.whisper_asr_model = old_model
-        _state.asr_engine = old_engine
-        _state.rev_api_key = old_key
-
-
-def test_injected_revai_key_selects_rev_without_legacy_config() -> None:
-    """Rev.AI selection should rely on the Rust-injected key, not config rediscovery."""
-
-    old_engine = _state.asr_engine
-    old_key = _state.rev_api_key
-    try:
-        load_asr_engine(
-            WorkerBootstrapRuntime(
-                task=InferTask.ASR,
-                lang="eng",
-                num_speakers=1,
-                revai_api_key=" from-rust ",
-            )
-        )
-
-        assert _state.asr_engine is AsrEngine.REV
-        assert _state.rev_api_key == " from-rust "
-    finally:
-        _state.asr_engine = old_engine
-        _state.rev_api_key = old_key
+    # The host carries the backend that loaded and the identity the handle
+    # was built with: one value, never a field written beside it.
+    assert isinstance(host, LoadedLocalAsr)
+    assert host.backend is AsrBackendV2.LOCAL_WHISPER
+    assert host.model_identity == _FakeHandle.model_identity
 
 
 def test_whisper_hub_override_dispatches_to_whisper_hub_loader(monkeypatch) -> None:
-    """Worker dispatch must route asr=whisper_hub to the fine-tune loader.
-
-    RED when ``AsrEngine.WHISPER_HUB`` does not yet exist and when
-    ``_model_loading.asr.load_asr_engine`` has no whisper_hub branch.
-    """
+    """Worker dispatch must route asr=whisper_hub to the fine-tune loader."""
 
     captured: dict[str, object] = {}
-    old_engine = _state.asr_engine
-    old_model = _state.whisper_asr_model
-    try:
 
-        def fake_load_whisper_hub_asr(
-            lang, engine_overrides, *, device_policy, model_path
-        ):
-            captured["lang"] = lang
-            captured["engine_overrides"] = engine_overrides
-            captured["device_policy"] = device_policy
-            captured["model_path"] = model_path
-            return _FakeHandle()
-
-        monkeypatch.setattr(
-            "batchalign.inference.whisper_hub.load_whisper_hub_asr",
-            fake_load_whisper_hub_asr,
-        )
-
-        load_asr_engine(
-            WorkerBootstrapRuntime(
-                task=InferTask.ASR,
-                lang="mal",
-                num_speakers=1,
-                engine_overrides={"asr": "whisper_hub"},
-                device_policy=DevicePolicy(force_cpu=True),
-            )
-        )
-
-        assert captured["lang"] == "mal"
-        assert captured["engine_overrides"] == {"asr": "whisper_hub"}
-        assert captured["device_policy"] == DevicePolicy(force_cpu=True)
-        assert captured["model_path"] == _FAKE_SNAPSHOT_PATH
-        assert isinstance(_state.whisper_asr_model, _FakeHandle)
-        assert _state.asr_engine is AsrEngine.WHISPER_HUB
-    finally:
-        _state.asr_engine = old_engine
-        _state.whisper_asr_model = old_model
-
-
-# Top-level integration tests at the worker-bootstrap seam
-# (``load_asr_engine(WorkerBootstrapRuntime)``). Resolver unit tests
-# in ``TestResolveAsrEngine`` above are supplements, not substitutes.
-
-
-def test_load_asr_engine_yue_with_no_override_or_rev_dispatches_to_funaudio(
-    monkeypatch,
-) -> None:
-    """yue worker with no overrides and no Rev key must load FunASR,
-    not vanilla Whisper-large-v3 (the worst measured engine on
-    Cantonese in the 2026-05-26 v2 benchmark, 81.9% CER on Tier 3)."""
-
-    funaudio_calls: list[tuple[object, object]] = []
-    whisper_calls: list[dict[str, object]] = []
-
-    def fake_load_funaudio_asr(lang, engine_overrides, **_pinned):
-        funaudio_calls.append((lang, engine_overrides))
-
-    def fake_load_whisper_asr(**kwargs):
-        # If this gets called, Fix 3 is not done, the bug is alive.
-        # Capture so the test failure is informative rather than crashy.
-        whisper_calls.append(kwargs)
+    def fake_load_whisper_hub_asr(snapshot, *, device_policy):
+        captured["device_policy"] = device_policy
+        captured["snapshot"] = snapshot
         return _FakeHandle()
 
     monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._funaudio_asr.load_funaudio_asr",
-        fake_load_funaudio_asr,
-    )
-    monkeypatch.setattr(
-        "batchalign.inference.asr.load_whisper_asr",
-        fake_load_whisper_asr,
+        "batchalign.inference.whisper_hub.load_whisper_hub_asr",
+        fake_load_whisper_hub_asr,
     )
 
-    old_engine = _state.asr_engine
-    old_whisper = _state.whisper_asr_model
-    old_key = _state.rev_api_key
-    try:
-        load_asr_engine(
-            WorkerBootstrapRuntime(
-                task=InferTask.ASR,
-                lang="yue",
-                num_speakers=1,
-                # No engine_overrides, no revai_api_key; this is the
-                # exact bootstrap shape that produced 81.9% CER in v2.
-            )
+    host = load_asr_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.ASR,
+            lang="mal",
+            num_speakers=1,
+            engine_overrides={"asr": "whisper_hub"},
+            device_policy=DevicePolicy(force_cpu=True),
         )
-
-        assert whisper_calls == [], (
-            "yue worker with no override + no Rev key MUST NOT load "
-            "vanilla Whisper-large-v3 (Fix 3 regression). "
-            f"whisper called with: {whisper_calls}"
-        )
-        assert len(funaudio_calls) == 1, (
-            "yue worker with no override + no Rev key must load FunASR. "
-            f"funaudio_calls={funaudio_calls}"
-        )
-        assert funaudio_calls[0] == ("yue", None)
-        assert _state.asr_engine is AsrEngine.FUNAUDIO
-    finally:
-        _state.asr_engine = old_engine
-        _state.whisper_asr_model = old_whisper
-        _state.rev_api_key = old_key
-
-
-def test_load_asr_engine_eng_with_no_override_or_rev_still_loads_whisper(
-    monkeypatch,
-) -> None:
-    """Languages without a per-language default entry keep the global
-    Whisper fallback."""
-
-    funaudio_calls: list[tuple[object, object]] = []
-
-    def fake_load_funaudio_asr(lang, engine_overrides, **_pinned):
-        funaudio_calls.append((lang, engine_overrides))
-
-    def fake_load_whisper_asr(**kwargs):
-        return _FakeHandle()
-
-    monkeypatch.setattr(
-        "batchalign.inference.languages.cantonese._funaudio_asr.load_funaudio_asr",
-        fake_load_funaudio_asr,
-    )
-    monkeypatch.setattr(
-        "batchalign.inference.asr.load_whisper_asr",
-        fake_load_whisper_asr,
     )
 
-    old_engine = _state.asr_engine
-    old_whisper = _state.whisper_asr_model
-    old_key = _state.rev_api_key
-    try:
-        # No engine named, as for a preloading worker; the control plane
-        # still sends the decode language because Whisper has an English token.
-        load_asr_engine(
-            WorkerBootstrapRuntime(
-                task=InferTask.ASR,
-                lang="eng",
-                num_speakers=1,
-                engine_overrides=_ENGLISH_SPAWN,
-            )
-        )
-
-        assert funaudio_calls == [], (
-            f"eng worker must not load FunASR. funaudio_calls={funaudio_calls}"
-        )
-        assert _state.asr_engine is AsrEngine.WHISPER
-        assert isinstance(_state.whisper_asr_model, _FakeHandle)
-    finally:
-        _state.asr_engine = old_engine
-        _state.whisper_asr_model = old_whisper
-        _state.rev_api_key = old_key
+    assert captured["device_policy"] == DevicePolicy(force_cpu=True)
+    # Unpinned, the language's table entry is what was resolved.
+    assert captured["snapshot"].model_id == "thennal/whisper-medium-ml"
+    assert isinstance(host, LoadedLocalAsr)
+    assert host.backend is AsrBackendV2.WHISPER_HUB
+    assert host.model_identity == _FakeHandle.model_identity
 
 
-def test_a_whisper_fallback_without_a_decode_language_is_refused() -> None:
-    """A preloading worker whose language has no Whisper token receives no
-    decode language. If it falls back to stock Whisper anyway, it refuses at
+def test_a_stock_whisper_load_without_a_decode_language_is_refused() -> None:
+    """A stock Whisper load whose spawn carried no decode language refuses at
     load, naming the key, rather than deciding a language itself."""
-    old_engine = _state.asr_engine
-    old_whisper = _state.whisper_asr_model
-    old_key = _state.rev_api_key
-    try:
-        with pytest.raises(ValueError, match=WHISPER_DECODE_LANGUAGE_KEY):
-            load_asr_engine(
-                WorkerBootstrapRuntime(task=InferTask.ASR, lang="nan", num_speakers=1)
+    with pytest.raises(ValueError, match=WHISPER_DECODE_LANGUAGE_KEY):
+        load_asr_engine(
+            WorkerBootstrapRuntime(
+                task=InferTask.ASR,
+                lang="nan",
+                num_speakers=1,
+                engine_overrides={"asr": "whisper"},
             )
-    finally:
-        _state.asr_engine = old_engine
-        _state.whisper_asr_model = old_whisper
-        _state.rev_api_key = old_key
+        )
 
 
 def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> None:
     """HK bootstrap should delegate credential discovery to the Rust boundary."""
 
     captured: dict[str, object] = {}
-    old_engine = _state.asr_engine
-    old_pinned = _state.asr_pinned_models
-    try:
-        # Mirrors the real loader's signature, which takes no engine overrides:
-        # Tencent's one knob is the engine-model type, and the control plane
-        # chooses it. A double that still accepted overrides would keep
-        # asserting a parameter the loader no longer has.
-        def fake_load_tencent_asr(lang, *, engine_model_type, config=None):
-            captured["lang"] = lang
-            captured["engine_model_type"] = engine_model_type
-            captured["config"] = config
 
-        # Tencent selects its model by a parameter the control plane chose, so
-        # the worker refuses to load without one. The pin travels IN
-        # `engine_overrides`, exactly as the control plane sends it: setting
-        # worker state directly would not survive, because `load_asr_engine`
-        # re-reads the pin from the overrides before any loader runs.
-        pinned = TencentModelsV2(
-            engine_model_type=RequestedModelV2(
-                id="tencent-asr",
-                revision=RequestedProviderParameterV2(parameter="16k_yue"),
-            )
+    class _FakeTencent:
+        def transcribe(self, _item):
+            raise AssertionError("loading must not transcribe")
+
+    loaded = _FakeTencent()
+
+    # Mirrors the real loader's signature, which takes no engine overrides:
+    # Tencent's one knob is the engine-model type, and the control plane
+    # chooses it.
+    def fake_load_tencent_asr(lang, *, engine_model_type, config=None):
+        captured["lang"] = lang
+        captured["engine_model_type"] = engine_model_type
+        captured["config"] = config
+        return loaded
+
+    # Tencent selects its model by a parameter the control plane chose, so
+    # the worker refuses to load without one. The pin travels IN
+    # `engine_overrides`, exactly as the control plane sends it, and is a load
+    # input: `load_asr_engine` reads it before any loader runs.
+    pinned = TencentModelsV2(
+        engine_model_type=RequestedModelV2(
+            id="tencent-asr",
+            revision=RequestedProviderParameterV2(parameter="16k_yue"),
         )
-        overrides = {
-            "asr": "tencent",
-            PINNED_ASR_MODELS_KEY: pinned.model_dump_json(),
-        }
+    )
+    overrides = {
+        "asr": "tencent",
+        PINNED_ASR_MODELS_KEY: pinned.model_dump_json(),
+    }
 
-        monkeypatch.setattr(
-            "batchalign.inference.languages.cantonese._tencent_asr.load_tencent_asr",
-            fake_load_tencent_asr,
+    monkeypatch.setattr(
+        "batchalign.inference.languages.cantonese._tencent_asr.load_tencent_asr",
+        fake_load_tencent_asr,
+    )
+
+    host = load_asr_engine(
+        WorkerBootstrapRuntime(
+            task=InferTask.ASR,
+            lang="yue",
+            num_speakers=1,
+            engine_overrides=overrides,
         )
+    )
 
+    # What the loader is GIVEN: the chosen parameter alone.
+    assert captured == {
+        "lang": "yue",
+        # Chosen by the Rust control plane and carried through the pin,
+        # not derived from the language by this worker.
+        "engine_model_type": "16k_yue",
+        "config": None,
+    }
+    assert isinstance(host, LoadedProviderAsr)
+    assert host.backend is AsrBackendV2.HK_TENCENT
+    assert host.runner == loaded.transcribe
+    # The identity is the declared member: Tencent reports no revision back.
+    assert host.model_identity == TencentModelIdentityV2(
+        engine_model_type=LoadedModelV2(
+            id="tencent-asr",
+            requested=RequestedProviderParameterV2(parameter="16k_yue"),
+            observed=ObservedNotExposedV2(),
+        )
+    )
+
+
+def test_a_pin_for_another_engine_is_refused_at_load(monkeypatch) -> None:
+    """The pin is a load input checked against the engine being loaded: a
+    Tencent pin on a Qwen load means the two sides disagree, and nothing
+    loads."""
+    called = _refuse_every_loader(monkeypatch)
+    pinned = TencentModelsV2(
+        engine_model_type=RequestedModelV2(
+            id="tencent-asr",
+            revision=RequestedProviderParameterV2(parameter="16k_yue"),
+        )
+    )
+    with pytest.raises(ValueError, match="pinned a 'tencent' ASR composition"):
         load_asr_engine(
             WorkerBootstrapRuntime(
                 task=InferTask.ASR,
                 lang="yue",
                 num_speakers=1,
-                engine_overrides=overrides,
+                engine_overrides={
+                    "asr": "qwen",
+                    PINNED_ASR_MODELS_KEY: pinned.model_dump_json(),
+                },
             )
         )
-
-        # What the loader is GIVEN, which is no longer the overrides. The pin
-        # travels in `engine_overrides` to `load_asr_engine`, which reads it
-        # before any loader runs and passes down the chosen parameter alone;
-        # the loader had no use for the rest and was carrying it unread.
-        assert captured == {
-            "lang": "yue",
-            # Chosen by the Rust control plane and carried through the pin,
-            # not derived from the language by this worker.
-            "engine_model_type": "16k_yue",
-            "config": None,
-        }
-        assert _state.asr_engine is AsrEngine.TENCENT
-    finally:
-        _state.asr_engine = old_engine
-        # Restored, or this pin leaks into every later test in the session and
-        # turns unrelated failures into order-dependent ones.
-        _state.asr_pinned_models = old_pinned
+    assert called == []
 
 
 def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
-    """If ``QwenRecognizerConfig.load()`` hangs (model download/load stuck
-    in the qwen-asr package's ``from_pretrained`` call), the loader
+    """If ``QwenRecognizerConfig.load()`` hangs (the load stuck in
+    ``from_pretrained``, then the qwen-asr package's), the loader
     must raise ``TimeoutError`` within the configured timeout, not
     sit silently at 0% CPU for hours.
 
@@ -479,7 +391,7 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
 
     hang_invocations: list[int] = []
 
-    def hang_warm(self) -> None:
+    def hang_warm(self, _snapshots) -> None:
         """Simulate the production hang: ``load()`` never returns."""
         hang_invocations.append(1)
         # Sleep longer than the configured timeout. If the loader
@@ -497,8 +409,9 @@ def test_load_qwen_asr_times_out_on_hang(monkeypatch) -> None:
     with pytest.raises(TimeoutError, match=r"Qwen3-ASR.*timed out after 1 second"):
         _qwen_asr.load_qwen_asr(
             "yue",
-            {"qwen_model": "Qwen/Qwen3-ASR-0.6B-hf"},
+            None,
             recognition=SEGMENTATION_MODEL_POLICY,
+            snapshots=FAKE_QWEN_SNAPSHOTS,
         )
     elapsed = time.monotonic() - start
 

@@ -140,17 +140,25 @@ Important keys:
 - `media_mappings`: corpus repository name to media directory, on the execution host; selected automatically when a submitted path contains the key (see "Remote use")
 - `memory_tier`: override auto-detected tier: `small`, `medium`, `large`, `fleet`
 - `memory_gate_mb`: host headroom reserve in MB (default: 2048)
-- `gpu_startup_mb` / `stanza_startup_mb` / `io_startup_mb`: per-profile startup reservation overrides
+- `gpu_startup_mb` / `stanza_startup_mb` / `io_startup_mb`: per-profile memory envelopes for the admission projection and the per-job execution budget (not a worker's spawn reservation, which is its measured baseline; each model a worker loads reserves its own memory)
 - `worker_health_interval_s`: health check frequency in seconds (default: 30)
-- `worker_ready_timeout_s`: seconds a spawned worker has to become ready (default: 300)
+- `worker_startup_stall_s`: how long a starting worker may go without
+  reporting progress before it counts as stalled (default: 300). Not a limit
+  on the whole startup: a worker reporting progress is waited for as long as
+  it keeps advancing, and a worker waiting for host memory (below) is not
+  starting yet. Applies to stdio workers and TCP daemons alike. See
+  [Model downloads](model-downloads.md#first-run-downloads-and-time-limits).
 - `audio_task_timeout_s`: raise the transport ceiling for audio tasks, in
   seconds. Leave it out for the built-in ceiling: ASR's scales with the audio
   (an override can only raise it), forced alignment and speaker diarization
   use 1800. `--timeout` sets the same value from the command line.
 - `analysis_task_timeout_s`: transport ceiling for OpenSMILE and AVQI, in
   seconds (built-in: 120)
-- `ensure_task_timeout_s`: how long on-demand model loading may take, in
-  seconds (built-in: 120); raise it on slow networks
+- `ensure_task_stall_s`: how long loading one model may go without
+  reporting progress, in seconds (default: 120). Every model loads on demand,
+  before the first file that needs it. Like `worker_startup_stall_s`, a stall
+  window rather than a limit on the whole load, so a slow network does not
+  need it raised
 - `worker_registry_path`: the pre-started worker registry file (built-in:
   `workers.json` in the state directory)
 - `job_ttl_days`: auto-delete completed jobs after this many days (default: 7)
@@ -159,10 +167,24 @@ Every timeout and interval above is a positive whole number of seconds. "Use
 the built-in value" is spelled by leaving the key out, never by writing `0`.
 Older files that wrote `0` (or `""` for `worker_registry_path`), which used to
 mean exactly that, still load: the timeout overrides and the registry path
-read it as absent, and `worker_health_interval_s` and `worker_ready_timeout_s`
-read it as their default. In code the overrides are `Option<PositiveSeconds>`
-and the two intervals are `PositiveSeconds`, so no consumer tests for a zero.
-`--timeout 0` on the command line is refused with that instruction.
+read it as absent, and `worker_health_interval_s` reads it as its default. The
+two stall windows are newer keys and refuse `0`. In code the overrides are
+`Option<PositiveSeconds>` and the intervals and windows are `PositiveSeconds`,
+so no consumer tests for a zero. `--timeout 0` on the command line is refused
+with that instruction.
+
+The two stall windows were renamed on 2026-11-05: `worker_ready_timeout_s` is
+now `worker_startup_stall_s` and `ensure_task_timeout_s` is now
+`ensure_task_stall_s`, since neither ever was a timeout. The configuration
+refuses unknown keys, so a file still using an old name fails at startup,
+naming the key; rename it.
+
+Waiting for host memory has no setting and no time limit. A worker that
+cannot start, or a model that cannot load, because the machine's memory is
+reserved by other work waits in turn until the memory is free; the file
+shows "Waiting for host memory" and the server log says what it is waiting
+for once a minute. Only a model larger than the machine can ever hold (its
+total memory less `memory_gate_mb`) is refused, at once, naming the sizes.
 
 A count that must be positive and is written as `0` or below is refused, not
 corrected: `job_ttl_days`, `memory_gate_poll_s`, `max_concurrent_worker_startups`

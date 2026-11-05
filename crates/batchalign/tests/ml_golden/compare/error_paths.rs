@@ -53,7 +53,6 @@ async fn error_compare_missing_gold_companion_fails_cleanly() {
                 override_media_cache: true,
                 ..CommonOptions::default()
             },
-            merge_abbrev: false.into(),
         }),
         paths_mode: true,
         source_paths: vec![main_path.to_string_lossy().as_ref().into()],

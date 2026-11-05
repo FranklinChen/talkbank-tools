@@ -1,7 +1,7 @@
 # Apple MPS Workarounds
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 ## MPS Exclusion Policy
 
@@ -226,20 +226,17 @@ device.
 
 ### Speaker Diarization (`inference/speaker.py`)
 
-```python
-return "cuda" if torch.cuda.is_available() else "cpu"
-```
+Local Pyannote diarization selects no device at all: the pipeline that
+`inference/pyannote_local.py` loads is never moved off the CPU, so neither
+CUDA nor the MPS opt-in reaches it. pyannoteAI runs at the provider and uses
+no local device.
 
-MPS is excluded from diarization because:
+MPS must stay excluded from diarization if a device is ever selected here:
 
 - **Pyannote on MPS** produces wrong timestamps
   ([pyannote/pyannote-audio#1337](https://github.com/pyannote/pyannote-audio/issues/1337),
   closed as wontfix). Kernel crashes also reported on M4
   ([#1886](https://github.com/pyannote/pyannote-audio/issues/1886)).
-- **NeMo** is CUDA-only by design, no MPS support at all.
-
-The device selector (`_device_for_speaker_runtime`) returns `"cuda"` or
-`"cpu"`, never `"mps"`.
 
 ### Device Policy (`batchalign/device.py`)
 

@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from batchalign.worker._types_v2 import (
     AsrElementV2,
@@ -34,7 +34,9 @@ from batchalign.worker._types_v2 import (
     WhisperTokenTimingV2,
 )
 
-_SCHEMA_MODELS: dict[str, type[BaseModel]] = {
+# A schema's Python form: a model, or a discriminated union of models (a
+# progress event is one of two scopes), each read through a ``TypeAdapter``.
+_SCHEMA_MODELS: dict[str, object] = {
     "hello_request": HelloRequestV2,
     "hello_response": HelloResponseV2,
     "execute_request": ExecuteRequestV2,
@@ -99,12 +101,14 @@ def test_worker_protocol_v2_fixtures_roundtrip_in_python(entry: dict[str, str]) 
     """Each shared fixture should roundtrip through the live Python V2 schema."""
 
     schema = entry["schema"]
-    model_type = _SCHEMA_MODELS[schema]
+    adapter: TypeAdapter[BaseModel] = TypeAdapter(_SCHEMA_MODELS[schema])
     with (_fixture_root() / entry["file"]).open() as handle:
         raw = json.load(handle)
 
-    model = model_type.model_validate(raw)
-    assert _prune_absent_none_fields(model.model_dump(mode="json"), raw) == raw
+    model = adapter.validate_python(raw)
+    assert (
+        _prune_absent_none_fields(adapter.dump_python(model, mode="json"), raw) == raw
+    )
 
 
 @pytest.mark.parametrize(
@@ -234,3 +238,60 @@ def test_an_item_outcome_admits_neither_a_null_result_nor_an_unknown_field() -> 
     ]:
         with pytest.raises(ValidationError):
             InferResponse.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        # Units in a load event.
+        {
+            "scope": "load",
+            "stage": "s",
+            "measure": {"kind": "units", "completed": 1, "total": 3},
+        },
+        # Growth in a request event.
+        {
+            "scope": "request",
+            "request_id": "req-7",
+            "stage": "s",
+            "progress": {"kind": "download_growth", "grown_kib": 7},
+        },
+        # Request progress that names no request.
+        {
+            "scope": "request",
+            "request_id": "",
+            "stage": "s",
+            "progress": {"completed": 1, "total": 3},
+        },
+        # More items done than the request holds.
+        {
+            "scope": "request",
+            "request_id": "req-7",
+            "stage": "s",
+            "progress": {"completed": 4, "total": 3},
+        },
+        # The pre-scope shape, whose empty id meant "a load".
+        {
+            "request_id": "",
+            "stage": "s",
+            "measure": {"kind": "phase", "edge": "begin"},
+        },
+    ],
+    ids=["units-in-load", "growth-in-request", "empty-id", "past-total", "no-scope"],
+)
+def test_a_progress_scope_and_its_measure_cannot_disagree(
+    event: dict[str, object],
+) -> None:
+    """The states the scoped event makes unrepresentable are refused, as
+    Rust refuses them (``progress.rs``)."""
+    with pytest.raises(ValidationError):
+        TypeAdapter(ProgressEventV2).validate_python(event)
+
+
+def test_unit_progress_refuses_a_count_past_its_total() -> None:
+    """A producer counting past its total fails where it builds the count."""
+    from batchalign.worker._types_v2 import UnitProgressV2
+
+    assert UnitProgressV2(completed=3, total=3).completed == 3
+    with pytest.raises(ValidationError, match="4 of 3 items"):
+        UnitProgressV2(completed=4, total=3)

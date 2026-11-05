@@ -30,16 +30,20 @@ from batchalign.inference.asr import (
     load_whisper_asr,
 )
 from batchalign.tests._asr_model_pins import loaded_identity
+from batchalign.tests._snapshots import transformers_snapshot
 from batchalign.worker._types_v2 import (
     AsrBackendV2,
     DetectWhisperLanguageV2,
     ForceWhisperLanguageV2,
     NotRequestedDiarizationV2,
+    WhisperModelIdentityV2,
 )
 
 # ---------------------------------------------------------------------------
 # Pydantic model tests
 # ---------------------------------------------------------------------------
+
+_STAND_IN_IDENTITY = WhisperModelIdentityV2(asr=transformers_snapshot().loaded)
 
 
 class TestAsrModels:
@@ -226,6 +230,7 @@ class TestWhisperPathBoundary:
                     config="cfg",
                     decoding=DetectWhisperLanguageV2(),
                     sample_rate=16000,
+                    model_identity=_STAND_IN_IDENTITY,
                 )
                 return handle.gen_kwargs()
 
@@ -284,6 +289,7 @@ class TestWhisperPathBoundary:
                     config="cfg",
                     decoding=DetectWhisperLanguageV2(),
                     sample_rate=16000,
+                    model_identity=_STAND_IN_IDENTITY,
                 )
                 return handle.gen_kwargs()
 
@@ -393,9 +399,9 @@ class TestWhisperLoader:
         monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
 
+        snapshot = transformers_snapshot("org/cuda-model")
         handle = load_whisper_asr(
-            model="cuda-model",
-            base="cuda-base",
+            snapshot,
             decoding=ForceWhisperLanguageV2(token="en"),
             target_sample_rate=44100,
             device_policy=DevicePolicy(),
@@ -403,7 +409,7 @@ class TestWhisperLoader:
 
         assert handle.decoding == ForceWhisperLanguageV2(token="en")
         assert handle.sample_rate == 44100
-        assert handle.config.base == "cuda-base"
+        assert handle.config.base == snapshot.path
         assert handle.config.no_repeat_ngram_size == 4
         assert handle.config.use_cache is True
         from batchalign.inference.whisper_windows import WindowOwnedWhisperPipeline
@@ -412,9 +418,9 @@ class TestWhisperLoader:
             (
                 "automatic-speech-recognition",
                 {
-                    "model": "cuda-model",
+                    "model": snapshot.path,
                     "pipeline_class": WindowOwnedWhisperPipeline,
-                    "tokenizer": "tokenizer:cuda-base",
+                    "tokenizer": f"tokenizer:{snapshot.path}",
                     "chunk_length_s": 25,
                     "stride_length_s": 3,
                     "device": torch.device("cuda"),
@@ -423,8 +429,9 @@ class TestWhisperLoader:
                 },
             )
         ]
-        assert _FakeTokenizer.calls == ["cuda-base"]
-        assert _FakeProcessor.calls == ["cuda-base"]
+        # One snapshot is model, tokenizer and processor alike.
+        assert _FakeTokenizer.calls == [snapshot.path]
+        assert _FakeProcessor.calls == [snapshot.path]
         assert bind_calls == [pipe.model]
         assert pipe.model.eval_called is True
 
@@ -448,8 +455,7 @@ class TestWhisperLoader:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
         handle = load_whisper_asr(
-            model="mps-model",
-            base="mps-base",
+            transformers_snapshot("org/mps-model"),
             decoding=DetectWhisperLanguageV2(),
             target_sample_rate=22050,
             device_policy=DevicePolicy(),
@@ -487,7 +493,9 @@ class TestWhisperLoader:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
 
         handle = load_whisper_asr(
-            decoding=DetectWhisperLanguageV2(), device_policy=DevicePolicy()
+            transformers_snapshot(),
+            decoding=DetectWhisperLanguageV2(),
+            device_policy=DevicePolicy(),
         )
 
         assert handle.decoding == DetectWhisperLanguageV2()
@@ -501,6 +509,7 @@ class TestWhisperLoader:
         _install_fake_transformers(monkeypatch, lambda task, **kwargs: _FakePipe())
         with pytest.raises(ValueError, match="'sw'"):
             load_whisper_asr(
+                transformers_snapshot(),
                 decoding=ForceWhisperLanguageV2(token="sw"),
                 device_policy=DevicePolicy(),
             )

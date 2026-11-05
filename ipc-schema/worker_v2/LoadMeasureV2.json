@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoadMeasureV2",
+  "description": "What a model load's progress event measures.",
+  "oneOf": [
+    {
+      "description": "A model download's measured growth so far, in KiB.",
+      "type": "object",
+      "properties": {
+        "grown_kib": {
+          "description": "KiB the download's cache trees have grown since it started.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "const": "download_growth"
+        }
+      },
+      "required": [
+        "kind",
+        "grown_kib"
+      ]
+    },
+    {
+      "description": "A named phase boundary.",
+      "type": "object",
+      "properties": {
+        "edge": {
+          "description": "Which end of the phase this event marks.",
+          "$ref": "#/$defs/PhaseEdgeV2"
+        },
+        "kind": {
+          "type": "string",
+          "const": "phase"
+        }
+      },
+      "required": [
+        "kind",
+        "edge"
+      ]
+    }
+  ],
+  "$defs": {
+    "PhaseEdgeV2": {
+      "description": "Which end of a phase a [`LoadMeasureV2::Phase`] event marks.",
+      "oneOf": [
+        {
+          "description": "The phase began.",
+          "type": "string",
+          "const": "begin"
+        },
+        {
+          "description": "The phase finished.",
+          "type": "string",
+          "const": "complete"
+        }
+      ]
+    }
+  }
+}

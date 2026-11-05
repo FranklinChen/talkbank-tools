@@ -1,7 +1,7 @@
 # Batchalign2 CLI Reference (Baseline)
 
 **Status:** Reference
-**Last updated:** 2026-09-07 07:04 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 This document captures the CLI surface of Batchalign2 across **two baselines**:
 
@@ -64,7 +64,7 @@ Forced alignment: adds word-level timing bullets to existing CHAT transcripts.
 | `--wav2vec` / `--whisper_fa` | exclusive pair | `--wav2vec` | FA engine selection | Hidden compat alias → `--fa-engine` |
 | `--pauses` | flag | off | Retain legacy character-spaced Whisper input. Measured ends are now preserved by default; `--word-gaps heal` explicitly requests the old smoothing behavior. | Wired |
 | `--wor` / `--nowor` | bool | `True` | Write %wor tier | Wired (`default_value_t = true`) |
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations | Wired | **(Feb 9 only)** |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 
 **Pipeline task:** `"fa"` (forced alignment).
 
@@ -108,7 +108,7 @@ Morphosyntactic analysis (POS, lemma, dependency parse).
 | `--skipmultilang` / `--multilang` | bool | `False` | Skip multilingual files | Wired |
 | `--lexicon` | path | `None` | Manual lexicon override | Wired |
 | `--override-media-cache` / `--use-cache` | bool | `False` | Bypass analysis cache **(Feb 9 only)** | Wired |
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 | `--no-l2-morphotag` | flag | off | Opt out of BA3's default-on per-word `@s` secondary dispatch and keep legacy `L2\|xxx` placeholders | BA3-only |
 
 **Pipeline task:** `"morphosyntax"`.
@@ -126,7 +126,7 @@ Translation to English.
 
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 | `--translate-engine google\|seamless\|nllb\|tencent\|aliyun` | enum | `google` | Pick translation engine | BA3-only |
 
 **Pipeline task:** `"translate"`.
@@ -163,7 +163,7 @@ Coreference resolution. Hidden from `--help` in BA2.
 
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 
 **Pipeline task:** `"coref"`.
 
@@ -175,7 +175,7 @@ Utterance segmentation.
 |------|------|---------|------|------------|
 | `--lang` | str | `"eng"` | Language code | Wired |
 | `-n` / `--num_speakers` | int | `2` | Expected speaker count | **Not as spelled.** BA3 takes `--num-speakers` (kebab). It never accepted BA2's `--num_speakers` underscore, and it stopped accepting `-n` on 2026-08-19. |
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 
 **Pipeline task:** `"utseg"`.
 
@@ -190,7 +190,7 @@ ASR word error rate benchmarking against gold transcripts.
 | `--lang` | str | `"eng"` | Language code | Wired |
 | `-n` / `--num_speakers` | int | `2` | Expected speaker count | **Not as spelled.** BA3 takes `--num-speakers` (kebab). It never accepted BA2's `--num_speakers` underscore, and it stopped accepting `-n` on 2026-08-19. |
 | `--wor` / `--nowor` | bool | `False` | Write %wor tier | Wired |
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 
 **Pipeline task:** `"asr"` (transcribe) + `"morphosyntax"` (compare).
 
@@ -201,7 +201,7 @@ Transcript comparison against gold-standard references.
 | Flag | Type | Default | Help | BA3 Status |
 |------|------|---------|------|------------|
 | `--lang` | str | `"eng"` | Language code | Wired |
-| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Wired |
+| `--merge-abbrev` / `--no-merge-abbrev` | bool | `False` | Merge abbreviations **(Feb 9 only)** | Removed: transcribe-only in BA3, refused at the command line |
 
 **Pipeline task:** `"morphosyntax"` (compare uses morphosyntax to tag both transcripts before WER computation).
 

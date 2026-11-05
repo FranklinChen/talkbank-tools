@@ -148,7 +148,7 @@ pub(crate) async fn process_morphosyntax_incremental(
     ) {
         Ok(before) => before,
         Err(ServerError::ChatAdmission(error))
-            if !crate::error::chat_admission_is_internal(&error) =>
+            if error.fault() == crate::error::RefusalFault::InvalidInput =>
         {
             warn!(%error, "Invalid prior CHAT disables morphology reuse; analyzing current input");
             return run_admitted_morphosyntax(ParsedFile::Analyze(after), services, params).await;

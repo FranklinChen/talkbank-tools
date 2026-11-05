@@ -1,7 +1,7 @@
 # Benchmarks
 
 **Status:** Current
-**Last updated:** 2026-09-16 22:04 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Batchalign provides a `benchmark` command to evaluate ASR accuracy against
 gold transcripts. It transcribes each audio file, compares the result
@@ -205,18 +205,17 @@ If no gold file is found, the file is skipped with an `InputMissing` error.
 
 ## Input Requirements
 
-The gold `.cha` file must be parseable by batchalign3's tree-sitter grammar.
-Files with parse errors (tree-sitter ERROR nodes) will fail at the
-morphotag pre-validation gate with:
+The gold `.cha` file must be valid CHAT. Benchmark admits it through
+Chatter, the same validity authority as `chatter validate`, before any
+comparison; a gold file that is not valid CHAT is refused with each problem
+and the line it is on, for example:
 
 ```text
-morphotag pre-validation failed: [L0] File has N parse error(s); input may be malformed
+the input transcript is not valid CHAT: line 7: E316 Unparsable content on main tier: '[ -eng]'. Correct the transcript and submit it again; nothing was written
 ```
 
-Note that `chatter validate` (from talkbank-tools) and batchalign3 use the
-same tree-sitter grammar, but batchalign3's pre-validation is stricter,
-it rejects files with **any** parse errors at L0, whereas `chatter validate`
-may report these as warnings.
+Run `chatter validate` on the gold file to see the same findings with their
+context.
 
 ## Example
 
@@ -233,7 +232,6 @@ batchalign3 benchmark ~/ba_data/input -o ~/ba_data/output --lang eng
 | `--lang CODE` | 3-letter ISO language code (default: `eng`) |
 | `--num-speakers N` | Number of speakers (default: `2`) |
 | `--wor` / `--nowor` | Toggle `%wor` tier output |
-| `--merge-abbrev` | Merge abbreviations in output |
 | `--bank NAME` | Legacy remote media selector (unsupported in the current CLI; pass filesystem paths instead) |
 | `--subdir PATH` | Legacy remote media selector subdirectory (unsupported in the current CLI) |
 

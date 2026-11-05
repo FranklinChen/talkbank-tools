@@ -96,6 +96,7 @@ fn test_transcribe_options_in(
             crate::params::CachePolicy::UseCache,
         ),
         write_wor: false,
+        merge_abbrev: crate::params::MergeAbbrevPolicy::Keep,
         media_name: Some("sample".into()),
         engine_extras: std::collections::BTreeMap::new(),
     }

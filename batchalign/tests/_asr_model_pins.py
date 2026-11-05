@@ -13,10 +13,8 @@ be reached from a test. The leading underscore keeps pytest from collecting it.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING
 
-from batchalign.worker._types import _state
 from batchalign.worker._types_v2 import (
     AliyunModelIdentityV2,
     AliyunModelsV2,
@@ -41,8 +39,6 @@ from batchalign.worker._types_v2 import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from batchalign.worker._types_v2 import AsrModelIdentityV2, AsrRequestedModelsV2
 
 # The resolved revisions, copied from the Rust manifest. A copy, and knowingly
@@ -160,20 +156,3 @@ def loaded_identity(backend: AsrBackendV2) -> AsrModelIdentityV2:
     if isinstance(models, RevModelsV2):
         return RevModelIdentityV2(provider=_loaded_unexposed(models.provider))
     raise AssertionError(f"no loaded identity for ASR backend {backend!s}")
-
-
-@contextlib.contextmanager
-def worker_loaded(backend: AsrBackendV2) -> Iterator[None]:
-    """Record a loaded ASR identity in worker state for the duration of a test.
-
-    Sets the same state the real engine loader sets, because the Rust bridge
-    reads its load record from there before serving a provider request. Restores
-    the previous value so one test cannot leak an identity into the next.
-    """
-
-    previous = _state.asr_model_identity
-    _state.asr_model_identity = loaded_identity(backend)
-    try:
-        yield
-    finally:
-        _state.asr_model_identity = previous

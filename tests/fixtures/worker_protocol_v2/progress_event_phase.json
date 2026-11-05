@@ -1,0 +1,8 @@
+{
+  "scope": "load",
+  "stage": "loading_task_morphosyntax_eng",
+  "measure": {
+    "kind": "phase",
+    "edge": "complete"
+  }
+}

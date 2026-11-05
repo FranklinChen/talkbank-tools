@@ -317,7 +317,7 @@ fn real_injection_retains_exact_word_intervals_through_written_chat() {
         .expect("complete written timing")
         .into_document();
     assert!(output.shortfalls.is_empty());
-    // Exercise the writer's optional final transform as well as serialization.
+    // Exercise the writer's final transform as well as serialization.
     let document = output
         .document
         .with_provenance_injected(&crate::provenance::align_provenance(
@@ -329,9 +329,7 @@ fn real_injection_retains_exact_word_intervals_through_written_chat() {
             crate::chat_ops::fa::DEFAULT_MAIN_BULLET_POLICY,
             crate::provenance::AlignTiming::Aligned,
         ))
-        .expect("provenance preserves the timing census")
-        .with_abbreviations_merged()
-        .expect("no abbreviation change");
+        .expect("provenance preserves the timing census");
     let (reread, errors) =
         batchalign_transform::parse::parse_lenient(&crate::chat_parser(), document.as_str());
     assert!(errors.is_empty(), "{errors:?}");
@@ -398,31 +396,6 @@ fn durable_partial_tier_is_authoritative_over_working_word_timings() {
             ..
         }]
     ));
-}
-
-#[test]
-fn later_abbreviation_merge_cannot_invalidate_admitted_timing_census() {
-    for include_wor in [true, false] {
-        let (mut file, admission) = attempt("F B I");
-        time_words(&mut file, false);
-        if !include_wor {
-            for line in &mut file.lines {
-                if let Line::Utterance(utterance) = line {
-                    utterance.dependent_tiers.retain(|entry| {
-                        !matches!(entry.tier, talkbank_model::model::DependentTier::Wor(_))
-                    });
-                }
-            }
-        }
-        let output = admission
-            .finish(result(file))
-            .expect("admitted output")
-            .into_document();
-        assert!(
-            output.document.with_abbreviations_merged().is_err(),
-            "a post-completion lexical change cannot retain its old census (wor={include_wor})"
-        );
-    }
 }
 
 #[test]

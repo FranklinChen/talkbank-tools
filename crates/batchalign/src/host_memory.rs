@@ -3,8 +3,34 @@
 //! The Rust server can be only one memory consumer on a machine that also runs
 //! other batchalign3 ports, CLI daemons, tests, or unrelated inference tools.
 //! This module provides a small machine-local coordination ledger so
-//! participating batchalign3 processes can serialize heavy worker startups and
-//! conservatively reserve job execution memory on shared hosts.
+//! participating batchalign3 processes can serialize worker startups, reserve
+//! each model a worker loads, and conservatively reserve job execution memory
+//! on shared hosts.
+//!
+//! # What a lease counts
+//!
+//! Admission compares the reservations with the memory the operating system
+//! reports AVAILABLE now. Memory a worker has already taken is gone from that
+//! reading, so a lease counts only what its holder has not yet taken: a
+//! worker-startup lease counts the process baseline until the worker is ready
+//! and is then dropped; a model-load lease counts the model while it loads and,
+//! once the worker confirms the load, only the activation margin the model
+//! has yet to use (`HostMemoryLease::settler`). Counting a resident model in
+//! full would count it twice, once in the reading and once in the ledger, and
+//! a load waiting with no deadline behind that phantom would wait for memory
+//! the host has.
+//!
+//! # Queued waits
+//!
+//! A worker startup or a model load that the host cannot fit now queues
+//! ([`HostMemoryCoordinator::queue_for_lease`]): it has no deadline, says it is
+//! waiting (a log line when it queues, a warning every
+//! [`QUEUED_LEASE_REPORT_INTERVAL`], and its [`QueuedLeaseObserver`]), and ends
+//! when the lease is granted, when the request is refused for good (one larger
+//! than the machine, an unreadable host or ledger), or when its future is
+//! dropped (a cancelled job). Real-model test locks and job execution plans
+//! keep a bounded wait ([`LeaseWait::Bounded`]); a job that cannot fit is
+//! re-queued by the runner rather than waiting inside it.
 
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -24,6 +50,16 @@ use crate::worker::WorkerProfile;
 
 const DEFAULT_LOCK_POLL: Duration = Duration::from_secs(1);
 const DEFAULT_TEST_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How often a queued lease wait retries the ledger.
+const QUEUED_LEASE_POLL: Duration = Duration::from_secs(1);
+
+/// How often a queued lease wait warns that it is still waiting.
+///
+/// Shorter than the saturated-pool checkout report (300 s): a pool queue
+/// behind long requests is ordinary, while a host that cannot fit a model
+/// is worth an operator's attention within a minute.
+pub const QUEUED_LEASE_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 
 pub use crate::types::response::HostMemoryPressureLevel;
 
@@ -234,6 +270,7 @@ pub struct HostMemorySnapshot {
 
 /// One acquired host-memory lease. Releasing the lease removes it from the
 /// machine-local ledger.
+#[derive(Debug)]
 pub struct HostMemoryLease {
     ledger_path: PathBuf,
     lease_id: String,
@@ -286,6 +323,19 @@ impl HostMemoryLease {
         })
     }
 
+    /// What changing this lease's reservation in place needs, detached from
+    /// the lease ([`LeaseSettler::settle`]): the transition from a model
+    /// loading (counted in full) to a model resident (counted at what it has
+    /// yet to use), see the module docs. Detached so the blocking pool can
+    /// run it while the lease stays with its owner, and a settle that never
+    /// runs cannot take the lease with it.
+    pub fn settler(&self) -> LeaseSettler {
+        LeaseSettler {
+            ledger_path: self.ledger_path.clone(),
+            lease_id: self.lease_id.clone(),
+        }
+    }
+
     fn release_internal(&mut self) {
         if self.released {
             return;
@@ -303,6 +353,34 @@ impl HostMemoryLease {
 impl Drop for HostMemoryLease {
     fn drop(&mut self) {
         self.release_internal();
+    }
+}
+
+/// Settles one lease's reservation ([`HostMemoryLease::settler`]) from a
+/// thread other than its owner's. Best effort, like
+/// [`HostMemoryLease::set_worker_pid`]: a ledger that cannot be rewritten
+/// keeps the larger reservation, which over-reserves and never
+/// under-reserves. Blocking file I/O.
+#[derive(Debug)]
+pub struct LeaseSettler {
+    ledger_path: PathBuf,
+    lease_id: String,
+}
+
+impl LeaseSettler {
+    /// Rewrite the lease's reservation to `reserved`. A lease already gone
+    /// (released, or pruned with its dead worker) has nothing to settle.
+    pub fn settle(self, reserved: MemoryMb) -> Result<(), HostMemoryError> {
+        let Self {
+            ledger_path,
+            lease_id,
+        } = self;
+        with_locked_ledger(&ledger_path, move |ledger: &mut MemoryLedger| {
+            if let Some(lease) = ledger.leases.iter_mut().find(|lease| lease.id == lease_id) {
+                lease.reserved_mb = reserved;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -404,7 +482,9 @@ pub enum HostMemoryError {
         /// Configured host-wide startup slot limit.
         max_slots: usize,
     },
-    /// Waiting for capacity exceeded the configured timeout.
+    /// A bounded wait for capacity (a real-model test lock, a job execution
+    /// plan) exceeded its timeout. Worker startups and model loads queue
+    /// instead and never time out.
     #[error(
         "timed out waiting for host-memory capacity for {label} after {waited_s}s: {last_reason}"
     )]
@@ -418,24 +498,69 @@ pub enum HostMemoryError {
     },
 }
 
+/// What a lease reserves memory for.
+///
+/// A new kind breaks every exhaustive match below until its author says
+/// whether it holds a startup slot and which side of an owner's demand it
+/// counts on.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum MemoryLeaseKind {
+    /// A worker process starting: its baseline, until it reports ready.
     WorkerStartup,
+    /// A job's file parallelism, for the job's life.
     JobExecution,
+    /// The machine-wide real-model test lock (no memory of its own).
     MlTestExclusive,
+    /// One model a worker loads on demand (`ensure_task`), for as long as
+    /// the worker holds it: in full while it loads, then the activation
+    /// margin it has yet to use.
+    ModelLoad,
+    /// One batch of a model a worker builds per batch (coreference), for the
+    /// batch.
+    ModelBatch,
+    /// Request-shaped workspace of an already loaded model, for the request.
+    ModelRequest,
 }
 
 impl MemoryLeaseKind {
     /// Whether a lease of this kind occupies one of the host's worker-startup
     /// slots. Only a worker startup does; it is a fact about the kind, not a
-    /// second field to keep in agreement with it.
+    /// second field to keep in agreement with it. A model load does not: its
+    /// memory is reserved by its own lease, and a slot held through a first
+    /// download would stall every other startup on the host for its length.
     fn holds_startup_slot(self) -> bool {
         match self {
             Self::WorkerStartup => true,
-            Self::JobExecution | Self::MlTestExclusive => false,
+            Self::JobExecution
+            | Self::MlTestExclusive
+            | Self::ModelLoad
+            | Self::ModelBatch
+            | Self::ModelRequest => false,
         }
     }
+
+    /// Which half of an owner's demand a lease of this kind counts on
+    /// ([`effective_reserved_mb`]).
+    fn demand_side(self) -> DemandSide {
+        match self {
+            Self::JobExecution | Self::MlTestExclusive => DemandSide::Job,
+            Self::WorkerStartup | Self::ModelLoad | Self::ModelBatch | Self::ModelRequest => {
+                DemandSide::Worker
+            }
+        }
+    }
+}
+
+/// The two halves of one owner's demand: what its jobs reserved, and what its
+/// workers reserved for themselves (their startups and the models they load).
+/// A job's reservation covers the workers serving it, so a worker's own
+/// leases are sub-allocations of it (Contract D) and the owner's demand is
+/// the larger half, never the sum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DemandSide {
+    Job,
+    Worker,
 }
 
 /// The ledger's time source: the host wall clock, read here and nowhere else
@@ -576,30 +701,35 @@ struct MemoryLedger {
     leases: Vec<MemoryLeaseRecord>,
 }
 
-/// Per-owner `max(sum(JobExecution), sum(WorkerStartup))`, summed over
-/// owners. `WorkerStartup` is a sub-allocation of `JobExecution` for
-/// the same owner (Contract D), so the larger of the two surfaces the
-/// owner's actual pending demand. `MlTestExclusive` carries 0 MB and
-/// folds into the `JobExecution` half.
+/// Per-owner `max(sum(job side), sum(worker side))`, summed over owners
+/// ([`DemandSide`]). A worker's startup and model leases are sub-allocations
+/// of its owner's job execution leases (Contract D), so the larger of the
+/// two surfaces the owner's actual pending demand. `MlTestExclusive`
+/// carries 0 MB and folds into the job half.
 ///
 /// Takes the reservations rather than the records, so admission can project
 /// the total WITH a requested lease by chaining it on, instead of building a
 /// placeholder record with an empty id and label to push onto a copy.
 fn effective_reserved_mb(reservations: impl IntoIterator<Item = Reservation>) -> u64 {
     use std::collections::HashMap;
-    let mut by_owner: HashMap<WorkerPid, (u64, u64)> = HashMap::new();
-    for reservation in reservations {
-        let entry = by_owner.entry(reservation.owner).or_default();
-        match reservation.kind {
-            MemoryLeaseKind::JobExecution | MemoryLeaseKind::MlTestExclusive => {
-                entry.0 = entry.0.saturating_add(reservation.reserved.0);
-            }
-            MemoryLeaseKind::WorkerStartup => {
-                entry.1 = entry.1.saturating_add(reservation.reserved.0);
-            }
-        }
+    #[derive(Default)]
+    struct OwnerDemand {
+        job: u64,
+        worker: u64,
     }
-    by_owner.values().map(|(je, ws)| (*je).max(*ws)).sum()
+    let mut by_owner: HashMap<WorkerPid, OwnerDemand> = HashMap::new();
+    for reservation in reservations {
+        let demand = by_owner.entry(reservation.owner).or_default();
+        let side = match reservation.kind.demand_side() {
+            DemandSide::Job => &mut demand.job,
+            DemandSide::Worker => &mut demand.worker,
+        };
+        *side = side.saturating_add(reservation.reserved.0);
+    }
+    by_owner
+        .values()
+        .map(|demand| demand.job.max(demand.worker))
+        .sum()
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +737,139 @@ struct MemoryLeaseRequest {
     kind: MemoryLeaseKind,
     reserved_mb: MemoryMb,
     label: String,
+    /// The worker process the reservation is for, when it already exists (a
+    /// model lease names its worker from the start, so it is reclaimed when
+    /// that worker dies and is never mistaken for a pre-spawn intent).
+    worker_pid: Option<WorkerPid>,
+}
+
+/// One reservation a worker asks the host for, ready to queue
+/// ([`HostMemoryCoordinator::queue_for_lease`]).
+///
+/// Built only by the constructors below, one per kind of worker reservation,
+/// so a queued wait cannot be handed a job's or a test lock's request.
+#[derive(Debug, Clone)]
+pub struct WorkerLeaseRequest(MemoryLeaseRequest);
+
+impl WorkerLeaseRequest {
+    /// A worker process starting, before it exists: its baseline
+    /// ([`crate::worker::residency::WORKER_BASELINE`]), the same for every
+    /// worker since none loads a model at startup.
+    pub fn worker_startup(
+        profile: WorkerProfile,
+        lang: &WorkerLanguage,
+        engine_overrides: &str,
+    ) -> Self {
+        Self(MemoryLeaseRequest {
+            kind: MemoryLeaseKind::WorkerStartup,
+            reserved_mb: crate::worker::residency::WORKER_BASELINE.reserved(),
+            label: format!(
+                "worker-startup:{}:{}:{}",
+                profile.label(),
+                lang,
+                engine_overrides
+            ),
+            worker_pid: None,
+        })
+    }
+
+    /// One model `worker` is about to load, `what` naming it (task and model).
+    pub fn model_load(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
+        Self(MemoryLeaseRequest {
+            kind: MemoryLeaseKind::ModelLoad,
+            reserved_mb: reserved,
+            label: format!("model-load:{what}:pid {worker}"),
+            worker_pid: Some(worker),
+        })
+    }
+
+    /// One batch of a per-batch model `worker` is about to build.
+    pub fn model_batch(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
+        Self(MemoryLeaseRequest {
+            kind: MemoryLeaseKind::ModelBatch,
+            reserved_mb: reserved,
+            label: format!("model-batch:{what}:pid {worker}"),
+            worker_pid: Some(worker),
+        })
+    }
+
+    /// Additional workspace of one prepared request on a resident model.
+    pub fn model_request(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
+        Self(MemoryLeaseRequest {
+            kind: MemoryLeaseKind::ModelRequest,
+            reserved_mb: reserved,
+            label: format!("model-request:{what}:pid {worker}"),
+            worker_pid: Some(worker),
+        })
+    }
+
+    /// The ledger label, which names what the lease is for.
+    pub fn label(&self) -> &str {
+        &self.0.label
+    }
+}
+
+/// Told when a queued lease wait starts and stops waiting, so whoever the
+/// wait serves (a file's progress) can say it is waiting for host memory.
+pub trait QueuedLeaseObserver: Send + Sync {
+    /// The request could not be granted now and is queued.
+    fn queued(&self);
+    /// The queued request was granted, refused or dropped.
+    fn dequeued(&self);
+}
+
+/// What one attempt to make room for a queued request did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reclaimed {
+    /// An idle worker was retired, releasing its leases and its memory: the
+    /// request is tried again at once.
+    Retired,
+    /// Nothing idle could be retired: the request waits for a lease to be
+    /// released some other way.
+    NothingIdle,
+}
+
+/// Frees host memory a queued request waits for, by retiring an idle worker.
+///
+/// A queued request asks for room directly rather than waiting for idle
+/// workers to leave on their own: the worker pool retires its largest idle
+/// worker, and a process with no pool ([`NoIdleWorkers`]) has nothing to
+/// retire. Called after each refusal, so a request that needs several
+/// workers' memory retires them one by one, and stops retiring once granted.
+#[async_trait::async_trait]
+pub trait MemoryReclaim: Send + Sync {
+    /// Retire one idle worker, if there is one.
+    async fn reclaim_one(&self) -> Reclaimed;
+}
+
+/// The reclaim of a process that owns no worker pool (a one-off command):
+/// it has no idle workers to retire.
+#[derive(Debug, Clone, Copy)]
+pub struct NoIdleWorkers;
+
+#[async_trait::async_trait]
+impl MemoryReclaim for NoIdleWorkers {
+    async fn reclaim_one(&self) -> Reclaimed {
+        Reclaimed::NothingIdle
+    }
+}
+
+/// An open queued wait: tells its observer it ended, whichever way it ends.
+struct QueuedWait<'a> {
+    observer: &'a dyn QueuedLeaseObserver,
+}
+
+impl<'a> QueuedWait<'a> {
+    fn begin(observer: &'a dyn QueuedLeaseObserver) -> Self {
+        observer.queued();
+        Self { observer }
+    }
+}
+
+impl Drop for QueuedWait<'_> {
+    fn drop(&mut self) {
+        self.observer.dequeued();
+    }
 }
 
 /// One reading of this host's RAM: both figures from the same refresh, so a
@@ -691,27 +954,108 @@ impl HostMemoryCoordinator {
         })
     }
 
-    /// Wait for a host-memory startup reservation for one worker/model load.
-    pub fn acquire_worker_startup_lease(
+    /// Wait for a worker reservation (a startup or a model), queued behind
+    /// the leases the host holds, with no deadline.
+    ///
+    /// The wait ends when the lease is granted; when the request is refused
+    /// for good (larger than the machine, an unreadable host, a ledger that
+    /// cannot be used: [`QueuedLeaseFailure::Refused`]); or when the future
+    /// is dropped, which is how a cancelled job stops waiting. While queued
+    /// it says so: one log line when it queues, a warning every
+    /// [`QUEUED_LEASE_REPORT_INTERVAL`] naming what it waits for, how long it
+    /// has waited and the host's last refusal, and `observer` told when it
+    /// starts and stops waiting. After each refusal it asks `reclaim` to
+    /// retire one idle worker, and tries again at once when one was.
+    ///
+    /// Each attempt (which takes the ledger's file lock) runs alone on the
+    /// blocking pool and the wait between attempts is a `tokio` sleep, so a
+    /// dropped future ends the wait at once and never takes a lease nobody
+    /// will use.
+    pub async fn queue_for_lease(
         &self,
-        profile: WorkerProfile,
-        startup_reservation_mb: MemoryMb,
-        lang: &WorkerLanguage,
-        engine_overrides: &str,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<HostMemoryLease, HostMemoryError> {
-        let request = MemoryLeaseRequest {
-            kind: MemoryLeaseKind::WorkerStartup,
-            reserved_mb: startup_reservation_mb,
-            label: format!(
-                "worker-startup:{}:{}:{}",
-                profile.label(),
-                lang,
-                engine_overrides
-            ),
-        };
-        self.wait_for_lease(request, timeout, poll_interval)
+        request: WorkerLeaseRequest,
+        observer: &dyn QueuedLeaseObserver,
+        reclaim: &dyn MemoryReclaim,
+    ) -> Result<HostMemoryLease, QueuedLeaseFailure> {
+        self.queue_for_lease_every(
+            request,
+            observer,
+            reclaim,
+            QUEUED_LEASE_POLL,
+            QUEUED_LEASE_REPORT_INTERVAL,
+        )
+        .await
+    }
+
+    /// [`Self::queue_for_lease`] with its poll and report intervals named, so
+    /// a test can drive the wait in milliseconds.
+    async fn queue_for_lease_every(
+        &self,
+        WorkerLeaseRequest(request): WorkerLeaseRequest,
+        observer: &dyn QueuedLeaseObserver,
+        reclaim: &dyn MemoryReclaim,
+        poll: Duration,
+        report_every: Duration,
+    ) -> Result<HostMemoryLease, QueuedLeaseFailure> {
+        let started = Instant::now();
+        let mut queued: Option<QueuedWait<'_>> = None;
+        let mut next_report = started + report_every;
+        let mut last_reason = String::from("no capacity decision yet");
+        loop {
+            let coordinator = self.clone();
+            let attempt = request.clone();
+            let outcome =
+                crate::blocking::spawn_in_span(move || coordinator.try_acquire_lease(attempt))
+                    .await
+                    .map_err(QueuedLeaseFailure::AttemptDidNotFinish)?;
+            let error = match outcome {
+                Ok(lease) => {
+                    if queued.is_some() {
+                        tracing::info!(
+                            lease = %request.label,
+                            waited_s = started.elapsed().as_secs(),
+                            "Host memory granted to a queued request"
+                        );
+                    }
+                    return Ok(lease);
+                }
+                Err(error) => error,
+            };
+            match after_failed_attempt(error, &request.label, &LeaseWait::Queued, &mut last_reason)
+            {
+                LeaseStep::Retry => {
+                    if queued.is_none() {
+                        tracing::info!(
+                            lease = %request.label,
+                            reserved_mb = request.reserved_mb.0,
+                            reason = %last_reason,
+                            "Waiting for host memory: the request keeps its place and is \
+                             granted when the host can fit it"
+                        );
+                        queued = Some(QueuedWait::begin(observer));
+                    }
+                    if Instant::now() >= next_report {
+                        tracing::warn!(
+                            lease = %request.label,
+                            reserved_mb = request.reserved_mb.0,
+                            waited_s = started.elapsed().as_secs(),
+                            reason = %last_reason,
+                            "Still waiting for host memory. The request keeps its place; it \
+                             fails only if it can never fit or its job is cancelled"
+                        );
+                        next_report += report_every;
+                    }
+                    // A retired worker (the reclaim logs which) frees its
+                    // leases at once, so the request is tried again
+                    // without waiting out the poll.
+                    match reclaim.reclaim_one().await {
+                        Reclaimed::Retired => {}
+                        Reclaimed::NothingIdle => tokio::time::sleep(poll).await,
+                    }
+                }
+                LeaseStep::Stop(error) => return Err(QueuedLeaseFailure::Refused(error)),
+            }
+        }
     }
 
     /// Acquire a machine-wide exclusive lock for real-model ML tests.
@@ -725,6 +1069,7 @@ impl HostMemoryCoordinator {
             kind: MemoryLeaseKind::MlTestExclusive,
             reserved_mb: MemoryMb(0),
             label: label.to_owned(),
+            worker_pid: None,
         };
         self.wait_for_lease(request, timeout, poll_interval)
     }
@@ -742,29 +1087,15 @@ impl HostMemoryCoordinator {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<JobExecutionPlan, HostMemoryError> {
-        let deadline = Instant::now() + timeout;
+        let wait = LeaseWait::bounded(timeout);
         let mut last_reason = String::from("no capacity decision yet");
         loop {
             match self.try_plan_job_execution(command, requested_workers, label) {
                 Ok(plan) => return Ok(plan),
-                Err(error)
-                    if timeout > Duration::ZERO
-                        && Instant::now() < deadline
-                        && retryable_error(&error) =>
-                {
-                    last_reason = error.to_string();
-                    std::thread::sleep(poll_interval);
-                }
-                Err(error) => {
-                    if timeout > Duration::ZERO && Instant::now() >= deadline {
-                        return Err(HostMemoryError::TimedOut {
-                            label: label.to_owned(),
-                            waited_s: timeout.as_secs(),
-                            last_reason,
-                        });
-                    }
-                    return Err(error);
-                }
+                Err(error) => match after_failed_attempt(error, label, &wait, &mut last_reason) {
+                    LeaseStep::Retry => std::thread::sleep(poll_interval),
+                    LeaseStep::Stop(error) => return Err(error),
+                },
             }
         }
     }
@@ -848,28 +1179,16 @@ impl HostMemoryCoordinator {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<HostMemoryLease, HostMemoryError> {
-        let deadline = Instant::now() + timeout;
+        let wait = LeaseWait::bounded(timeout);
         let mut last_reason = String::from("no capacity decision yet");
         loop {
             match self.try_acquire_lease(request.clone()) {
                 Ok(lease) => return Ok(lease),
-                Err(error)
-                    if timeout > Duration::ZERO
-                        && Instant::now() < deadline
-                        && retryable_error(&error) =>
-                {
-                    last_reason = error.to_string();
-                    std::thread::sleep(poll_interval);
-                }
                 Err(error) => {
-                    if timeout > Duration::ZERO && Instant::now() >= deadline {
-                        return Err(HostMemoryError::TimedOut {
-                            label: request.label,
-                            waited_s: timeout.as_secs(),
-                            last_reason,
-                        });
+                    match after_failed_attempt(error, &request.label, &wait, &mut last_reason) {
+                        LeaseStep::Retry => std::thread::sleep(poll_interval),
+                        LeaseStep::Stop(error) => return Err(error),
                     }
-                    return Err(error);
                 }
             }
         }
@@ -924,9 +1243,17 @@ impl HostMemoryCoordinator {
                         reserved: request.reserved_mb,
                     })),
             );
+            // A request that adds nothing to the projected total is a
+            // sub-allocation of a reservation this owner already holds (a
+            // model load inside its job's lease, Contract D): the memory was
+            // promised when that lease was granted, so it is admitted even if
+            // the host now reads as over-committed. Refusing it would make a
+            // job wait on its own reservation, which a queued wait (no
+            // deadline) would do for ever.
+            let adds_demand = projected_reserved_mb > pending_reserved_mb;
             let projected_available_mb =
                 system.available_mb.0.saturating_sub(projected_reserved_mb);
-            if projected_available_mb < self.config.reserve_mb.0 {
+            if adds_demand && projected_available_mb < self.config.reserve_mb.0 {
                 return Err(HostMemoryError::CapacityRejected {
                     label: request.label.clone(),
                     available_mb: system.available_mb.0,
@@ -941,7 +1268,7 @@ impl HostMemoryCoordinator {
                 id: Uuid::new_v4().to_string(),
                 kind: request.kind,
                 owner_pid: WorkerPid(std::process::id()),
-                worker_pid: None,
+                worker_pid: request.worker_pid,
                 reserved_mb: request.reserved_mb,
                 label: request.label,
                 created_at: ledger_now(),
@@ -999,9 +1326,17 @@ fn with_locked_ledger<T>(
         })?
     };
 
-    prune_stale_leases(&mut ledger)?;
+    let pruned = prune_stale_leases(&mut ledger)?;
 
     let result = action(&mut ledger);
+    // An action that refuses changes nothing (every refusal returns before
+    // its action writes), so a refusal with nothing pruned leaves the file
+    // as it was: no rewrite, no sync. A queued wait refused every second
+    // would otherwise rewrite the shared ledger every second for as long as
+    // it waits.
+    if let (Err(_), Pruned::Nothing) = (&result, pruned) {
+        return result;
+    }
 
     file.set_len(0).map_err(|source| HostMemoryError::Io {
         path: path.to_path_buf(),
@@ -1036,9 +1371,10 @@ fn with_locked_ledger<T>(
 /// materialises. Without this, a failed-spawn or daemon-side bookkeeping
 /// glitch produces a phantom hold that consumes budget indefinitely.
 ///
-/// 30 minutes is generous: Stanza model load is typically 1-3 minutes
-/// on cold start, and the daemon's own ready-timeout is configured at
-/// `ready_timeout_s` (default 600s = 10 min) plus retry headroom. A
+/// 30 minutes is generous: a worker starts with no model (each model's
+/// lease names its worker from the start, so none of them is an intent),
+/// and a starting worker may go without advancing for
+/// `worker_startup_stall_s` (default 300 s) before it is retired. A
 /// pre-spawn intent older than this window is by construction stuck.
 ///
 /// Operational evidence (2026-05-01 afternoon wedge): 3 admitted jobs
@@ -1082,10 +1418,11 @@ enum Liveness {
 /// An empty ledger has nothing to judge and reads nothing. Otherwise only the
 /// process each lease is bound to is refreshed (its worker when it names one,
 /// else its owner, the same choice the retain below makes), once per PID.
-fn prune_stale_leases(ledger: &mut MemoryLedger) -> Result<(), HostUnreadable> {
+fn prune_stale_leases(ledger: &mut MemoryLedger) -> Result<Pruned, HostUnreadable> {
     if ledger.leases.is_empty() {
-        return Ok(());
+        return Ok(Pruned::Nothing);
     }
+    let before = ledger.leases.len();
     let mut system = open_system()?;
     let mut pids: Vec<Pid> = ledger
         .leases
@@ -1131,7 +1468,17 @@ fn prune_stale_leases(ledger: &mut MemoryLedger) -> Result<(), HostUnreadable> {
         // healthy long-lived state.
         now.saturating_duration_since(lease.created_at) < PRE_SPAWN_INTENT_DEADLINE
     });
-    Ok(())
+    Ok(match ledger.leases.len() == before {
+        true => Pruned::Nothing,
+        false => Pruned::Some,
+    })
+}
+
+/// Whether a prune pass removed any lease, so the ledger must be written back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pruned {
+    Nothing,
+    Some,
 }
 
 /// TTL the cached `SystemMemory` is good for. Admission gates
@@ -1227,6 +1574,83 @@ fn plan_job_reservation(
     None
 }
 
+/// What a failed lease attempt leads to.
+enum LeaseStep {
+    /// The refusal may clear (and a bounded wait is inside its window): wait
+    /// and try again.
+    Retry,
+    /// Stop with this error.
+    Stop(HostMemoryError),
+}
+
+/// How long a lease wait may go on.
+enum LeaseWait {
+    /// Until `deadline` (`timeout` after it began); a zero timeout is one
+    /// attempt. Real-model test locks and job execution plans.
+    Bounded {
+        timeout: Duration,
+        deadline: Instant,
+    },
+    /// Until granted or refused for good: worker startups and model loads,
+    /// which queue ([`HostMemoryCoordinator::queue_for_lease`]).
+    Queued,
+}
+
+impl LeaseWait {
+    /// A bounded wait of `timeout`, starting now.
+    fn bounded(timeout: Duration) -> Self {
+        Self::Bounded {
+            timeout,
+            deadline: Instant::now() + timeout,
+        }
+    }
+}
+
+/// The one rule for a failed attempt, shared by every wait: a retryable
+/// refusal is retried (and remembered as the last reason) while the wait
+/// allows; a bounded wait past its window is a timeout naming that reason;
+/// anything else stops with its own error, which is how a request larger
+/// than the machine is refused at once even by a queued wait.
+fn after_failed_attempt(
+    error: HostMemoryError,
+    label: &str,
+    wait: &LeaseWait,
+    last_reason: &mut String,
+) -> LeaseStep {
+    if !retryable_error(&error) {
+        return LeaseStep::Stop(error);
+    }
+    match wait {
+        LeaseWait::Queued => {
+            *last_reason = error.to_string();
+            LeaseStep::Retry
+        }
+        LeaseWait::Bounded { timeout, .. } if timeout.is_zero() => LeaseStep::Stop(error),
+        LeaseWait::Bounded { timeout, deadline } => {
+            if Instant::now() < *deadline {
+                *last_reason = error.to_string();
+                LeaseStep::Retry
+            } else {
+                LeaseStep::Stop(HostMemoryError::TimedOut {
+                    label: label.to_owned(),
+                    waited_s: timeout.as_secs(),
+                    last_reason: std::mem::take(last_reason),
+                })
+            }
+        }
+    }
+}
+
+/// Why [`HostMemoryCoordinator::queue_for_lease`] returned no lease.
+#[derive(Debug)]
+pub enum QueuedLeaseFailure {
+    /// The host refused the reservation for good: larger than the machine
+    /// can ever fit, or a host or ledger it cannot read.
+    Refused(HostMemoryError),
+    /// The blocking task taking one attempt panicked or was cancelled.
+    AttemptDidNotFinish(tokio::task::JoinError),
+}
+
 fn retryable_error(error: &HostMemoryError) -> bool {
     match error {
         HostMemoryError::CapacityRejected {
@@ -1270,7 +1694,7 @@ mod tests {
     use super::{
         HostMemoryCoordinator, HostMemoryError, HostMemoryLease, HostMemoryPressureLevel,
         HostMemoryRuntimeConfig, HostReadings, MemoryLeaseKind, MemoryLeaseRecord,
-        MemoryLeaseRequest, MemoryLedger, plan_job_reservation, pressure_level_for,
+        MemoryLeaseRequest, MemoryLedger, NoIdleWorkers, plan_job_reservation, pressure_level_for,
         retryable_error, with_locked_ledger,
     };
     use crate::api::MachineTime;
@@ -1318,10 +1742,260 @@ mod tests {
         assert!(written.contains(r#""startup_slot":true"#), "{written}");
     }
 
-    /// Build a runtime config pointing at a fresh tmp coordinator file.
-    /// Returns the TempDir so the caller can keep it alive for the test.
-    /// The declared test host's readings, so no ledger test depends on the
-    /// machine running it.
+    /// Records what a queued wait tells its observer, in order.
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl super::QueuedLeaseObserver for RecordingObserver {
+        fn queued(&self) {
+            self.events.lock().expect("events").push("queued");
+        }
+        fn dequeued(&self) {
+            self.events.lock().expect("events").push("dequeued");
+        }
+    }
+
+    impl RecordingObserver {
+        fn seen(&self) -> Vec<&'static str> {
+            self.events.lock().expect("events").clone()
+        }
+    }
+
+    /// A model lease for a worker that is this (live) test process.
+    fn model_load(reserved_mb: u64) -> super::WorkerLeaseRequest {
+        super::WorkerLeaseRequest::model_load(
+            WorkerPid(std::process::id()),
+            "fa:wav2vec",
+            MemoryMb(reserved_mb),
+        )
+    }
+
+    /// Poll and report intervals short enough for a test.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// A load the host cannot fit now queues behind the leases it holds, says
+    /// so, and is granted once one of them is released. The declared host
+    /// has 14,000 MB available against an 8,000 MB reserve: a held 5,000 MB
+    /// lease leaves no room for 2,000 MB more until it goes.
+    #[tokio::test]
+    async fn a_queued_load_is_granted_when_a_held_lease_is_released() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let held = coordinator
+            .try_acquire_lease(model_load(5_000).0)
+            .expect("the first lease fits");
+        let observer = RecordingObserver::default();
+        let waiting = coordinator.queue_for_lease_every(
+            model_load(2_000),
+            &observer,
+            &NoIdleWorkers,
+            POLL,
+            POLL,
+        );
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(POLL * 10, &mut waiting).await.is_err(),
+            "the load must wait while the held lease leaves no room"
+        );
+        assert_eq!(observer.seen(), vec!["queued"]);
+
+        held.release();
+        let granted = waiting.await.expect("granted once the held lease is gone");
+        assert_eq!(observer.seen(), vec!["queued", "dequeued"]);
+        assert_eq!(
+            coordinator.snapshot().expect("snapshot").active_reserved_mb,
+            MemoryMb(2_000)
+        );
+        granted.release();
+    }
+
+    /// Stands in for the pool: retiring its one idle worker releases that
+    /// worker's lease; after that nothing is idle.
+    struct OneIdleWorker(std::sync::Mutex<Option<HostMemoryLease>>);
+
+    #[async_trait::async_trait]
+    impl super::MemoryReclaim for OneIdleWorker {
+        async fn reclaim_one(&self) -> super::Reclaimed {
+            match self.0.lock().expect("lock").take() {
+                Some(lease) => {
+                    lease.release();
+                    super::Reclaimed::Retired
+                }
+                None => super::Reclaimed::NothingIdle,
+            }
+        }
+    }
+
+    /// A queued load retires an idle worker to make room instead of waiting
+    /// for it to leave: the idle worker's 5,000 MB lease is all that keeps
+    /// 2,000 MB more from fitting, and the load is granted with no release
+    /// from anywhere else. The poll is an hour, so a grant inside the test's
+    /// timeout can only come from the reclaim's immediate retry.
+    #[tokio::test]
+    async fn a_queued_load_retires_an_idle_worker_to_make_room() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let idle = OneIdleWorker(std::sync::Mutex::new(Some(
+            coordinator
+                .try_acquire_lease(model_load(5_000).0)
+                .expect("the idle worker's lease fits"),
+        )));
+        let observer = RecordingObserver::default();
+        let hour = std::time::Duration::from_secs(3_600);
+        let granted = tokio::time::timeout(
+            POLL * 50,
+            coordinator.queue_for_lease_every(model_load(2_000), &observer, &idle, hour, hour),
+        )
+        .await
+        .expect("granted at once after the idle worker was retired")
+        .expect("granted");
+        assert_eq!(observer.seen(), vec!["queued", "dequeued"]);
+        assert_eq!(
+            coordinator.snapshot().expect("snapshot").active_reserved_mb,
+            MemoryMb(2_000)
+        );
+        granted.release();
+    }
+
+    /// A cancelled job drops its queued wait: the wait ends, says so, and
+    /// takes no lease, even once the host could fit it.
+    #[tokio::test]
+    async fn a_dropped_queued_wait_ends_and_takes_no_lease() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let held = coordinator
+            .try_acquire_lease(model_load(5_000).0)
+            .expect("the first lease fits");
+        let observer = RecordingObserver::default();
+        let waited = tokio::time::timeout(
+            POLL * 10,
+            coordinator.queue_for_lease_every(
+                model_load(2_000),
+                &observer,
+                &NoIdleWorkers,
+                POLL,
+                POLL,
+            ),
+        )
+        .await;
+        assert!(
+            waited.is_err(),
+            "nothing was released, so it was still queued"
+        );
+        assert_eq!(observer.seen(), vec!["queued", "dequeued"]);
+
+        held.release();
+        tokio::time::sleep(POLL * 5).await;
+        let snapshot = coordinator.snapshot().expect("snapshot");
+        assert_eq!(snapshot.active_reserved_mb, MemoryMb(0));
+        assert!(
+            !snapshot
+                .active_lease_labels
+                .iter()
+                .any(|label| label.contains("model-load")),
+            "{:?}",
+            snapshot.active_lease_labels
+        );
+    }
+
+    /// A load larger than the machine can ever fit is refused at once, never
+    /// queued: 20,000 MB on a 15,989 MB host.
+    #[tokio::test]
+    async fn an_impossible_load_is_refused_at_once() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let observer = RecordingObserver::default();
+        let outcome = coordinator
+            .queue_for_lease_every(model_load(20_000), &observer, &NoIdleWorkers, POLL, POLL)
+            .await;
+        match outcome {
+            Err(super::QueuedLeaseFailure::Refused(HostMemoryError::CapacityRejected {
+                requested_mb,
+                ..
+            })) => assert_eq!(requested_mb, 20_000),
+            Err(other) => panic!("expected a capacity refusal, got {other:?}"),
+            Ok(_) => panic!("a load larger than the machine was granted"),
+        }
+        assert!(
+            observer.seen().is_empty(),
+            "an impossible load never queues"
+        );
+    }
+
+    /// A worker's load inside its owner's job lease adds nothing to the
+    /// owner's demand (Contract D), so it is admitted even when the host
+    /// reads as over-committed: a job never waits on its own reservation.
+    #[test]
+    fn a_load_inside_its_owners_job_lease_is_admitted_on_a_full_host() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config.clone(), test_readings());
+        inject_lease(
+            &config,
+            MemoryLeaseKind::JobExecution,
+            std::process::id(),
+            None,
+            13_000,
+            "job",
+        );
+        // 14,000 available less 13,000 reserved is under the 8,000 reserve.
+        let inside = coordinator
+            .try_acquire_lease(model_load(4_000).0)
+            .expect("a sub-allocation of the job's lease is admitted");
+        assert_eq!(
+            coordinator.snapshot().expect("snapshot").active_reserved_mb,
+            MemoryMb(13_000),
+            "the load is counted inside the job's reservation, not on top"
+        );
+        let Err(refused) = coordinator.try_acquire_lease(model_load(10_000).0) else {
+            panic!("a load that raises the owner's demand past the host was admitted");
+        };
+        assert!(
+            matches!(refused, HostMemoryError::CapacityRejected { .. }),
+            "{refused:?}"
+        );
+        inside.release();
+    }
+
+    /// Settling a lease changes what it counts: a model loading is counted
+    /// in full, a model resident only at what it has yet to use.
+    #[test]
+    fn a_settled_lease_counts_its_new_reservation() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let lease = coordinator
+            .try_acquire_lease(model_load(4_000).0)
+            .expect("fits");
+        lease.settler().settle(MemoryMb(1_000)).expect("settle");
+        let snapshot = coordinator.snapshot().expect("snapshot");
+        assert_eq!(snapshot.active_reserved_mb, MemoryMb(1_000));
+        lease.release();
+        assert_eq!(
+            coordinator.snapshot().expect("snapshot").active_reserved_mb,
+            MemoryMb(0)
+        );
+    }
+
+    /// A model lease names its worker from the start, so it is reclaimed when
+    /// that worker dies.
+    #[test]
+    fn a_model_lease_for_a_dead_worker_is_reclaimed() {
+        let (_dir, config) = test_runtime_config();
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let lease = coordinator
+            .try_acquire_lease(
+                super::WorkerLeaseRequest::model_load(WorkerPid(4_000_000), "coref", MemoryMb(500))
+                    .0,
+            )
+            .expect("fits");
+        std::mem::forget(lease);
+        assert_eq!(
+            coordinator.snapshot().expect("snapshot").active_reserved_mb,
+            MemoryMb(0)
+        );
+    }
+
     fn test_readings() -> HostReadings {
         crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
             .readings()
@@ -1482,12 +2156,12 @@ mod tests {
             kind: MemoryLeaseKind::WorkerStartup,
             reserved_mb: MemoryMb(reserved_mb),
             label: "boundary".to_owned(),
+            worker_pid: None,
         };
 
-        // `HostMemoryLease` is not `Debug`, so no `expect_err`.
-        let Err(refused) = coordinator.try_acquire_lease(request(6_001)) else {
-            panic!("one megabyte past the reserve was admitted");
-        };
+        let refused = coordinator
+            .try_acquire_lease(request(6_001))
+            .expect_err("one megabyte past the reserve was admitted");
         let HostMemoryError::CapacityRejected {
             available_mb,
             requested_mb,

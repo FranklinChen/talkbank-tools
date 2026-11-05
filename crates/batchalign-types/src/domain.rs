@@ -1505,7 +1505,7 @@ numeric_id!(
     /// A POSITION measured from the start of a recording is
     /// `batchalign::time::FileMs`; one measured from the start of an alignment
     /// window is `batchalign::time::WindowMs`. Use those for offsets, and this
-    /// only for genuine durations (`max_group_ms`, `tight_buffer_ms`).
+    /// only for genuine durations (`tight_buffer_ms`, audio durations).
     ///
     /// Still carried by the `worker_v2` IPC types, whose `start_ms` / `end_ms`
     /// fields ARE positions and are not yet converted. Two DIFFERENT decisions

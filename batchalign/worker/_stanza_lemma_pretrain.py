@@ -168,21 +168,20 @@ def resolve_lemma_pretrain(
     lemma_model = next(specs[0].package for name, specs in resolved if name == "lemma")
     model_file = resources_dir / alpha2 / "lemma" / f"{lemma_model}.pt"
     if not model_file.is_file():
-        from batchalign.worker._progress import emit_download_event
+        from batchalign.worker._download_liveness import (
+            StanzaResources,
+            download_liveness,
+        )
 
-        emit_download_event(
-            stage=f"downloading_stanza_lemma_{alpha2}",
-            user_message=(
-                f"Downloading the Stanza {alpha2} lemmatizer (one-time; future "
-                "runs will use the local cache)…"
-            ),
-        )
-        stanza.download(
-            lang=alpha2,
-            package=None,
-            processors={"lemma": lemma_model},
-            download_json=False,
-        )
+        with download_liveness(
+            StanzaResources(f"lemma_{alpha2}"), what=f"the Stanza {alpha2} lemmatizer"
+        ):
+            stanza.download(
+                lang=alpha2,
+                package=None,
+                processors={"lemma": lemma_model},
+                download_json=False,
+            )
     if not model_file.is_file():
         raise StanzaLemmaPretrainError(
             f"Stanza did not install the {alpha2} lemmatizer at {model_file}"

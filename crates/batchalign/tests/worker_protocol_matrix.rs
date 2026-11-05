@@ -202,9 +202,7 @@ fn fa_fixture_coverage(backend: FaBackendV2) -> FixtureCoverage {
 
 fn speaker_fixture_coverage(backend: SpeakerBackendV2) -> FixtureCoverage {
     match backend {
-        SpeakerBackendV2::PyannoteAi | SpeakerBackendV2::Pyannote | SpeakerBackendV2::Nemo => {
-            FixtureCoverage::Required
-        }
+        SpeakerBackendV2::PyannoteAi | SpeakerBackendV2::Pyannote => FixtureCoverage::Required,
     }
 }
 
@@ -212,7 +210,6 @@ fn speaker_backend_label(backend: SpeakerBackendV2) -> &'static str {
     match backend {
         SpeakerBackendV2::PyannoteAi => "pyannote_ai",
         SpeakerBackendV2::Pyannote => "pyannote",
-        SpeakerBackendV2::Nemo => "nemo",
     }
 }
 
@@ -254,6 +251,7 @@ fn asr_input_kind_name(input: &AsrInputV2) -> &'static str {
 /// Return the stable label for one execute result kind.
 fn result_kind_name(result: &TaskResultV2) -> &'static str {
     match result {
+        TaskResultV2::FaPreparation(_) => "fa_preparation",
         TaskResultV2::WhisperChunkResult(_) => "whisper_chunk_result",
         TaskResultV2::MonologueAsrResult(_) => "monologue_asr_result",
         TaskResultV2::WhisperTokenTimingResult(_) => "whisper_token_timing_result",
@@ -277,6 +275,9 @@ fn expected_result_kind(file: &str) -> Option<&'static str> {
         "execute_response_asr_monologues.json" => Some("monologue_asr_result"),
         "execute_response_fa_whisper_tokens.json" => Some("whisper_token_timing_result"),
         "execute_response_fa_indexed_timings.json" => Some("indexed_word_timing_result"),
+        "execute_response_fa_prepared.json" | "execute_response_fa_preparation_refused.json" => {
+            Some("fa_preparation")
+        }
         "execute_response_morphosyntax_success.json" => Some("morphosyntax_result"),
         "execute_response_utseg_success.json" => Some("utseg_result"),
         "execute_response_translate_success.json" => Some("translation_result"),
@@ -500,9 +501,7 @@ fn validate_execute_request_invariants(request: &ExecuteRequestV2) -> Result<(),
             };
             require_attachment_kind(request, audio_ref_id, "prepared_audio")?;
             match speaker_request.backend {
-                SpeakerBackendV2::PyannoteAi
-                | SpeakerBackendV2::Pyannote
-                | SpeakerBackendV2::Nemo => Ok(()),
+                SpeakerBackendV2::PyannoteAi | SpeakerBackendV2::Pyannote => Ok(()),
             }
         }
         TaskRequestV2::SpeakerEmbedding(embedding_request) => {
@@ -666,6 +665,9 @@ fn validate_execute_response_invariants(
 /// Validate result-shape invariants that the Rust schema alone cannot encode.
 fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
     match result {
+        // Closed preparation variants and positive quantities are admitted
+        // by their types. Input binding belongs to the request/reply edge.
+        TaskResultV2::FaPreparation(_) => Ok(()),
         TaskResultV2::WhisperChunkResult(value) => {
             // Chunk ORDER is not a wire invariant: seams overlap and chunks
             // arrive inverted from every producer, and the consumer settles
@@ -791,8 +793,7 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
                     })
                     .collect::<Option<Vec<_>>>()
                     .ok_or_else(|| "pyannoteAI speaker segments must have timings".to_owned())?,
-                SpeakerInferenceEvidenceV2::Pyannote { segments }
-                | SpeakerInferenceEvidenceV2::Nemo { segments } => segments
+                SpeakerInferenceEvidenceV2::Pyannote { segments } => segments
                     .iter()
                     .map(|segment| {
                         (
@@ -1075,7 +1076,9 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -1092,8 +1095,35 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
         ("req-v2-mismatch-speaker", InferenceTaskV2::Speaker),
         ("req-v2-mismatch-fa", InferenceTaskV2::ForcedAlignment),
     ] {
+        let request = mismatched_execute_request(request_id, task);
+        // An echo worker builds nothing, so its loads take no lease.
+        let preparation = batchalign::worker::pool::LoadPreparation {
+            admission: batchalign::worker::pool::LoadAdmission::new(
+                config.runtime.host.memory_coordinator(),
+                batchalign::worker::pool::ModelHosting::TestEcho,
+                std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+            ),
+            stall: batchalign::worker::LoadingStall::DEFAULT_ENSURE_TASK,
+        };
+        let loaded = lease
+            .ensure_task(
+                &batchalign::worker::pool::TaskLoad::for_request(&request),
+                &preparation,
+            )
+            .await
+            .expect("an echo worker is prepared for any task");
+        let batchalign::worker::pool::DispatchPreparation::Ready(ready) =
+            batchalign::worker::pool::DispatchPreparation::begin(&request)
+                .expect("malformed task pairs reach native validation unchanged")
+        else {
+            panic!("a mismatched task must not become a valid FA preparation")
+        };
+        let permit = loaded
+            .run(ready, &preparation.admission)
+            .await
+            .expect("the request is its load's own");
         let response = lease
-            .execute_v2(&mismatched_execute_request(request_id, task))
+            .execute_v2(&permit)
             .await
             .expect("worker should return a typed invalid-payload response");
 

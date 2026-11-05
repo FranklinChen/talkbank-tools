@@ -27,24 +27,19 @@ if TYPE_CHECKING:
 from batchalign.device import DevicePolicy
 from batchalign.worker._model_loading import (
     enable_test_echo,
-    load_worker_profile,
-    load_worker_profile_lazy,
-    load_worker_task,
     parse_engine_overrides,
     resolve_injected_revai_api_key,
+    start_worker,
 )
 from batchalign.worker._protocol import (
-    ErrorCorrelation,
-    _classify_dispatch_exception,
     _print_ready,
     _serve_stdio,
     _serve_stdio_concurrent,
     _serve_tcp,
     _serve_tcp_concurrent,
-    _write_json,
     claim_protocol_stdout,
-    error_envelope,
 )
+from batchalign.worker._runtime_identity import observe_worker_runtime
 from batchalign.worker._stanza_capabilities import (
     refresh_resources_manifest_if_present,
 )
@@ -127,13 +122,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--lazy",
-        action="store_true",
-        help="Lazy profile mode: signal ready immediately, load models on demand "
-        "via ensure_task IPC. Used on memory-constrained machines (24-48 GB).",
-    )
-
-    parser.add_argument(
         "--transport",
         choices=["stdio", "tcp"],
         default="stdio",
@@ -200,11 +188,21 @@ def main() -> None:
     """
     parser = build_arg_parser()
     args = parser.parse_args()
-    # A stdio worker's stdout is its protocol stream: claim it before any
-    # library can print into it (see `claim_protocol_stdout`). A TCP daemon
-    # speaks on its sockets and keeps its stdout.
-    if args.transport == "stdio":
-        claim_protocol_stdout()
+    # Stdout is the protocol stream every worker reports its startup on, a
+    # stdio worker's for its whole life and a TCP daemon's until its ready
+    # line (it then speaks on its sockets): claim it before any library can
+    # print into it (see `claim_protocol_stdout`).
+    claim_protocol_stdout()
+
+    # The runtime identity this worker reports, observed NOW, before any
+    # dependency or model is imported. It describes the installed runtime, and
+    # the server refuses a worker whose identity differs from the first one it
+    # admitted. Imports change what it would read later: loading FunASR's
+    # dependencies puts setuptools' vendored packages on `sys.path`, which
+    # changes the distribution inventory, so a worker that loaded models before
+    # observing reported a different identity than one that had not, and was
+    # refused (2026-11-05, when the FunASR load moved to bootstrap).
+    runtime = observe_worker_runtime()
 
     log_level = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}.get(
         args.verbose, logging.DEBUG
@@ -276,7 +274,7 @@ def main() -> None:
     elif bootstrap.profile is None and bootstrap.task is None:
         parser.error("--task or --profile is required (or use --test-echo)")
     else:
-        _load_models_or_report(args, bootstrap)
+        start_worker(bootstrap)
 
     # After bootstrap succeeds, the worker switches to the request loop
     # expected by the Rust supervisor (stdio) or becomes a persistent daemon
@@ -295,13 +293,13 @@ def main() -> None:
         port = args.port if args.port != 0 else _auto_assign_port(args.host)
         match serving:
             case WorkerServing.CONCURRENT:
-                _serve_tcp_concurrent(args.host, port, max_threads=threads)
+                _serve_tcp_concurrent(args.host, port, runtime, max_threads=threads)
             case WorkerServing.SEQUENTIAL:
-                _serve_tcp(args.host, port)
+                _serve_tcp(args.host, port, runtime)
             case _:
                 assert_never(serving)
     else:
-        _print_ready()
+        _print_ready(runtime)
         match serving:
             case WorkerServing.CONCURRENT:
                 _serve_stdio_concurrent(max_threads=threads)
@@ -309,46 +307,6 @@ def main() -> None:
                 _serve_stdio()
             case _:
                 assert_never(serving)
-
-
-def _load_models_or_report(
-    args: argparse.Namespace, bootstrap: WorkerBootstrapRuntime
-) -> None:
-    """Load the worker's models; on failure, say why on the protocol and exit.
-
-    A stdio worker that cannot load its models writes one classified
-    ``{"op": "error"}`` line in place of its ready line, then exits, so the
-    server reads a download that failed in transit as a download (retried)
-    rather than as an unexplained exit before the ready line (a system
-    failure). The Rust ready reader accepts that line
-    (``ReportedFailure::into_startup_error``). A TCP daemon has no reader on
-    its stdout, so it exits with the traceback alone, as before.
-    """
-    try:
-        if args.lazy and bootstrap.profile is not None:
-            load_worker_profile_lazy(bootstrap)
-        elif bootstrap.profile is not None:
-            load_worker_profile(bootstrap)
-        else:
-            load_worker_task(bootstrap)
-    except Exception as error:
-        if args.transport != "stdio":
-            raise
-        import traceback
-
-        kind = _classify_dispatch_exception(error)
-        sys.stderr.write(
-            f"--- worker startup exception ({kind}) ---\n" + traceback.format_exc()
-        )
-        sys.stderr.flush()
-        _write_json(
-            error_envelope(
-                str(error) or error.__class__.__name__,
-                kind,
-                ErrorCorrelation.uncorrelated(),
-            )
-        )
-        sys.exit(1)
 
 
 def _auto_assign_port(host: str) -> TcpPort:

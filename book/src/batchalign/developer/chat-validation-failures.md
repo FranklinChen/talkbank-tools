@@ -1,7 +1,7 @@
 # CHAT Validation Failures
 
 **Status:** Current
-**Last updated:** 2026-10-24 17:45 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 The [command contract](../architecture/command-contracts.md) is the authoritative
 input-admission and output policy. This page explains how validation failures
@@ -134,11 +134,11 @@ stateDiagram-v2
   (`ChatOutput { document, shortfalls, exclusions, .. }`) but
   `OutputReport::of` does not take it, so it cannot make a file diagnosed; a
   file whose only untimed utterances are notes is `done`.
-- **Cosmetic edits on a diagnosed document.** A requested abbreviation merge is
-  applied to the diagnosed model and judged afresh by the producer transition.
-  It cannot be refused by the merge, because a diagnosed output is written
-  whatever the judgement says. Only `align` stamps provenance through the proof
-  (`PostValidated::with_provenance_injected`), and its output is never diagnosed.
+- **Edits on a diagnosed document.** None are made after judgement. Only
+  `align` stamps provenance through the proof
+  (`PostValidated::with_provenance_injected`), and its output is never
+  diagnosed. (Transcribe's `--merge-abbrev` runs on the recognized words before
+  the document exists, so it is judged with everything else.)
 
 Unchanged output carries original bytes bound to their exact admitted parse.
 Declining analysis does not exempt the resulting document from admission.
@@ -334,8 +334,7 @@ flowchart LR
   `LocalizedDiagnosis::held_out_locations`, which owns both the ordinals and
   the document they index; morphotag keeps internal `SpanAddress`es by
   utterance index and locates the bounded first ones in
-  `MorphosyntaxOutput::finish`, after the abbreviation merge, against the
-  document it writes.
+  `MorphosyntaxOutput::finish`, against the document it writes.
 - Morphotag's utterance index is born where the utterances are walked:
   `collect_payloads` gives each `CollectedUtterance` an `UtteranceAddress`
   (line and utterance index from the one walk), and injection carries it to

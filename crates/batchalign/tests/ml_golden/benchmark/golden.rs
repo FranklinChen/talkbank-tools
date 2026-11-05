@@ -38,7 +38,6 @@ async fn golden_benchmark_eng() {
         },
         asr_engine: AsrEngineName::Whisper,
         wor: WorTierPolicy::Omit,
-        merge_abbrev: false.into(),
     });
 
     let submission = JobSubmission {

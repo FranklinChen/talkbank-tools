@@ -107,12 +107,14 @@ fn correspondence_fuzzy_and_ascii_policies_share_the_alignment_relation() {
         ("A à", "a À à"),
         ("yeah now yeah", "yea now yeah yeah"),
         ("hello", "hello hello"),
+        ("aaaa aaab aabb aaaa", "aaab aabb aaaa aaab"),
     ];
     for (payload, reference) in controls {
         for mode in [
             MatchMode::Exact,
             MatchMode::CaseInsensitive,
             MatchMode::Fuzzy { threshold: 0.85 },
+            MatchMode::Fuzzy { threshold: 0.80 },
         ] {
             assert_eq!(
                 common(&words(payload), &words(reference), mode),
@@ -120,6 +122,16 @@ fn correspondence_fuzzy_and_ascii_policies_share_the_alignment_relation() {
             );
         }
     }
+    // Every word pair is dissimilar, so the complete relation is empty and
+    // retains no candidate edges. Its 64,008,000 occurrence pairs are not a
+    // storage demand or a linguistic reason to refuse proof. Exact spelling
+    // classes need only one lexical comparison for this population.
+    let payload = vec!["a".to_owned(); 8000];
+    let reference = vec!["zzzz".to_owned(); 8001];
+    assert!(matches!(
+        CorrespondenceAdmission::observe(&payload, &reference, MatchMode::Fuzzy { threshold: 0.85 }),
+        CorrespondenceAdmission::Complete(common) if common.pairs().next().is_none()
+    ));
 }
 
 #[test]
@@ -151,51 +163,50 @@ fn correspondence_identical_selected_prefix_does_not_prove_uniqueness() {
 fn correspondence_budget_exhaustion_is_not_ambiguity_or_empty_proof() {
     let payload = words("a a");
     let reference = words("a a a");
+    for mode in [MatchMode::Exact, MatchMode::Fuzzy { threshold: 0.85 }] {
+        assert!(matches!(
+            admit(&payload, &reference, mode, 5),
+            CorrespondenceAdmission::BudgetExhausted(budget) if budget.limit() == 5
+        ));
+    }
     assert!(matches!(
-        admit(&payload, &reference, MatchMode::Exact, 5, 100),
-        CorrespondenceAdmission::BudgetExhausted(CorrespondenceBudget::CandidateEdges)
-    ));
-    assert!(matches!(
-        admit(
-            &payload,
-            &reference,
-            MatchMode::Fuzzy { threshold: 0.85 },
-            100,
-            5
-        ),
-        CorrespondenceAdmission::BudgetExhausted(CorrespondenceBudget::FuzzyComparisons)
-    ));
-    assert!(matches!(
-        admit(&[], &reference, MatchMode::Exact, 0, 0),
+        admit(&[], &reference, MatchMode::Exact, 0),
         CorrespondenceAdmission::Complete(_)
     ));
 }
 
 #[test]
 fn repeated_literal_words_do_not_require_retaining_nonoptimal_edges() {
-    let source = vec!["same".to_owned(); 1300];
-    let observed = admit(
-        &source,
-        &source,
-        MatchMode::Exact,
-        MAX_EDGES,
-        MAX_FUZZY_COMPARISONS,
-    );
-    let CorrespondenceAdmission::Complete(common) = observed else {
-        panic!("1,690,000 raw equal-word pairs have only 1,300 optimal edges");
-    };
-    assert_eq!(
-        common.pairs().collect::<Vec<_>>(),
-        (0..1300).map(|i| (i, i)).collect::<Vec<_>>()
-    );
+    for length in [1300, 5000] {
+        let mut source = vec!["same".to_owned(); length];
+        let mut reference = source.clone();
+        // One disagreement defeats whole-input exact embedding. Every other
+        // pair remains common, despite the quadratic raw equality population.
+        let disagreement = length / 2;
+        source[disagreement] = "source".to_owned();
+        reference[disagreement] = "reference".to_owned();
+        let observed = CorrespondenceAdmission::observe(&source, &reference, MatchMode::Exact);
+        let CorrespondenceAdmission::Complete(common) = observed else {
+            panic!(
+                "{length} words have only {} optimal edges, not the raw quadratic population",
+                length - 1
+            );
+        };
+        assert_eq!(
+            common.pairs().collect::<Vec<_>>(),
+            (0..length)
+                .filter(|&i| i != disagreement)
+                .map(|i| (i, i))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 fn packed_common(
     payload: &[String],
     reference: &[String],
-    mode: MatchMode,
+    mode: super::super::LiteralMatchMode,
 ) -> BTreeSet<(usize, usize)> {
-    let mode = crate::dp_align::packed_literal::policy(mode).unwrap();
     let input =
         literal::LiteralCandidates::observe(payload, reference, mode, &Uninterrupted).unwrap();
     match input.certify(MAX_EDGES, &Uninterrupted).unwrap() {
@@ -219,7 +230,7 @@ fn packed_frontier_common_pairs_equal_exhaustive_chain_intersections() {
     for payload in &sequences {
         for reference in &sequences {
             assert_eq!(
-                packed_common(payload, reference, MatchMode::Exact),
+                packed_common(payload, reference, super::super::LiteralMatchMode::Exact),
                 oracle(payload, reference, MatchMode::Exact)
             );
         }
@@ -228,9 +239,15 @@ fn packed_frontier_common_pairs_equal_exhaustive_chain_intersections() {
         ("A é", "a É é"),
         ("head repeat tail", "head repeat repeat tail"),
     ] {
-        for mode in [MatchMode::Exact, MatchMode::CaseInsensitive] {
+        for (mode, literal_mode) in [
+            (MatchMode::Exact, super::super::LiteralMatchMode::Exact),
+            (
+                MatchMode::CaseInsensitive,
+                super::super::LiteralMatchMode::AsciiInsensitive,
+            ),
+        ] {
             assert_eq!(
-                packed_common(&words(payload), &words(reference), mode),
+                packed_common(&words(payload), &words(reference), literal_mode),
                 oracle(&words(payload), &words(reference), mode)
             );
         }
@@ -249,10 +266,9 @@ fn packed_literal_admission_preserves_true_competition_and_edge_overflow() {
             &payload,
             &reference,
             MatchMode::Exact,
-            MAX_EDGES,
-            MAX_FUZZY_COMPARISONS
+            MAX_EDGES
         ),
-        CorrespondenceAdmission::BudgetExhausted(CorrespondenceBudget::CandidateEdges)
+        CorrespondenceAdmission::BudgetExhausted(budget) if budget.limit() == MAX_EDGES
     ));
 }
 
@@ -269,11 +285,25 @@ fn packed_workspace_admission_and_interruption_do_not_create_common_pairs() {
     .unwrap();
     assert!(input.certify(MAX_EDGES, &Uninterrupted).unwrap().is_none());
 
-    struct Cancel;
-    impl WorkControl for Cancel {
+    struct Count(std::cell::Cell<usize>);
+    impl WorkControl for Count {
+        type Error = std::convert::Infallible;
+        fn check(&self) -> Result<(), Self::Error> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+    struct InterruptAfter(std::cell::Cell<usize>);
+    impl WorkControl for InterruptAfter {
         type Error = &'static str;
         fn check(&self) -> Result<(), Self::Error> {
-            Err("cancelled")
+            match self.0.get().checked_sub(1) {
+                Some(remaining) => {
+                    self.0.set(remaining);
+                    Ok(())
+                }
+                None => Err("cancelled"),
+            }
         }
     }
     let payload = words("a a");
@@ -285,13 +315,20 @@ fn packed_workspace_admission_and_interruption_do_not_create_common_pairs() {
         &Uninterrupted,
     )
     .unwrap();
+    let count = Count(std::cell::Cell::new(0));
     assert!(matches!(
-        input.certify(MAX_EDGES, &Cancel),
-        Err("cancelled")
+        input.certify(MAX_EDGES, &count).unwrap(),
+        Some(CorrespondenceAdmission::Complete(_))
     ));
-    assert!(
-        crate::dp_align::packed_literal::policy(MatchMode::Fuzzy { threshold: 0.85 }).is_none()
-    );
+    for at in 0..count.0.get() {
+        assert!(
+            matches!(
+                input.certify(MAX_EDGES, &InterruptAfter(std::cell::Cell::new(at))),
+                Err("cancelled")
+            ),
+            "at checkpoint {at}"
+        );
+    }
 }
 
 #[test]
@@ -308,7 +345,7 @@ fn packed_common_evidence_snapshot_distinguishes_competing_occurrences() {
             packed_common(
                 &words(source),
                 &words(reference),
-                MatchMode::CaseInsensitive
+                super::super::LiteralMatchMode::AsciiInsensitive
             )
         )
     })
@@ -323,19 +360,22 @@ fn packed_common_evidence_snapshot_distinguishes_competing_occurrences() {
 
 #[test]
 fn interruption_after_partial_rank_observation_never_emits_a_certificate() {
+    enum CheckMode {
+        Observe,
+        InterruptAt(usize),
+    }
     struct Checks {
         count: std::cell::Cell<usize>,
-        stop: usize,
+        mode: CheckMode,
     }
     impl WorkControl for Checks {
         type Error = &'static str;
         fn check(&self) -> Result<(), Self::Error> {
             let next = self.count.get() + 1;
             self.count.set(next);
-            if next >= self.stop {
-                Err("cancelled")
-            } else {
-                Ok(())
+            match self.mode {
+                CheckMode::InterruptAt(stop) if next >= stop => Err("cancelled"),
+                CheckMode::Observe | CheckMode::InterruptAt(_) => Ok(()),
             }
         }
     }
@@ -352,7 +392,7 @@ fn interruption_after_partial_rank_observation_never_emits_a_certificate() {
     .unwrap();
     let completed = Checks {
         count: std::cell::Cell::new(0),
-        stop: usize::MAX,
+        mode: CheckMode::Observe,
     };
     let Some(CorrespondenceAdmission::Complete(common)) =
         input.certify(MAX_EDGES, &completed).unwrap()
@@ -362,12 +402,44 @@ fn interruption_after_partial_rank_observation_never_emits_a_certificate() {
     assert_eq!(common.pairs().collect::<Vec<_>>(), vec![(64, 65)]);
     let interrupted = Checks {
         count: std::cell::Cell::new(0),
-        stop: completed.count.get() - 8,
+        mode: CheckMode::InterruptAt(completed.count.get() - 8),
     };
     assert!(matches!(
         input.certify(MAX_EDGES, &interrupted),
         Err("cancelled")
     ));
+    // Exercise cancellation throughout preparation, completed-row reuse and
+    // both sparse score phases through the real public producer.
+    let payload = words("aaaa aaab aabb aaaa");
+    let reference = words("aaab aabb aaaa aaab");
+    for mode in [MatchMode::Exact, MatchMode::Fuzzy { threshold: 0.80 }] {
+        let completed = Checks {
+            count: std::cell::Cell::new(0),
+            mode: CheckMode::Observe,
+        };
+        assert!(matches!(
+            CorrespondenceAdmission::observe_controlled(&payload, &reference, mode, &completed),
+            Ok(CorrespondenceAdmission::Complete(_))
+        ));
+        for at in 1..=completed.count.get() {
+            let interrupted = Checks {
+                count: std::cell::Cell::new(0),
+                mode: CheckMode::InterruptAt(at),
+            };
+            assert!(
+                matches!(
+                    CorrespondenceAdmission::observe_controlled(
+                        &payload,
+                        &reference,
+                        mode,
+                        &interrupted
+                    ),
+                    Err("cancelled")
+                ),
+                "mode={mode:?} checkpoint={at}"
+            );
+        }
+    }
 }
 
 #[test]

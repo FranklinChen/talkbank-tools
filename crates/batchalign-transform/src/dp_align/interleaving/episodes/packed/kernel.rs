@@ -8,7 +8,8 @@ mod proof;
 use cost::{ForwardWork, Ledger, ReconstructionWork};
 
 mod admission;
-use admission::{AdmittedProblem, RowRequest};
+use super::geometry::SurveyedLiteralSearch;
+use admission::{AdmittedProblem, RejectedRows, RowRequest};
 
 struct Plan<'g, 's> {
     admitted: AdmittedProblem<'g, 's>,
@@ -17,7 +18,7 @@ struct Plan<'g, 's> {
 }
 impl<'g, 's> Plan<'g, 's> {
     fn graph(&self) -> &Graph {
-        self.admitted.refused().graph()
+        self.admitted.prepared().graph()
     }
     fn source(&self) -> &'g [&'s str] {
         self.admitted.source()
@@ -35,11 +36,11 @@ impl<'g, 's> Plan<'g, 's> {
         self.admitted.geometry()
     }
     fn admit<C: WorkControl + ?Sized>(
-        refused: RefusedBand<'g, 's>,
+        prepared: SurveyedLiteralSearch<'g, 's>,
         request: RowRequest,
         control: &C,
-    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
-        let admitted = match AdmittedProblem::observe(refused, request, control)? {
+    ) -> Result<Result<Self, RejectedRows<'g, 's>>, C::Error> {
+        let admitted = match AdmittedProblem::observe(prepared, request, control)? {
             Ok(value) => value,
             Err(refusal) => return Ok(Err(refusal)),
         };
@@ -298,7 +299,7 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> CompleteForward<'l, 'p, 'g, 's
                 terminal = Some(TerminalScore::of_end_row(
                     profile,
                     plan.length(),
-                    plan.admitted.refused().feasible(),
+                    plan.admitted.prepared().feasible(),
                 ));
             }
             let _ = frontier.commit(slot, row);
@@ -370,28 +371,35 @@ impl<'l, 'p, 'g, 's, 'c, C: WorkControl + ?Sized> CompleteForward<'l, 'p, 'g, 's
 }
 
 pub(super) fn observe<C: WorkControl + ?Sized>(
-    refused: RefusedBand<'_, '_>,
+    prepared: PreparedLiteralSearch<'_, '_>,
     control: &C,
 ) -> Result<Result<Observation, LocalInterleavingRefusal>, C::Error> {
-    // Preserve the previous full-profile admission/fallback policy exactly.
-    if let Relation::Literal { source, .. } = refused.relation()
-        && source.len() >= refused.feasible().saturating_mul(2)
-        && let Ok(plan) = Plan::admit(refused, RowRequest::Full, control)?
-    {
-        return execute(&plan, control);
-    }
-    let plan = match Plan::admit(refused, RowRequest::Viable, control)? {
-        Ok(plan) => plan,
-        Err(refusal) => return Ok(Err(refusal)),
+    let prepared = match SurveyedLiteralSearch::observe(prepared, control)? {
+        Ok(prepared) => prepared,
+        Err(cause) => return Ok(Err(cause)),
     };
-    execute(&plan, control)
+    // Preserve the previous full-profile admission/fallback policy exactly.
+    let prepared =
+        if prepared.prepared().source().len() >= prepared.prepared().feasible().saturating_mul(2) {
+            match Plan::admit(prepared, RowRequest::Full, control)? {
+                Ok(plan) => return execute(plan, control),
+                Err(rejected) => rejected.input,
+            }
+        } else {
+            prepared
+        };
+    let plan = match Plan::admit(prepared, RowRequest::Viable, control)? {
+        Ok(plan) => plan,
+        Err(rejected) => return Ok(Err(rejected.cause)),
+    };
+    execute(plan, control)
 }
 
 fn execute<C: WorkControl + ?Sized>(
-    plan: &Plan<'_, '_>,
+    plan: Plan<'_, '_>,
     control: &C,
 ) -> Result<Result<Observation, LocalInterleavingRefusal>, C::Error> {
-    let ledger = Ledger::new(plan, control);
+    let ledger = Ledger::new(&plan, control);
     let result = CompleteForward::observe(&ledger).and_then(|forward| forward.finish());
     let status = match &result {
         Ok(Ok(_)) => PackedSearchStatus::Completed,
@@ -415,30 +423,36 @@ fn execute<C: WorkControl + ?Sized>(
 
 #[cfg(test)]
 pub(super) fn testing<C: WorkControl + ?Sized>(
-    refused: RefusedBand<'_, '_>,
-    block: usize,
+    prepared: PreparedLiteralSearch<'_, '_>,
+    block: std::num::NonZeroUsize,
     control: &C,
 ) -> Result<Result<Observation, LocalInterleavingRefusal>, C::Error> {
-    let mut plan = match Plan::admit(refused, RowRequest::Viable, control)? {
-        Ok(plan) => plan,
-        Err(refusal) => return Ok(Err(refusal)),
+    let prepared = match SurveyedLiteralSearch::testing(prepared, block, control)? {
+        Ok(prepared) => prepared,
+        Err(cause) => return Ok(Err(cause)),
     };
-    plan.admitted.geometry_mut().block = block;
-    execute(&plan, control)
+    let plan = match Plan::admit(prepared, RowRequest::Viable, control)? {
+        Ok(plan) => plan,
+        Err(rejected) => return Ok(Err(rejected.cause)),
+    };
+    execute(plan, control)
 }
 
 #[cfg(test)]
 pub(super) fn testing_full<C: WorkControl + ?Sized>(
-    refused: RefusedBand<'_, '_>,
-    block: usize,
+    prepared: PreparedLiteralSearch<'_, '_>,
+    block: std::num::NonZeroUsize,
     control: &C,
 ) -> Result<Result<Observation, LocalInterleavingRefusal>, C::Error> {
-    let mut plan = match Plan::admit(refused, RowRequest::Full, control)? {
-        Ok(plan) => plan,
-        Err(refusal) => return Ok(Err(refusal)),
+    let prepared = match SurveyedLiteralSearch::testing(prepared, block, control)? {
+        Ok(prepared) => prepared,
+        Err(cause) => return Ok(Err(cause)),
     };
-    plan.admitted.geometry_mut().block = block;
-    execute(&plan, control)
+    let plan = match Plan::admit(prepared, RowRequest::Full, control)? {
+        Ok(plan) => plan,
+        Err(rejected) => return Ok(Err(rejected.cause)),
+    };
+    execute(plan, control)
 }
 
 #[cfg(test)]

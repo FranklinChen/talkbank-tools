@@ -29,11 +29,16 @@ from unittest import mock
 import pytest
 
 from batchalign.worker import _protocol
-from batchalign.worker._runtime_identity import Sha256Digest, _hash_package_tree
+from batchalign.worker._runtime_identity import (
+    Sha256Digest,
+    _hash_package_tree,
+    observe_worker_runtime,
+)
+from batchalign.worker._types_v2 import PhaseEdgeV2, PhaseV2, UnitProgressV2
 
 
 def test_pre_ready_progress_event_goes_to_stdout_as_preamble():
-    """Before ready, ``write_progress_event`` emits a JSON line on stdout.
+    """Before ready, ``write_load_progress`` emits a JSON line on stdout.
 
     The supervisor's ``read_ready_line`` accepts ``progress_v2`` lines
     as bootstrap-time preamble (one or more lines before the ready
@@ -46,11 +51,8 @@ def test_pre_ready_progress_event_goes_to_stdout_as_preamble():
         mock.patch.object(sys, "stdout", fake_stdout),
         mock.patch.object(sys, "stderr", fake_stderr),
     ):
-        _protocol.write_progress_event(
-            request_id="",
-            completed=0,
-            total=0,
-            stage="downloading_stanza_catalog",
+        _protocol.write_load_progress(
+            "downloading_stanza_catalog", PhaseV2(edge=PhaseEdgeV2.BEGIN)
         )
 
     line = fake_stdout.getvalue().strip()
@@ -59,7 +61,11 @@ def test_pre_ready_progress_event_goes_to_stdout_as_preamble():
         "Pre-ready progress events should be emitted as a single "
         f"progress_v2 JSON line on stdout. Got: {line!r}"
     )
-    assert envelope["event"]["stage"] == "downloading_stanza_catalog"
+    assert envelope["event"] == {
+        "scope": "load",
+        "stage": "downloading_stanza_catalog",
+        "measure": {"kind": "phase", "edge": "begin"},
+    }
     assert fake_stderr.getvalue() == "", (
         "Stderr is buffered until process exit; pre-ready events must "
         "use the stdout preamble path. Got stderr: "
@@ -68,14 +74,14 @@ def test_pre_ready_progress_event_goes_to_stdout_as_preamble():
 
 
 def test_print_ready_writes_ready_envelope():
-    """``_print_ready()`` writes the ready envelope to stdout."""
+    """``_print_ready(runtime)`` writes the ready envelope to stdout."""
     fake_stdout = io.StringIO()
     fake_stderr = io.StringIO()
     with (
         mock.patch.object(sys, "stdout", fake_stdout),
         mock.patch.object(sys, "stderr", fake_stderr),
     ):
-        _protocol._print_ready()
+        _protocol._print_ready(observe_worker_runtime())
 
     line = fake_stdout.getvalue().strip()
     envelope = json.loads(line)
@@ -161,43 +167,113 @@ def test_post_ready_progress_event_goes_to_stdout():
         mock.patch.object(sys, "stdout", fake_stdout),
         mock.patch.object(sys, "stderr", fake_stderr),
     ):
-        _protocol.write_progress_event(
-            request_id="req-7",
-            completed=0,
-            total=0,
-            stage="downloading_hf_openai_whisper-large-v3",
+        _protocol.write_request_progress(
+            "req-7", "stanza_processing", UnitProgressV2(completed=3, total=10)
         )
 
     line = fake_stdout.getvalue().strip()
     envelope = json.loads(line)
     assert envelope["op"] == "progress_v2"
-    assert envelope["event"]["request_id"] == "req-7"
-    assert envelope["event"]["stage"] == "downloading_hf_openai_whisper-large-v3"
+    assert envelope["event"] == {
+        "scope": "request",
+        "request_id": "req-7",
+        "stage": "stanza_processing",
+        "progress": {"completed": 3, "total": 10},
+    }
     # The event should NOT also be logged to stderr; that would double-
     # report it.
     assert fake_stderr.getvalue() == ""
 
 
-def test_print_ready_tcp_writes_ready_to_stderr():
-    """``_print_ready_tcp()`` signals readiness on stderr.
+def test_a_tcp_daemon_reports_its_startup_on_the_protocol_stream_then_ends_it():
+    """A TCP daemon's startup is a stdio worker's: progress, then the ready
+    line, on the stdout it claimed, which its spawner reads with the same
+    reader (``read_ready_line``) under the same stall window.
 
-    TCP-mode workers signal readiness on stderr (the CLI launcher reads
-    it there); stdout is unused for the handshake.
+    The ready line names the transport, where the daemon listens, and the
+    runtime identity a stdio worker's carries. After it the stream ends: the
+    spawner stops reading and the daemon outlives it, so a later protocol line
+    (a request's progress) must not reach the pipe. Run in a child process,
+    since the claim rewires the process's descriptors.
     """
-    fake_stdout = io.StringIO()
-    fake_stderr = io.StringIO()
-    with (
-        mock.patch.object(sys, "stdout", fake_stdout),
-        mock.patch.object(sys, "stderr", fake_stderr),
-    ):
-        _protocol._print_ready_tcp("127.0.0.1", 9100)
+    import subprocess
 
-    line = fake_stderr.getvalue().strip()
-    envelope = json.loads(line)
-    assert envelope["ready"] is True
-    assert envelope["transport"] == "tcp"
-    assert envelope["port"] == 9100
-    assert fake_stdout.getvalue() == ""
+    script = (
+        "from batchalign.worker import _protocol\n"
+        "from batchalign.worker._runtime_identity import observe_worker_runtime\n"
+        "from batchalign.worker._types_v2 import PhaseEdgeV2, PhaseV2, UnitProgressV2\n"
+        "_protocol.claim_protocol_stdout()\n"
+        "_protocol.write_load_progress('loading_task_fa_eng', PhaseV2(edge=PhaseEdgeV2.BEGIN))\n"
+        "_protocol._print_ready_tcp('127.0.0.1', 9100, observe_worker_runtime())\n"
+        "_protocol.write_request_progress('req-1', 'aligning', UnitProgressV2(completed=1, total=2))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(lines) == 2, result.stdout
+    progress, ready = lines
+    assert progress["op"] == "progress_v2"
+    assert progress["event"]["scope"] == "load"
+    assert ready["ready"] is True
+    assert ready["transport"] == "tcp"
+    assert ready["host"] == "127.0.0.1"
+    assert ready["port"] == 9100
+    assert ready["runtime"]["schema_version"] == 1
+    assert "op" not in ready, "the ready line is the one untagged line"
+
+
+def test_a_real_tcp_daemon_prints_its_ready_line_on_stdout(tmp_path):
+    """The real daemon entry point: an echo TCP daemon's first protocol line
+    on stdout is its ready line, naming its port, and nothing of its
+    handshake goes to stderr. It registers in a private state directory and
+    is stopped once ready.
+    """
+    import os
+    import subprocess
+
+    env = dict(os.environ, BATCHALIGN_STATE_DIR=str(tmp_path))
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "batchalign.worker",
+            "--transport",
+            "tcp",
+            "--test-echo",
+            "--profile",
+            "stanza",
+            "--lang",
+            "eng",
+            "--host",
+            "127.0.0.1",
+            "--serving",
+            "sequential",
+            "--gpu-thread-pool-size",
+            "1",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline()
+        ready = json.loads(line)
+        assert ready["ready"] is True, line
+        assert ready["transport"] == "tcp"
+        assert isinstance(ready["port"], int) and ready["port"] > 0
+        assert ready["pid"] == proc.pid
+        assert "runtime" in ready
+    finally:
+        proc.terminate()
+        _, stderr = proc.communicate(timeout=30)
+    assert '"ready"' not in stderr, stderr
 
 
 def test_claimed_protocol_stdout_keeps_library_output_off_the_protocol_stream():

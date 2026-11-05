@@ -10,8 +10,7 @@
 //! the worker protocol evolves from V1 payloads to V2 prepared artifacts.
 
 use crate::chat_ops::fa::{
-    BulletRepairPolicy, FaGroup, RecordingPresence, WordTiming,
-    apply_fa_results_with_projection_policy, collect_existing_fa_word_timings,
+    BulletRepairPolicy, FaGroup, RecordingPresence, WordTiming, collect_existing_fa_word_timings,
     expand_bullets_for_edge_fillers, group_utterances, refresh_existing_alignment_for_utterance,
     strip_wor_from_monotonicity_stripped_utterances,
 };
@@ -24,7 +23,6 @@ use batchalign_transform::diff::UtteranceDelta;
 use batchalign_transform::diff::preserve::{TierKind, copy_dependent_tiers};
 use tracing::info;
 
-use super::AdmittedFaResult;
 use super::units::{FaDispatchInputs, resolve_group_timings};
 use crate::chat_ops::fa::Grouping;
 
@@ -69,217 +67,249 @@ impl RetainedFaPrior {
 /// The attempt carries its source admission through UTR. A declared no-op and
 /// a complete-`%wor` file never reach this entry: `AlignRoute::decide` sends
 /// them to the no-recording route at admission, prior or no prior.
-pub(crate) async fn process_fa_incremental(
-    before: &RetainedFaPrior,
-    active: super::ActiveFaInput<'_>,
-    audio: &AudioContext<'_>,
-    worker_lang: &crate::api::LanguageCode3,
-    services: super::FaServices<'_>,
-    fa_params: &FaParams,
-    progress: Option<&ProgressSender>,
-) -> Result<AdmittedFaResult, ServerError> {
-    use batchalign_transform::diff::{DiffSummary, diff_chat};
+pub(crate) fn process_fa_incremental<'run>(
+    before: &'run RetainedFaPrior,
+    active: super::ActiveFaInput<'run>,
+    audio: &'run AudioContext<'run>,
+    worker_lang: &'run crate::api::LanguageCode3,
+    services: super::FaServices<'run>,
+    fa_params: &'run FaParams,
+    progress: Option<&'run ProgressSender>,
+) -> super::FaExecution<'run> {
+    Box::pin(async move {
+        use batchalign_transform::diff::{DiffSummary, diff_chat};
 
-    let before_file = before.file.document();
-    let deltas = diff_chat(before_file, &active.chat_file);
-    let summary = DiffSummary::from_deltas(&deltas);
+        let before_file = before.file.document();
+        let deltas = diff_chat(before_file, &active.chat_file);
+        let summary = DiffSummary::from_deltas(&deltas);
 
-    info!(
-        unchanged = summary.unchanged,
-        words_changed = summary.words_changed,
-        inserted = summary.inserted,
-        deleted = summary.deleted,
-        "Incremental FA diff"
-    );
+        info!(
+            unchanged = summary.unchanged,
+            words_changed = summary.words_changed,
+            inserted = summary.inserted,
+            deleted = summary.deleted,
+            "Incremental FA diff"
+        );
 
-    // If there is no unchanged, speaker-only-changed, or timing-only region to
-    // preserve from the previous file, the incremental path has nothing to
-    // reuse and should fall back to the regular full-file align path.
-    if summary.unchanged == 0 && summary.speaker_changed == 0 && summary.timing_only == 0 {
-        // The AST entry point, not `process_fa`: the document is already
-        // parsed, and `process_fa` exists only to parse a string into one.
-        return super::run_fa_from_ast(active, audio, worker_lang, services, fa_params, progress)
+        // If there is no unchanged, speaker-only-changed, or timing-only region to
+        // preserve from the previous file, the incremental path has nothing to
+        // reuse and should fall back to the regular full-file align path.
+        if summary.unchanged == 0 && summary.speaker_changed == 0 && summary.timing_only == 0 {
+            // The AST entry point, not `process_fa`: the document is already
+            // parsed, and `process_fa` exists only to parse a string into one.
+            return super::run_fa_from_ast(
+                active,
+                audio,
+                worker_lang,
+                services,
+                fa_params,
+                progress,
+            )
             .await;
-    }
+        }
 
-    // The "after" document's own model is the mutation target. It used to be a
-    // third parse of its own serialization.
-    let super::ActiveFaInput {
-        mut chat_file,
-        admission,
-        main_bullets,
-        anchors,
-    } = active;
+        // The "after" document's own model is the mutation target. It used to be a
+        // third parse of its own serialization.
+        let super::ActiveFaInput {
+            mut chat_file,
+            admission,
+            main_bullets,
+            anchors,
+        } = active;
 
-    // The same pairing the full path makes. The "after" document is this
-    // run's input, so under `--main-bullets keep` its bullets, bound at the
-    // parse, are the ones that stay, whatever copying the "before" file's
-    // `%wor` in and refreshing it below does to the working model.
-    let projection =
-        crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
+        // The same pairing the full path makes. The "after" document is this
+        // run's input, so under `--main-bullets keep` its bullets, bound at the
+        // parse, are the ones that stay, whatever copying the "before" file's
+        // `%wor` in and refreshing it below does to the working model.
+        let projection =
+            crate::chat_ops::fa::FaProjection::new(fa_params.projection_policy(), main_bullets);
 
-    let reusable_after_indices =
-        reuse_stable_wor_timing_from_before(before_file, &mut chat_file, &deltas);
-    let reusable_after_touched: Vec<crate::chat_ops::UtteranceIdx> = reusable_after_indices
-        .iter()
-        .map(|&idx| crate::chat_ops::UtteranceIdx::new(idx))
-        .collect();
+        let reusable_after_indices =
+            reuse_stable_wor_timing_from_before(before_file, &mut chat_file, &deltas);
+        let reusable_after_touched: Vec<crate::chat_ops::UtteranceIdx> = reusable_after_indices
+            .iter()
+            .map(|&idx| crate::chat_ops::UtteranceIdx::new(idx))
+            .collect();
 
-    expand_bullets_for_edge_fillers(&mut chat_file);
+        expand_bullets_for_edge_fillers(&mut chat_file);
 
-    // Resolved once, here, and used for BOTH grouping and the containment
-    // checks on what the engine returns. Grouping used to take an
-    // `Option<u64>` and invent its own behaviour when it was absent; there is
-    // one recording and one answer.
-    let recording = audio.recording().await?;
-    // The anchors describe the "after" document's words, which the reuse
-    // above copied `%wor` onto without changing a word.
-    let (admission, grouping) = admission.admit_grouping(
-        group_utterances(&chat_file, fa_params.max_group_ms().0, &recording, anchors),
-        &chat_file,
-    )?;
-    let Grouping {
-        groups,
-        decisions: grouping_decisions,
-        windows_clamped,
-    } = grouping;
-    if groups.is_empty() {
-        // Every utterance reused by `reuse_stable_wor_timing_from_before` is
-        // folded in here so `%wor` (when requested) is written after
-        // monotonicity resolves, never by the refresh step itself
-        // (2026-09-01 review, item 2).
-        let finalized = crate::chat_ops::fa::projection_without_injection_with_touched(
+        // Resolved once, here, and used for BOTH grouping and the containment
+        // checks on what the engine returns. Grouping used to take an
+        // `Option<u64>` and invent its own behaviour when it was absent; there is
+        // one recording and one answer.
+        let recording = audio.recording().await?;
+        // The anchors describe the "after" document's words, which the reuse
+        // above copied `%wor` onto without changing a word.
+        let (admission, grouping) = admission.admit_grouping(
+            group_utterances(
+                &chat_file,
+                fa_params.aggregation_target(),
+                &recording,
+                anchors,
+            ),
+            &chat_file,
+        )?;
+        let Grouping {
+            groups,
+            decisions: grouping_decisions,
+            windows_clamped,
+        } = grouping;
+        if groups.is_empty() {
+            // Every utterance reused by `reuse_stable_wor_timing_from_before` is
+            // folded in here so `%wor` (when requested) is written after
+            // monotonicity resolves, never by the refresh step itself
+            // (2026-09-01 review, item 2).
+            let finalized = crate::chat_ops::fa::projection_without_injection_with_touched(
+                projection,
+                fa_params.wor_tier.should_write(),
+                reusable_after_touched,
+            )
+            .then_finalize(
+                &mut chat_file,
+                BulletRepairPolicy::from(fa_params.bullet_repair),
+            )
+            .map_err(super::kept_bullets_failed)?;
+            if fa_params.bullet_repair {
+                tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied (incremental)");
+            }
+            strip_wor_from_monotonicity_stripped_utterances(
+                &mut chat_file,
+                finalized.monotonicity(),
+            );
+            let written = crate::chat_ops::fa::retain_decision_evidence(
+                &mut chat_file,
+                crate::chat_ops::fa::FaDecisions::without_injection(
+                    Vec::new(),
+                    grouping_decisions,
+                    finalized,
+                ),
+            );
+            return admission.finish(
+                FaResult::without_groups(
+                    chat_file,
+                    fa_params.gap_healing,
+                    fa_params.engine.as_wire_name(),
+                    services.cache_namespace,
+                    // The recording was resolved for this route even though every
+                    // group was answered from the prior's `%wor`.
+                    RecordingRead::Read,
+                )
+                .with_written_decisions(written),
+            );
+        }
+
+        // Groups whose every utterance was reused from the "before" file are
+        // resolved from `%wor`; everything else goes to cache or worker. Counted
+        // here only for the log line.
+        let reused_group_count = groups
+            .iter()
+            .filter(|group| group.is_reusable_from(&reusable_after_indices))
+            .count();
+
+        info!(
+            total_groups = groups.len(),
+            realign_groups = groups.len() - reused_group_count,
+            reused_groups = reused_group_count,
+            anchored_utterances = anchors.anchored_utterances(),
+            // Same fact the full path reports, in the same place, so the two runs
+            // stay comparable line for line.
+            windows_clamped,
+            "Incremental FA: selective group re-alignment with stable %wor reuse"
+        );
+
+        // The same resolution the full path runs.
+        let sources = projection
+            .main_bullets()
+            .supplied_retry_sources(&chat_file, &recording)
+            .map_err(super::kept_bullets_failed)?;
+        let population = super::preparation::prepare_population(
+            groups,
+            sources,
+            &chat_file,
+            &reusable_after_indices,
+            anchors,
+            super::preparation::FaPreparationContext {
+                audio,
+                worker_lang,
+                services,
+                params: fa_params,
+            },
+            progress,
+        )
+        .await?;
+        let resolved = resolve_group_timings(FaDispatchInputs {
+            population,
+            chat_file: &chat_file,
+            reusable_utterances: &reusable_after_indices,
+            progress,
+            context: "incremental forced alignment",
+        })
+        .await?;
+        let super::units::InjectedFaPopulation {
+            applied,
+            evidence: group_evidence,
+            mut fallback_events,
+            retry,
+        } = resolved.inject(
+            &mut chat_file,
             projection,
             fa_params.wor_tier.should_write(),
-            reusable_after_touched,
-        )
-        .then_finalize(
-            &mut chat_file,
-            BulletRepairPolicy::from(fa_params.bullet_repair),
-        )
-        .map_err(super::kept_bullets_failed)?;
+        )?;
+
+        // Injection, optional repair, then monotonicity enforcement, as ONE typed
+        // transition. The sequence used
+        // to be two statements plus a comment saying the second must follow the
+        // first, and this path shipped without it: UTR anchor drift survived into
+        // the output (APROCSA 2256_T4.cha, 2026-04-09). Consuming `FaApplied` is
+        // now the only way to reach the injection records, so the comment is a
+        // signature.
+        let (finalized, retry_fallbacks) = retry
+            .finalize(
+                applied.also_touched(reusable_after_touched),
+                &mut chat_file,
+                BulletRepairPolicy::from(fa_params.bullet_repair),
+                progress,
+            )
+            .await?;
+        fallback_events.extend(retry_fallbacks);
         if fa_params.bullet_repair {
             tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied (incremental)");
         }
-        strip_wor_from_monotonicity_stripped_utterances(&mut chat_file, finalized.monotonicity());
-        let written = crate::chat_ops::fa::retain_decision_evidence(
+
+        // The same owner the full path uses, so the ORDER lives in one place and a
+        // new source cannot reach one path only. The strip and the two guards this
+        // block used to carry (one on `review_level`, one on emptiness) disappeared
+        // when CHAT-tier generation was removed from the reachable API.
+        //
+        // `rescue` is stated EMPTY rather than omitted: this path never runs
+        // narrow-bullet rescue, and until 2026-08-15 that legitimate difference was
+        // hidden behind a comment claiming the two lists were the same. Saying it
+        // outright is what makes the next divergence visible.
+        let written_decisions = crate::chat_ops::fa::retain_decision_evidence(
             &mut chat_file,
-            crate::chat_ops::fa::FaDecisions::without_injection(
-                Vec::new(),
-                grouping_decisions,
+            crate::chat_ops::fa::FaDecisions {
+                rescue: Vec::new(),
+                grouping: grouping_decisions,
                 finalized,
-            ),
+            },
         );
-        return admission.finish(
-            FaResult::without_groups(
-                chat_file,
-                fa_params.gap_healing,
-                fa_params.engine.as_wire_name(),
-                services.cache_namespace,
-                // The recording was resolved for this route even though every
-                // group was answered from the prior's `%wor`.
-                RecordingRead::Read,
-            )
-            .with_written_decisions(written),
-        );
-    }
+        let (decision_records, timing_effects) = written_decisions.into_evidence();
+        let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
 
-    // Groups whose every utterance was reused from the "before" file are
-    // resolved from `%wor`; everything else goes to cache or worker. Counted
-    // here only for the log line.
-    let reused_group_count = groups
-        .iter()
-        .filter(|group| group.is_reusable_from(&reusable_after_indices))
-        .count();
-
-    info!(
-        total_groups = groups.len(),
-        realign_groups = groups.len() - reused_group_count,
-        reused_groups = reused_group_count,
-        anchored_utterances = anchors.anchored_utterances(),
-        // Same fact the full path reports, in the same place, so the two runs
-        // stay comparable line for line.
-        windows_clamped,
-        "Incremental FA: selective group re-alignment with stable %wor reuse"
-    );
-
-    // The same resolution the full path runs.
-    let mut resolved = resolve_group_timings(FaDispatchInputs {
-        groups: &groups,
-        chat_file: &chat_file,
-        reusable_utterances: &reusable_after_indices,
-        audio,
-        worker_lang,
-        services,
-        fa_params,
-        progress,
-        context: "incremental forced alignment",
-    })
-    .await?;
-    let fallback_events = std::mem::take(&mut resolved.fallback_events);
-    let (final_timings, group_evidence) = resolved.into_parts();
-
-    // Injection, optional repair, then monotonicity enforcement, as ONE typed
-    // transition. The sequence used
-    // to be two statements plus a comment saying the second must follow the
-    // first, and this path shipped without it: UTR anchor drift survived into
-    // the output (APROCSA 2256_T4.cha, 2026-04-09). Consuming `FaApplied` is
-    // now the only way to reach the injection records, so the comment is a
-    // signature.
-    let finalized = apply_fa_results_with_projection_policy(
-        &mut chat_file,
-        &groups,
-        &final_timings,
-        projection,
-        fa_params.wor_tier.should_write(),
-    )
-    .map_err(super::kept_bullets_failed)?
-    // Utterances reused from the "before" file's `%wor` (2026-09-01 review,
-    // item 2): their `%wor` (if requested) is written by this SAME phase,
-    // after monotonicity resolves, not by the refresh step above.
-    .also_touched(reusable_after_touched)
-    .then_finalize(
-        &mut chat_file,
-        BulletRepairPolicy::from(fa_params.bullet_repair),
-    )
-    .map_err(super::kept_bullets_failed)?;
-    if fa_params.bullet_repair {
-        tracing::info!(stats = %finalized.repair_stats(), "bullet repair applied (incremental)");
-    }
-
-    // The same owner the full path uses, so the ORDER lives in one place and a
-    // new source cannot reach one path only. The strip and the two guards this
-    // block used to carry (one on `review_level`, one on emptiness) disappeared
-    // when CHAT-tier generation was removed from the reachable API.
-    //
-    // `rescue` is stated EMPTY rather than omitted: this path never runs
-    // narrow-bullet rescue, and until 2026-08-15 that legitimate difference was
-    // hidden behind a comment claiming the two lists were the same. Saying it
-    // outright is what makes the next divergence visible.
-    let written_decisions = crate::chat_ops::fa::retain_decision_evidence(
-        &mut chat_file,
-        crate::chat_ops::fa::FaDecisions {
-            rescue: Vec::new(),
-            grouping: grouping_decisions,
-            finalized,
-        },
-    );
-    let (decision_records, timing_effects) = written_decisions.into_evidence();
-    let timing_decisions = timing_effects.into_iter().map(Into::into).collect();
-
-    // The media/timing transition and post-validation run in
-    // `FaAdmission::finish`, below, against what this file was ADMITTED
-    // with, together with every other `Ok` return.
-    admission.finish(FaResult {
-        output: chat_file,
-        group_evidence,
-        engine: fa_params.engine.as_wire_name().to_owned(),
-        cache_namespace: services.cache_namespace.clone(),
-        decisions: decision_records,
-        timing_decisions,
-        gap_healing: fa_params.gap_healing,
-        fallback_events,
-        recording: RecordingRead::Read,
+        // The media/timing transition and post-validation run in
+        // `FaAdmission::finish`, below, against what this file was ADMITTED
+        // with, together with every other `Ok` return.
+        admission.finish(FaResult {
+            output: chat_file,
+            group_evidence,
+            engine: fa_params.engine.as_wire_name().to_owned(),
+            cache_namespace: services.cache_namespace.clone(),
+            decisions: decision_records,
+            timing_decisions,
+            gap_healing: fa_params.gap_healing,
+            fallback_events,
+            recording: RecordingRead::Read,
+        })
     })
 }
 
@@ -527,7 +557,7 @@ mod tests {
         let reused = reuse_stable_wor_timing_from_before(&before, &mut after, &deltas);
         assert_eq!(reused.len(), 2);
 
-        let groups = group_utterances(
+        let groups = crate::chat_ops::fa::group_with_declared_window_limit(
             &after,
             20_000,
             &crate::chat_ops::fa::coordinates::Recording::of_duration(

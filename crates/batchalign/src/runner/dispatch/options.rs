@@ -61,7 +61,6 @@ impl ResolvedUtrStrategy {
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct FaDispatchParams {
     pub fa_params: FaParams,
-    pub merge_abbrev: MergeAbbrevPolicy,
     pub utr_engine: Option<UtrEngine>,
     pub utr_strategy: ResolvedUtrStrategy,
 }
@@ -98,7 +97,6 @@ pub(crate) fn extract_fa_dispatch_params(
             bullet_repair: align.bullet_repair,
             review_level: align.review_level,
         },
-        merge_abbrev: align.merge_abbrev,
         utr_engine: align.effective_utr_engine(),
         utr_strategy: ResolvedUtrStrategy::from_options(&align.utr),
     })
@@ -172,7 +170,6 @@ pub(crate) struct MorphotagDispatchParams {
     pub tokenization_mode: TokenizationMode,
     pub multilingual_policy: MultilingualPolicy,
     pub override_media_cache: bool,
-    pub merge_abbrev: MergeAbbrevPolicy,
     pub l2_policy: crate::params::L2MorphotagPolicy,
     pub pos_hint_policy: crate::params::PosHintPolicy,
     pub ca_policy: crate::options::CaMorphotagPolicy,
@@ -188,7 +185,6 @@ pub(crate) fn extract_morphotag_dispatch_params(
             tokenization_mode: TokenizationMode::from(m.retokenize),
             multilingual_policy: MultilingualPolicy::from_skip_flag(m.skipmultilang),
             override_media_cache: m.common.override_media_cache,
-            merge_abbrev: m.merge_abbrev,
             l2_policy: (!m.no_l2_morphotag).into(),
             pos_hint_policy: (!m.no_pos_hints).into(),
             ca_policy: m.ca_policy,
@@ -207,7 +203,6 @@ pub(crate) fn extract_morphotag_dispatch_params(
 pub(crate) struct BenchmarkDispatchParams {
     pub asr_engine: AsrEngineName,
     pub wor_tier: WorTierPolicy,
-    pub merge_abbrev: MergeAbbrevPolicy,
     pub cache_policy: CachePolicy,
     /// Per-engine configuration extras (see
     /// [`TranscribeDispatchParams::engine_extras`] for the rationale
@@ -224,7 +219,6 @@ pub(crate) fn extract_benchmark_dispatch_params(
         CommandOptions::Benchmark(b) => Some(BenchmarkDispatchParams {
             asr_engine: b.effective_asr_engine(),
             wor_tier: b.wor,
-            merge_abbrev: b.merge_abbrev,
             cache_policy,
             engine_extras: b.common.engine_overrides.extras.clone(),
         }),
@@ -284,7 +278,6 @@ mod tests {
         utr_engine: Option<UtrEngine>,
         pauses: bool,
         wor: bool,
-        merge_abbrev: bool,
     ) -> CommandOptions {
         CommandOptions::Align(AlignOptions {
             common: common_default(),
@@ -296,7 +289,6 @@ mod tests {
             pauses,
             boundaries: Default::default(),
             wor: wor.into(),
-            merge_abbrev: merge_abbrev.into(),
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
@@ -307,7 +299,7 @@ mod tests {
     #[test]
     fn pauses_reaches_the_default_engine() {
         let with_pauses = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, true, true, false),
+            &align_opts("wav2vec_fa", None, true, true),
             CachePolicy::UseCache,
         )
         .expect("wav2vec align must produce dispatch params");
@@ -318,7 +310,7 @@ mod tests {
         );
 
         let without = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, true, false),
+            &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .expect("wav2vec align must produce dispatch params");
@@ -332,7 +324,7 @@ mod tests {
     #[test]
     fn fa_dispatch_reads_fa_engine() {
         let p1 = extract_fa_dispatch_params(
-            &align_opts("whisper_fa", None, false, true, false),
+            &align_opts("whisper_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
@@ -342,7 +334,7 @@ mod tests {
         );
 
         let p2 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, true, false),
+            &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
@@ -355,14 +347,14 @@ mod tests {
     #[test]
     fn fa_dispatch_reads_pauses() {
         let p1 = extract_fa_dispatch_params(
-            &align_opts("whisper_fa", None, true, true, false),
+            &align_opts("whisper_fa", None, true, true),
             CachePolicy::UseCache,
         )
         .unwrap();
         assert_eq!(p1.fa_params.gap_healing, WordGapHealing::PreserveMeasured);
 
         let p2 = extract_fa_dispatch_params(
-            &align_opts("whisper_fa", None, false, true, false),
+            &align_opts("whisper_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
@@ -421,14 +413,14 @@ mod tests {
     #[test]
     fn fa_dispatch_reads_wor() {
         let p1 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, true, false),
+            &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
         assert_eq!(p1.fa_params.wor_tier, WorTierPolicy::Include);
 
         let p2 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, false, false),
+            &align_opts("wav2vec_fa", None, false, false),
             CachePolicy::UseCache,
         )
         .unwrap();
@@ -438,21 +430,21 @@ mod tests {
     #[test]
     fn fa_dispatch_reads_utr_engine() {
         let p1 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", Some(UtrEngine::RevAi), false, true, false),
+            &align_opts("wav2vec_fa", Some(UtrEngine::RevAi), false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
         assert_eq!(p1.utr_engine, Some(UtrEngine::RevAi));
 
         let p2 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, true, false),
+            &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
         assert_eq!(p2.utr_engine, None);
 
         let p3 = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", Some(UtrEngine::HkTencent), false, true, false),
+            &align_opts("wav2vec_fa", Some(UtrEngine::HkTencent), false, true),
             CachePolicy::UseCache,
         )
         .unwrap();
@@ -494,24 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn fa_dispatch_reads_merge_abbrev() {
-        let opts = CommandOptions::Align(AlignOptions {
-            common: common_default(),
-            fa_engine: FaEngineName::Wave2Vec,
-            utr: Default::default(),
-            pauses: false,
-            boundaries: Default::default(),
-            wor: true.into(),
-            merge_abbrev: true.into(),
-            media_dir: None,
-            bullet_repair: false,
-            review_level: Default::default(),
-        });
-        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
-        assert!(params.merge_abbrev.should_merge());
-    }
-
-    #[test]
     fn fa_dispatch_passes_cache_policy() {
         let opts = CommandOptions::Align(AlignOptions {
             common: common_default(),
@@ -520,7 +494,6 @@ mod tests {
             pauses: false,
             boundaries: Default::default(),
             wor: true.into(),
-            merge_abbrev: false.into(),
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
@@ -622,7 +595,6 @@ mod tests {
             common: common_with_cache_override(),
             retokenize: true,
             skipmultilang: true,
-            merge_abbrev: true.into(),
 
             ..Default::default()
         });
@@ -633,7 +605,6 @@ mod tests {
             MultilingualPolicy::SkipNonPrimary
         );
         assert!(params.override_media_cache);
-        assert!(params.merge_abbrev.should_merge());
     }
 
     #[test]
@@ -647,7 +618,6 @@ mod tests {
         assert_eq!(params.tokenization_mode, TokenizationMode::Preserve);
         assert_eq!(params.multilingual_policy, MultilingualPolicy::ProcessAll);
         assert!(!params.override_media_cache);
-        assert!(!params.merge_abbrev.should_merge());
     }
 
     // =======================================================================
@@ -660,12 +630,10 @@ mod tests {
             common: common_with_cache_override(),
             asr_engine: AsrEngineName::WhisperOai,
             wor: true.into(),
-            merge_abbrev: true.into(),
         });
         let params = extract_benchmark_dispatch_params(&opts, CachePolicy::SkipCache).unwrap();
         assert_eq!(params.asr_engine, AsrEngineName::WhisperOai);
         assert!(params.wor_tier.should_write());
-        assert!(params.merge_abbrev.should_merge());
         assert_eq!(params.cache_policy, CachePolicy::SkipCache);
     }
 
@@ -677,7 +645,6 @@ mod tests {
             common,
             asr_engine: AsrEngineName::RevAi,
             wor: true.into(),
-            merge_abbrev: false.into(),
         });
 
         let params = extract_benchmark_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
@@ -711,7 +678,6 @@ mod tests {
             pauses: false,
             boundaries: Default::default(),
             wor: true.into(),
-            merge_abbrev: false.into(),
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
@@ -769,7 +735,6 @@ mod tests {
                 pauses: false,
                 boundaries: Default::default(),
                 wor: true.into(),
-                merge_abbrev: false.into(),
                 media_dir: None,
                 bullet_repair: false,
                 review_level: Default::default(),

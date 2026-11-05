@@ -136,6 +136,12 @@ impl BackendProgressPort {
 
     /// Report one wire progress event for one chunk of one language group.
     ///
+    /// Only a request-scoped event is utterance progress. A chunk's request
+    /// can also carry a load's progress (a lazy load the request triggered: a
+    /// download's growth or a phase boundary): that measures the load, not
+    /// this file's utterances, so it is logged and never reaches the ledger,
+    /// where a growth count in KiB would read as utterances done.
+    ///
     /// Uses `try_send`: a progress report must never slow inference or, worse,
     /// deadlock it if the drain task is gone. A dropped report costs at most one
     /// stale second on a display, and the next report supersedes it, because the
@@ -147,12 +153,24 @@ impl BackendProgressPort {
         chunk: BatchChunkIndex,
         event: &ProgressEventV2,
     ) {
-        self.send(ProgressReport::Chunk(BackendProgress::from_event(
-            self.source_id.clone(),
-            group.clone(),
-            chunk,
-            event,
-        )));
+        match event {
+            ProgressEventV2::Request(request) => {
+                self.send(ProgressReport::Chunk(BackendProgress::from_units(
+                    self.source_id.clone(),
+                    group.clone(),
+                    chunk,
+                    request.progress(),
+                )));
+            }
+            ProgressEventV2::Load(load) => {
+                tracing::debug!(
+                    source_id = %self.source_id,
+                    stage = %load.stage,
+                    measure = ?load.measure,
+                    "model-load progress during a batch request: not utterance progress"
+                );
+            }
+        }
     }
 
     /// Queue one report, dropping it rather than ever blocking inference.
@@ -269,15 +287,27 @@ mod tests {
     use super::*;
     use crate::runner::util::batch_progress::BatchChunkIndex;
     use crate::runner::util::test_sink::RecordingSink;
-    use batchalign_types::worker_v2::WorkerRequestIdV2;
+    use batchalign_types::worker_v2::{
+        LoadMeasureV2, LoadProgressV2, PhaseEdgeV2, RequestProgressV2, UnitProgressV2,
+        WorkerRequestIdV2,
+    };
+
+    fn load(measure: LoadMeasureV2) -> ProgressEventV2 {
+        ProgressEventV2::Load(LoadProgressV2 {
+            stage: "downloading_stanza_eng".to_string(),
+            measure,
+        })
+    }
 
     fn event(completed: u32, total: u32) -> ProgressEventV2 {
-        ProgressEventV2 {
-            request_id: WorkerRequestIdV2::from("req"),
-            completed,
-            total,
-            stage: "stanza_processing".to_string(),
-        }
+        ProgressEventV2::Request(
+            RequestProgressV2::new(
+                WorkerRequestIdV2::from("req"),
+                "stanza_processing".to_string(),
+                UnitProgressV2::new(completed, total).expect("a test count within its total"),
+            )
+            .expect("a named request"),
+        )
     }
 
     fn lang(code: &str) -> LanguageCode3 {
@@ -385,6 +415,38 @@ mod tests {
             "the queued reports must still be published on shutdown"
         );
         drop(port);
+    }
+
+    /// A model load the request triggered is not utterance progress: neither
+    /// its growth (KiB, which would read as utterances) nor its phases reach
+    /// the file's counts.
+    #[tokio::test]
+    async fn model_load_progress_is_not_utterance_progress() {
+        let sink = Arc::new(RecordingSink::default());
+        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-6"));
+        let port = reporter
+            .port(DisplayPath::from("a.cha"))
+            .expect("port must exist");
+        port.declare_group_total(&lang("eng"), UtteranceCount(100));
+        port.report(&lang("eng"), BatchChunkIndex(0), &event(10, 100));
+        port.report(
+            &lang("eng"),
+            BatchChunkIndex(0),
+            &load(LoadMeasureV2::DownloadGrowth { grown_kib: 4_096 }),
+        );
+        port.report(
+            &lang("eng"),
+            BatchChunkIndex(0),
+            &load(LoadMeasureV2::Phase {
+                edge: PhaseEdgeV2::Complete,
+            }),
+        );
+        reporter.finish().await;
+
+        let writes = sink.progress();
+        let write = writes.last().expect("a.cha must get a write");
+        assert_eq!(write.current, Some(10));
+        assert_eq!(write.total, Some(100));
     }
 
     /// Ports are refused after `finish`, so a late report cannot resurrect a

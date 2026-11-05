@@ -14,7 +14,10 @@
 use crate::chat_ops::nlp::{FaIndexedTiming, FaRawResponse, FaRawToken};
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
 
-use crate::types::worker_v2::{ExecuteResponseV2, ProtocolErrorCodeV2, TaskResultV2};
+use crate::types::worker_v2::{
+    ExecuteResponseV2, FaConstraintUnitV2, FaPreparationOutcomeV2, FaPreparationRefusalV2,
+    ProtocolErrorCodeV2, TaskResultV2,
+};
 
 /// A recoverable input constraint a CTC forced-alignment engine reported.
 ///
@@ -40,6 +43,12 @@ pub enum FaEngineConstraint {
     /// The window is shorter than the feature extractor's receptive field
     /// (Wave2Vec MMS_FA's seventh conv layer, kernel 2, sees one sample).
     InputShorterThanKernel,
+    /// Input exceeds the context read from the loaded model.
+    ModelAudioContextExceeded,
+    /// Actual labels exceed the loaded model's decoder context.
+    ModelTextContextExceeded,
+    /// Input below the loaded model's minimum usable extent.
+    ModelInputBelowMinimum,
 }
 
 impl FaEngineConstraint {
@@ -55,6 +64,9 @@ impl FaEngineConstraint {
             Self::CtcTargetsTooLong => "targets length is too long for CTC",
             Self::CtcBlankIndexInTargets => "targets Tensor shouldn't contain blank index",
             Self::InputShorterThanKernel => "Kernel size can't be greater than actual input size",
+            Self::ModelAudioContextExceeded => "audio exceeds the loaded model context",
+            Self::ModelTextContextExceeded => "labels exceed the loaded decoder context",
+            Self::ModelInputBelowMinimum => "input is below the loaded model minimum",
         }
     }
 
@@ -68,7 +80,11 @@ impl FaEngineConstraint {
                 "audio segment too short for Wave2Vec feature extractor"
             }
             // The CTC constraints are recorded in the engine's own words.
-            Self::CtcTargetsTooLong | Self::CtcBlankIndexInTargets => self.engine_text(),
+            Self::CtcTargetsTooLong
+            | Self::CtcBlankIndexInTargets
+            | Self::ModelAudioContextExceeded
+            | Self::ModelTextContextExceeded
+            | Self::ModelInputBelowMinimum => self.engine_text(),
         }
     }
 
@@ -92,7 +108,15 @@ impl FaEngineConstraint {
 #[error("{failure}")]
 pub struct FaWorkerFailure {
     class: FaFailureClass,
-    failure: ExecuteFailureRead,
+    failure: FaFailureReport,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+enum FaFailureReport {
+    #[error(transparent)]
+    Execution(ExecuteFailureRead),
+    #[error(transparent)]
+    Preparation(FaPreparationRefusalV2),
 }
 
 /// What a forced-alignment worker failure means for the request: the class
@@ -133,7 +157,37 @@ impl FaWorkerFailure {
             | ProtocolErrorCodeV2::DeviceOutOfMemory
             | ProtocolErrorCodeV2::ModelOutputInvalid => FaFailureClass::FileFailure,
         };
-        Self { class, failure }
+        Self {
+            class,
+            failure: FaFailureReport::Execution(failure),
+        }
+    }
+
+    pub(crate) fn from_preparation(cause: FaPreparationRefusalV2) -> Self {
+        let class = match &cause {
+            FaPreparationRefusalV2::InsufficientInput { unit, .. } => {
+                FaFailureClass::EngineConstraint(match unit {
+                    FaConstraintUnitV2::EncodedFrames => FaEngineConstraint::CtcTargetsTooLong,
+                    FaConstraintUnitV2::AudioSamples | FaConstraintUnitV2::TextLabels => {
+                        FaEngineConstraint::ModelInputBelowMinimum
+                    }
+                })
+            }
+            FaPreparationRefusalV2::ModelConstraint { unit, .. } => {
+                FaFailureClass::EngineConstraint(match unit {
+                    FaConstraintUnitV2::EncodedFrames => FaEngineConstraint::CtcTargetsTooLong,
+                    FaConstraintUnitV2::AudioSamples => {
+                        FaEngineConstraint::ModelAudioContextExceeded
+                    }
+                    FaConstraintUnitV2::TextLabels => FaEngineConstraint::ModelTextContextExceeded,
+                })
+            }
+            FaPreparationRefusalV2::ProjectionUnavailable { .. } => FaFailureClass::FileFailure,
+        };
+        Self {
+            class,
+            failure: FaFailureReport::Preparation(cause),
+        }
     }
 
     /// What the failure means for the request.
@@ -141,9 +195,17 @@ impl FaWorkerFailure {
         self.class
     }
 
-    /// The worker's report this was classified from.
-    pub fn into_report(self) -> ExecuteFailureRead {
-        self.failure
+    /// Preserve the producing category through the final file-error boundary.
+    pub fn into_server_error(self, context: std::fmt::Arguments<'_>) -> crate::error::ServerError {
+        match self.failure {
+            FaFailureReport::Execution(report) => report.in_context(context).into_server_error(
+                crate::worker::execute_result_v2::ModelLocality::Local,
+                crate::error::BilledProduct::NotNamed,
+            ),
+            FaFailureReport::Preparation(cause) => crate::error::ServerError::Worker(
+                crate::worker::error::WorkerError::RequestRefused(format!("{context}: {cause}")),
+            ),
+        }
     }
 }
 
@@ -173,6 +235,16 @@ pub fn read_fa_payload(response: &ExecuteResponseV2) -> Result<FaRawResponse, Fa
     let result =
         require_success_result(response, "forced-alignment").map_err(FaWorkerFailure::classify)?;
     Ok(match result {
+        TaskResultV2::FaPreparation(result) => {
+            return Err(match &result.outcome {
+                FaPreparationOutcomeV2::Prepared { .. } => {
+                    FaPayloadRefusal::WrongResult("FA allocation plan")
+                }
+                FaPreparationOutcomeV2::Refused { cause } => {
+                    FaPayloadRefusal::Failed(FaWorkerFailure::from_preparation(cause.clone()))
+                }
+            });
+        }
         TaskResultV2::WhisperTokenTimingResult(result) => FaRawResponse::TokenLevel {
             tokens: result
                 .tokens
@@ -269,7 +341,6 @@ mod tests {
     fn invalid_generated_timing_stays_final_through_the_fa_boundary() {
         use crate::runner::util::classify_server_error;
         use crate::types::scheduling::{FailureCategory, NextAttempt, RetryPolicy, StopReason};
-        use crate::worker::execute_result_v2::ModelLocality;
 
         let response = ExecuteResponseV2::failure(
             WorkerRequestIdV2::from("req-invalid-timing"),
@@ -281,11 +352,8 @@ mod tests {
             panic!("the failed response must preserve its typed failure");
         };
         assert_eq!(failure.class(), FaFailureClass::FileFailure);
-        let category = classify_server_error(
-            &failure
-                .into_report()
-                .into_server_error(ModelLocality::Local, crate::error::BilledProduct::NotNamed),
-        );
+        let category =
+            classify_server_error(&failure.into_server_error(format_args!("forced alignment")));
         assert_eq!(category, FailureCategory::ModelOutputInvalid);
         assert_eq!(
             RetryPolicy::default().after_failure(1, category),

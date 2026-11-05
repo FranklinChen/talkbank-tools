@@ -49,7 +49,7 @@ from batchalign.inference._domain_types import (
 )
 from batchalign.inference.provider_retry import LastResponse, ProviderRefusal
 from batchalign.inference.translate import LoadedTranslation
-from batchalign.worker._types import WorkerBootstrapRuntime, _state
+from batchalign.worker._types import WorkerBootstrapRuntime
 
 # A FLORES-200 language tag (e.g. ``"spa_Latn"``, ``"zho_Hans"``,
 # ``"yue_Hant"``) as accepted by NLLB's tokenizer ``src_lang`` setter
@@ -84,7 +84,7 @@ class _TencentTranslationResponse(BaseModel):
 L = logging.getLogger("batchalign.worker")
 
 
-def load_translation_engine(bootstrap: WorkerBootstrapRuntime) -> None:
+def load_translation_engine(bootstrap: WorkerBootstrapRuntime) -> LoadedTranslation:
     """Load the translation engine for this worker.
 
     Dispatches on the resolved ``TranslationBackend`` so adding a new
@@ -93,20 +93,19 @@ def load_translation_engine(bootstrap: WorkerBootstrapRuntime) -> None:
     """
     backend = resolve_translate_engine(bootstrap.engine_overrides or None)
     if backend is TranslationBackend.GOOGLE:
-        _load_google_translate()
+        return _load_google_translate()
     elif backend is TranslationBackend.SEAMLESS:
-        _load_seamless_translate()
+        return _load_seamless_translate()
     elif backend is TranslationBackend.NLLB:
-        _load_nllb_translate()
+        return _load_nllb_translate()
     elif backend is TranslationBackend.TENCENT:
-        _load_tencent_translate()
+        return _load_tencent_translate()
     elif backend is TranslationBackend.ALIYUN:
-        _load_aliyun_translate()
+        return _load_aliyun_translate()
     else:
         # Exhaustive match: mypy/pyright prove this is unreachable;
         # at runtime ``typing.assert_never`` raises AssertionError so
-        # a missing arm fails loudly instead of leaving
-        # _state.translation unset. Matches the equivalent guards in
+        # a missing arm fails loudly instead of returning no engine. Matches the equivalent guards in
         # ``_model_loading.asr.load_asr_engine`` and
         # ``_model_loading.forced_alignment.load_fa_engine``.
         typing.assert_never(backend)
@@ -205,39 +204,37 @@ def _google_language(code: LanguageCode) -> str:
     return str(mapped)
 
 
-def _load_google_translate() -> None:
-    """Install ``_state.translation`` for a googletrans-backed translator."""
-    _state.translation = LoadedTranslation(
+def _load_google_translate() -> LoadedTranslation:
+    """Load a googletrans-backed translator."""
+    return LoadedTranslation(
         engine="googletrans-v1",
         translate=_GoogleTranslateSession(),
     )
 
 
-def _load_seamless_translate() -> None:
-    """Install ``_state.translation`` for a locally-loaded SeamlessM4T model.
+SEAMLESS_MODEL_ID = "facebook/hf-seamless-m4t-medium"
+NLLB_MODEL_ID = "facebook/nllb-200-distilled-1.3B"
 
-    Model is downloaded from HuggingFace on first load and cached
-    thereafter. Operators on hosts where the public HF endpoint is slow
-    or blocked can point at a mirror via ``HF_ENDPOINT`` before the
+
+def _load_seamless_translate() -> LoadedTranslation:
+    """Load a locally-loaded SeamlessM4T model.
+
+    The model is resolved first (``resolve_transformers``: downloaded on a
+    first load, under ``download_liveness``, then cached) and loaded from
+    that snapshot only. Operators on hosts where the public HF endpoint is
+    slow or blocked can point at a mirror via ``HF_ENDPOINT`` before the
     worker starts.
     """
     from transformers import AutoProcessor, SeamlessM4TModel
 
-    from batchalign.worker._progress import (
-        HF_ARTIFACTS_SEAMLESS,
-        emit_hf_download_if_missing,
+    from batchalign.worker._model_loading.pinned_hub import (
+        resolve_transformers,
+        unpinned,
     )
 
-    emit_hf_download_if_missing(
-        "facebook/hf-seamless-m4t-medium",
-        kind="translation",
-        artifacts=HF_ARTIFACTS_SEAMLESS,
-    )
-
-    processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
-        "facebook/hf-seamless-m4t-medium"
-    )
-    model = SeamlessM4TModel.from_pretrained("facebook/hf-seamless-m4t-medium")
+    snapshot = resolve_transformers(unpinned(SEAMLESS_MODEL_ID), kind="translation")
+    processor = AutoProcessor.from_pretrained(snapshot.path)  # type: ignore[no-untyped-call]
+    model = SeamlessM4TModel.from_pretrained(snapshot.path)
     # torch.nn.Module.eval(): sets the module to inference mode,
     # unrelated to Python's builtin eval().
     if hasattr(model, "eval"):
@@ -251,8 +248,8 @@ def _load_seamless_translate() -> None:
         output = model.generate(**inputs, tgt_lang=target_lang, generate_speech=False)
         return str(processor.decode(output[0].tolist()[0], skip_special_tokens=True))
 
-    _state.translation = LoadedTranslation(
-        engine="facebook/hf-seamless-m4t-medium",
+    return LoadedTranslation(
+        engine=SEAMLESS_MODEL_ID,
         translate=seamless_fn,
     )
 
@@ -278,30 +275,24 @@ _ISO_639_3_TO_FLORES_200: dict[LanguageCode, FloresLanguageTag] = {
 }
 
 
-def _load_nllb_translate() -> None:
-    """Install ``_state.translation`` for a locally-loaded NLLB-200-distilled-1.3B.
+def _load_nllb_translate() -> LoadedTranslation:
+    """Load a locally-loaded NLLB-200-distilled-1.3B.
 
-    Model downloads from HuggingFace on first load (~5 GB) and is
-    cached thereafter. Operators on hosts where the public HF endpoint
-    is slow or blocked can point at a mirror via ``HF_ENDPOINT`` before
-    the worker starts.
+    The model (~5.5 GB) is resolved first (``resolve_transformers``) and
+    loaded from that snapshot only. Operators on hosts where the public HF
+    endpoint is slow or blocked can point at a mirror via ``HF_ENDPOINT``
+    before the worker starts.
     """
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-    from batchalign.worker._progress import (
-        HF_ARTIFACTS_NLLB,
-        emit_hf_download_if_missing,
+    from batchalign.worker._model_loading.pinned_hub import (
+        resolve_transformers,
+        unpinned,
     )
 
-    model_id = "facebook/nllb-200-distilled-1.3B"
-    emit_hf_download_if_missing(
-        model_id,
-        kind="translation",
-        artifacts=HF_ARTIFACTS_NLLB,
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+    snapshot = resolve_transformers(unpinned(NLLB_MODEL_ID), kind="translation")
+    tokenizer = AutoTokenizer.from_pretrained(snapshot.path)
+    model = AutoModelForSeq2SeqLM.from_pretrained(snapshot.path)
     # torch.nn.Module.eval(): sets the module to inference mode
     # (disables dropout/BN training behavior). Without this, the 1.3B
     # encoder-decoder stays in training mode and generation is
@@ -336,8 +327,8 @@ def _load_nllb_translate() -> None:
         )
         return str(tokenizer.decode(translated[0], skip_special_tokens=True))
 
-    _state.translation = LoadedTranslation(
-        engine=model_id,
+    return LoadedTranslation(
+        engine=NLLB_MODEL_ID,
         translate=nllb_fn,
     )
 
@@ -368,8 +359,8 @@ _ISO_639_3_TO_TENCENT_LANG: dict[LanguageCode, TencentLanguageCode] = {
 }
 
 
-def _load_tencent_translate() -> None:
-    """Install ``_state.translation`` for a Tencent Cloud TMT translator.
+def _load_tencent_translate() -> LoadedTranslation:
+    """Load a Tencent Cloud TMT translator.
 
     Credentials come from the same source the Tencent ASR backend
     uses: ``read_asr_config`` (in
@@ -453,7 +444,7 @@ def _load_tencent_translate() -> None:
             raise RuntimeError(f"Tencent TMT translation failed: {exc}") from exc
         return _TencentTranslationResponse.model_validate(resp).Response.TargetText
 
-    _state.translation = LoadedTranslation(
+    return LoadedTranslation(
         engine="tencent-tmt",
         translate=tencent_fn,
     )
@@ -509,8 +500,8 @@ _ALIYUN_MT_FORMAT_TYPE: str = "text"
 _ALIYUN_MT_SCENE: str = "general"
 
 
-def _load_aliyun_translate() -> None:
-    """Install ``_state.translation`` for an Aliyun MT translator.
+def _load_aliyun_translate() -> LoadedTranslation:
+    """Load an Aliyun MT translator.
 
     Credentials come from the same source the Aliyun ASR backend
     uses: ``read_asr_config`` (in
@@ -599,7 +590,7 @@ def _load_aliyun_translate() -> None:
             )
         return translated
 
-    _state.translation = LoadedTranslation(
+    return LoadedTranslation(
         engine="aliyun-mt",
         translate=aliyun_fn,
     )

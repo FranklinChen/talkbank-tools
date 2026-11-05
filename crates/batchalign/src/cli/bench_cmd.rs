@@ -94,32 +94,23 @@ fn build_options(_global: &GlobalOpts, args: &BenchArgs) -> CommandOptions {
         }),
         BenchTarget::Translate => CommandOptions::Translate(TranslateOptions {
             common,
-            merge_abbrev: false.into(),
             ..TranslateOptions::default()
         }),
         BenchTarget::Utseg => CommandOptions::Utseg(UtsegOptions {
             common,
-            merge_abbrev: false.into(),
             utseg_fallback: false.into(),
         }),
         BenchTarget::Benchmark => CommandOptions::Benchmark(BenchmarkOptions {
             common,
             asr_engine: crate::options::AsrEngineName::RevAi,
             wor: false.into(),
-            merge_abbrev: false.into(),
         }),
         BenchTarget::Opensmile => CommandOptions::Opensmile(OpensmileOptions {
             common,
             feature_set: "eGeMAPSv02".into(),
         }),
-        BenchTarget::Coref => CommandOptions::Coref(CorefOptions {
-            common,
-            merge_abbrev: false.into(),
-        }),
-        BenchTarget::Compare => CommandOptions::Compare(CompareOptions {
-            common,
-            merge_abbrev: false.into(),
-        }),
+        BenchTarget::Coref => CommandOptions::Coref(CorefOptions { common }),
+        BenchTarget::Compare => CommandOptions::Compare(CompareOptions { common }),
     }
 }
 

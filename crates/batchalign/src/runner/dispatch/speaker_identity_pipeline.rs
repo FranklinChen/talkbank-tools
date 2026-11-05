@@ -201,10 +201,10 @@ pub(crate) async fn dispatch_speaker_identity(
         return;
     };
     // One route for the whole job, so every embedding request reaches the
-    // worker the probe selected. Speaker identity selects no engine, so its
-    // plan is the engine-free one routing probed with.
+    // worker the probe selected and prepared: the plan routing probed with,
+    // whose speaker model is the embedding model.
     let route = match pool.gpu_route(
-        &crate::worker::pool::GpuModelPlan::without_engines(),
+        &crate::worker::pool::GpuModelPlan::speaker_identity(),
         crate::worker::pool::GpuTask::Speaker,
         pool_key,
     ) {
@@ -284,13 +284,13 @@ async fn process_one_file(
     let chat_text = match tokio::fs::read_to_string(&read_path).await {
         Ok(content) => content,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(
                     &format!("Failed to read input: {error}"),
                     FailureCategory::InputMissing,
                 )
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -298,10 +298,10 @@ async fn process_one_file(
     let transcript = match admit_speaker_transcript(&chat_text, read_path.as_path()) {
         Ok(transcript) => transcript,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(&error.to_string(), classify_server_error(&error))
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -318,23 +318,23 @@ async fn process_one_file(
     {
         Ok(path) => path,
         Err(unresolved) => {
-            lifecycle
+            return lifecycle
                 .fail(&unresolved.message, FailureCategory::Validation)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
     let audio_path = match crate::ensure_wav::ensure_wav(&original_audio_path, None).await {
         Ok(path) => path,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(
                     &format!("Media conversion failed for {filename}: {error}"),
                     FailureCategory::Validation,
                 )
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 

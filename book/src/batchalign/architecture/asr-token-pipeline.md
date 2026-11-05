@@ -353,7 +353,7 @@ count.
 
 | # | Stage | Function | What changes |
 |---|-------|----------|-------------|
-| 1 | Compound merging | `prepare_words_pre_expansion()` | Adjacent compound pairs joined ("air"+"plane" → "airplane") |
+| 1 | Compound merging | `prepare_words_pre_expansion()` | Adjacent compound pairs joined ("air"+"plane" → "airplane"), timed from the first word's start to the second word's end. A pair with an untimed word is not joined. |
 | 2 | Timed word extraction + separator strip | `prepare_words_pre_expansion()` | Seconds → ms, pause markers filtered, MOR_PUNCT (`,` `„` `‡`) and RTL separators trimmed from word boundaries. **Case is preserved**: see "Casing" below. |
 | 2d | **Han-script normalization** (`yue` and `nan` only; `nan` converts to Taiwan traditional with no domain table) | `prepare_words_pre_expansion()` | The monologue's words are normalized as ONE run through `AlignedNormalization` (simplified → traditional plus the 31-entry domain table), and each word gets back exactly its own characters. It runs before stage 3 because that stage interpolates timestamps across a token's characters and must see final text, and because normalizing afterwards would normalize one character at a time and lose every multi-character replacement. A conversion that changed the character count refuses the file (`NormalizationChangedLength`, carrying both counts) rather than re-cutting words away from their timings. |
 | 3 | Multi-word splitting | `prepare_words_pre_expansion()` | Space-containing tokens split, timestamps interpolated, hyphens joined |

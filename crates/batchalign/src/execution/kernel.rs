@@ -29,7 +29,6 @@ struct ExecutionContext<'a> {
     pub(crate) host: &'a DispatchHostContext,
     pub(crate) gateway: &'a dyn WorkerGateway,
     pub(crate) mwt: &'a MwtDict,
-    pub(crate) should_merge_abbrev: bool,
 }
 
 /// Stage executor interface used by the new execution kernel.
@@ -140,7 +139,6 @@ pub(crate) async fn dispatch_compare_job(
     host: &DispatchHostContext,
     gateway: &dyn WorkerGateway,
     mwt: &MwtDict,
-    should_merge_abbrev: bool,
 ) -> Result<(), crate::error::ServerError> {
     let plan = match planning::build_job_plan(job) {
         Ok(plan) => plan,
@@ -172,7 +170,6 @@ pub(crate) async fn dispatch_compare_job(
         host,
         gateway,
         mwt,
-        should_merge_abbrev,
     };
     ExecutionKernel::new(Box::new(CompareStageExecutor))
         .run(&plan, &ctx)
@@ -342,30 +339,6 @@ impl StageExecutor for CompareStageExecutor {
                         "compare output materialization ran before compare outputs existed".into(),
                     )
                 })?;
-                // The merge is the LAST transition on the proof, so the bytes
-                // written are bytes the gate judged. It ran on the finished
-                // TEXT here until 2026-09-07 (`merge_abbreviations_in_chat_text`
-                // over `chat_output`, then write the result), which put a
-                // transform after the only thing that had looked at the
-                // document. A refusal is returned, not warned about: this
-                // stage's `Result` is what fails the file.
-                //
-                // The flag stays a `bool` here rather than the
-                // `MergeAbbreviations` enum the two dispatch writers use:
-                // `runner::dispatch` is private to `runner` and re-exports
-                // nothing, so sharing the vocabulary would mean widening two
-                // module boundaries for a two-variant enum.
-                let chat_output = if ctx.should_merge_abbrev {
-                    // POLICY: the refusal carries `unmerged`, an admissible
-                    // compare output, and this stage declines to write it. A
-                    // merge that breaks the gate its input passed is a defect
-                    // in the merge, and writing past it would hide one.
-                    chat_output.with_abbreviations_merged().map_err(|refused| {
-                        crate::error::ServerError::Validation(refused.to_string())
-                    })?
-                } else {
-                    chat_output
-                };
                 let Some(artifacts) =
                     planning::artifact_set_for_source(plan, &state.unit.main.display_path)
                 else {
@@ -529,7 +502,6 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Compare(CompareOptions {
                     common: CommonOptions::default(),
-                    merge_abbrev: false.into(),
                 }),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,
@@ -657,7 +629,6 @@ mod tests {
             host: &host,
             gateway: &gateway,
             mwt: &MwtDict::default(),
-            should_merge_abbrev: false,
         };
 
         ExecutionKernel::new(Box::new(CompareStageExecutor))

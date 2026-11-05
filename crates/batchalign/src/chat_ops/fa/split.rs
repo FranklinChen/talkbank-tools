@@ -34,10 +34,10 @@
 //! # When it refuses, and why that is evidence (A4)
 //!
 //! If two consecutive cut points (or a window edge and its nearest cut) are
-//! farther apart than the budget, no cut at an anchor can keep both sides in
-//! budget. On real data that stretch is minutes long and means UTR placed the
-//! utterance across audio it does not belong to, so the refusal names the
-//! stretch for review. Only that piece is left unaligned; the complete word
+//! farther apart than a declared window bound, no cut at an anchor can keep
+//! both sides within that bound. This does not establish a model limit or
+//! prove that UTR misplaced the utterance. Resource-driven planning must bind
+//! each actual request to loaded-model evidence. Only an unavailable piece is left unaligned; the complete word
 //! partition remains owned by the group, including unavailable pieces.
 //!
 //! # Tricky parts for a newcomer
@@ -54,28 +54,35 @@
 //! * Equal cut instants (zero-length tokens) collapse to the later word, so
 //!   no piece has zero duration.
 
-use batchalign_transform::decisions::{RefusedWindow, SplitWindow, UnusableAnchors};
+use batchalign_transform::decisions::RefusedWindow;
+#[cfg(test)]
+use batchalign_transform::decisions::{SplitWindow, UnusableAnchors};
 use talkbank_model::{UtteranceIdx, WordIdx};
 
 use super::FaWord;
 use super::coordinates::{FaWindow, FileMs, Ms};
-use super::utr::{AlignableWords, AnchorDisorder, AnchorLookup};
+use super::utr::AlignableWords;
+#[cfg(test)]
+use super::utr::{AnchorDisorder, AnchorLookup};
 
+#[cfg(test)]
 mod context;
 mod partition;
 pub use partition::{AnchoredPart, UnavailablePiece};
 
 /// A window inside its recording that is longer than the engine budget.
 ///
-/// Minted only by [`OverBudgetWindow::exceeding`], so holding one is the
-/// proof that the window cannot be aligned in one request, which is what makes
-/// a split of it at least two pieces.
+/// Minted only by [`OverBudgetWindow::exceeding`]. It proves that a declared
+/// geometric bound is exceeded, not that the loaded model cannot execute the
+/// request. An aggregation target cannot supply resource-admission evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(super) struct OverBudgetWindow {
     window: FaWindow,
     budget: Ms,
 }
 
+#[cfg(test)]
 impl OverBudgetWindow {
     /// The window, when it is longer than `budget`.
     pub(super) fn exceeding(window: FaWindow, budget: Ms) -> Option<Self> {
@@ -114,6 +121,22 @@ pub(super) struct NonEmptyWords {
 }
 
 impl NonEmptyWords {
+    /// Copy a recorded source's nonempty word population without reopening
+    /// admission or independently selecting its original word bounds.
+    pub(super) fn from_recorded(source: super::grouping::SourceUtterance<'_>) -> Self {
+        Self {
+            first: source.first_word(),
+            last: source.last_word(),
+            words: source.words().to_vec(),
+        }
+    }
+
+    pub(super) fn first_word(&self) -> WordIdx {
+        self.first
+    }
+    pub(super) fn last_word(&self) -> WordIdx {
+        self.last
+    }
     /// The list, when it holds at least one word.
     pub(super) fn from_vec(words: Vec<FaWord>) -> Option<Self> {
         let (first, last) = match (words.first(), words.last()) {
@@ -141,7 +164,7 @@ impl NonEmptyWords {
     /// Split after `word`: the words up to and including it, and the rest.
     /// When either side would be empty the list comes back unchanged as the
     /// error, so the caller does not cut there.
-    fn split_after(mut self, word: WordIdx) -> Result<(Self, Self), Self> {
+    pub(super) fn split_after(mut self, word: WordIdx) -> Result<(Self, Self), Self> {
         let at = self
             .words
             .iter()
@@ -188,7 +211,33 @@ pub struct AnchoredPiece {
 }
 
 impl AnchoredPiece {
-    fn new(words: NonEmptyWords, window: FaWindow) -> Self {
+    /// A proposal retains the source words and both windows. It is not an
+    /// admitted model request until preparation approves this exact shape.
+    pub(super) fn trailing_proposal(&self, following: FileMs) -> Option<Self> {
+        let extension = Ms((following.since(self.window.end()).0 / 2)
+            .min(super::grouping::TRAILING_GAP_EXTENSION_MS));
+        if extension.0 == 0 {
+            return None;
+        }
+        let mut proposal = self.clone();
+        proposal.window = proposal.window.extend_by(extension);
+        proposal.ownership_window = proposal.ownership_window.extend_by(extension);
+        Some(proposal)
+    }
+    /// A source/context admission already bound the words, owned range and
+    /// both windows. Consumers cannot independently replace any of them.
+    pub(super) fn from_resource_context(
+        context: super::resource_partition::ResourceContext,
+    ) -> Self {
+        let (words, owned, ownership_window, window) = context.into_parts();
+        Self {
+            words,
+            owned,
+            ownership_window,
+            window,
+        }
+    }
+    pub(super) fn new(words: NonEmptyWords, window: FaWindow) -> Self {
         let owned = 0..words.as_slice().len();
         Self {
             words,
@@ -258,6 +307,7 @@ pub type Pieces<'s> =
 
 /// Why an over-budget window could not be split.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(super) enum SplitRefusal {
     /// UTR has nothing to say about this utterance.
     NotRecovered,
@@ -281,18 +331,36 @@ pub(super) enum SplitRefusal {
 
 /// A candidate cut: after `word`, at the instant that word was heard ending.
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 struct Cut {
     word: WordIdx,
     at: FileMs,
 }
 
 impl AnchoredSplit {
+    /// Retain the original population when re-admitting historical geometry.
+    pub(super) fn source_words(&self) -> NonEmptyWords {
+        let first = match self.earlier.first() {
+            Some(first) => first,
+            None => &self.last,
+        };
+        NonEmptyWords {
+            first: first.first_word(),
+            last: self.last.last_word(),
+            words: self
+                .pieces()
+                .flat_map(AnchoredPart::words)
+                .cloned()
+                .collect(),
+        }
+    }
     /// Plan the pieces for one over-budget utterance, or say why there are
     /// none.
     ///
     /// Consumes the utterance's words: on success the pieces own them. Greedy:
     /// each piece is extended to the furthest cut that keeps it within the
     /// budget.
+    #[cfg(test)]
     pub(super) fn plan(
         over: OverBudgetWindow,
         utterance: UtteranceIdx,
@@ -418,6 +486,7 @@ impl AnchoredSplit {
     /// single group's window is padded, but never past the budget: half the
     /// gap, at most `max_extension`, at most what keeps the last piece within
     /// the budget, and never past the recording.
+    #[cfg(test)]
     pub(super) fn extend_into_trailing_gap(&mut self, next_start: FileMs, max_extension: Ms) {
         let AnchoredPart::Request(last) = &mut self.last else {
             return;
@@ -431,6 +500,7 @@ impl AnchoredSplit {
     }
 
     /// The decision recording that this window was aligned in pieces.
+    #[cfg(test)]
     pub(super) fn decision(&self) -> SplitWindow {
         SplitWindow {
             start_ms: self.window.audio_start().get(),
@@ -441,6 +511,7 @@ impl AnchoredSplit {
     }
 }
 
+#[cfg(test)]
 impl SplitRefusal {
     /// The one conversion from a failed split to its evidence form.
     ///

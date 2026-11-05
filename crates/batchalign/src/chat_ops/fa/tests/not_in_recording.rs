@@ -74,7 +74,7 @@ fn grouping_excludes_a_diary_note_and_refuses_unsupported_speech() {
     );
     let recording = test_recording(20_000);
 
-    let grouping = group_utterances(
+    let grouping = group_with_declared_window_limit(
         &with_note,
         20_000,
         &recording,
@@ -83,7 +83,12 @@ fn grouping_excludes_a_diary_note_and_refuses_unsupported_speech() {
     let requested: Vec<usize> = grouping
         .groups
         .iter()
-        .flat_map(|group| group.utterance_indices().iter().map(|index| index.raw()))
+        .flat_map(|group| {
+            group
+                .utterance_indices()
+                .into_iter()
+                .map(|index| index.raw())
+        })
         .collect();
     assert_eq!(requested, [0, 3], "only localized speech, and not the note");
     assert_eq!(

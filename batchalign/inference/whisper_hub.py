@@ -1,9 +1,12 @@
 """HuggingFace Whisper fine-tune ASR backend (engine: ``whisper_hub``).
 
 Loads a Malayalam (or any other language) Whisper fine-tune from the
-Hugging Face Hub by model_id, resolved from a per-language default table
-(``batchalign.models.resolve``) or an explicit user override via
-``--engine-overrides '{"asr":"whisper_hub","model_id":"owner/model"}'``.
+snapshot the worker resolved for it. Which fine-tune a language gets is
+pinned by the control plane; an unpinned worker names it from a
+per-language default table (``resolve_whisper_hub_model_id``) or an explicit
+user override via
+``--engine-overrides '{"asr":"whisper_hub","model_id":"owner/model"}'``,
+and the worker resolves that id before loading.
 
 Why a separate engine rather than overloading ``whisper``:
 
@@ -24,7 +27,8 @@ Mechanics:
 - Model_id resolution is pure: ``resolve_whisper_hub_model_id`` takes
   the language + engine_overrides and returns either a concrete HF
   model_id or raises ``WhisperHubModelNotFoundError``.
-- Model loading delegates through ``batchalign.inference.asr.load_whisper_asr``
+- Model loading takes the resolved ``TransformersSnapshot`` only and
+  delegates through ``batchalign.inference.asr.load_whisper_asr``
   with ``CheckpointPinnedLanguage`` decoding, so ``gen_kwargs`` never forces
   a task or language (which breaks fine-tunes). The returned
   handle is the same ``WhisperASRHandle`` used by stock Whisper, so
@@ -45,6 +49,7 @@ from batchalign.models.resolve import resolve
 if TYPE_CHECKING:
     from batchalign.device import DevicePolicy
     from batchalign.inference.types import WhisperASRHandle
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 
 # Key under which an explicit user override for the fine-tune model_id
@@ -99,13 +104,17 @@ def resolve_whisper_hub_model_id(
 
 
 def load_whisper_hub_asr(
-    lang: LanguageCode,
-    engine_overrides: dict[str, str] | None,
+    snapshot: TransformersSnapshot,
     *,
     device_policy: DevicePolicy | None = None,
-    model_path: str | None = None,
 ) -> WhisperASRHandle:
     """Load an HF Whisper fine-tune and return the shared ``WhisperASRHandle``.
+
+    ``snapshot`` is the fine-tune the worker already resolved at the revision
+    the control plane pinned (Rust owns which fine-tune a language gets,
+    `model_manifest`; an unpinned worker resolves the table below first).
+    It used to take an optional path and fall back to resolving the table
+    here, which downloaded inside the load when the path was missing.
 
     The returned handle is the same type used by stock Whisper. Downstream
     V2 inference (``infer_whisper_prepared_audio``) works without
@@ -123,17 +132,8 @@ def load_whisper_hub_asr(
     from batchalign.inference.asr import load_whisper_asr
     from batchalign.inference.types import CheckpointPinnedLanguage
 
-    # ``model_path`` is a snapshot the worker already materialized at the
-    # revision the control plane pinned. When it is given, the per-language
-    # table below is not consulted at all: Rust owns which fine-tune a
-    # language gets (`model_manifest`), and resolving it a second time here
-    # could only disagree. The table remains for direct callers that have no
-    # control plane, and for the named "no default for this language" error.
-    model_id = model_path or resolve_whisper_hub_model_id(lang, engine_overrides)
-
     return load_whisper_asr(
-        model=model_id,
-        base=model_id,
+        snapshot,
         decoding=CheckpointPinnedLanguage(),
         device_policy=device_policy,
         timestamp_mode=WhisperTimestampMode.SEGMENT,

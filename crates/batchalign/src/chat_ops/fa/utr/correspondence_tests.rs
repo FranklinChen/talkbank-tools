@@ -338,27 +338,33 @@ fn missing_endpoint_search_uses_the_actual_recording_edge_not_a_synthetic_time()
             )
             .unwrap();
         assert_eq!((search.span.start_ms, search.span.end_ms), (100, end));
-        let grouping =
-            super::super::grouping::group_utterances(&chat, 500, &recording, &result.anchors);
+        let grouping = super::super::grouping::group_with_declared_window_limit(
+            &chat,
+            500,
+            &recording,
+            &result.anchors,
+        );
         assert!(
-            !grouping.groups.iter().any(|group| match group.units() {
-                super::super::GroupUnits::Whole(unit) =>
-                    unit.words.iter().any(|word| word.text == "missing"),
-                super::super::GroupUnits::Pieces(mut pieces) => pieces.any(|part| match part {
-                    super::super::AnchoredPart::Request(piece) =>
-                        piece.words().iter().any(|word| word.text == "missing"),
-                    super::super::AnchoredPart::Unavailable(piece) => {
+            !grouping
+                .groups
+                .iter()
+                .flat_map(|group| group.requests())
+                .any(|unit| unit.words().iter().any(|word| word.text == "missing")),
+            "an over-budget obligation must not fall back to a narrow convenient crop"
+        );
+        for group in &grouping.groups {
+            if let super::super::GroupSpan::Anchored(split) = group.span() {
+                for part in split.pieces() {
+                    if let super::super::AnchoredPart::Unavailable(piece) = part {
                         assert_eq!(
                             piece.window().end().get(),
                             end,
                             "unavailable endpoint keeps the real recording edge"
                         );
-                        false
                     }
-                }),
-            }),
-            "an over-budget obligation must not fall back to a narrow convenient crop"
-        );
+                }
+            }
+        }
         assert!(grouping.decisions.iter().any(|decision| matches!(
             decision.strategy,
             batchalign_transform::decisions::DecisionStrategy::Fa(
@@ -590,7 +596,12 @@ fn ambiguous_interleaving_search_keeps_all_candidates_across_host_crop() {
     let recording =
         super::super::coordinates::Recording::of_duration(super::super::coordinates::Ms(4000))
             .expect("recording");
-    let groups = super::super::grouping::group_utterances(&chat, 2000, &recording, &result.anchors);
+    let groups = super::super::grouping::group_with_declared_window_limit(
+        &chat,
+        2000,
+        &recording,
+        &result.anchors,
+    );
     assert!(
         groups
             .groups
@@ -727,7 +738,12 @@ fn complete_ambiguous_embeddings_bound_search_without_selecting_timings() {
     let recording =
         super::super::coordinates::Recording::of_duration(super::super::coordinates::Ms(4000))
             .expect("recording");
-    let groups = super::super::grouping::group_utterances(&chat, 1000, &recording, &result.anchors);
+    let groups = super::super::grouping::group_with_declared_window_limit(
+        &chat,
+        1000,
+        &recording,
+        &result.anchors,
+    );
     assert_eq!(
         groups.groups.len(),
         1,
@@ -1010,7 +1026,8 @@ fn correspondence_partial_certainty_retains_anchor_and_complete_candidate_range(
     let recording =
         super::super::coordinates::Recording::of_duration(super::super::coordinates::Ms(1000))
             .expect("positive recording");
-    let groups = super::super::grouping::group_utterances(&chat, 1000, &recording, &anchors);
+    let groups =
+        super::super::grouping::group_with_declared_window_limit(&chat, 1000, &recording, &anchors);
     assert_eq!(
         groups.groups.len(),
         1,

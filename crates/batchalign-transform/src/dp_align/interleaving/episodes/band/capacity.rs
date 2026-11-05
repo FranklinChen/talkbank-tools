@@ -5,7 +5,6 @@
 
 use super::*;
 use crate::dp_align::LiteralMatchMode;
-use crate::dp_align::packed_literal::policy;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -31,9 +30,6 @@ impl<'relation, 'source> ReferenceCapacity<'relation, 'source> {
             mode,
         } = relation
         else {
-            return Ok(None);
-        };
-        let Some(mode) = policy(*mode) else {
             return Ok(None);
         };
         // Reserve both retained vectors and a conservative map-entry/header

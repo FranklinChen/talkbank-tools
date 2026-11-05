@@ -1,4 +1,4 @@
-"""Loading policy of the morphosyntax batch-infer handler.
+"""Loading policy of the morphosyntax runner.
 
 The handler used to PRELOAD every language mentioned anywhere in a request
 before inference began. Against a bounded cache that thrashes: with a capacity
@@ -61,10 +61,10 @@ def _three_language_request() -> BatchInferRequest:
 def test_the_handler_preloads_nothing(loaded_languages: list[str]) -> None:
     """RED FIRST (review item 7): a three-language request over a
     capacity-two cache must not load three pipelines before inference."""
-    from batchalign.worker._infer_hosts import build_morphosyntax_batch_infer_handler
+    from batchalign.worker._infer_hosts import build_morphosyntax_runner
 
-    handler = build_morphosyntax_batch_infer_handler()
-    handler(_three_language_request())
+    runner = build_morphosyntax_runner(_state.stanza_pipelines)
+    runner(_three_language_request(), None)
 
     assert loaded_languages == [], (
         "languages must be loaded per group at the point of use, not upfront: "
@@ -81,10 +81,10 @@ def test_the_handler_hands_the_cache_over_as_one_lookup(
     which is what allowed a read of one to be separated from a read of the
     other by an eviction.
     """
-    from batchalign.worker._infer_hosts import build_morphosyntax_batch_infer_handler
+    from batchalign.worker._infer_hosts import build_morphosyntax_runner
 
-    handler = build_morphosyntax_batch_infer_handler()
-    call = handler(_three_language_request())
+    runner = build_morphosyntax_runner(_state.stanza_pipelines)
+    call = runner(_three_language_request(), None)
 
     assert isinstance(call, dict)
     assert call["pipelines"] is _state.stanza_pipelines
@@ -93,3 +93,23 @@ def test_the_handler_hands_the_cache_over_as_one_lookup(
     # And the on-demand loader is still wired, since that is what makes
     # dropping the preload safe.
     assert call["load_pipeline"] is not None
+
+
+def test_the_progress_callback_is_the_callers_argument(
+    loaded_languages: list[str],
+) -> None:
+    """A request's progress callback reaches inference as an argument, not
+    through worker state: the legacy route passes none, a V2 request its own."""
+    from batchalign.worker._infer_hosts import build_morphosyntax_runner
+
+    def on_progress(_completed: int, _total: int) -> None:
+        return None
+
+    runner = build_morphosyntax_runner(_state.stanza_pipelines)
+
+    assert runner(_three_language_request(), None)["progress_callback"] is None
+    assert (
+        runner(_three_language_request(), on_progress)["progress_callback"]
+        is on_progress
+    )
+    assert not hasattr(_state, "active_progress_callback")

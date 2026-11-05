@@ -558,7 +558,6 @@ mod tests {
         use crate::runner::util::classify_server_error;
         use crate::scheduling::FailureCategory;
         use crate::worker::error::WorkerError;
-        use crate::worker::memory_guard::MemoryGuardError;
 
         struct FailingWorker(std::sync::Mutex<Option<WorkerError>>);
 
@@ -599,8 +598,11 @@ mod tests {
                 false,
             ),
             (
-                WorkerError::ReadyTimeout {
-                    timeout_s: crate::api::PositiveSeconds::literal::<1>(),
+                WorkerError::Stalled {
+                    waited_for: crate::worker::LoadingWait::Ready,
+                    stall: crate::worker::LoadingStall::new(
+                        crate::api::PositiveSeconds::literal::<1>(),
+                    ),
                 },
                 FailureCategory::WorkerTimeout,
                 true,
@@ -614,11 +616,10 @@ mod tests {
                 true,
             ),
             (
-                WorkerError::MemoryGuard(MemoryGuardError::InsufficientMemory {
-                    available_mb: 1,
-                    required_mb: 2,
-                    total_mb: 3,
-                }),
+                WorkerError::DeviceOutOfMemory {
+                    message: "device out of memory".into(),
+                    worker: crate::worker::error::WorkerAfterError::Serves,
+                },
                 FailureCategory::MemoryPressure,
                 true,
             ),
@@ -650,13 +651,7 @@ mod tests {
             if expected == FailureCategory::MemoryPressure {
                 assert!(matches!(
                     &server,
-                    ServerError::Worker(WorkerError::MemoryGuard(
-                        MemoryGuardError::InsufficientMemory {
-                            available_mb: 1,
-                            required_mb: 2,
-                            total_mb: 3
-                        }
-                    ))
+                    ServerError::Worker(WorkerError::DeviceOutOfMemory { .. })
                 ));
             }
             if expected == FailureCategory::WorkerCrash {

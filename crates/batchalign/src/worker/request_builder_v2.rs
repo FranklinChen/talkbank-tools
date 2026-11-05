@@ -75,6 +75,133 @@ pub struct PreparedFaRequestIdsV2 {
     pub audio_ref_id: WorkerArtifactIdV2,
 }
 
+/// Materialized FA inputs. The original media path is deliberately absent:
+/// selecting a fallback backend can reshape labels, but cannot decode it again.
+/// Candidate is the only wire phase this state can produce.
+#[derive(Debug)]
+pub struct PreparedFaCandidateV2 {
+    request_id: WorkerRequestIdV2,
+    backend: FaCandidateBackend,
+    payload: crate::types::worker_v2::PreparedTextRefV2,
+    audio: crate::types::worker_v2::PreparedAudioRefV2,
+    whisper_text: WhisperTextMode,
+}
+
+#[derive(Debug)]
+enum FaCandidateBackend {
+    Whisper {
+        capture: Option<crate::types::worker_v2::WhisperAttentionCaptureRequestV2>,
+    },
+    Wave2vec,
+    Cantonese,
+    Qwen,
+}
+
+impl FaCandidateBackend {
+    fn of(engine: FaEngineName) -> Self {
+        match fa_backend_for_engine(engine) {
+            FaBackendV2::Whisper => Self::Whisper { capture: None },
+            FaBackendV2::Wave2vec => Self::Wave2vec,
+            FaBackendV2::Wav2vecCanto => Self::Cantonese,
+            FaBackendV2::Qwen3 => Self::Qwen,
+        }
+    }
+    fn wire(&self) -> FaBackendV2 {
+        match self {
+            Self::Whisper { .. } => FaBackendV2::Whisper,
+            Self::Wave2vec => FaBackendV2::Wave2vec,
+            Self::Cantonese => FaBackendV2::Wav2vecCanto,
+            Self::Qwen => FaBackendV2::Qwen3,
+        }
+    }
+}
+
+impl PreparedFaCandidateV2 {
+    /// Reuse immutable prepared PCM and source text under another model.
+    pub(crate) fn retarget(mut self, engine: FaEngineName, request_id: WorkerRequestIdV2) -> Self {
+        self.backend = FaCandidateBackend::of(engine);
+        self.request_id = request_id;
+        self
+    }
+
+    /// Capture is admitted at the candidate edge and belongs only to Whisper.
+    pub(crate) fn with_attention_capture(
+        mut self,
+        capture: Option<crate::types::worker_v2::WhisperAttentionCaptureRequestV2>,
+    ) -> Result<Self, ForcedAlignmentRequestBuildErrorV2> {
+        match (&mut self.backend, capture) {
+            (FaCandidateBackend::Whisper { capture: selected }, capture) => *selected = capture,
+            (
+                FaCandidateBackend::Wave2vec
+                | FaCandidateBackend::Cantonese
+                | FaCandidateBackend::Qwen,
+                None,
+            ) => {}
+            (
+                FaCandidateBackend::Wave2vec
+                | FaCandidateBackend::Cantonese
+                | FaCandidateBackend::Qwen,
+                Some(_),
+            ) => return Err(ForcedAlignmentRequestBuildErrorV2::UnsupportedAttentionCapture),
+        }
+        Ok(self)
+    }
+
+    /// Borrow an immutable packet for preparation without reopening any inputs.
+    pub(crate) fn request(&self) -> ExecuteRequestV2 {
+        let backend = self.backend.wire();
+        let attention_capture = match &self.backend {
+            FaCandidateBackend::Whisper { capture } => capture.clone(),
+            FaCandidateBackend::Wave2vec
+            | FaCandidateBackend::Cantonese
+            | FaCandidateBackend::Qwen => None,
+        };
+        ExecuteRequestV2 {
+            request_id: self.request_id.clone(),
+            task: InferenceTaskV2::ForcedAlignment,
+            payload: TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                phase: crate::types::worker_v2::FaRequestPhaseV2::Candidate,
+                attention_capture,
+                backend,
+                payload_ref_id: self.payload.id.clone(),
+                audio_ref_id: self.audio.id.clone(),
+                text_mode: text_mode_for(backend, self.whisper_text),
+            }),
+            attachments: vec![
+                ArtifactRefV2::PreparedText(self.payload.clone()),
+                ArtifactRefV2::PreparedAudio(self.audio.clone()),
+            ],
+        }
+    }
+
+    /// Cross into the generic worker envelope at its transport boundary.
+    pub fn into_request(self) -> ExecuteRequestV2 {
+        let backend = self.backend.wire();
+        let attention_capture = match self.backend {
+            FaCandidateBackend::Whisper { capture } => capture,
+            FaCandidateBackend::Wave2vec
+            | FaCandidateBackend::Cantonese
+            | FaCandidateBackend::Qwen => None,
+        };
+        ExecuteRequestV2 {
+            request_id: self.request_id,
+            task: InferenceTaskV2::ForcedAlignment,
+            payload: TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
+                phase: crate::types::worker_v2::FaRequestPhaseV2::Candidate,
+                attention_capture,
+                backend,
+                payload_ref_id: self.payload.id.clone(),
+                audio_ref_id: self.audio.id.clone(),
+                text_mode: text_mode_for(backend, self.whisper_text),
+            }),
+            attachments: vec![
+                ArtifactRefV2::PreparedText(self.payload),
+                ArtifactRefV2::PreparedAudio(self.audio),
+            ],
+        }
+    }
+}
+
 impl PreparedFaRequestIdsV2 {
     /// Construct the stable ids for one staged V2 FA request.
     pub fn new(
@@ -104,6 +231,9 @@ pub struct ForcedAlignmentBuildInputV2<'a> {
 /// Errors produced while building a staged V2 forced-alignment request.
 #[derive(Debug, Error)]
 pub enum ForcedAlignmentRequestBuildErrorV2 {
+    /// Attention capture is a Whisper capability, not an optional word-model field.
+    #[error("forced-alignment attention capture requires a Whisper candidate")]
+    UnsupportedAttentionCapture,
     /// The infer item contained inconsistent word arrays.
     #[error("forced-alignment infer item field {field} has length {actual}, expected {expected}")]
     MismatchedWordArrayLength {
@@ -146,7 +276,7 @@ pub enum ForcedAlignmentRequestBuildErrorV2 {
 pub async fn build_forced_alignment_request_v2(
     store: &PreparedArtifactStoreV2,
     input: ForcedAlignmentBuildInputV2<'_>,
-) -> Result<ExecuteRequestV2, ForcedAlignmentRequestBuildErrorV2> {
+) -> Result<PreparedFaCandidateV2, ForcedAlignmentRequestBuildErrorV2> {
     validate_fa_infer_item(input.infer_item)?;
 
     let payload = PreparedFaPayloadV2::from_infer_item(input.infer_item);
@@ -172,24 +302,13 @@ pub async fn build_forced_alignment_request_v2(
             other => ForcedAlignmentRequestBuildErrorV2::Artifact(other),
         })?;
 
-    let backend = fa_backend_for_engine(input.engine);
-    let request = ExecuteRequestV2 {
+    Ok(PreparedFaCandidateV2 {
         request_id: input.ids.request_id.clone(),
-        task: InferenceTaskV2::ForcedAlignment,
-        payload: TaskRequestV2::ForcedAlignment(ForcedAlignmentRequestV2 {
-            attention_capture: None,
-            backend,
-            payload_ref_id: payload_attachment.id.clone(),
-            audio_ref_id: audio_attachment.id.clone(),
-            text_mode: text_mode_for(backend, input.infer_item.whisper_text),
-        }),
-        attachments: vec![
-            ArtifactRefV2::PreparedText(payload_attachment),
-            ArtifactRefV2::PreparedAudio(audio_attachment),
-        ],
-    };
-
-    Ok(request)
+        backend: FaCandidateBackend::of(input.engine),
+        payload: payload_attachment,
+        audio: audio_attachment,
+        whisper_text: input.infer_item.whisper_text,
+    })
 }
 
 /// Map an FA engine onto the V2 backend vocabulary.
@@ -414,7 +533,8 @@ mod tests {
             },
         )
         .await
-        .expect("staged FA V2 request should build");
+        .expect("staged FA V2 request should build")
+        .into_request();
 
         assert_eq!(request.task, InferenceTaskV2::ForcedAlignment);
         let TaskRequestV2::ForcedAlignment(payload) = &request.payload else {

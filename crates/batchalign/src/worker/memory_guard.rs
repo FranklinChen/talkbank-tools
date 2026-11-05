@@ -1,13 +1,14 @@
-//! Process-global memory guard for Python worker spawning.
+//! Process-global memory guard for Python worker spawning, and the typed
+//! refusals of every host-memory wait a worker makes.
 //!
 //! # Problem
 //!
-//! Each Python ML worker loads 2-15 GB of models (Whisper, Stanza, etc.).
-//! When multiple workers spawn concurrently, from parallel tests, warmup,
-//! or job dispatch: they each check available memory, see "enough", and
-//! start loading simultaneously. By the time all models are resident, total
-//! usage exceeds physical RAM, triggering a **kernel-level OOM panic** that
-//! crashes the entire machine (not just the process).
+//! Python ML workers load gigabytes of models (Whisper, Stanza, etc.). When
+//! several start or load at once (parallel tests, pre-scaling, job dispatch)
+//! each sees "enough" memory before any of them has taken its share, and by
+//! the time all are resident they exceed physical RAM, triggering a
+//! **kernel-level OOM panic** that crashes the entire machine (not just the
+//! process).
 //!
 //! This has caused multiple catastrophic crashes on a 64 GB developer machine
 //! (see `docs/postmortems/`). The Jetsam report from 2026-03-21 showed 5
@@ -15,40 +16,31 @@
 //!
 //! # Solution
 //!
-//! A process-global semaphore serializes worker spawns within one process, and
-//! a host-wide ledger coordinates heavy worker/model startups across local
-//! batchalign3 processes. Before each spawn, the guard checks local available
-//! memory and then reserves a host-wide startup slot plus startup headroom. If
-//! memory is insufficient, the spawn is rejected with a typed error, never
-//! silently retried or defaulted.
+//! Every byte a worker holds is reserved with the host-wide ledger
+//! (`crate::host_memory`) before it is taken: the process baseline by the
+//! spawn's startup lease, here, and each model by its load's own lease
+//! (`worker::pool::task_load`). A process-global semaphore also serializes
+//! spawns within one process, and the ledger's startup slots across the
+//! host's batchalign3 processes.
 //!
-//! This is defense-in-depth: even if a caller forgets to check memory, the
-//! spawn itself will refuse. The local semaphore prevents the in-process TOCTOU
-//! race where N concurrent checks all see "enough" before any model is loaded,
-//! and the host-wide ledger extends that protection across separate local
-//! servers, ports, and test binaries.
+//! A reservation the host cannot fit now is queued, not refused: the spawn
+//! waits, reported, until the host can fit it, and a cancelled job stops the
+//! wait by dropping it. Only a reservation that can never fit, or a host or
+//! ledger that cannot be read, is refused, with its own typed error.
 
 use std::sync::LazyLock;
-use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use crate::host_memory::HostMemoryLease;
+use crate::host_memory::{
+    HostMemoryError, HostMemoryLease, QueuedLeaseFailure, WorkerLeaseRequest,
+};
 
 use super::handle::WorkerConfig;
 
-/// Minimum available memory (MB) to allow a worker spawn.
-/// Default: 4 GB. Override via `BATCHALIGN_SPAWN_MIN_MEMORY_MB` env var.
-fn min_spawn_memory_mb() -> u64 {
-    std::env::var("BATCHALIGN_SPAWN_MIN_MEMORY_MB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4096)
-}
-
 /// Maximum concurrent worker spawns. Serializing spawns prevents the TOCTOU
-/// race where N workers all check memory before any model is loaded.
+/// race where N workers all check memory before any of them has started.
 ///
 /// Default: 1 (fully serialized). Override via `BATCHALIGN_MAX_CONCURRENT_SPAWNS`.
 fn max_concurrent_spawns() -> usize {
@@ -62,47 +54,76 @@ fn max_concurrent_spawns() -> usize {
 static SPAWN_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(max_concurrent_spawns()));
 
-/// Error returned when a worker spawn is blocked by the memory guard.
+/// Why a worker's host-memory reservation (a spawn's baseline, a model's
+/// load, a per-batch build) was refused.
 ///
 /// Each cause keeps its own type so the job-failure classifier
-/// (`runner::util::error_classification`) can tell memory pressure, which a
-/// later retry may get past, from a host or ledger the guard cannot use,
-/// which no retry fixes.
+/// (`runner::util::error_classification`) can tell a reservation no host
+/// state will ever fit from a host or ledger the coordinator cannot use.
+/// There is no "not enough memory now": that wait queues.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryGuardError {
-    /// Not enough free memory to safely spawn a worker.
-    #[error(
-        "insufficient memory to spawn worker: {available_mb} MB available, \
-         {required_mb} MB required (total RAM: {total_mb} MB). \
-         This guard prevents kernel OOM panics. \
-         Set BATCHALIGN_SPAWN_MIN_MEMORY_MB to adjust the threshold."
-    )]
-    InsufficientMemory {
-        /// How much memory is currently available.
-        available_mb: u64,
-        /// How much memory was requested for this spawn.
-        required_mb: u64,
-        /// Total physical RAM on this machine.
-        total_mb: u64,
-    },
-
     /// Spawn semaphore was closed (server shutting down).
     #[error("worker spawn semaphore closed (server shutting down)")]
     SemaphoreClosed,
 
-    /// Host-wide coordinator rejected or timed out the startup reservation,
-    /// or could not use its ledger; the coordinator's own error says which.
-    #[error("host memory coordinator blocked worker spawn: {0}")]
-    HostReservation(#[source] crate::host_memory::HostMemoryError),
+    /// The reservation is larger than this host can ever grant with its
+    /// reserve kept free: no amount of waiting fits it.
+    #[error(
+        "{label} needs {requested_mb} MB of host memory, more than this host can ever grant: \
+         {total_mb} MB total, {reserve_mb} MB kept free (memory_gate_mb)"
+    )]
+    ExceedsHost {
+        /// What the reservation was for (the ledger label).
+        label: String,
+        /// What it asked for.
+        requested_mb: u64,
+        /// The host's reserve.
+        reserve_mb: u64,
+        /// The host's total memory.
+        total_mb: u64,
+    },
+
+    /// The coordinator could not read the host or use its ledger.
+    #[error("host memory coordinator could not decide a reservation: {0}")]
+    LedgerUnusable(#[source] HostMemoryError),
 
     /// The blocking task taking the reservation panicked or was cancelled.
     #[error("host memory reservation task did not finish: {0}")]
     ReservationTaskFailed(#[source] tokio::task::JoinError),
+}
 
-    /// The operating system would not report this host's memory, so the
-    /// guard has nothing to check the spawn against and refuses it.
-    #[error(transparent)]
-    HostUnreadable(#[from] crate::host_memory::HostUnreadable),
+impl From<QueuedLeaseFailure> for MemoryGuardError {
+    /// A queued wait stops only on a refusal no waiting clears.
+    fn from(failure: QueuedLeaseFailure) -> Self {
+        match failure {
+            QueuedLeaseFailure::Refused(HostMemoryError::CapacityRejected {
+                label,
+                requested_mb,
+                reserve_mb,
+                total_mb,
+                ..
+            }) => Self::ExceedsHost {
+                label,
+                requested_mb,
+                reserve_mb,
+                total_mb,
+            },
+            // The rest a queued wait stops on: the host or the ledger cannot
+            // be read or written. (A busy slot or test lock is retried and a
+            // timeout belongs to bounded waits, so neither reaches here; they
+            // are named, not wildcarded, so a new refusal must decide.)
+            QueuedLeaseFailure::Refused(
+                error @ (HostMemoryError::Unreadable(_)
+                | HostMemoryError::Io { .. }
+                | HostMemoryError::CorruptLedger { .. }
+                | HostMemoryError::StartupSlotsBusy { .. }
+                | HostMemoryError::MlTestLockBusy { .. }
+                | HostMemoryError::TimedOut { .. }),
+            ) => Self::LedgerUnusable(error),
+            QueuedLeaseFailure::AttemptDidNotFinish(join) => Self::ReservationTaskFailed(join),
+        }
+    }
 }
 
 /// Combined local+host guard that protects one worker startup window.
@@ -148,65 +169,42 @@ pub fn available_spawn_permits() -> usize {
     SPAWN_SEMAPHORE.available_permits()
 }
 
-/// Acquire a spawn permit, checking memory before allowing the spawn.
+/// Acquire a spawn permit: the process's spawn semaphore, then the host's
+/// startup lease for the worker's baseline.
 ///
-/// This is the **only** path through which workers should be spawned.
-/// It serializes spawns via a global semaphore and checks memory before
-/// each one, preventing the concurrent-check TOCTOU race.
+/// This is the **only** path through which workers should be spawned. The
+/// lease reserves [`crate::worker::residency::WORKER_BASELINE`], what a
+/// worker holds before any load, since no model loads at startup: each model
+/// takes its own lease when it loads. The lease is queued, never refused for
+/// a host that is merely full (see the module docs); a cancelled job stops
+/// the wait by dropping this future.
 ///
-/// Returns a permit guard. The caller holds the guard through
-/// `WorkerHandle::spawn()`, which blocks until the worker sends its ready
-/// signal (i.e., models are loaded). This means the next spawn's memory
-/// check sees an accurate picture of available RAM.
-pub async fn acquire_spawn_permit(config: &WorkerConfig) -> Result<SpawnPermit, MemoryGuardError> {
+/// While queued it retires idle workers through `reclaim` (the pool's, or
+/// [`crate::host_memory::NoIdleWorkers`] for a process with no pool).
+///
+/// Returns a permit guard. The caller holds the guard through the spawn's
+/// ready handshake, so the next spawn's admission sees this one's baseline
+/// either reserved or already taken.
+pub async fn acquire_spawn_permit(
+    config: &WorkerConfig,
+    reclaim: &dyn crate::host_memory::MemoryReclaim,
+) -> Result<SpawnPermit, MemoryGuardError> {
     let permit = SPAWN_SEMAPHORE
         .acquire()
         .await
         .map_err(|_| MemoryGuardError::SemaphoreClosed)?;
 
-    let startup_reservation = config.startup_reservation_mb();
-    let required_mb = startup_reservation.0.max(min_spawn_memory_mb());
-    // Drops the permit on refusal (`?` returns before it is held), so other
-    // spawns can proceed; an unreadable host is refused, never waved through.
-    let memory = config.runtime.host.readings().memory()?;
-    let available = memory.available_mb.0;
-    let total = memory.total_mb.0;
-    let threshold = required_mb;
-
-    if available < threshold {
-        // Drop the permit before returning the error so other spawns can proceed.
-        drop(permit);
-        warn!(
-            available_mb = available,
-            required_mb = threshold,
-            total_mb = total,
-            "Memory guard blocked worker spawn"
-        );
-        return Err(MemoryGuardError::InsufficientMemory {
-            available_mb: available,
-            required_mb: threshold,
-            total_mb: total,
-        });
-    }
-
-    let coordinator = config.runtime.host.memory_coordinator();
-    let profile = config.profile;
-    let lang = config.lang.clone();
-    let engine_overrides = config.engine_overrides.clone();
-    let timeout = config.ready_timeout_s.duration();
-    let host_lease = crate::blocking::spawn_in_span(move || {
-        coordinator.acquire_worker_startup_lease(
-            profile,
-            startup_reservation,
-            &lang,
-            &engine_overrides,
-            timeout,
-            Duration::from_secs(1),
-        )
-    })
-    .await
-    .map_err(MemoryGuardError::ReservationTaskFailed)?
-    .map_err(MemoryGuardError::HostReservation)?;
+    let request =
+        WorkerLeaseRequest::worker_startup(config.profile, &config.lang, &config.engine_overrides);
+    let observer = super::pool::checkout_wait::MemoryWaitObserver::current();
+    // Drops the semaphore permit on refusal (`?` returns before it is held),
+    // so other spawns can proceed.
+    let host_lease = config
+        .runtime
+        .host
+        .memory_coordinator()
+        .queue_for_lease(request, &observer, reclaim)
+        .await?;
 
     Ok(SpawnPermit {
         _local_permit: permit,
@@ -222,8 +220,10 @@ mod tests {
     use crate::worker::WorkerProfile;
     use tempfile::tempdir;
 
+    /// A reserve no host can keep free refuses the spawn at once, naming the
+    /// sizes, rather than queueing it for ever.
     #[tokio::test]
-    async fn host_reservation_rejects_when_reserve_is_impossible() {
+    async fn a_spawn_no_host_can_fit_is_refused_at_once() {
         let temp = tempdir().expect("tempdir");
         let config = WorkerConfig {
             profile: WorkerProfile::Stanza,
@@ -240,42 +240,16 @@ mod tests {
             },
             ..WorkerConfig::for_tests()
         };
-        let result = acquire_spawn_permit(&config).await;
+        let result = acquire_spawn_permit(&config, &crate::host_memory::NoIdleWorkers).await;
         assert!(
-            matches!(result, Err(MemoryGuardError::HostReservation(_))),
-            "expected host reservation rejection"
+            matches!(
+                result,
+                Err(MemoryGuardError::ExceedsHost {
+                    reserve_mb: 1_000_000_000,
+                    ..
+                })
+            ),
+            "expected a refusal no waiting clears"
         );
-    }
-
-    #[test]
-    fn large_tier_startup_reservations_exceed_old_flat_floor() {
-        // On Large/Fleet tiers, reservations should exceed the old 4 GB flat
-        // floor that existed before tier-adaptive budgets.
-        use crate::types::runtime::MemoryTier;
-        let tier = MemoryTier::from_total_mb(64_000);
-        let gpu = WorkerProfile::Gpu.startup_reservation_mb_for_tier(&tier);
-        let stanza = WorkerProfile::Stanza.startup_reservation_mb_for_tier(&tier);
-        assert!(
-            gpu.0 > 4096,
-            "GPU Large tier ({} MB) must exceed old floor",
-            gpu.0
-        );
-        assert!(
-            stanza.0 > 4096,
-            "Stanza Large tier ({} MB) must exceed old floor",
-            stanza.0
-        );
-    }
-
-    #[test]
-    fn small_tier_startup_reservations_are_positive() {
-        use crate::types::runtime::MemoryTier;
-        let tier = MemoryTier::from_total_mb(16_000);
-        let gpu = WorkerProfile::Gpu.startup_reservation_mb_for_tier(&tier);
-        let stanza = WorkerProfile::Stanza.startup_reservation_mb_for_tier(&tier);
-        let io = WorkerProfile::Io.startup_reservation_mb_for_tier(&tier);
-        assert!(gpu.0 > 0);
-        assert!(stanza.0 > 0);
-        assert!(io.0 > 0);
     }
 }

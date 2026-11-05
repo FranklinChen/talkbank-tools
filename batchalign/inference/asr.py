@@ -24,7 +24,11 @@ from batchalign.inference._domain_types import (
     WhisperCpuPrecision,
     WhisperTimestampMode,
 )
-from batchalign.worker._types_v2 import ForceWhisperLanguageV2, ProviderDiarizationV2
+from batchalign.worker._types_v2 import (
+    ForceWhisperLanguageV2,
+    ProviderDiarizationV2,
+    WhisperModelIdentityV2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,7 @@ if TYPE_CHECKING:
     from transformers import GenerationConfig
 
     from batchalign.inference.types import WhisperASRHandle, WhisperDecoding
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
     from batchalign.worker._types_v2 import WhisperChunkResultPayloadV2
 
 # ---------------------------------------------------------------------------
@@ -164,8 +169,7 @@ def _cpu_torch_dtype(precision: WhisperCpuPrecision) -> Any:
 
 
 def load_whisper_asr(
-    model: str = "openai/whisper-large-v3",
-    base: str = "openai/whisper-large-v3",
+    snapshot: TransformersSnapshot,
     target_sample_rate: SampleRate = 16000,
     *,
     decoding: WhisperDecoding,
@@ -173,7 +177,15 @@ def load_whisper_asr(
     cpu_precision: WhisperCpuPrecision = WhisperCpuPrecision.FLOAT32,
     timestamp_mode: WhisperTimestampMode = WhisperTimestampMode.WORD,
 ) -> WhisperASRHandle:
-    """Load a Whisper ASR pipeline. Returns a typed handle.
+    """Load a Whisper ASR pipeline from a resolved snapshot. Returns a typed
+    handle.
+
+    ``snapshot`` is the only source of weights, tokenizer and generation
+    config: a ``TransformersSnapshot`` exists only once
+    ``pinned_hub.resolve_transformers`` has materialized it, so this load
+    reads finished files and never downloads. It used to take a hub id
+    (defaulting to ``openai/whisper-large-v3``) and a separate ``base``;
+    every caller passed the snapshot path as both.
 
     ``decoding`` is how the handle is told its language for its whole life. A
     forced token the loaded checkpoint lacks is refused here, at load, rather
@@ -199,16 +211,11 @@ def load_whisper_asr(
 
     device = resolve_inference_device(device_policy)
 
-    # No download probe here. The worker resolves the pinned snapshot before
-    # calling this function and passes the resolved DIRECTORY as both ``model``
-    # and ``base``, so probing them asked whether a local path was a cached
-    # repository: it never is, the notification fired on every load and named a
-    # directory, and ``model != base`` could no longer be true, so the second
-    # probe was dead. The announcement now lives in
-    # ``worker._model_loading.asr._load_hub_member``, the call that actually
-    # downloads and the only one that knows the revision it is fetching.
-
-    config = GenerationConfig.from_pretrained(base)
+    # The download, if any, already happened in the resolve edge
+    # (`pinned_hub.resolve_transformers`, under `download_liveness`), the only
+    # call that knows the model id and the revision it is fetching.
+    directory = snapshot.path
+    config = GenerationConfig.from_pretrained(directory)
     config.no_repeat_ngram_size = 4
     config.use_cache = True
     _admit_decoding(decoding, config)
@@ -231,8 +238,8 @@ def load_whisper_asr(
     pipe = pipeline(
         "automatic-speech-recognition",
         pipeline_class=WindowOwnedWhisperPipeline,
-        model=model,
-        tokenizer=WhisperTokenizer.from_pretrained(base),
+        model=directory,
+        tokenizer=WhisperTokenizer.from_pretrained(directory),
         chunk_length_s=25,
         stride_length_s=3,
         device=device,
@@ -241,13 +248,14 @@ def load_whisper_asr(
     )
     bind_whisper_token_timestamp_extractor(pipe.model)
     pipe.model.eval()
-    WhisperProcessor.from_pretrained(base)
+    WhisperProcessor.from_pretrained(directory)
 
     return WhisperASRHandle(
         pipe=pipe,
         config=config,
         decoding=decoding,
         sample_rate=target_sample_rate,
+        model_identity=WhisperModelIdentityV2(asr=snapshot.loaded),
     )
 
 
@@ -341,10 +349,6 @@ def infer_whisper_prepared_audio(
             raise ValueError(
                 "Whisper window ownership does not cover the prepared audio"
             )
-        if model.model_identity is None:
-            raise RuntimeError(
-                "Whisper window observations have no loaded model identity"
-            )
         return WhisperChunkResultPayloadV2(
             lang=lang,
             text="",
@@ -385,22 +389,11 @@ def infer_whisper_prepared_audio(
             without_full_timing,
             len(spans),
         )
-    # The handle is the honest witness: it is the object the loader resolved a
-    # snapshot into, so it knows which commit actually came off the hub. A
-    # handle that never got one cannot have its output attributed, and guessing
-    # the configured checkpoint here would record a model that may not be the
-    # one on disk, which is the exact substitution this workstream removes.
-    identity = model.model_identity
-    if identity is None:
-        raise RuntimeError(
-            "this Whisper handle was never told which checkpoint it loaded, so "
-            "its results cannot name their model. The worker ASR loader sets "
-            "`model_identity` as soon as it resolves the snapshot; a handle "
-            "built outside that path must do the same before inference."
-        )
+    # The handle is the honest witness: it was built from the snapshot, so it
+    # knows which commit actually came off the hub.
     return WhisperChunkResultPayloadV2(
         lang=lang,
         text=raw.get("text", "") if isinstance(raw, dict) else "",
         chunks=spans,
-        model=identity,
+        model=model.model_identity,
     )

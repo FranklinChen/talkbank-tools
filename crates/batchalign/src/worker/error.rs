@@ -28,6 +28,10 @@ fn format_process_exited(code: Option<i32>, stderr: Option<&str>) -> String {
 /// than in a message a classifier would have to parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerWait {
+    /// A spawned worker's ready signal, under a fixed limit (a TCP daemon,
+    /// whose progress this server cannot see). A stdio worker's startup is a
+    /// [`crate::worker::LoadingWait::Ready`] instead.
+    Ready,
     /// A TCP connection to a worker daemon at this address.
     Connect {
         /// `host:port`.
@@ -59,6 +63,7 @@ pub enum WorkerWait {
 impl std::fmt::Display for WorkerWait {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Ready => f.write_str("the worker's ready signal"),
             Self::Connect { addr } => write!(f, "a connection to the worker at {addr}"),
             Self::Health => f.write_str("the health response"),
             Self::Capabilities => f.write_str("the capabilities response"),
@@ -102,21 +107,25 @@ pub enum WorkerError {
     #[error("worker failed to start: {0}")]
     SpawnFailed(String),
 
-    /// The worker process started but did not emit its JSON ready signal
-    /// within the configured timeout.
+    /// A worker loading models (starting up, or in `ensure_task`) reported
+    /// no progress that advanced for a whole [`crate::worker::LoadingStall`]
+    /// window.
     ///
-    /// This usually means the worker is stuck loading heavy ML models (Stanza,
-    /// Whisper) or the Python import itself is hanging. Increasing
-    /// `ready_timeout_s` in [`super::pool::PoolConfig`] may help for
-    /// legitimately slow model loads.
+    /// Not "too slow": a loading wait has no total limit, because a first
+    /// model download takes as long as the network makes it, and the worker
+    /// reports measured download growth while it runs. This is the worker
+    /// going quiet: a hung import, a download that stopped moving, a load
+    /// stuck on disk.
     ///
-    /// **Retryable** -- a transient resource stall (disk I/O, network for
-    /// model download) can resolve on retry. The pool will try again on the
-    /// next dispatch.
-    #[error("worker not ready after {timeout_s}s")]
-    ReadyTimeout {
-        /// Number of seconds waited before giving up.
-        timeout_s: crate::api::PositiveSeconds,
+    /// **Retryable**: a stalled download or a transient resource stall can
+    /// resolve on retry, and a resumable download keeps what it fetched. The
+    /// worker is retired.
+    #[error("{waited_for}: no progress for {stall}s while loading models")]
+    Stalled {
+        /// What was awaited: startup, or a lazy worker's `ensure_task`.
+        waited_for: crate::worker::LoadingWait,
+        /// The window that passed without an advance.
+        stall: crate::worker::LoadingStall,
     },
 
     /// The worker emitted something on stdout before the ready signal, but it
@@ -279,6 +288,20 @@ pub enum WorkerError {
         worker: WorkerAfterError,
     },
 
+    /// The worker is refused a model it was asked to load (a gated or private
+    /// repository): an `{"op":"error", "kind":"access_denied"}` line, most
+    /// often answering `ensure_task`.
+    ///
+    /// **Not retried** (`ModelAccessDenied`): the same load is refused again
+    /// until an operator grants access, and the message names the remedy.
+    #[error("worker is refused a model: {message}")]
+    ModelAccessDenied {
+        /// The worker's own diagnosis, naming the repository and the remedy.
+        message: String,
+        /// Whether the worker still serves after reporting it.
+        worker: WorkerAfterError,
+    },
+
     /// A local model reported an unclassified `RuntimeFailure`.
     /// The code does not establish a cause or deterministic input defect.
     /// Retried within the existing budget; the healthy channel remains reusable.
@@ -299,8 +322,9 @@ pub enum WorkerError {
     ///
     /// **Terminal** -- admitting it would make result provenance ambiguous;
     /// the server must be restarted into one coherent Python environment.
-    #[error("worker runtime identity differs from the runtime pinned by this server")]
-    RuntimeIdentityMismatch,
+    /// Carries both identities; the message names what differs.
+    #[error(transparent)]
+    RuntimeIdentityMismatch(Box<super::runtime_identity::WorkerRuntimeMismatch>),
 
     /// The worker's capability report was refused where the pool admits it:
     /// an advertised task with no engine entry, or an engine entry for a task
@@ -476,7 +500,8 @@ impl WorkerError {
             // which it stopped serving: the kind decided which.
             Self::Bootstrap { worker, .. }
             | Self::ModelDownload { worker, .. }
-            | Self::DeviceOutOfMemory { worker, .. } => match worker {
+            | Self::DeviceOutOfMemory { worker, .. }
+            | Self::ModelAccessDenied { worker, .. } => match worker {
                 WorkerAfterError::Serves => WorkerAfterFailure::Reusable,
                 WorkerAfterError::Exits => WorkerAfterFailure::Retire,
             },
@@ -493,7 +518,7 @@ impl WorkerError {
             | Self::PoolShuttingDown
             | Self::PoolAccountingBroken { .. } => WorkerAfterFailure::Reusable,
             Self::SpawnFailed(_)
-            | Self::ReadyTimeout { .. }
+            | Self::Stalled { .. }
             | Self::ReadyParseFailed(_)
             | Self::HealthCheckFailed(_)
             | Self::ProcessExited { .. }
@@ -502,7 +527,7 @@ impl WorkerError {
             | Self::Io(_)
             | Self::WorkerRetired
             | Self::OutputNoise { .. }
-            | Self::RuntimeIdentityMismatch
+            | Self::RuntimeIdentityMismatch(_)
             // A worker whose capability report was refused is not used.
             | Self::CapabilitiesRefused(_) => WorkerAfterFailure::Retire,
         }
@@ -510,7 +535,7 @@ impl WorkerError {
 }
 
 impl From<super::runtime_identity::WorkerRuntimeMismatch> for WorkerError {
-    fn from(_: super::runtime_identity::WorkerRuntimeMismatch) -> Self {
-        Self::RuntimeIdentityMismatch
+    fn from(mismatch: super::runtime_identity::WorkerRuntimeMismatch) -> Self {
+        Self::RuntimeIdentityMismatch(Box::new(mismatch))
     }
 }

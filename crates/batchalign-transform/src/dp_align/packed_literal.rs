@@ -1,7 +1,7 @@
 //! Shared Allison-Dix row kernel. Checkpoints retain their exact reference
 //! owner; restoring one never accepts replacement masks, policy or width.
 
-use super::{LiteralMatchMode, MatchMode, WorkControl};
+use super::{LiteralMatchMode, WorkControl};
 use std::collections::HashMap;
 
 mod arithmetic;
@@ -18,11 +18,13 @@ pub(super) enum ReferenceOrder {
     Reverse,
 }
 
-pub(super) fn policy(mode: MatchMode) -> Option<LiteralMatchMode> {
-    match mode {
-        MatchMode::Exact => Some(LiteralMatchMode::Exact),
-        MatchMode::CaseInsensitive => Some(LiteralMatchMode::AsciiInsensitive),
-        MatchMode::Fuzzy { .. } => None,
+impl LiteralMatchMode {
+    /// The same literal relation for graph scoring and packed proof edges.
+    pub(crate) fn matches_words(self, source: &str, reference: &str) -> bool {
+        match self {
+            Self::Exact => source == reference,
+            Self::AsciiInsensitive => source.eq_ignore_ascii_case(reference),
+        }
     }
 }
 

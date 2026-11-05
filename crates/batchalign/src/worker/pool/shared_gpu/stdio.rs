@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::process::{Child, ChildStdin};
 use tracing::{info, instrument, warn};
 
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
+use crate::types::worker_v2::ExecuteResponseV2;
 use crate::worker::WorkerPid;
 use crate::worker::error::WorkerError;
 use crate::worker::handle::{WorkerConfig, WorkerHandle};
@@ -63,13 +63,13 @@ impl SharedGpuWorker {
     /// Send one typed V2 execute request and await the response.
     #[instrument(
         skip_all,
-        fields(pid = %self.channel.pid(), request_id = %request.request_id),
+        fields(pid = %self.channel.pid(), request_id = %permit.request().request_id),
     )]
     pub(in crate::worker::pool) async fn execute_v2(
         &self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.channel.execute_v2(request).await
+        self.channel.execute_v2(permit).await
     }
 
     /// Query this exact worker's live capability and engine identity.
@@ -79,16 +79,13 @@ impl SharedGpuWorker {
         self.channel.capabilities().await
     }
 
-    /// Load one task's models on demand via the `ensure_task` IPC operation.
+    /// Prepare this worker for `load` (`ensure_task`), returning its proof.
     pub(in crate::worker::pool) async fn ensure_task(
         &self,
-        task: crate::worker::InferTask,
-        engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout: crate::api::PositiveSeconds,
-    ) -> Result<(), WorkerError> {
-        self.channel
-            .ensure_task(task, engine_overrides, timeout)
-            .await
+        load: &crate::worker::pool::TaskLoad,
+        preparation: &crate::worker::pool::LoadPreparation,
+    ) -> Result<std::sync::Arc<crate::worker::pool::Loaded>, WorkerError> {
+        self.channel.ensure_task(load, preparation).await
     }
 
     /// Gracefully shut down the GPU worker, for `why`. Idempotent.

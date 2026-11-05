@@ -1,7 +1,7 @@
 # Model Downloads and Caching (Developer Reference)
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:58 EST
+**Last updated:** 2026-11-06 18:19 EST
 
 This page documents how batchalign3 downloads, caches, and verifies ML
 models, the contributor-facing complement to the
@@ -93,20 +93,29 @@ Source verified by reading code on 2026-05-06.
 | 1 | Stanza morphosyntax | `batchalign/worker/_stanza_loading.py:99` `load_stanza_models` | `stanza.Pipeline(download_method=REUSE_RESOURCES)` | Stanza `DEFAULT_MODEL_DIR` |
 | 2 | Stanza utseg (fallback route, once per language) | `_stanza_loading.py` `load_utseg_pipeline` | (same) | (same) |
 | 3 | Stanza Chinese retok | `_stanza_loading.py:235` `load_stanza_retokenize_model` | (same) | (same) |
-| 4 | Stanza coref (lazy) | `batchalign/inference/coref.py:66-68` | `stanza.Pipeline(...)` | (same) |
-| 5 | Whisper ASR | `batchalign/inference/asr.py:119` `load_whisper_asr` | `transformers.pipeline + WhisperProcessor.from_pretrained` | HF |
-| 6 | Whisper FA | `batchalign/inference/fa.py:114` `load_whisper_fa` | `WhisperForConditionalGeneration.from_pretrained` + `WhisperProcessor.from_pretrained` | HF |
+| 4 | Stanza coref (first use: `ensure_task`) | `batchalign/inference/coref.py::prepare_coref`, called by `batchalign/worker/_model_loading/coreference.py::load_coref_task` | `stanza.Pipeline(...)`: built once to fetch its files and released (`PreparedCoref`); each batch builds it from those files and releases it (`PreparedCoref.opened`) | (same) |
+| 5 | Whisper ASR | `batchalign/inference/asr.py` `load_whisper_asr(TransformersSnapshot)` | `transformers.pipeline + WhisperProcessor.from_pretrained` on the snapshot | HF |
+| 6 | Whisper FA | `batchalign/worker/_model_loading/forced_alignment.py` resolves; `batchalign/inference/fa.py` `load_whisper_fa(model_id, TransformersSnapshot)` loads | `WhisperForConditionalGeneration.from_pretrained` + `WhisperProcessor.from_pretrained` on the snapshot | HF |
 | 7 | Wave2Vec FA | `batchalign/inference/fa.py:198` `load_wave2vec_fa` | `torchaudio.pipelines.MMS_FA.get_model()` | torchaudio hub |
 | 8 | Cantonese FA | `batchalign/inference/languages/cantonese/_cantonese_fa.py` `load_cantonese_fa` | Reuses row 7: it calls `load_wave2vec_fa` (torchaudio `MMS_FA`) and adds jyutping preprocessing; no separate download | torchaudio hub |
-| 9 | SeamlessM4T translation | `batchalign/worker/_model_loading/translation.py::_load_seamless_translate` | `AutoProcessor.from_pretrained` + `SeamlessM4TModel.from_pretrained` | HF |
-| 9b | NLLB-200 translation | `batchalign/worker/_model_loading/translation.py::_load_nllb_translate` | `AutoTokenizer.from_pretrained` + `AutoModelForSeq2SeqLM.from_pretrained` (`facebook/nllb-200-distilled-1.3B`, ~5.5 GB) | HF |
-| 10 | pyannote diarization | `batchalign/inference/pyannote_local.py:163` `_load_pipeline` | `Pipeline.from_pretrained(config, token=token)` over the pinned `talkbank/dia-fork` artifacts | HF |
-| 10b | Pyannote speaker embedding | `batchalign/inference/speaker_embedding.py::load_speaker_embedding_model` | `PretrainedSpeakerEmbedding(<pinned local ONNX path>)` | HF |
-| 11 | NeMo speaker (fallback) | `batchalign/inference/speaker.py` (NeMo branch) | `EncDecSpeakerLabelModel.from_pretrained(...)` | NeMo cache |
-| 12 | BERT utterance (boundary model) | `batchalign/worker/_model_loading/utterance.py::load_utterance_model` resolves the pinned snapshot; `batchalign/models/utterance/infer.py::BertUtteranceModel` loads it | `resolve_pinned_snapshot`, then `AutoTokenizer.from_pretrained` + `BertForTokenClassification.from_pretrained` on the resolved LOCAL PATH | HF |
+| 9 | SeamlessM4T translation | `batchalign/worker/_model_loading/translation.py::_load_seamless_translate` | `resolve_transformers`, then `AutoProcessor.from_pretrained` + `SeamlessM4TModel.from_pretrained` on the snapshot | HF |
+| 9b | NLLB-200 translation | `batchalign/worker/_model_loading/translation.py::_load_nllb_translate` | `resolve_transformers`, then `AutoTokenizer.from_pretrained` + `AutoModelForSeq2SeqLM.from_pretrained` on the snapshot (`facebook/nllb-200-distilled-1.3B`, ~5.5 GB) | HF |
+| 10 | pyannote diarization (first use: the speaker load that names local pyannote) | `batchalign/inference/pyannote_local.py::load_local_pyannote_pipeline`, called by `batchalign/worker/_model_loading/speaker.py::load_local_pyannote_task` | `Pipeline.from_pretrained(config, token=token)` over the pinned `talkbank/dia-fork` artifacts, held as `LoadedPyannotePipeline` | HF |
+| 10b | Pyannote speaker embedding (first use: the speaker load that names the embedding model) | `batchalign/inference/speaker_embedding.py::load_speaker_embedding_model`, called by `load_speaker_embedding_task` | `PretrainedSpeakerEmbedding(<pinned local ONNX path>)` | HF |
+| 12 | BERT utterance (boundary model) | `batchalign/worker/_model_loading/utterance.py::load_utterance_model` resolves the pinned snapshot; `batchalign/models/utterance/infer.py::BertUtteranceModel` loads it | `resolve_transformers`, then `BertUtteranceModel(model_id, snapshot)` runs `AutoTokenizer.from_pretrained` + `BertForTokenClassification.from_pretrained` on the snapshot | HF |
 | 13 | PyCantonese | (bundled) |, | (none, wheel) |
 | 14 | Model manifest | `crates/batchalign/src/model_manifest.rs` | None: it loads nothing. It is the one place naming which models each ASR engine and each utterance-segmentation language loads, and at which revision | (none) |
-| 15 | Pinned Hugging Face snapshot | `batchalign/worker/_model_loading/pinned_hub.py::resolve_pinned_snapshot` | `huggingface_hub.snapshot_download(model_id, revision=…)`, then the commit is read off the resolved directory | HF |
+| 15 | Pinned Hugging Face snapshot | `batchalign/worker/_model_loading/pinned_hub.py::resolve_transformers`, `resolve_repository` | `huggingface_hub.snapshot_download(model_id, revision=…)`, then the commit is read off the resolved directory | HF |
+
+Every row loads on first use: inside `ensure_task`, which the pool sends
+before a worker's first request for the task, in every bootstrap mode, under
+the loading stall window. No worker loads a model at startup, and none loads
+inside a request. The load a request needs is its `TaskLoad` (its task and
+the engines its load reads): rows 5 to 9b by the engine in the worker key,
+rows 10 and 10b by the speaker model the request names (`speaker` or
+`speaker_embedding` in the `ensure_task` overrides, never in the worker key,
+so one GPU worker serves both and each is its own load). pyannoteAI is hosted
+and builds nothing. Row 4 is resident only during a coref batch.
 
 Cache roots resolve to OS-specific paths via each library's own logic. See
 the [user-facing chapter](../user-guide/model-downloads.md) for the table
@@ -114,14 +123,50 @@ of OS-resolved paths.
 
 ### Rows 14 and 15: the pinned path
 
-**Only the files a loader reads are downloaded.** Every pinned Hugging Face
-load goes through `pinned_hub.resolve_pinned_snapshot(model_id, commit,
-files)`, and `files` is a required `HubFiles` family the loader declares:
+**A model's state is its type.** A model is requested (`RequestedModelV2`:
+an id and a pinned or unpinned revision), then resolved (complete on local
+disk, a snapshot proof), then loaded (in memory), then ready (an inference
+capability, such as `ReadyQwenRecognizer`). Resolution is the only edge that
+touches the network, and each Hugging Face family has its own edge, whose
+result type is the only input its loaders accept:
 
-| Family | Fetches | Loaders |
+```mermaid
+flowchart LR
+    R[RequestedModelV2] -->|resolve_transformers| T[TransformersSnapshot<br/>requested, path; commit derived]
+    R -->|resolve_repository| P[RepositorySnapshot<br/>requested, path; commit derived]
+    R -->|resolve_modelscope_snapshot| M[ModelScopeSnapshot<br/>complete by admit]
+    T --> L1[load_whisper_asr, load_whisper_fa,<br/>QwenRecognizerConfig.load, QwenForcedAligner.load,<br/>BertUtteranceModel, load_machine_ear, translation]
+    P --> L2[FunAudioRecognizer.load: SenseVoice]
+    M --> L3[FunAudioRecognizer.load: Paraformer]
+```
+
+| Edge | Fetches | Loaders |
 |---|---|---|
-| `TRANSFORMERS` | configs, tokenizer and template files (`*.json`, `*.txt`, `*.jinja`, `*.model`, `*.tiktoken`) and the default-variant weights: safetensors when the revision has them, otherwise PyTorch `.bin` (the precedence `from_pretrained` applies); a revision with neither is refused | Whisper, Qwen3 ASR and forced aligner, the BERT utterance-boundary models |
-| `WHOLE_REPOSITORY` | everything | FunASR (SenseVoice and its VAD), which reads whatever its `config.yaml` names |
+| `resolve_transformers` | configs, tokenizer and template files (`*.json`, `*.txt`, `*.jinja`, `*.model`, `*.tiktoken`) and exactly one default-variant weight layout, the first present in `from_pretrained`'s precedence (`WeightLayout`: single safetensors, safetensors index, single `.bin`, `.bin` index); a revision with none is refused | Whisper ASR and FA, Qwen3 ASR and forced aligner, the BERT utterance-boundary models, Seamless and NLLB, the machine-ear models |
+| `resolve_repository` | everything | FunASR (SenseVoice and its VAD), which reads whatever its `config.yaml` names |
+
+One layout, not every layout present: `nvidia/audio-flamingo-3-hf` ships its
+weights as a 16.5 GB `model.safetensors` and again as four shards, and
+fetching both would download the model twice to read it once. The rule
+(`pinned_hub.default_weights`) is shared by the resolver and by
+`scripts/check_hub_file_selection.py`, so the report cannot drift from what
+downloads.
+
+**A snapshot's constructor is its admission.** Python cannot hide a
+constructor, so the constructor itself refuses anything that is not a proof:
+a path that is not a directory, a leaf that is not a 40-character commit, a
+commit other than the one `requested` pins, and (for Transformers) a
+directory with no default-variant weights; a `ModelScopeSnapshot` refuses a
+missing, partial (`*.incomplete`) or checkpoint-less directory. The commit is
+derived from the directory, never passed. A snapshot carries the request it
+was resolved from, so `snapshot.model_id` and `snapshot.loaded` (the
+`LoadedModelV2` a worker reports) cannot name another model, and a loader
+takes no separate id. An unpinned resolve pins the commit its first hub call
+lands on for every later call, so it makes one network round trip and cannot
+assemble a snapshot from two revisions. Admission is tested in
+`batchalign/tests/worker/test_snapshot_admission.py`; tests that fake the
+loaders build real stand-in directories through
+`batchalign/tests/_snapshots.py`.
 
 Without it `snapshot_download` fetched every format a repository carries:
 `openai/whisper-large-v3` holds Flax, PyTorch `.bin`, fp32 shards and
@@ -363,42 +408,36 @@ distinction is what the catalog bootstrap exists to enforce.
 
 ## User-visible download notifications
 
-Every download site emits a `progress_v2` event so the user sees what's
-happening. The shared helper lives at
-`batchalign/worker/_progress.py`:
+Every call that may download runs inside
+`batchalign/worker/_download_liveness.py::download_liveness`, which watches
+the library's cache trees and says nothing until they grow. Then it
+announces the download (`"Downloading <what> (one-time; future runs use the
+local cache)…"`), reports the growth in KiB at most every 10 s, and closes
+with `"Downloaded <what>."` A cache hit is silent. The same reports keep a slow
+first download inside the worker's startup stall window (see
+[time transparency](../architecture/time-transparency.md#progress-as-liveness-how-long-a-model-load-may-take)).
 
-- `emit_download_event(stage, user_message, request_id=None, size_bytes_estimate=None)`
- , generic, used for non-HF downloads (Stanza catalog, Stanza language
-  packs, torchaudio bundles).
-- `emit_hf_download_if_missing(model_id, kind, request_id=None)`: probes
-  the HuggingFace cache via `try_to_load_from_cache`; emits only when the
-  model is genuinely about to download. Wraps every `from_pretrained()`
-  call.
-
-Sample: every HF load site looks like
+A Hugging Face model never calls it directly: its resolve edge does
+(`pinned_hub.resolve_transformers`). Another library's download names its
+source, which decides the stage and the trees watched:
 
 ```python
-from batchalign.worker._progress import emit_hf_download_if_missing
+from batchalign.worker._download_liveness import TorchHubBundle, download_liveness
 
-emit_hf_download_if_missing("openai/whisper-large-v3", kind="ASR")
-pipe = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3", ...)
+with download_liveness(TorchHubBundle("mms_fa"), what="the MMS_FA bundle"):
+    model = torchaudio.pipelines.MMS_FA.get_model()
 ```
 
-The wrapping is cheap (one cache probe), idempotent for cached models
-(probe returns hit, no event emitted), and safe under failure (probe
-exceptions log debug-level and emit anyway, a false-positive notification
-is a much smaller UX cost than a silent multi-minute wait).
-
-User-message wording must convey four things: what's downloading, the
-approximate size, that it's a one-time cost, and that future runs will be
-instant. Size hints for the largest models are tabulated in
-`_progress.py` `_HF_SIZE_HINTS_GB`; expand the table when adding new
-families.
+There is no cache probe and no size table: the sizes users see are the
+measured growth, and a probe was a guess that sent a partial download down an
+unwatched branch.
 
 ## Audit gates (regression prevention)
 
-A static check in `batchalign/tests/test_progress_audit.py` (planned)
-asserts that no new code reintroduces opt-outs. Specifically, it greps for:
+A download can be announced only by `download_liveness`: phase events take a
+closed `PhaseStage` that cannot spell `downloading_`.
+`batchalign/tests/test_progress_audit.py` asserts that no new code
+reintroduces opt-outs. Specifically, it greps for:
 
 - `local_files_only=True` in any `from_pretrained()` call
 - `HF_HUB_OFFLINE` or `TRANSFORMERS_OFFLINE` set inside BA3-controlled
@@ -684,22 +723,20 @@ PyCantonese tests run in the default suite because PyCantonese is bundled
 2. If the model is one a stage loads BY DEFAULT rather than only under an
    explicit override, add a manifest pin in `crates/batchalign/src/model_manifest.rs`
    (a commit for Hugging Face, a tag where the hub exposes no commit) and load
-   it through `resolve_pinned_snapshot`, pointing the library at the resolved
-   LOCAL PATH rather than at the model name. A default model with no pin has no
+   it through the resolve edge for its family (`resolve_transformers` or
+   `resolve_repository`), and make the loader take that snapshot type, never
+   a model name or a bare path. A default model with no pin has no
    identity before it loads, which means no honest provenance stamp and no
    cache namespace; and a model loaded by name cannot report a revision it was
    never asked for, which is what forces a revision field to be optional.
-3. Add a `progress_v2` emit immediately before the load:
-   - HuggingFace: `emit_hf_download_if_missing(model_id, kind=...)`.
-   - Stanza language pack: extend the helper in `_stanza_loading.py` (or
-     copy its shape).
-   - Other libraries: use `emit_download_event(stage, user_message)`.
-4. Add a size-hint entry to `_HF_SIZE_HINTS_GB` if the model is > 100 MB,
-   so the user sees a useful estimate.
-5. Update the [user-facing chapter](../user-guide/model-downloads.md)
+3. Run the call that may download inside `download_liveness` (Hugging Face
+   members get this from their resolve edge; Stanza pipelines from
+   `_stanza_loading._watched_pipeline`). Never announce a download in
+   advance: the audit test rejects it.
+4. Update the [user-facing chapter](../user-guide/model-downloads.md)
    table with the new family + size + first-run wait estimate.
-6. Update this page's inventory table.
-7. Add a golden-marked test that exercises a fresh download path.
+5. Update this page's inventory table.
+6. Add a golden-marked test that exercises a fresh download path.
 
 ## Related references
 

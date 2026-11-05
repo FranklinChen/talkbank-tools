@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 
 fn words(bits: usize, len: usize) -> Vec<String> {
     (0..len)
@@ -7,7 +9,12 @@ fn words(bits: usize, len: usize) -> Vec<String> {
 }
 
 fn compare(turns: &[SpeakerTurn<'_>], reference: &[String]) {
-    let (graph, addresses) = Graph::of(turns, Budget::nodes(turns).unwrap());
+    let materialized = PreparedGraph::admit(turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -19,23 +26,17 @@ fn compare(turns: &[SpeakerTurn<'_>], reference: &[String]) {
     let expected = super::super::tests::oracle(turns, reference);
     let optimum = expected[0].len();
     for block in [1, 2, 3, graph.order.len()] {
+        let block = NonZeroUsize::new(block).expect("declared fixture strides are positive");
         let result = uninterrupted(kernel::testing_full(
-            RefusedBand::testing(&graph, &relation),
+            PreparedLiteralSearch::testing(graph, &relation),
             block,
             &Uninterrupted,
         ))
         .unwrap();
-        let refused = RefusedBand::testing(&graph, &relation);
+        let prepared = PreparedLiteralSearch::testing(graph, &relation);
         let mut results = vec![result];
-        for bound in 0..=refused.feasible() {
-            results.push(
-                uninterrupted(kernel::testing(
-                    refused.testing_lower_bound(bound),
-                    block,
-                    &Uninterrupted,
-                ))
-                .unwrap(),
-            );
+        for problem in prepared.testing_bounds() {
+            results.push(uninterrupted(kernel::testing(problem, block, &Uninterrupted)).unwrap());
         }
         for result in results {
             let selected: BTreeSet<_> = result
@@ -80,7 +81,12 @@ fn full_profile_inspection_selection_is_checkpoint_independent() {
     for bits in [0, 9, 17] {
         let reference = words(bits, 5);
         compare(&turns, &reference);
-        let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
+        let addresses = materialized.addresses();
         let relation = Relation::new(
             addresses
                 .iter()
@@ -91,8 +97,9 @@ fn full_profile_inspection_selection_is_checkpoint_independent() {
         );
         let mut selected = None;
         for block in [1, 2, graph.order.len()] {
+            let block = NonZeroUsize::new(block).expect("declared fixture strides are positive");
             let observed = uninterrupted(kernel::testing_full(
-                RefusedBand::testing(&graph, &relation),
+                PreparedLiteralSearch::testing(graph, &relation),
                 block,
                 &Uninterrupted,
             ))
@@ -165,7 +172,12 @@ fn a_work_refused_reordered_dialogue_uses_the_packed_producer() {
     let b = vec!["b".to_owned(); 380];
     let reference: Vec<_> = b.iter().chain(&a).cloned().collect();
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -174,8 +186,11 @@ fn a_work_refused_reordered_dialogue_uses_the_packed_producer() {
         &reference,
         MatchMode::Exact,
     );
-    let refused = match uninterrupted(Band::admit(&graph, &relation, 760, 760, &Uninterrupted)) {
-        Err(refused) => refused,
+    let refused = match uninterrupted(Band::admit(graph, &relation, 760, 760, &Uninterrupted)) {
+        Err(BandAlternative::Packed(prepared)) => prepared,
+        Err(BandAlternative::Refused(cause)) => {
+            panic!("fixture must prepare a literal alternative, got {cause:?}")
+        }
         Ok(_) => panic!("fixture must reproduce a dense work refusal"),
     };
     let observed = uninterrupted(observe(refused, &Uninterrupted)).unwrap();
@@ -212,7 +227,12 @@ fn cancellation_never_yields_a_complete_packed_observation() {
     let b = words(1, 20);
     let reference = words(2, 40);
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -222,14 +242,25 @@ fn cancellation_never_yields_a_complete_packed_observation() {
         MatchMode::Exact,
     );
     let result = observe(
-        RefusedBand::testing(&graph, &relation),
+        PreparedLiteralSearch::testing(graph, &relation),
         &Cancel(Cell::new(0)),
     );
     assert!(matches!(result, Err("cancelled")));
 }
 
 #[test]
-fn partial_reordering_retains_a_real_work_refusal_after_fusion() {
+fn partial_reordering_completes_beyond_the_former_execution_work_cutoff() {
+    #[derive(Default)]
+    struct Recorder(std::cell::RefCell<Vec<PackedSearchCost>>);
+    impl WorkControl for Recorder {
+        type Error = std::convert::Infallible;
+        fn check(&self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn packed_search_cost(&self, cost: &PackedSearchCost) {
+            self.0.borrow_mut().push(cost.clone());
+        }
+    }
     let a = vec!["a".to_owned(); 420];
     let b = vec!["b".to_owned(); 420];
     let reference: Vec<_> = a[..210]
@@ -239,19 +270,42 @@ fn partial_reordering_retains_a_real_work_refusal_after_fusion() {
         .cloned()
         .collect();
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    assert!(matches!(
-        LocalInterleaving::observe(&turns, &reference, MatchMode::Exact),
-        Err(LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded { phase:LocalInterleavingWorkPhase::PackedSearch, required_at_least })) if required_at_least > WORK_CELLS
-    ));
+    let recorder = Recorder::default();
+    let observed = uninterrupted(LocalInterleaving::observe_controlled(
+        &turns,
+        &reference,
+        MatchMode::Exact,
+        &recorder,
+    ))
+    .unwrap();
+    assert_eq!(observed.matched_words(), 840);
+    for (source, word) in observed.words().enumerate() {
+        let expected = match source {
+            0..210 => source,
+            210..420 => source + 420,
+            _ => source - 210,
+        };
+        assert!(!word.can_be_missing());
+        assert_eq!(word.common().unwrap().matched().reference_index(), expected);
+    }
+    let costs = recorder.0.borrow();
+    assert_eq!(costs.len(), 1);
+    assert_eq!(costs[0].status(), PackedSearchStatus::Completed);
+    assert!(costs[0].used().lower_bound() > WORK_CELLS as u128);
 }
 
 #[test]
-fn viable_profiles_cross_word_boundaries_with_exact_mandatory_pairs() {
+fn packed_profiles_preserve_exact_domains_across_shifted_word_boundaries() {
     let a = vec!["a".to_owned(); 65];
     let b = vec!["b".to_owned(); 65];
     let reference: Vec<_> = b.iter().chain(&a).cloned().collect();
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -261,8 +315,9 @@ fn viable_profiles_cross_word_boundaries_with_exact_mandatory_pairs() {
         MatchMode::Exact,
     );
     for block in [64, 129, graph.order.len()] {
+        let block = NonZeroUsize::new(block).expect("declared fixture strides are positive");
         let result = uninterrupted(kernel::testing(
-            RefusedBand::testing(&graph, &relation),
+            PreparedLiteralSearch::testing(graph, &relation),
             block,
             &Uninterrupted,
         ))
@@ -271,6 +326,54 @@ fn viable_profiles_cross_word_boundaries_with_exact_mandatory_pairs() {
         for (i, word) in result.words.iter().enumerate() {
             assert!(!word.can_be_missing);
             assert_eq!(word.candidates, [if i < 65 { i + 65 } else { i - 65 }]);
+        }
+    }
+
+    // Closed-form all-optimal domains for repeated words cross unaligned
+    // 64-slot windows, union repeated edge observations and promote inline
+    // domains to sparse blocks. Enumerating all legal paths here is exponential.
+    for (m, n) in [(65usize, 130usize), (130, 65)] {
+        let source = vec!["same".to_owned(); m];
+        let reference = vec!["same".to_owned(); n];
+        let turns = [SpeakerTurn::new("A", &source)];
+        let materialized = PreparedGraph::admit(&turns)
+            .unwrap()
+            .materialize(&Uninterrupted)
+            .unwrap();
+        let graph = materialized.graph();
+        let relation = Relation::new(
+            source.iter().map(String::as_str).collect(),
+            &reference,
+            MatchMode::Exact,
+        );
+        for block in [1, 2, graph.order.len()] {
+            let block = NonZeroUsize::new(block).expect("declared fixture strides are positive");
+            let results = [
+                uninterrupted(kernel::testing(
+                    PreparedLiteralSearch::testing(graph, &relation),
+                    block,
+                    &Uninterrupted,
+                ))
+                .unwrap(),
+                uninterrupted(kernel::testing_full(
+                    PreparedLiteralSearch::testing(graph, &relation),
+                    block,
+                    &Uninterrupted,
+                ))
+                .unwrap(),
+            ];
+            for result in results {
+                assert_eq!(result.selected.len(), m.min(n));
+                for (word, observed) in result.words.iter().enumerate() {
+                    let first = word.saturating_sub(m.saturating_sub(n));
+                    let last = (word + n.saturating_sub(m)).min(n - 1);
+                    assert_eq!(
+                        observed.candidates,
+                        (first..=last).rev().collect::<Vec<_>>()
+                    );
+                    assert_eq!(observed.can_be_missing, m > n);
+                }
+            }
         }
     }
 }
@@ -301,7 +404,12 @@ fn interruption_inside_forward_reconstruction_proof_and_traceback_returns_no_obs
     let b = words(1, 4);
     let reference = words(2, 8);
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -311,6 +419,7 @@ fn interruption_inside_forward_reconstruction_proof_and_traceback_returns_no_obs
         MatchMode::Exact,
     );
     let mut stages = BTreeSet::new();
+    let block = NonZeroUsize::new(2).expect("declared fixture stride is positive");
     for produce in [kernel::testing::<Polls>, kernel::testing_full::<Polls>] {
         let polls = Polls {
             calls: Cell::new(0),
@@ -318,9 +427,13 @@ fn interruption_inside_forward_reconstruction_proof_and_traceback_returns_no_obs
             receipts: RefCell::new(Vec::new()),
         };
         assert!(
-            produce(RefusedBand::testing(&graph, &relation), 2, &polls)
-                .unwrap()
-                .is_ok()
+            produce(
+                PreparedLiteralSearch::testing(graph, &relation),
+                block,
+                &polls
+            )
+            .unwrap()
+            .is_ok()
         );
         let completed = polls.calls.get();
         for at in 1..=completed {
@@ -331,7 +444,11 @@ fn interruption_inside_forward_reconstruction_proof_and_traceback_returns_no_obs
             };
             assert!(
                 matches!(
-                    produce(RefusedBand::testing(&graph, &relation), 2, &polls),
+                    produce(
+                        PreparedLiteralSearch::testing(graph, &relation),
+                        block,
+                        &polls
+                    ),
                     Err("cancelled")
                 ),
                 "at poll {at}"
@@ -377,7 +494,12 @@ fn full_fallback_candidate_refusal_never_returns_partial_inspection() {
     let source = vec!["a".to_owned(); 70_000];
     let reference = vec!["a".to_owned(); 1_000];
     let turns = [SpeakerTurn::new("A", &source)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let relation = Relation::new(
         addresses
             .iter()
@@ -387,22 +509,18 @@ fn full_fallback_candidate_refusal_never_returns_partial_inspection() {
         MatchMode::Exact,
     );
     let refused = match uninterrupted(Band::admit(
-        &graph,
+        graph,
         &relation,
         source.len(),
         reference.len(),
         &Uninterrupted,
     )) {
-        Err(refused) => refused,
+        Err(BandAlternative::Packed(prepared)) => prepared,
+        Err(BandAlternative::Refused(cause)) => {
+            panic!("fixture must prepare a literal alternative, got {cause:?}")
+        }
         Ok(_) => panic!("the actual band must refuse this work population"),
     };
-    assert!(matches!(
-        refused.refusal(),
-        LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
-            phase: LocalInterleavingWorkPhase::BandedSearch,
-            ..
-        })
-    ));
     let observer = Observer(Cell::new(0));
     assert!(matches!(
         uninterrupted(observe(refused, &observer)),
@@ -418,7 +536,7 @@ fn full_fallback_candidate_refusal_never_returns_partial_inspection() {
 }
 
 #[test]
-fn ascii_policy_budget_admission_and_fuzzy_nonadmission_remain_explicit() {
+fn ascii_policy_and_budget_admission_remain_explicit() {
     let a = vec!["A".to_owned(), "é".to_owned()];
     let b = vec!["b".to_owned(), "É".to_owned()];
     let reference = vec![
@@ -428,14 +546,19 @@ fn ascii_policy_budget_admission_and_fuzzy_nonadmission_remain_explicit() {
         "é".to_owned(),
     ];
     let turns = [SpeakerTurn::new("A", &a), SpeakerTurn::new("B", &b)];
-    let (graph, addresses) = Graph::of(&turns, Budget::nodes(&turns).unwrap());
+    let materialized = PreparedGraph::admit(&turns)
+        .unwrap()
+        .materialize(&Uninterrupted)
+        .unwrap();
+    let graph = materialized.graph();
+    let addresses = materialized.addresses();
     let source: Vec<_> = addresses
         .iter()
         .map(|address| turns[address.utterance].words[address.word].as_str())
         .collect();
     let relation = Relation::new(source.clone(), &reference, MatchMode::CaseInsensitive);
     let result = uninterrupted(observe(
-        RefusedBand::testing(&graph, &relation),
+        PreparedLiteralSearch::testing(graph, &relation),
         &Uninterrupted,
     ))
     .unwrap();
@@ -461,27 +584,16 @@ fn ascii_policy_budget_admission_and_fuzzy_nonadmission_remain_explicit() {
             candidates
         );
     }
-    let fuzzy = Relation::new(source, &reference, MatchMode::Fuzzy { threshold: 0.8 });
-    let refusal = RefusedBand::testing(&graph, &fuzzy).refusal();
-    assert!(
-        matches!(uninterrupted(observe(RefusedBand::testing(&graph,&fuzzy),&Uninterrupted)),Err(value) if value==refusal)
-    );
-    let work = uninterrupted(Geometry::observe(&graph, WORK_CELLS, 0, &Uninterrupted));
-    assert!(matches!(
-        work,
-        Err(LocalInterleavingRefusal::Budget(
-            LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::PackedSearch,
-                ..
-            }
-        ))
-    ));
-    let memory = uninterrupted(Geometry::observe(
-        &graph,
-        SCORE_CELLS / 24 + 1,
-        0,
+    // Admission consumes this real reference population; no fixture can pair
+    // independent dimensions with a prepared relation or replace its geometry.
+    let reference = vec!["literal".to_owned(); SCORE_CELLS / 24 + 1];
+    let relation = Relation::new(source, &reference, MatchMode::CaseInsensitive);
+    let prepared = uninterrupted(geometry::SurveyedLiteralSearch::observe(
+        PreparedLiteralSearch::testing(graph, &relation),
         &Uninterrupted,
-    ));
+    ))
+    .expect("the graph survey fits");
+    let memory = prepared.project(Representation::Full);
     assert!(matches!(
         memory,
         Err(LocalInterleavingRefusal::Budget(

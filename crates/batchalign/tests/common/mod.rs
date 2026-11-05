@@ -1285,7 +1285,9 @@ fn live_fixture_pool_config(python_path: &str) -> PoolConfig {
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own model load; see `HarnessBudget::FixtureWorkerReady`.
-        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
+        ),
         // Allow 2 workers per key so sequential tests don't block waiting
         // for a prior test's checked-out worker to be returned to the pool.
         max_workers_per_key: PerProfile::uniform(2),

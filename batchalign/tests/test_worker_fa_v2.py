@@ -10,15 +10,14 @@ from pathlib import Path
 
 import numpy as np
 
-from batchalign.worker._fa_v2 import (
-    ForcedAlignmentExecutionHostV2,
-    execute_forced_alignment_request_v2,
-)
+from batchalign.tests._loaded_hosts import prepare_fa_fixture, whisper_fa, word_fa
+from batchalign.worker._fa_v2 import execute_forced_alignment_request_v2
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
     ExecuteSuccessV2,
     FaBackendV2,
+    FaCandidateV2,
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     IndexedWordTimingResultV2,
@@ -64,34 +63,37 @@ def _make_request(
     _write_payload(payload_path)
     _write_pcm_f32le(audio_path, np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32))
 
-    return ExecuteRequestV2(
-        request_id="req-fa-stage-1",
-        task=InferenceTaskV2.FORCED_ALIGNMENT,
-        payload=ForcedAlignmentRequestV2(
-            backend=backend,
-            payload_ref_id="payload-ref-1",
-            audio_ref_id="audio-ref-1",
-            text_mode=text_mode,
-        ),
-        attachments=[
-            PreparedTextRefV2(
-                id="payload-ref-1",
-                path=str(payload_path),
-                encoding=PreparedTextEncodingV2.UTF8_JSON,
-                byte_offset=0,
-                byte_len=payload_path.stat().st_size,
+    return prepare_fa_fixture(
+        ExecuteRequestV2(
+            request_id="req-fa-stage-1",
+            task=InferenceTaskV2.FORCED_ALIGNMENT,
+            payload=ForcedAlignmentRequestV2(
+                phase=FaCandidateV2(),
+                backend=backend,
+                payload_ref_id="payload-ref-1",
+                audio_ref_id="audio-ref-1",
+                text_mode=text_mode,
             ),
-            PreparedAudioRefV2(
-                id="audio-ref-1",
-                path=str(audio_path),
-                encoding=PreparedAudioEncodingV2.PCM_F32LE,
-                channels=1,
-                sample_rate_hz=16000,
-                frame_count=4,
-                byte_offset=0,
-                byte_len=16,
-            ),
-        ],
+            attachments=[
+                PreparedTextRefV2(
+                    id="payload-ref-1",
+                    path=str(payload_path),
+                    encoding=PreparedTextEncodingV2.UTF8_JSON,
+                    byte_offset=0,
+                    byte_len=payload_path.stat().st_size,
+                ),
+                PreparedAudioRefV2(
+                    id="audio-ref-1",
+                    path=str(audio_path),
+                    encoding=PreparedAudioEncodingV2.PCM_F32LE,
+                    channels=1,
+                    sample_rate_hz=16000,
+                    frame_count=4,
+                    byte_offset=0,
+                    byte_len=16,
+                ),
+            ],
+        )
     )
 
 
@@ -109,7 +111,7 @@ def test_executes_whisper_fa_v2_request(tmp_path: Path) -> None:
         _make_request(
             tmp_path, backend=FaBackendV2.WHISPER, text_mode=FaTextModeV2.SPACE_JOINED
         ),
-        ForcedAlignmentExecutionHostV2(whisper_runner=whisper_runner),
+        whisper_fa(whisper_runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -133,7 +135,7 @@ def test_executes_wave2vec_fa_v2_request(tmp_path: Path) -> None:
         _make_request(
             tmp_path, backend=FaBackendV2.WAVE2VEC, text_mode=FaTextModeV2.SPACE_JOINED
         ),
-        ForcedAlignmentExecutionHostV2(wave2vec_runner=wave2vec_runner),
+        word_fa(wave2vec_runner),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
@@ -144,17 +146,16 @@ def test_executes_wave2vec_fa_v2_request(tmp_path: Path) -> None:
 
 
 def test_executes_cantonese_wave2vec_fa_v2_request(tmp_path: Path) -> None:
-    """The FA executor should preserve the internal Cantonese callback contract."""
+    """The Cantonese host takes the word-list call shape: audio and words."""
 
     captured: dict[str, object] = {}
 
-    def canto_runner(audio, payload, request):
+    def canto_runner(audio, words):
         captured["shape"] = audio.shape
-        captured["words"] = payload.words
-        captured["text_mode"] = request.text_mode
+        captured["words"] = words
         return [
-            (payload.words[0], (50, 120), None),
-            (payload.words[1], (130, 220), None),
+            (words[0], (50, 120), None),
+            (words[1], (130, 220), None),
         ]
 
     response = execute_forced_alignment_request_v2(
@@ -163,18 +164,14 @@ def test_executes_cantonese_wave2vec_fa_v2_request(tmp_path: Path) -> None:
             backend=FaBackendV2.WAV2VEC_CANTO,
             text_mode=FaTextModeV2.CHAR_JOINED,
         ),
-        ForcedAlignmentExecutionHostV2(canto_runner=canto_runner),
+        word_fa(canto_runner, FaBackendV2.WAV2VEC_CANTO),
     )
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, IndexedWordTimingResultV2)
     assert response.result.indexed_timings[0].start_ms == 50
     assert response.result.indexed_timings[1].end_ms == 220
-    assert captured == {
-        "shape": (4,),
-        "words": ["hello", "world"],
-        "text_mode": FaTextModeV2.CHAR_JOINED,
-    }
+    assert captured == {"shape": (4,), "words": ["hello", "world"]}
 
 
 def test_returns_missing_attachment_error_for_invalid_request(tmp_path: Path) -> None:
@@ -187,7 +184,7 @@ def test_returns_missing_attachment_error_for_invalid_request(tmp_path: Path) ->
 
     response = execute_forced_alignment_request_v2(
         request,
-        ForcedAlignmentExecutionHostV2(whisper_runner=lambda *_args: []),
+        whisper_fa(lambda *_args: []),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -215,7 +212,7 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
 
     response = execute_forced_alignment_request_v2(
         bad_request,
-        ForcedAlignmentExecutionHostV2(whisper_runner=lambda *_args: []),
+        whisper_fa(lambda *_args: []),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -224,10 +221,15 @@ def test_invalid_numeric_attachment_becomes_invalid_payload_even_if_validation_i
     assert response.result is None
 
 
-def test_returns_model_unavailable_for_unwired_cantonese_backend(
+def test_a_request_for_another_backend_than_the_loaded_one_is_refused(
     tmp_path: Path,
 ) -> None:
-    """Backends without an installed host should fail explicitly."""
+    """The executor reads the backend from the host it is handed: a Cantonese
+    request on a worker that loaded Wave2Vec is refused by name, and the loaded
+    runner never runs."""
+
+    def must_not_run(*_args: object) -> object:
+        raise AssertionError("the loaded runner serves a different backend")
 
     response = execute_forced_alignment_request_v2(
         _make_request(
@@ -235,12 +237,16 @@ def test_returns_model_unavailable_for_unwired_cantonese_backend(
             backend=FaBackendV2.WAV2VEC_CANTO,
             text_mode=FaTextModeV2.CHAR_JOINED,
         ),
-        ForcedAlignmentExecutionHostV2(),
+        word_fa(must_not_run, FaBackendV2.WAVE2VEC),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code is ProtocolErrorCodeV2.MODEL_UNAVAILABLE
-    assert "Cantonese FA host" in response.outcome.message
+    assert (
+        "this worker loaded the wave2vec forced-alignment backend"
+        in response.outcome.message
+    )
+    assert "request asks for wav2vec_canto" in response.outcome.message
 
 
 def test_invalid_whisper_fa_host_output_becomes_runtime_failure(tmp_path: Path) -> None:
@@ -250,9 +256,7 @@ def test_invalid_whisper_fa_host_output_becomes_runtime_failure(tmp_path: Path) 
         _make_request(
             tmp_path, backend=FaBackendV2.WHISPER, text_mode=FaTextModeV2.SPACE_JOINED
         ),
-        ForcedAlignmentExecutionHostV2(
-            whisper_runner=lambda _audio, _text: [("hello", float("nan"))]
-        ),
+        whisper_fa(lambda _audio, _text: [("hello", float("nan"))]),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -270,9 +274,7 @@ def test_invalid_wave2vec_fa_host_output_becomes_runtime_failure(
         _make_request(
             tmp_path, backend=FaBackendV2.WAVE2VEC, text_mode=FaTextModeV2.SPACE_JOINED
         ),
-        ForcedAlignmentExecutionHostV2(
-            wave2vec_runner=lambda _audio, _words: [("hello", (40, 10), 0.5)]
-        ),
+        word_fa(lambda _audio, _words: [("hello", (40, 10), 0.5)]),
     )
 
     assert isinstance(response.outcome, ExecuteErrorV2)
@@ -290,8 +292,8 @@ def test_out_of_range_wave2vec_model_score_is_rejected(tmp_path: Path) -> None:
             backend=FaBackendV2.WAVE2VEC,
             text_mode=FaTextModeV2.SPACE_JOINED,
         ),
-        ForcedAlignmentExecutionHostV2(
-            wave2vec_runner=lambda _audio, _words: [
+        word_fa(
+            lambda _audio, _words: [
                 ("hello", (10, 40), 1.1),
                 ("world", (40, 90), 0.9),
             ]
@@ -316,34 +318,37 @@ def _make_request_in_dir(thread_dir: Path, thread_index: int) -> ExecuteRequestV
     _write_payload(payload_path)
     # Use 160 samples (10 ms of audio at 16 kHz), enough to pass frame validation
     _write_pcm_f32le(audio_path, np.ones(160, dtype=np.float32) * 0.1)
-    return ExecuteRequestV2(
-        request_id=f"req-concurrent-{thread_index}",
-        task=InferenceTaskV2.FORCED_ALIGNMENT,
-        payload=ForcedAlignmentRequestV2(
-            backend=FaBackendV2.WAVE2VEC,
-            payload_ref_id=f"payload-{thread_index}",
-            audio_ref_id=f"audio-{thread_index}",
-            text_mode=FaTextModeV2.SPACE_JOINED,
-        ),
-        attachments=[
-            PreparedTextRefV2(
-                id=f"payload-{thread_index}",
-                path=str(payload_path),
-                encoding=PreparedTextEncodingV2.UTF8_JSON,
-                byte_offset=0,
-                byte_len=payload_path.stat().st_size,
+    return prepare_fa_fixture(
+        ExecuteRequestV2(
+            request_id=f"req-concurrent-{thread_index}",
+            task=InferenceTaskV2.FORCED_ALIGNMENT,
+            payload=ForcedAlignmentRequestV2(
+                phase=FaCandidateV2(),
+                backend=FaBackendV2.WAVE2VEC,
+                payload_ref_id=f"payload-{thread_index}",
+                audio_ref_id=f"audio-{thread_index}",
+                text_mode=FaTextModeV2.SPACE_JOINED,
             ),
-            PreparedAudioRefV2(
-                id=f"audio-{thread_index}",
-                path=str(audio_path),
-                encoding=PreparedAudioEncodingV2.PCM_F32LE,
-                channels=1,
-                sample_rate_hz=16000,
-                frame_count=160,
-                byte_offset=0,
-                byte_len=160 * 4,
-            ),
-        ],
+            attachments=[
+                PreparedTextRefV2(
+                    id=f"payload-{thread_index}",
+                    path=str(payload_path),
+                    encoding=PreparedTextEncodingV2.UTF8_JSON,
+                    byte_offset=0,
+                    byte_len=payload_path.stat().st_size,
+                ),
+                PreparedAudioRefV2(
+                    id=f"audio-{thread_index}",
+                    path=str(audio_path),
+                    encoding=PreparedAudioEncodingV2.PCM_F32LE,
+                    channels=1,
+                    sample_rate_hz=16000,
+                    frame_count=160,
+                    byte_offset=0,
+                    byte_len=160 * 4,
+                ),
+            ],
+        )
     )
 
 
@@ -389,7 +394,7 @@ def test_wave2vec_fa_requests_are_serialized_under_thread_pool(tmp_path: Path) -
             active -= 1
         return [(w, (i * 100, (i + 1) * 100), None) for i, w in enumerate(words)]
 
-    host = ForcedAlignmentExecutionHostV2(wave2vec_runner=serialization_checking_runner)
+    host = word_fa(serialization_checking_runner)
     # Match the default gpu_thread_pool_size so the test reflects real concurrency
     n_threads = 4
     requests = [

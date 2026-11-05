@@ -1,6 +1,7 @@
 //! Source-owned request admission for each piece of an anchored partition.
 
 use super::{AnchoredPiece, FaWindow, FaWord, Ms, NonEmptyWords, RefusedWindow};
+#[cfg(test)]
 use crate::chat_ops::fa::utr::UtteranceAnchors;
 use talkbank_model::WordIdx;
 
@@ -26,6 +27,7 @@ pub struct UnavailablePiece {
 impl AnchoredPart {
     /// The partition producer alone can mint request capability. Classification
     /// consumes the words, so both outcomes retain exactly the same population.
+    #[cfg(test)]
     pub(super) fn admit(words: NonEmptyWords, window: FaWindow, budget: Ms) -> Self {
         if window.len() <= budget {
             Self::Request(AnchoredPiece::new(words, window))
@@ -75,6 +77,7 @@ impl UnavailablePiece {
     /// A recovered final word may join the FOLLOWING supported request. It
     /// never becomes an isolated request over just its ASR token interval.
     /// The unknown prefix remains unavailable, with its original words.
+    #[cfg(test)]
     pub(super) fn recover_into(
         self,
         next: AnchoredPiece,

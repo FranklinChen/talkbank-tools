@@ -54,7 +54,6 @@ def _recognizer(loaded):
     return ReadyQwenRecognizer(
         QwenRecognizerConfig(
             lang="yue",
-            model_id="Qwen/Qwen3-ASR-0.6B-hf",
             device="cpu",
             recognition=SEGMENTATION_MODEL_POLICY,
         ),

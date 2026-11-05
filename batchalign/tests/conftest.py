@@ -339,6 +339,26 @@ def pytest_collection_modifyitems(
 
 
 @pytest.fixture(autouse=True)
+def _download_liveness_watches_no_real_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test measures the real model caches.
+
+    ``download_liveness`` measures the library's cache trees; in a test those
+    are this machine's real caches, so a walk is slow and a real download
+    running beside the suite would read as the test's growth. Every tree is
+    empty here; a test about liveness itself points one at ``tmp_path``.
+    """
+    import batchalign.worker._download_liveness as liveness
+
+    for roots in (
+        "hf_cache_roots",
+        "torch_hub_roots",
+        "stanza_roots",
+        "modelscope_roots",
+    ):
+        monkeypatch.setattr(liveness, roots, lambda: ())
+
+
+@pytest.fixture(autouse=True)
 def _guard_golden_oom(request: pytest.FixtureRequest) -> None:
     """Per-test OOM guard: belt-and-suspenders for the collect-time
     budget check.

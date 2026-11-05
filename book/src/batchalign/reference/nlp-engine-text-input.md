@@ -1,7 +1,7 @@
 # NLP Engine Text Input Expectations
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 21:04 EST
 
 Comprehensive reference for what text format each NLP engine/tool in batchalign3
 expects as input, what preprocessing is applied, and what would break if raw
@@ -318,7 +318,8 @@ cleaned words). Python joins them and Stanza preserves the tokenization.
 start/end flags. Rust builds CHAT `%xcoref` bracket notation from these.
 
 **Source files:**
-- `batchalign/inference/coref.py` (Python: `batch_infer_coref()`)
+- `batchalign/inference/coref.py` (Python: `prepare_coref()` at the coref
+  task load; `batch_infer_coref()` builds, runs and releases the pipeline)
 - `crates/batchalign/src/coref.rs` (Rust: injection)
 
 ---
@@ -535,7 +536,7 @@ which is why a filled pause arrives as `um` rather than `&-um`.
 
 ---
 
-### 13. Pyannote / NeMo -- Speaker Diarization
+### 13. Pyannote / pyannoteAI -- Speaker Diarization
 
 **Task:** Identify speaker turns from audio.
 
@@ -566,7 +567,7 @@ which is why a filled pause arrives as `um` rather than `&-um`.
 | PyCantonese (seg) | Segmentation | Joined chars | `cleaned_text()`, joined | Own tokenizer | No |
 | PyCantonese (POS) | POS tagging | Word list | Stanza output text | N/A | No |
 | Google Translate | Translation | Joined text | `cleaned_text()` | N/A | No |
-| Pyannote/NeMo | Diarization | Audio only | N/A | N/A | N/A |
+| Pyannote/pyannoteAI | Diarization | Audio only | N/A | N/A | N/A |
 
 ## CHAT Structural Markers That Are Stripped
 

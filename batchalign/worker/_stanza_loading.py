@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Sequence
+from typing import Any
 
 from batchalign.inference._domain_types import LanguageCode, StanzaCode
 from batchalign.inference._italian_mwt import (
@@ -47,21 +48,10 @@ L = logging.getLogger("batchalign.worker")
 # pipeline loads.
 _JA_PACKAGE = "combined"
 
-# One process-wide creation of the pipeline cache, ordered by a lock because
-# two serving threads can reach a first load at the same time. The previous
-# read-modify-write of `_state.stanza_pipelines` could lose one thread's
-# pipeline entirely; `None` still means "no Stanza bootstrap has run".
-_CACHE_CREATION_LOCK = threading.Lock()
-
 
 def pipeline_cache() -> StanzaPipelineCache:
-    """Return this worker's Stanza pipeline cache, creating it once."""
-    with _CACHE_CREATION_LOCK:
-        cache = _state.stanza_pipelines
-        if cache is None:
-            cache = StanzaPipelineCache()
-            _state.stanza_pipelines = cache
-        return cache
+    """Return this worker's Stanza pipeline cache, created with the worker."""
+    return _state.stanza_pipelines
 
 
 # Stanza's key for pos-independent lemmatizer entries (`_POS_INDEPENDENT` in
@@ -179,8 +169,6 @@ def _build_stanza_models(lang: LanguageCode) -> None:
     replacing the first: double the peak memory and double the wall clock for
     one usable result. The second thread now waits and finds the first's.
     """
-    import stanza
-    from stanza import DownloadMethod
 
     from batchalign.inference._tokenizer_realign import (
         TokenizerContext,
@@ -225,19 +213,12 @@ def _build_stanza_models(lang: LanguageCode) -> None:
             lexicon=provider.lexicon,
         )
 
-    # If the language pack for ``alpha2`` is not yet on disk, ``stanza.Pipeline``
-    # will block while downloading several hundred MB of model files. Surface
-    # that wait via the progress channel so every UI shows it to the user.
-    _emit_stanza_lang_download_event_if_missing(lang, alpha2)
-
     # Options every branch shares. The lemma pretrain repair (see
     # `_stanza_lemma_pretrain`) is in here, rather than repeated per branch,
     # so a new branch cannot be written without it.
     lemma_package = _JA_PACKAGE if alpha2 == "ja" else None
     common = {
-        "lang": alpha2,
         "processors": processors,
-        "download_method": DownloadMethod.REUSE_RESOURCES,
         "tokenize_no_ssplit": True,
         **lemma_pretrain_options(alpha2, lemma_package),
     }
@@ -245,7 +226,9 @@ def _build_stanza_models(lang: LanguageCode) -> None:
     # The Stanza pipeline shape varies by language because tokenization and MWT
     # support are not uniform across the supported languages.
     if alpha2 == "ja":
-        nlp = stanza.Pipeline(
+        nlp = _watched_pipeline(
+            lang,
+            alpha2,
             **common,
             tokenize_pretokenized=True,
             package={
@@ -256,15 +239,19 @@ def _build_stanza_models(lang: LanguageCode) -> None:
             },
         )
     elif not has_mwt:
-        nlp = stanza.Pipeline(**common, tokenize_pretokenized=True)
+        nlp = _watched_pipeline(lang, alpha2, **common, tokenize_pretokenized=True)
     elif alpha2 == "en":
-        nlp = stanza.Pipeline(
+        nlp = _watched_pipeline(
+            lang,
+            alpha2,
             **common,
             tokenize_postprocessor=make_tokenizer_postprocessor(ctx),
             package={"mwt": "gum"},
         )
     else:
-        nlp = stanza.Pipeline(
+        nlp = _watched_pipeline(
+            lang,
+            alpha2,
             **common,
             tokenize_postprocessor=make_tokenizer_postprocessor(ctx, italian_policy),
         )
@@ -317,8 +304,6 @@ def _build_stanza_retokenize_model(
     Called only by :func:`load_stanza_retokenize_model`, and only with
     ``retok_key``'s construction slot held.
     """
-    import stanza
-    from stanza import DownloadMethod
 
     from batchalign.inference._tokenizer_realign import TokenizerContext
 
@@ -328,12 +313,10 @@ def _build_stanza_retokenize_model(
     # The Mandarin retokenize pipeline uses the neural tokenizer (a separate
     # ~200 MB model from the ``tokenize_pretokenized`` variant). Surface the
     # wait if it's about to download.
-    _emit_stanza_lang_download_event_if_missing(lang, alpha2)
-
-    nlp = stanza.Pipeline(
-        lang=alpha2,
+    nlp = _watched_pipeline(
+        lang,
+        alpha2,
         processors=processors,
-        download_method=DownloadMethod.REUSE_RESOURCES,
         tokenize_no_ssplit=True,
         tokenize_pretokenized=False,
         **lemma_pretrain_options(alpha2),
@@ -479,8 +462,7 @@ class ItalianMwtPolicyProvider:
         if self._lexicon_resolved:
             return self._lexicon
         self._lexicon_resolved = True
-        pipelines = _state.stanza_pipelines
-        entry = None if pipelines is None else pipelines.loaded(self._lang)
+        entry = _state.stanza_pipelines.loaded(self._lang)
         if entry is None:
             L.warning(
                 "Italian MWT policy: no loaded pipeline for %s, leaving Stanza's "
@@ -617,8 +599,6 @@ def load_stanza_mwt_probe_model(
     tokenizer plus MWT model, and both install, with the loser's pipeline
     already handed out to its caller.
     """
-    import stanza
-    from stanza import DownloadMethod
 
     probe_key = mwt_probe_key(lang)
     cache = pipeline_cache()
@@ -627,10 +607,10 @@ def load_stanza_mwt_probe_model(
             return already_resident
 
         alpha2 = stanza_code_for(lang)
-        nlp = stanza.Pipeline(
-            lang=alpha2,
+        nlp = _watched_pipeline(
+            lang,
+            alpha2,
             processors="tokenize,mwt",
-            download_method=DownloadMethod.REUSE_RESOURCES,
             tokenize_no_ssplit=True,
             tokenize_postprocessor=postprocessor,
         )
@@ -690,17 +670,13 @@ def load_utseg_pipeline(lang: LanguageCode) -> LoadedPipeline:
         if already_resident is not None:
             return already_resident
 
-        import stanza
-        from stanza import DownloadMethod
-
-        _emit_stanza_lang_download_event_if_missing(lang, cap.stanza_code)
-        nlp = stanza.Pipeline(
-            lang=cap.stanza_code,
+        nlp = _watched_pipeline(
+            lang,
+            cap.stanza_code,
             processors=_pipeline_processors(
                 "utterance_segmentation", with_mwt=cap.has("mwt")
             ),
             tokenize_pretokenized=True,
-            download_method=DownloadMethod.REUSE_RESOURCES,
         )
         # No tokenizer context: utseg has no realignment layer.
         installed = cache.install(key, nlp, context=None)
@@ -713,50 +689,31 @@ def load_utseg_pipeline(lang: LanguageCode) -> LoadedPipeline:
 # ---------------------------------------------------------------------------
 
 
-def _emit_stanza_lang_download_event_if_missing(
-    lang: LanguageCode, alpha2: StanzaCode
-) -> None:
-    """Emit a user-visible event if Stanza needs to download ``alpha2``.
+def _watched_pipeline(
+    lang: LanguageCode, alpha2: StanzaCode, **pipeline_options: Any
+) -> Any:
+    """Construct a ``stanza.Pipeline`` for ``alpha2``, its downloads watched.
 
-    Probes the configured Stanza model directory for the presence of any
-    files under ``<model_dir>/<alpha2>/``. Absence implies ``stanza.Pipeline``
-    will block on a multi-hundred-MB download. The notification surfaces
-    that wait through the same progress channel UIs already render for
-    model loading.
+    This is the one place a worker's Stanza pipeline is built, so it supplies
+    the options every construction shares: the Stanza language (``alpha2``)
+    and ``download_method=REUSE_RESOURCES``. Callers pass only what differs.
 
-    Best-effort: if the probe fails for any reason, we emit anyway. False-
-    positive notifications are a much smaller UX cost than silent waits.
+    The pipeline downloads any missing language pack (several hundred MB)
+    while it is constructed. Under ``download_liveness`` that download is
+    announced when bytes arrive and its growth reported, which keeps a slow
+    first download inside the worker's stall window; a pack already on disk
+    says nothing. This replaces a probe that guessed "cached" from any file
+    under the language directory, so a partial pack downloaded in silence.
     """
-    import os
+    import stanza
 
-    from batchalign.worker._progress import emit_download_event
+    from batchalign.worker._download_liveness import StanzaResources, download_liveness
 
-    is_present = False
-    try:
-        import stanza.resources.common as src
-
-        lang_dir = os.path.join(src.DEFAULT_MODEL_DIR, alpha2)
-        # Stanza scatters language packs across subdirectories named after
-        # processor packages (e.g. ``en/tokenize/combined.pt``); presence of
-        # *any* file under the language directory means at least some pack
-        # has been seeded and the download is partial-or-done. The Pipeline
-        # call may still pull a few small files; that's fine, the user has
-        # already been informed via past events.
-        if os.path.isdir(lang_dir):
-            for _root, _dirs, files in os.walk(lang_dir):
-                if files:
-                    is_present = True
-                    break
-    except Exception as probe_exc:
-        L.debug("Stanza lang-pack probe failed for %s: %s", alpha2, probe_exc)
-
-    if is_present:
-        return
-
-    emit_download_event(
-        stage=f"downloading_stanza_lang_{alpha2}",
-        user_message=(
-            f"Downloading Stanza language pack for {lang} ({alpha2}) "
-            "(one-time, ~250-500 MB; future runs will use the local cache)…"
-        ),
-    )
+    with download_liveness(
+        StanzaResources(alpha2), what=f"the Stanza language pack for {lang} ({alpha2})"
+    ):
+        return stanza.Pipeline(
+            lang=alpha2,
+            download_method=stanza.DownloadMethod.REUSE_RESOURCES,
+            **pipeline_options,
+        )

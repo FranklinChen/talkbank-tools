@@ -3,13 +3,12 @@
 This module is the narrow typed entrypoint for live V2 execution over the
 existing stdio worker process. Its job is intentionally small:
 
-- build model-host adapters from already loaded worker state
-- route one typed V2 execute request to the correct task executor
-- return one typed V2 execute response
+- resolve one request's load in the worker's load registry, ONCE, here
+- refuse a request whose load is absent, by name (``model_unavailable``)
+- hand the task executor the host that load built
 
-The production worker loop should not assemble FA hosts or branch on loaded
-model state inline. Keeping that wiring here makes the dispatch from
-``BatchInferRequest`` payloads to typed V2 execute requests explicit and testable.
+No executor sees an absent model: each takes the loaded host itself, so a
+``None`` test inside a handler has nothing to test.
 
 **See also:** `../../INTERFACE_MAP.md` for the unified Python/Rust interface
 reference, including Rust FFI function signatures, shared schema definitions,
@@ -18,127 +17,92 @@ and full Python caller locations.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, TypeVar, assert_never
 
 if TYPE_CHECKING:
-    from batchalign.inference.languages.cantonese._cantonese_fa import CantoneseFaHost
+    from collections.abc import Callable
+
+    from batchalign.worker._types import LoadKey, TaskLoadRegistry
     from batchalign.worker._types_v2 import (
         AsrModelIdentityV2,
         AsrRequestV2,
-        TaskRequestV2,
         TaskResultV2,
     )
 
 import time
-from dataclasses import dataclass, field
 
-from batchalign.worker._asr_v2 import (
-    AsrExecutionHostV2,
-    build_default_asr_execution_host_v2,
-    execute_asr_request_v2,
+from batchalign.worker._asr_v2 import execute_asr_request_v2
+from batchalign.worker._avqi_v2 import execute_avqi_request_v2
+from batchalign.worker._fa_v2 import execute_forced_alignment_request_v2
+from batchalign.worker._loads import (
+    ASR_LOAD,
+    AVQI_LOAD,
+    COREF_LOAD,
+    FA_LOAD,
+    MORPHOSYNTAX_LOAD,
+    OPENSMILE_LOAD,
+    SPEAKER_EMBEDDING_LOAD,
+    TRANSLATE_LOAD,
+    UTSEG_LOAD,
+    WORD_SEGMENTATION_LOAD,
+    ControlPlaneAsr,
+    LoadedLocalAsr,
+    LoadedProviderAsr,
+    diarization_load,
 )
-from batchalign.worker._avqi_v2 import (
-    AvqiExecutionHostV2,
-    build_default_avqi_execution_host_v2,
-    execute_avqi_request_v2,
-)
-from batchalign.worker._fa_v2 import (
-    ForcedAlignmentExecutionHostV2,
-    build_default_fa_execution_host_v2,
-    execute_forced_alignment_request_v2,
-)
-from batchalign.worker._opensmile_v2 import (
-    OpenSmileExecutionHostV2,
-    build_default_opensmile_execution_host_v2,
-    execute_opensmile_request_v2,
-)
+from batchalign.worker._opensmile_v2 import execute_opensmile_request_v2
 from batchalign.worker._speaker_embedding_v2 import (
-    SpeakerEmbeddingExecutionHostV2,
-    build_default_speaker_embedding_execution_host_v2,
     execute_speaker_embedding_request_v2,
 )
-from batchalign.worker._speaker_v2 import (
-    SpeakerExecutionHostV2,
-    build_default_speaker_execution_host_v2,
-    execute_speaker_request_v2,
-)
+from batchalign.worker._speaker_v2 import execute_speaker_request_v2
 from batchalign.worker._text_v2 import (
-    TextExecutionHostV2,
-    build_default_text_execution_host_v2,
     execute_coref_request_v2,
     execute_morphosyntax_request_v2,
     execute_translate_request_v2,
     execute_utseg_request_v2,
     execute_word_segmentation_request_v2,
 )
-from batchalign.worker._types import _state, sleep_test_delay
+from batchalign.worker._types import _state, not_loaded_message, sleep_test_delay
 from batchalign.worker._types_v2 import (
+    AsrRequestV2,
+    AvqiRequestV2,
+    CorefRequestV2,
     ExecuteErrorV2,
     ExecuteRequestV2,
     ExecuteResponseV2,
-    InferenceTaskV2,
+    ForcedAlignmentRequestV2,
+    MorphosyntaxRequestV2,
+    OpenSmileRequestV2,
     ProtocolErrorCodeV2,
+    SpeakerEmbeddingRequestV2,
+    SpeakerRequestV2,
+    TranslateRequestV2,
+    UtsegRequestV2,
+    WordSegmentationRequestV2,
 )
 
+Host = TypeVar("Host")
 
-@dataclass(frozen=True, slots=True)
-class WorkerExecutionHostV2:
-    """Live V2 execution hosts built from already loaded worker state.
 
-    The host groups the task-specific executors that the Python worker can run
-    directly. Tests inject typed fake hosts here instead of replacing module
-    globals.
+def execute_request_v2(request: ExecuteRequestV2) -> ExecuteResponseV2:
+    """Execute one typed V2 worker request against this worker's loads.
+
+    The protocol loop's entry point: the one place the process-wide registry
+    is read. Everything else takes the registry as an argument
+    (:func:`execute_on_loads`), which is how tests hand it the hosts they
+    built.
     """
-
-    asr: AsrExecutionHostV2 = field(default_factory=AsrExecutionHostV2)
-    forced_alignment: ForcedAlignmentExecutionHostV2 = field(
-        default_factory=ForcedAlignmentExecutionHostV2
-    )
-    speaker: SpeakerExecutionHostV2 = field(default_factory=SpeakerExecutionHostV2)
-    speaker_embedding: SpeakerEmbeddingExecutionHostV2 = field(
-        default_factory=SpeakerEmbeddingExecutionHostV2
-    )
-    opensmile: OpenSmileExecutionHostV2 = field(
-        default_factory=OpenSmileExecutionHostV2
-    )
-    avqi: AvqiExecutionHostV2 = field(default_factory=AvqiExecutionHostV2)
-    text: TextExecutionHostV2 = field(default_factory=TextExecutionHostV2)
+    return execute_on_loads(request, _state.loads)
 
 
-def build_default_execution_host_v2() -> WorkerExecutionHostV2:
-    """Build the live V2 execution hosts from loaded worker models."""
-
-    return WorkerExecutionHostV2(
-        asr=build_default_asr_execution_host_v2(
-            asr_engine=_state.asr_engine,
-            whisper_model=_state.whisper_asr_model,
-        ),
-        forced_alignment=build_default_fa_execution_host_v2(
-            whisper_model=_state.whisper_fa_model,
-            wave2vec_model=_state.wave2vec_fa_model,
-            canto_host=_default_cantonese_fa_host(),
-            qwen_host=_state.qwen_fa_host,
-        ),
-        speaker=build_default_speaker_execution_host_v2(
-            _state.bootstrap.device_policy if _state.bootstrap is not None else None
-        ),
-        speaker_embedding=build_default_speaker_embedding_execution_host_v2(),
-        opensmile=build_default_opensmile_execution_host_v2(),
-        avqi=build_default_avqi_execution_host_v2(),
-        text=build_default_text_execution_host_v2(),
-    )
-
-
-def execute_request_v2(
-    request: ExecuteRequestV2,
-    *,
-    host: WorkerExecutionHostV2 | None = None,
+def execute_on_loads(
+    request: ExecuteRequestV2, loads: TaskLoadRegistry
 ) -> ExecuteResponseV2:
-    """Execute one typed V2 worker request against the loaded runtime.
+    """Execute one typed V2 request on the hosts ``loads`` holds.
 
-    Every response this function builds itself (a refused request, an
-    unsupported task, a test echo) reports the time from receipt to reply,
-    measured here; none of them invents one.
+    Every response this function builds itself (a refused request, a test
+    echo) reports the time from receipt to reply, measured here; none of them
+    invents one.
     """
     started_at = time.monotonic()
 
@@ -166,42 +130,72 @@ def execute_request_v2(
         return ExecuteResponseV2(
             request_id=request.request_id,
             outcome=ExecuteSuccessV2(),
-            result=_echo_placeholder_result(request.payload),
+            result=_echo_placeholder_result(request),
             elapsed_s=_seconds_since(started_at),
         )
 
-    execution_host = host or build_default_execution_host_v2()
-
-    match request.task:
-        case InferenceTaskV2.MORPHOSYNTAX:
-            return execute_morphosyntax_request_v2(request, execution_host.text)
-        case InferenceTaskV2.UTSEG:
-            return execute_utseg_request_v2(request, execution_host.text)
-        case InferenceTaskV2.TRANSLATE:
-            return execute_translate_request_v2(request, execution_host.text)
-        case InferenceTaskV2.COREF:
-            return execute_coref_request_v2(request, execution_host.text)
-        case InferenceTaskV2.WORD_SEGMENTATION:
-            return execute_word_segmentation_request_v2(request)
-        case InferenceTaskV2.ASR:
-            return execute_asr_request_v2(request, execution_host.asr)
-        case InferenceTaskV2.FORCED_ALIGNMENT:
-            return execute_forced_alignment_request_v2(
+    def on(
+        key: LoadKey[Host],
+        execute: Callable[[ExecuteRequestV2, Host], ExecuteResponseV2],
+    ) -> ExecuteResponseV2:
+        # The one resolution: absent is the named refusal, present is the
+        # host the executor receives.
+        host = loads.get(key)
+        if host is None:
+            return _refusal(
                 request,
-                execution_host.forced_alignment,
+                ProtocolErrorCodeV2.MODEL_UNAVAILABLE,
+                not_loaded_message(key.load),
+                started_at,
             )
-        case InferenceTaskV2.SPEAKER:
-            return execute_speaker_request_v2(request, execution_host.speaker)
-        case InferenceTaskV2.SPEAKER_EMBEDDING:
-            return execute_speaker_embedding_request_v2(
-                request, execution_host.speaker_embedding
-            )
-        case InferenceTaskV2.OPENSMILE:
-            return execute_opensmile_request_v2(request, execution_host.opensmile)
-        case InferenceTaskV2.AVQI:
-            return execute_avqi_request_v2(request, execution_host.avqi)
+        return execute(request, host)
+
+    payload = request.payload
+    match payload:
+        case MorphosyntaxRequestV2():
+            return on(MORPHOSYNTAX_LOAD, execute_morphosyntax_request_v2)
+        case UtsegRequestV2():
+            return on(UTSEG_LOAD, execute_utseg_request_v2)
+        case TranslateRequestV2():
+            return on(TRANSLATE_LOAD, execute_translate_request_v2)
+        case CorefRequestV2():
+            return on(COREF_LOAD, execute_coref_request_v2)
+        case WordSegmentationRequestV2():
+            return on(WORD_SEGMENTATION_LOAD, execute_word_segmentation_request_v2)
+        case AsrRequestV2(backend=asr_backend):
+
+            def run_asr(
+                request: ExecuteRequestV2,
+                host: LoadedLocalAsr | LoadedProviderAsr | ControlPlaneAsr,
+            ) -> ExecuteResponseV2:
+                match host:
+                    case LoadedLocalAsr() | LoadedProviderAsr():
+                        return execute_asr_request_v2(request, host)
+                    case ControlPlaneAsr():
+                        return _refusal(
+                            request,
+                            ProtocolErrorCodeV2.MODEL_UNAVAILABLE,
+                            "this worker hosts no ASR engine: its plan's ASR "
+                            f"runs in the control plane, so a {asr_backend.value} "
+                            "request cannot run here",
+                            started_at,
+                        )
+                    case _:
+                        assert_never(host)
+
+            return on(ASR_LOAD, run_asr)
+        case ForcedAlignmentRequestV2():
+            return on(FA_LOAD, execute_forced_alignment_request_v2)
+        case SpeakerRequestV2(backend=speaker_backend):
+            return on(diarization_load(speaker_backend), execute_speaker_request_v2)
+        case SpeakerEmbeddingRequestV2():
+            return on(SPEAKER_EMBEDDING_LOAD, execute_speaker_embedding_request_v2)
+        case OpenSmileRequestV2():
+            return on(OPENSMILE_LOAD, execute_opensmile_request_v2)
+        case AvqiRequestV2():
+            return on(AVQI_LOAD, execute_avqi_request_v2)
         case _:
-            return _unsupported_task_response(request, started_at)
+            assert_never(payload)
 
 
 def _echo_model_identity(request: AsrRequestV2) -> AsrModelIdentityV2:
@@ -277,7 +271,7 @@ def _echo_model_identity(request: AsrRequestV2) -> AsrModelIdentityV2:
             assert_never(models)
 
 
-def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
+def _echo_placeholder_result(request: ExecuteRequestV2) -> TaskResultV2:
     """Derive an empty result from the typed request payload itself."""
 
     from batchalign.worker._types_v2 import (
@@ -286,15 +280,25 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
         AvqiResultPayloadV2,
         CorefRequestV2,
         CorefResultPayloadV2,
+        FaCandidateV2,
+        FaExecuteV2,
+        FaNoModelMemoryV2,
+        FaPreparationBindingV2,
+        FaPreparationPlanV2,
+        FaPreparationResultPayloadV2,
+        FaPreparedV2,
+        FaPrepareV2,
+        FaProjectionUnavailableV2,
+        FaRefusedV2,
         ForcedAlignmentRequestV2,
         IndexedWordTimingResultPayloadV2,
         LocalPyannoteSpeakerEvidenceV2,
         MonologueAsrResultPayloadV2,
         MorphosyntaxRequestV2,
         MorphosyntaxResultPayloadV2,
-        NemoSpeakerEvidenceV2,
         OpenSmileRequestV2,
         OpenSmileResultPayloadV2,
+        PreparedAudioRefV2,
         PyannoteAISpeakerEvidenceV2,
         SpanTooShortForEmbeddingV2,
         SpeakerBackendV2,
@@ -311,6 +315,7 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
         WordSegmentationResultPayloadV2,
     )
 
+    payload = request.payload
     match payload:
         case MorphosyntaxRequestV2():
             return MorphosyntaxResultPayloadV2(items=[])
@@ -327,7 +332,55 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
                 lang="eng", monologues=[], model=_echo_model_identity(payload)
             )
         case ForcedAlignmentRequestV2():
-            return IndexedWordTimingResultPayloadV2(indexed_timings=[])
+            match payload.phase:
+                case FaPrepareV2(execution_request_id=execution_id):
+                    audio = next(
+                        (
+                            item
+                            for item in request.attachments
+                            if isinstance(item, PreparedAudioRefV2)
+                            and item.id == payload.audio_ref_id
+                        ),
+                        None,
+                    )
+                    if audio is None:
+                        return FaPreparationResultPayloadV2(
+                            outcome=FaRefusedV2(
+                                cause=FaProjectionUnavailableV2(
+                                    message="test echo has no matching audio descriptor"
+                                )
+                            )
+                        )
+                    return FaPreparationResultPayloadV2(
+                        outcome=FaPreparedV2(
+                            plan=FaPreparationPlanV2(
+                                binding=FaPreparationBindingV2(
+                                    execution_request_id=execution_id,
+                                    backend=payload.backend,
+                                    engine="test-echo",
+                                    payload_ref_id=payload.payload_ref_id,
+                                    audio_ref_id=payload.audio_ref_id,
+                                    samples=audio.frame_count,
+                                    sample_rate_hz=audio.sample_rate_hz,
+                                    text_mode=payload.text_mode,
+                                    attention_capture=payload.attention_capture,
+                                ),
+                                memory=FaNoModelMemoryV2(),
+                            )
+                        )
+                    )
+                case FaExecuteV2():
+                    return IndexedWordTimingResultPayloadV2(indexed_timings=[])
+                case FaCandidateV2():
+                    return FaPreparationResultPayloadV2(
+                        outcome=FaRefusedV2(
+                            cause=FaProjectionUnavailableV2(
+                                message="an FA candidate cannot execute"
+                            )
+                        )
+                    )
+                case _:
+                    assert_never(payload.phase)
         case SpeakerRequestV2(backend=backend):
             match backend:
                 case SpeakerBackendV2.PYANNOTE_AI:
@@ -340,10 +393,6 @@ def _echo_placeholder_result(payload: TaskRequestV2) -> TaskResultV2:
                 case SpeakerBackendV2.PYANNOTE:
                     return SpeakerResultPayloadV2(
                         evidence=LocalPyannoteSpeakerEvidenceV2(segments=[])
-                    )
-                case SpeakerBackendV2.NEMO:
-                    return SpeakerResultPayloadV2(
-                        evidence=NemoSpeakerEvidenceV2(segments=[])
                     )
                 case _:
                     assert_never(backend)
@@ -400,20 +449,17 @@ def _seconds_since(started_at: float) -> float:
     return time.monotonic() - started_at
 
 
-def _unsupported_task_response(
-    request: ExecuteRequestV2, started_at: float
+def _refusal(
+    request: ExecuteRequestV2,
+    code: ProtocolErrorCodeV2,
+    message: str,
+    started_at: float,
 ) -> ExecuteResponseV2:
-    """Return a typed error for V2 tasks that are not live yet."""
+    """One typed refusal this module builds itself, timed from receipt."""
 
     return ExecuteResponseV2(
         request_id=request.request_id,
-        outcome=ExecuteErrorV2(
-            code=ProtocolErrorCodeV2.MODEL_UNAVAILABLE,
-            message=(
-                f"worker protocol V2 task {request.task.value} is not wired into "
-                "the live worker yet"
-            ),
-        ),
+        outcome=ExecuteErrorV2(code=code, message=message),
         result=None,
         elapsed_s=_seconds_since(started_at),
     )
@@ -426,55 +472,23 @@ def _validate_request_boundary(
 
     payload_kind = getattr(request.payload, "kind", None)
     if payload_kind is None:
-        return _invalid_payload_response(
+        return _refusal(
             request,
+            ProtocolErrorCodeV2.INVALID_PAYLOAD,
             "execute payload did not include a task kind discriminator",
             started_at,
         )
     if request.task.value != payload_kind:
-        return _invalid_payload_response(
+        return _refusal(
             request,
+            ProtocolErrorCodeV2.INVALID_PAYLOAD,
             f"execute payload kind {payload_kind} does not match task {request.task.value}",
             started_at,
         )
     return None
 
 
-def _invalid_payload_response(
-    request: ExecuteRequestV2,
-    message: str,
-    started_at: float,
-) -> ExecuteResponseV2:
-    """Return one typed invalid-payload protocol response."""
-
-    return ExecuteResponseV2(
-        request_id=request.request_id,
-        outcome=ExecuteErrorV2(
-            code=ProtocolErrorCodeV2.INVALID_PAYLOAD,
-            message=message,
-        ),
-        result=None,
-        elapsed_s=_seconds_since(started_at),
-    )
-
-
 __all__ = [
-    "WorkerExecutionHostV2",
-    "build_default_execution_host_v2",
+    "execute_on_loads",
     "execute_request_v2",
 ]
-
-
-def _default_cantonese_fa_host() -> CantoneseFaHost | None:
-    """The loaded Cantonese FA host, or None when that engine was not loaded.
-
-    Imported lazily because the Cantonese module imports torch transitively via
-    `batchalign.inference.fa`, and this module currently pulls no torch at all.
-    (It does NOT pull pycantonese, which is imported inside `load_cantonese_fa`;
-    an earlier version of this comment said otherwise.)
-    """
-    from batchalign.inference.languages.cantonese._cantonese_fa import (
-        default_cantonese_fa_host,
-    )
-
-    return default_cantonese_fa_host()

@@ -484,6 +484,36 @@ class TestWorkerV2Conformance:
         schema = _load_schema("worker_v2", "ProviderDiarizationV2")
         _assert_tagged_union_matches(schema, ProviderDiarizationV2)
 
+    def test_progress_event(self) -> None:
+        """A progress event's scope and measure read the same on both sides.
+
+        The supervisor's stall window takes the load scope and the
+        request-progress ledger the request scope, each matching on the
+        variant, so a scope, kind or field known to one side only would be an
+        event the other refuses, or a number read as the wrong thing.
+        """
+        from batchalign.worker._types_v2 import (
+            LoadMeasureV2,
+            PhaseEdgeV2,
+            ProgressEventV2,
+            UnitProgressV2,
+        )
+
+        _assert_tagged_union_matches(
+            _load_schema("worker_v2", "ProgressEventV2"),
+            ProgressEventV2,
+            tag="scope",
+        )
+        _assert_tagged_union_matches(
+            _load_schema("worker_v2", "LoadMeasureV2"), LoadMeasureV2
+        )
+        _assert_fields_match(
+            _load_schema("worker_v2", "UnitProgressV2"), UnitProgressV2
+        )
+        assert _schema_enum_values(_load_schema("worker_v2", "PhaseEdgeV2")) == {
+            edge.value for edge in PhaseEdgeV2
+        }
+
     def test_decode_budget_realtime_factor_matches_rust(self) -> None:
         """Pin Python's realtime factor to Rust's copy of the same constant.
 

@@ -3,8 +3,11 @@
 **Status:** Current
 **Last modified:** {{git-dates:page}}
 
-This page documents overlap-aware alignment improvements: what is shipped
-and known limitations.
+This page documents overlap-aware alignment behavior and its known limits.
+The preparation-ownership changes below are in development source; adaptive
+UTR host-memory admission is still being implemented. Packed execution no longer
+stops at a universal operation count; preparation, storage and candidate limits
+remain active until their replacement is complete and qualified.
 
 ## Architecture and evidence authority
 
@@ -155,13 +158,14 @@ candidate edges and missingness with an unpruned joint graph, not just a selecte
 path; multiplicity/ASCII controls have an insta snapshot. The limits do not rise,
 and a remaining refusal still grants no fallback timing authority.
 
-Admission bounds preliminary witness work plus admitted source-state/reference
+Scalar admission bounds preliminary witness work plus admitted source-state/reference
 cells to 64,000,000 and score storage to 2,097,152 machine-word payload units; possible addressed matches
 are separately limited to 1,048,576. Graph/evidence overhead is additional to
 score storage. Graph construction also has a pre-allocation node limit.
-Large exact/ASCII-case-insensitive canonical witnesses use bit-parallel LCS
-row differences and sparse equality masks. Small witnesses and fuzzy relations
-retain scalar rows with matching prefix/suffix stripping. Weak lexical agreement
+Exact/ASCII-case-insensitive canonical interiors can use bit-parallel LCS
+row differences and sparse equality masks. Scalar rows remain the other literal
+representation and the only fuzzy representation. Matching edges are observed
+once and retained before either scorer is admitted. Weak lexical agreement
 can still leave the admitted graph band too wide to search. Unreachable cells
 are distinct from reachable zero scores, and cancellation remains separate from
 budget refusal.
@@ -185,6 +189,58 @@ proof alone cannot identify who spoke or prove accurate timing. Repeated words
 may remain ambiguous even with complete recovery candidates; neither selecting
 the earliest repeat nor abstaining from every difficult case proves correctness.
 
+### Input-owned graph preparation
+
+`PreparedGraph` retains the actual projected turns, checked source boundaries
+and episode geometry together. Prefix offsets include the real exclusive end
+boundary, so graph construction needs no missing-offset fallback. Episode word
+counts use those offsets instead of repeatedly summing following turns. The
+legacy graph quota is checked during preparation; this remains an explicit
+unfinished storage policy, not a physical-memory certificate or shared lease.
+
+Construction consumes the prepared owner and accepts no replacement inputs or
+capacity. It reserves the observed node/address populations and builds each
+word address alongside its edge. Empty episodes and nonempty grids are distinct
+prepared variants; empty episodes carry no unused grid dimensions. Cancellation
+is checked while materializing nodes and edges, and cannot publish a partial
+`MaterializedGraph`.
+
+The materialized owner also retains `PendingTurnFrontiers`, carrying the paid
+episode classification. Only a completed correspondence observation consumes
+it to build turn-space corridor boundaries. `CompletedGraphObservation` alone
+can enter source lifting, which releases projected temporary words before
+building final evidence through its original addresses. A separate `TurnFrontier`
+keeps those turn boundaries distinct from word-space `SearchFrontier` values. Refused or
+interrupted proof drops the pending owner without performing an unused sweep.
+Episode membership is therefore observed once for budget geometry, graph
+construction and final corridors. Literal projection preserves every turn,
+speaker and continuation, including turns whose words were all excluded.
+
+```mermaid
+flowchart TD
+    graph_turns["Actual projected turns preserve source order metadata"] --> graph_census["Observe prefix boundaries and episode geometry once"]
+    graph_census --> graph_policy{"Existing legacy graph quota"}
+    graph_policy -->|"fits"| prepared_graph["PreparedGraph owns inputs and checked geometry"]
+    prepared_graph --> materialize_graph["Consume construction with cooperative cancellation"]
+    materialize_graph --> graph_owner["MaterializedGraph owns graph, addresses and pending frontiers"]
+    graph_owner --> graph_proof["Complete correspondence proof"]
+    graph_proof --> turn_frontiers["Consume PendingTurnFrontiers using retained episode facts"]
+    turn_frontiers --> observed_graph["CompletedGraphObservation owns evidence and turn-space frontiers"]
+    observed_graph --> word_frontiers["Consume source lifting through original addresses"]
+    graph_policy -->|"refused"| graph_discard["Drop pending work; no partial correspondence"]
+    materialize_graph -->|"interrupted"| graph_discard
+    graph_proof -->|"refused or interrupted"| graph_discard
+```
+
+This removes the detached turns/count constructor, repeated episode
+classification, repeated following-run sums, end-offset fallback, an extra word
+enumeration and the unnecessary edge cloning requirement. Existing independent
+correspondence, inspection, continuation and cancellation controls remain; the ordinary-turn
+control now checks the materialized graph rather than only its budget count.
+No new tests of inaccessible preparation states are added. Input-shaped graph
+allocation accounting and shared UTR memory admission still need qualification;
+the remaining graph, score and candidate quotas are not removed by this change.
+
 ### Packed feasible-score producer and ownership
 
 `dp_align/interleaving/episodes/band/witness.rs::CanonicalWitness` constructs a
@@ -207,25 +263,64 @@ update work is proportional to `m * ceil(n / 64)`; preprocessing and sparse post
 are also included in admission. This does not promise a fixed wall-time speedup.
 
 The producer uses ASCII folding only for the existing case-insensitive relation;
-it introduces no Unicode normalization or new fuzzy equivalence. It selects the
-packed path when the unmatched scalar middle would exceed 1,000,000 cells.
-Prefix/suffix and small cases keep their existing scalar path. An already
-affordable dense search may use the zero lower bound rather than pay for a
-witness. These are implementation choices, not word-count acceptance cutoffs.
+it introduces no Unicode normalization or new fuzzy equivalence.
+`PreparedWitness::observe` derives both lengths from its bound relation and
+observes matching prefixes/suffixes once. A complete witness has no remaining
+row-allocation capability. Otherwise, `WitnessInterior` owns the unmatched
+ranges and completed edges; admission consumes that owner into an
+`AdmittedInterior` whose `AdmittedKernel` carries the exact chosen view and its
+accounted work. Callers cannot supply unrelated lengths or repeat edge scans
+in a scalar helper. Both scorers consume their views, and execution returns
+only its score or caller interruption, with no late budget-refusal route.
 
-The existing 64,000,000 work, 2,097,152 score-storage and 1,048,576 candidate
-limits remain. Work counts scalar witness cells or packed-word passes, optional
+Literal admission orders scalar and packed projections by their declared work
+for that actual interior, replacing the former 1,000,000-cell selection constant.
+It checks work and storage before any row allocation. If the preferred
+representation refuses, the other projection remains available; that is a
+metadata alternative, not a repeated execution. If both refuse, the preferred
+representation's diagnostic is retained. These are algorithmic accounting units,
+not a prediction of elapsed time or a proof of physical impossibility. Existing
+resource policies still apply while adaptive shared-memory admission is unfinished.
+An already affordable dense search may use the zero lower bound rather than pay
+for a witness; that separate band-selection policy is unchanged.
+
+```mermaid
+flowchart TD
+    relation["Bound Relation: derive actual lengths"] --> edges["Observe matching edges once"]
+    edges -->|"no interior remains"| complete["PreparedWitness::Complete: no row allocation"]
+    edges -->|"nonempty interior"| interior["WitnessInterior owns trimmed ranges and completed edges"]
+    interior --> project["Project scalar; literal policy also permits packed"]
+    project --> admit["Admit preferred projection before allocation"]
+    admit -->|"literal representation refused"| alternate["Admit retained alternate projection; neither has executed"]
+    admit -->|"fits current policy"| granted["AdmittedKernel owns chosen view and accounted work"]
+    alternate -->|"fits current policy"| granted
+    alternate -->|"both refuse"| refused["Terminal budget diagnostic; no witness authority"]
+    admit -->|"fuzzy scalar refused"| refused
+    granted --> run["Consume AdmittedInterior; score only its interior"]
+    run -->|"completed"| witness["CanonicalWitness bound to original relation"]
+    run -->|"cancelled"| stopped["No completed witness"]
+    complete --> witness
+    witness --> bound["Feasible lower bound only; no correspondence or timing authority"]
+```
+
+Witness and representation admission retain their 64,000,000 prospective-work
+policy; score storage remains 2,097,152 units and candidates 1,048,576.
+This is distinct from the now diagnostic-only packed execution ledger.
+Preparation work counts scalar witness cells or packed-word passes, optional
 literal-capacity preparation passes, and admitted graph/reference cells. Complete band admission is counted without
 allocating/scoring that band. `interleaving_work` records add `phase`
 (`graph_shape`, `feasible_witness`, `banded_search`, `packed_search`) and `required_at_least`;
 arithmetic overflow saturates the required count. Other budgets remain separate.
 Cooperative checkpoints stop computation without turning cancellation into
-ambiguity or constructing a partial timing certificate.
+ambiguity or constructing a partial timing certificate. Managed CPU search
+starts a fresh indeterminate `Recovering utterance timing` update, clearing
+the preceding ASR-window counts. ASR completion is not correspondence completion.
+The runtime also logs the input-bound packed cost receipt at debug level.
 
 This producer is corpus- and ASR-provider-independent. It applies to the joint
 interleaved UTR path, including the default global strategy; it does not change
-the separate monotonic correspondence producer, small scalar cases, fuzzy
-witness computation, morphotag or acoustic FA inference. No special CLI flag is
+the separate monotonic correspondence producer, fuzzy matching semantics,
+morphotag or acoustic FA inference. No special CLI flag is
 needed. Exact score equivalence is checked against an independent scalar oracle,
 exhaustive small binary pairs, repeated words, ASCII-policy cases and multi-block
 carry/borrow. Separate legal-order oracles check all-optimal correspondence,
@@ -239,12 +334,81 @@ node-oriented packed profiles. Affordable dense bands, fuzzy relations and
 earlier witness/graph/memory refusals keep their existing paths. This is not
 transcript chunking, a new overlap model, or selected-path-only evidence.
 
-The refused-band receipt binds the actual graph, relation, feasible score and
-already-paid preparation. The packed plan owns forward/reverse equality masks,
+`PreparedLiteralSearch` binds the actual graph, source/reference words, literal
+policy, feasible score and already-paid preparation. It is neither cloneable
+nor copyable. `Relation::Literal` carries `LiteralMatchMode`, whose only variants
+are exact and ASCII-insensitive matching; fuzzy semantics cannot enter this
+producer. The packed plan owns forward/reverse equality masks,
 checkpoint stride and live-row expiry. Forward and backward states are distinct
 types; checkpoints and reconstructed blocks retain their plan owner. Only a
 completed forward/backward observation can return candidates and missingness.
 The shared packed arithmetic does not itself issue a matching certificate.
+
+#### Consuming preparation and representation admission
+
+Scalar band admission returns either its admitted band or `BandAlternative`.
+The alternative distinguishes an actual refusal from an owned prepared literal
+search. A packed producer therefore accepts preparation directly, rather than
+accepting a refusal and checking its phase and matching policy again.
+`SurveyedLiteralSearch::observe` consumes that preparation and retains the graph's
+liveness/expiry survey. Its constructor is the only production route to those
+survey facts. Full-row and viable-row admission reuse this same owner; neither
+can rebuild the survey from a borrowed graph. `AdmittedProblem` owns it together
+with the admitted row geometry, with no independently replaceable input/policy.
+The four stride candidates form a fixed nonempty array, so selection starts with
+an actual candidate rather than `usize::MAX` placeholders. The former temporary
+stride vector and a second liveness vector allocation on fallback disappear.
+
+The checkpoint schedule owns its graph before the survey. A declared test stride
+is a `NonZeroUsize` admitted at this same edge; its real liveness/work/storage are
+projected before execution. There is no mutable geometry accessor or fixture
+constructor taking unrelated reference dimensions. Checkpoint exactness and
+cancellation controls exercise admitted plans, rather than replacing a stride
+after its resources were qualified. The memory-refusal control also owns its
+actual reference population; the fabricated-dimension work assertion is removed.
+
+```mermaid
+flowchart TD
+    relation["Source-bound Relation: literal or fuzzy"] --> band["Band::admit observes feasible witness"]
+    band -->|"scalar admitted"| scalar["Band owns scalar proof geometry"]
+    band -->|"literal alternative"| prepared["PreparedLiteralSearch owns paid witness and literal policy"]
+    band -->|"actual refusal"| refused["Terminal refusal; no correspondence authority"]
+    prepared --> survey["Consume into SurveyedLiteralSearch: observe graph once"]
+    survey --> choice{"Current full-row eligibility"}
+    choice -->|"eligible"| full["Consume preparation for full-row admission"]
+    choice -->|"otherwise"| viable["Consume preparation for viable-row admission"]
+    full -->|"metadata rejected: return same surveyed owner"| viable
+    full -->|"admitted"| admitted["AdmittedProblem owns preparation and row geometry"]
+    viable -->|"admitted"| admitted
+    viable -->|"rejected"| refused
+    admitted --> plan["Plan owns forward and reverse literal masks"]
+    plan --> run["Execute consumes Plan; no second run capability"]
+    run --> forward["Complete forward state borrows this plan and ledger"]
+    run -.-> counts["Diagnostic work counts: Exact or AtLeast; cannot refuse execution"]
+    forward --> proof["Backward proof and inspection consume pending work"]
+    proof -->|"complete"| observation["Observation: candidates, missingness and selected path"]
+    proof -->|"cancelled or refused"| dropped["Drop incomplete observation"]
+```
+
+Only metadata admission rejection returns preparation for another representation.
+Once a plan is admitted, that owner cannot simultaneously prepare another plan.
+Execution consumes the plan, so the same admitted work cannot execute twice;
+failed or interrupted execution does not issue a fresh preparation capability.
+This removes the old broad-policy adapter, repeated refusal-phase/policy checks,
+duplicated input fields and tests that constructed fuzzy packed input or reused
+already-consumed preparation. The cost-receipt control also no longer executes
+one admitted plan twice; independent exactness oracles already cover its proof.
+Keep literal-policy/input admission, arithmetic,
+cancellation and independent all-optimal correspondence oracles: these exercise
+real boundaries rather than transitions no longer expressible in the API.
+
+This is the implemented ownership boundary, not yet a host-memory lease.
+The adaptive-admission work must still bind prepared storage demand to the shared
+coordinator, replace universal work/storage/candidate policy and preserve the
+supported direct-library and legacy CLI routes. Preparation/representation work,
+storage and candidate limits remain, but the execution counter cannot issue a
+work refusal. A passing small oracle suite does
+not establish long-recording recovery, measured memory use or release readiness.
 
 Full-reference profiles are used only when their complete prospective work and
 storage fit and the witness is too weak to offer a width advantage. Otherwise,
@@ -265,23 +429,27 @@ missingness is impossible, as before. Selected traceback is for inspection and
 cannot grant common evidence. Projection lifting retains original addresses,
 turn boundaries and corridors.
 
-Limits stay at 64,000,000 work units, 2,097,152 machine-word score-storage units
-and 1,048,576 distinct addressed candidates. Geometry reserves checkpoint,
+Preparation/representation admission retains its prospective-work limit;
+storage remains 2,097,152 machine-word units and distinct addressed candidates
+1,048,576. Geometry reserves checkpoint,
 reconstruction, live rows, summaries, masks and conservative map payload before
 allocation; this is not a process-RSS promise. Full profiles reserve all passes.
-Viable profiles reserve preparation/metadata work and charge actual packed-word
-passes **before** cloning, advancement, merging, reconstruction, cut observation
-and traceback. Candidate visits are also charged, and a new distinct pair is
-refused before exceeding its cap. A `packed_search` refusal's
-`required_at_least` is the known work floor plus the next required operation,
-not an estimate of the eventual full search or elapsed time. Cancellation or
+Viable profiles retain diagnostic preparation/metadata work and count actual
+packed-word passes during cloning, advancement, merging, reconstruction, cut
+observation and traceback. Candidate visits are counted, and a new distinct pair
+is refused before exceeding its separate cap. Counting an operation returns no
+refusal: it cannot stop an admitted proof at 64 million operations. Legacy
+`packed_search` work refusals can still arise from prospective geometry admission;
+they are not execution-ledger refusals or full elapsed-time estimates. Cancellation or
 any refusal discards the incomplete observation and grants no timing authority.
 
 Independent legal-order oracles compare complete candidate sets, missingness,
 optima and selected-path legality for all small binary inputs, every feasible
 lower bound and multiple checkpoint sizes. Additional tests cover multiword
 carry/borrow, signed score origins, ASCII policy, work/memory admission and
-cancellation at every cooperative poll in a complete small proof. Wire snapshots
+cancellation at every cooperative poll in a complete small proof. The existing
+partially reordered fixture now completes beyond the former execution cutoff
+and checks every expected common pair, rather than expecting a refusal. Wire snapshots
 retain the new diagnostic spelling without changing the budget kind.
 
 #### Fused profile and edge passes
@@ -294,7 +462,8 @@ consumes the owned predecessor transition; interrupted numeric work grants no
 reusable partial row. Row advancement reserves three packed passes (recurrence,
 score extraction and trimming), and merging reserves two (output storage and
 aligned maximum). Predecessor clones remain separately charged. Memory geometry
-stays conservative; no storage or work limit is relaxed.
+stays conservative. These arithmetic reductions do not change storage admission;
+execution counting is now independent of a stopping policy.
 
 Deletion and matching observation also share one scan. Write `D(k)=F(k)+B(k)-O`
 for the joined score relative to the global optimum. If the suffix declines by
@@ -313,7 +482,7 @@ two slices, output allocation and paired scan, with separate score-origin costs
 and an extra shift pass when the matching-only boundary is present. Scalar
 oracles cover offset alignment, absent masks, padding, signed origins and every
 paired cut; complete legal-order oracles still check the finished graph proof.
-Finite-budget refusals remain valid outcomes even after these reductions.
+Preparation, storage and candidate refusals remain possible after these reductions.
 
 #### Stage-bound cost receipts and sparse witness streams
 
@@ -325,9 +494,13 @@ inspection traceback. A bare ledger cannot charge unclassified work. The plan
 owns its admitted geometry rather than duplicating stride/work fields.
 
 Receipts distinguish completion, budget refusal and caller interruption. They
-retain per-stage charged work, the last operation's stage, the next denied
-operation's required floor, projected populations, checkpoint/storage geometry
-and peak produced-row width. Stage totals include already-paid witness work and
+retain per-stage work, the last operation's stage, projected populations, checkpoint/storage geometry
+and peak produced-row width. `PackedSearchWork` distinguishes an exact `u128`
+count from an explicit lower bound if its numeric range is exceeded. Neither
+state can reject execution; overflow cannot wrap, pretend to be exact or become
+a false data refusal. The ledger has no duplicate total/denied-floor fields or
+work-limit branch. Its old threshold-refusal test is obsolete; numeric overflow
+is covered in the existing receipt boundary control. Stage totals include already-paid witness work and
 prospective metadata reserves, not just executed instructions; they are not
 wall-time profiles or forecasts of the uncompleted search. Denied work is not
 charged. The optional observer must not block and cannot grant correspondence,
@@ -364,6 +537,56 @@ use this same lifecycle while keeping their pre-reserved work policy.
 Exhaustive legal-order/checkpoint controls, interruption at every
 poll including interleaved inspection, and the reproduced duplicate-pass cost
 boundary protect the consuming transition.
+
+#### Proof-owned candidate blocks
+
+The pending proof owns `PendingCandidates`, whose slots come from its admitted
+plan's source population. Each word starts with an empty domain; one nonempty
+64-position block is stored inline, and a multi-block domain owns a boxed sparse
+map. Boxing this uncommon state keeps the per-word census compact. No global
+tree of `(source word, reference position)` pairs is built.
+
+Matching cuts arrive as bit masks. Their reference windows may start between
+global block boundaries, so observation normalizes a mask into at most two
+blocks. `PreparedInsertion` retains the actual empty, inline or sparse-map entry
+and its newly observed bit count. Its consuming admission checks the remaining
+**distinct** candidate allowance before changing the domain or allocating a new
+map. The insertion retains the originating census's allowance and that word's
+cardinality together with the target; invocation accepts no substitute counters.
+Revisiting a bit changes neither the count nor its address. The operation
+does not repeat a lookup after admission, and diagnostic candidate visits are
+counted by bounded blocks rather than a per-bit fallible loop.
+
+Missingness observations and candidate domains stay private to the pending proof.
+Only successful completion of every backward block and inspection reconstruction
+materializes the descending candidate vectors. Each vector reserves its retained
+exact distinct count once. Cancellation, inconsistency or candidate refusal
+drops the entire owner, so partially collected candidates cannot become lexical
+absence or timing authority. Literal policy, tie order, candidate limits and
+output schemas are unchanged; this is not yet adaptive host-memory admission.
+
+```mermaid
+flowchart TD
+    forward_candidates["CompleteForward owns admitted plan and ledger"] --> pending_candidates["PendingProof owns PendingCandidates and inspection cursor"]
+    pending_candidates --> matching_block["Observe missingness and equality-filtered bit mask"]
+    matching_block --> normalized_block["Normalize shifted mask to global reference blocks"]
+    normalized_block --> insertion["PreparedInsertion owns target entry and new distinct bits"]
+    insertion --> candidate_capacity{"Existing candidate allowance"}
+    candidate_capacity -->|"fits"| union_block["Consume insertion; union once and retain exact counts"]
+    union_block --> domain_kind["Empty to inline to boxed sparse domain; no per-pair tree"]
+    domain_kind --> more_proof{"All backward blocks and inspection complete"}
+    more_proof -->|"remaining"| matching_block
+    more_proof -->|"complete"| completed_candidates["Consume pending owner into addressed word evidence"]
+    candidate_capacity -->|"refused"| discarded_candidates["Drop whole proof; no partial observation"]
+    pending_candidates -->|"cancelled or inconsistent"| discarded_candidates
+```
+
+Independent legal-order oracles still check all candidates and missingness.
+The existing word-boundary control additionally checks closed-form repeated-word
+domains across shifted masks and both full/viable checkpoint plans. It covers
+inline promotion, deduplication and optional versus required words without
+adding tests of impossible private constructors. Candidate refusal and every
+cooperative cancellation cut remain separate controls.
 
 ### Lossless retained checkpoints
 
@@ -443,14 +666,40 @@ exactly when `F(p,r) + 1 + B(p+1,r+1)` equals the full LCS score. Its rank is
 only the sole optimal edge at a rank can construct a common pair. A selected
 path, identical prefix or first repeated occurrence grants no authority.
 
+`StorageAdmittedLiteralProof` owns the observed literal input, checkpoint stride
+and declared candidate allowance. Its consuming operation accepts no replacement
+inputs or policy. The former universal 64-million-work ceiling is removed from
+this route: a prospective operation count cannot reject a representation whose
+storage qualifies. Finite input geometry and cooperative interruption still
+bound execution; no larger universal work constant replaces the old one.
+
 The 1,048,576 admitted-edge limit remains. This route counts only edges proved
-optimal before admission, not every raw equality pair. It preadmits at most
-64,000,000 packed passes/prefix probes and reserves score/index payload plus a
-conservative map allowance within the former raw-edge vector's four-machine-word
-per-edge allowance. This is not a total RSS or allocator guarantee. If that
-optional workspace/work reservation cannot be admitted, the original bounded
-sparse route remains; its raw candidate cap may still refuse. A genuine optimal
-edge overflow also refuses without emitting a partial common certificate.
+optimal before admission, not every raw equality pair. It reserves score/index
+payload plus the existing conservative map allowance within the former raw-edge
+vector's four-machine-word per-edge allowance. This legacy storage policy is not
+adaptive host admission, a total RSS bound or proof of physical impossibility.
+If the optional workspace cannot qualify, the original bounded sparse route
+remains; its raw candidate cap may still refuse. A genuine optimal-edge overflow
+also refuses without emitting a partial common certificate. Replacement of the
+remaining storage/candidate policies and conservative estimates is still required.
+
+```mermaid
+flowchart TD
+    monotonic_input["LiteralCandidates owns observed postings and exact input"] --> storage_projection["Project checkpoint and row storage; no universal work ceiling"]
+    storage_projection --> legacy_storage{"Current declared storage allowance"}
+    legacy_storage -->|"qualifies"| admitted_monotonic["StorageAdmittedLiteralProof owns input, stride and edge allowance"]
+    legacy_storage -->|"unqualified"| retained_sparse["Retain input for bounded sparse alternative; no impossibility claim"]
+    admitted_monotonic --> consume_monotonic["Consume proof operation with cooperative interruption"]
+    consume_monotonic -->|"complete"| common_monotonic["CommonCorrespondences; selected inspection remains separate"]
+    consume_monotonic -->|"cancelled or optimal-edge allowance exceeded"| stopped_monotonic["No partial common certificate"]
+```
+
+The existing repeated-word control includes a 5,000-word pair with one differing
+interior word. Whole-input embedding cannot handle it, yet exactly 4,999 pairs
+are common. Its old 77,400,005 prospective work count exceeded the universal
+ceiling despite admitted storage. The public producer now completes that proof.
+The existing cancellation control interrupts at every cooperative checkpoint of
+a small packed proof, including after it has started; test count is unchanged.
 
 Exhaustive chain oracles check the packed proof independently of its selected
 path. Scalar prefix oracles cover word boundaries, ASCII/non-ASCII policy,
@@ -458,6 +707,71 @@ reverse rows and resumed checkpoints. An insta snapshot distinguishes common
 endpoints from competing repeated occurrences. Constructor, cancellation and
 genuine cap controls remain. Acoustic inference, output validity, model/cache
 selection and final required-word completion are unchanged.
+
+### Owned fuzzy preparation and sparse score phases
+
+Monotonic fuzzy correspondence no longer refuses an input because the product
+of its word counts exceeds 64 million. That product is neither retained storage
+nor evidence of lexical ambiguity. `FuzzyCandidates` owns its original input
+borrows, comparison policy and actual caller's candidate allowance. It interns
+exact original spellings across both inputs, preparing each distinct spelling
+once. Fuzzy matches are **not** equivalence classes: a threshold relation need
+not be transitive, and Unicode lowercasing does not replace the ASCII fast path.
+
+The first occurrence of a source spelling compares against each distinct
+reference spelling once. A prepared row retains those completed observations
+and its exact addressed edge count. Its consuming admission checks the whole
+row against the remaining candidate allowance before appending any edges.
+Only a fully appended row becomes reusable. Later identical source words copy
+reference addresses from that immutable completed edge span, without retaining
+a second per-edge memo or recomputing lexical comparisons. Reference occurrence
+order and the full matching relation are preserved. Cancellation drops the
+whole pending census; an interrupted row cannot become a completed empty row.
+
+Sparse proof then consumes `Candidates` into `ForwardRanked`, followed by
+`CompleteRanks`. A candidate edge carries addresses only; positive ranks are
+appended as observed, never initialized to zero as an uncomputed score.
+Each phase releases its Fenwick scratch before the next phase allocates it.
+Rank multiplicity uses `Empty`, `Unique` and `Competing`, rather than an
+unbounded numeric counter. Only both completed score passes can certify common
+pairs. A fully observed empty relation needs no Fenwick allocation. The literal
+packed route's storage allowance still derives from the address payload plus
+both rank representations, so splitting these types does not halve that policy
+accidentally.
+
+```mermaid
+flowchart TD
+    fuzzy_input["FuzzyCandidates owns inputs, policy and allowance"] --> row_fact{"Source spelling row"}
+    row_fact -->|"unobserved"| observe_row["Compare distinct reference spellings once"]
+    row_fact -->|"complete"| retained_row["Borrow original completed edge span"]
+    observe_row --> prepared_row["PreparedRow owns actual edge count and target"]
+    retained_row --> prepared_row
+    prepared_row --> row_allowance{"Remaining candidate allowance"}
+    row_allowance -->|"fits"| admitted_row["AdmittedRow appends once"]
+    admitted_row --> row_done{"All source occurrences complete"}
+    row_done -->|"more"| row_fact
+    row_done -->|"yes"| sparse_candidates["Candidates owns addresses and reference"]
+    sparse_candidates --> forward_ranks["ForwardRanked owns positive observed ranks"]
+    forward_ranks --> complete_ranks["CompleteRanks owns both score passes"]
+    complete_ranks --> common_pairs["Certify common pairs from rank multiplicities"]
+    row_allowance -->|"refused"| discard_fuzzy["Drop pending proof; no partial evidence"]
+    fuzzy_input -->|"interrupted in any phase"| discard_fuzzy
+```
+
+The existing public-producer boundary control now includes 8,000 versus 8,001
+dissimilar repeated words: 64,008,000 occurrence pairs, one distinct lexical
+comparison, and no retained candidate edges. Small independent chain oracles
+cover repeated and nontransitive fuzzy relations; cancellation is exercised at
+every observed checkpoint across preparation, reuse and scoring. These extend
+existing tests without increasing test count. Candidate refusal reports the
+actual caller's allowance; current native proof cannot emit a fuzzy work-limit
+refusal. The historical `fuzzy_comparisons` diagnostic spelling remains in the
+evidence model for recorded-result compatibility.
+
+This removes one work cutoff and repeated lexical preparation, not all resource
+policy. The candidate cap, independent inspection limits, joint-search admission
+and shared host-memory integration remain explicit unfinished work. No new CLI
+option, matching threshold, cache identity or timing rule is introduced.
 
 ### Chatter ownership boundary
 

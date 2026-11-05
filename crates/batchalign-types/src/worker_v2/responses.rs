@@ -1070,7 +1070,7 @@ impl SpeakerProviderJobIdV2 {
 
 /// Raw evidence returned by one speaker-inference backend.
 ///
-/// The three variants make backend provenance structural. In particular, a
+/// The variants make backend provenance structural. In particular, a
 /// local backend cannot construct a pyannoteAI result without also supplying
 /// the completed provider job evidence, and cloud evidence cannot masquerade
 /// as a normalized-only local segment list.
@@ -1088,11 +1088,6 @@ pub enum SpeakerInferenceEvidenceV2 {
     },
     /// Normalized segments from the local pyannote runtime.
     Pyannote {
-        /// Ordered speaker segments.
-        segments: Vec<SpeakerSegmentV2>,
-    },
-    /// Normalized segments from the local NeMo runtime.
-    Nemo {
         /// Ordered speaker segments.
         segments: Vec<SpeakerSegmentV2>,
     },
@@ -1220,6 +1215,8 @@ pub struct WordSegmentationResultV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TaskResultV2 {
+    /// Request-bound allocation evidence, never acoustic timings.
+    FaPreparation(super::FaPreparationResultV2),
     /// Whisper chunk output.
     WhisperChunkResult(WhisperChunkResultV2),
     /// Provider-shaped speaker monologue output.
@@ -1514,19 +1511,6 @@ impl ExecuteResponseV2 {
             ExecuteResponseBodyV2::Failure { code, message } => Err((code, message)),
         }
     }
-}
-
-/// Progress event emitted by long-running V2 tasks.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct ProgressEventV2 {
-    /// Correlation id of the request being updated.
-    pub request_id: WorkerRequestIdV2,
-    /// Completed units.
-    pub completed: u32,
-    /// Total units expected.
-    pub total: u32,
-    /// Stable progress stage label.
-    pub stage: String,
 }
 
 /// Shutdown request sent to a V2 worker.

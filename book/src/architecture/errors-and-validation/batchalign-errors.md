@@ -1,7 +1,7 @@
 # Errors: Batchalign Runtime
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 14:49 EST
 
 How Batchalign produces, propagates, and surfaces errors specific to
 the ML runtime: parse modes, ML/IPC failures, network errors,
@@ -25,6 +25,63 @@ A rejected input, a diagnosed generated transcript and an optional-stage
 shortfall have different output contracts. See
 [validation](validation.md) and
 [command contracts](../../batchalign/architecture/command-contracts.md).
+
+### Refused input transcripts
+
+Every command that reads a submitted transcript admits it through Chatter:
+complete admission (`ParsedSourceChat::admit`) for text commands, benchmark
+gold files, merge-verify drafts and the UTR replay, or source-bound
+replacement admission (`admit_planned_tiers`, `admit_word_timing_plan`) for
+morphotag and align. A refusal reaches the user as a
+`SourceRefusal<E>` (`crates/batchalign/src/error.rs`), carried by
+`ServerError::ChatAdmission`, `ServerError::ChatReplacementAdmission`,
+`CliError::ChatAdmission` and `MergeVerifyError::SourceAdmission`.
+
+```mermaid
+flowchart LR
+    Src["submitted transcript text"] --> Admit["Chatter admission"]
+    Admit -->|refused| Err["ValidatedParseError or ReplacementFailure"]
+    Err --> In["SourceRefusal::in_source(error, text)"]
+    Src --> In
+    In --> Lines["each finding projected by SourceDiagnostic: line or typed reason"]
+    In --> Fault["AdmissionFailure::fault: RefusalFault"]
+    Fault --> Msg["message"]
+    Fault --> Http["HTTP status"]
+    Fault --> Cat["failure category"]
+    Fault --> Exit["CLI exit code"]
+```
+
+**Whose fault.** `AdmissionFailure::fault` decides it once, by an exhaustive
+match over Chatter's failure variant, and every reader takes it from there:
+
+| `RefusalFault` | Message | HTTP | Failure category | CLI exit |
+| --- | --- | --- | --- | --- |
+| `InvalidInput` | "the input transcript is not valid CHAT: line 7: E316 .... Correct the transcript and submit it again; nothing was written" | 400 | `Validation` | 2 |
+| `ToolFailure` | "internal fault reading the transcript (...); this is a tool problem, not a verdict on the transcript, and nothing was written" | 500 | `System` | 6 |
+
+`ReplacementFailure::SourceUnavailable` is a tool failure, although Chatter's
+`has_internal_failure` answers `false` for it: Chatter documents it as
+asserting no invalidity. Merge-verify's other failures map into the same
+`RefusalFault` (`MergeVerifyError::fault`).
+
+**Lines.** Chatter's findings carry byte spans in the refused source's
+coordinates, and a line exists only once a span is projected onto that
+source. Only the refusing call site holds the source, so
+`SourceRefusal::in_source(error, source)` is the one constructor, and it runs
+Chatter's checked projection (`enhance_errors_with_index`) there, once. A span
+the source does not contain (a coordinate defect) keeps no line rather than a
+wrong one, and is logged at `warn`.
+
+**Watch out.** Nothing checks that the text passed to `in_source` is the text
+Chatter refused; each site passes the string it gave Chatter. A site that
+passed a preprocessed copy would get plausible but wrong line numbers. The
+lasting fix is for Chatter's admissions, which hold the source when they fail,
+to return positioned findings and an explicit fault verdict; `SourceRefusal`
+and `AdmissionFailure` then become unnecessary.
+
+One refusal is not fatal: when morphotag reuses an earlier transcript's
+morphology and that earlier transcript is refused as invalid input, reuse is
+disabled with a warning and the current input is analyzed in full.
 
 ## Structured Error Access (PyO3)
 

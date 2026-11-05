@@ -82,6 +82,11 @@ remain the separate `make batchalign-ci-python` step.
 
 ### 4. Product and documentation
 
+- [ ] The [CLIARE readiness and compatibility record](cliare-compliance.md)
+  reflects the candidate's changes, retained legacy pathways, evidence and open
+  findings. Record the measurement identity and scope, or explicitly state that
+  measurement remains pending; do not imply compliance from source checks alone.
+
 - [ ] The README and installation guide describe GitHub Release installation,
   not PyPI.
 - [ ] The release contract and platform matrix match the artifacts and tested

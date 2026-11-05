@@ -1,22 +1,22 @@
-"""Tests for LazyProfile worker bootstrap mode.
+"""Tests for worker startup and on-demand loading.
 
-LazyProfile workers start with no models loaded and load them on demand
-via ensure_task_loaded(). This is the principled architecture for
-memory-constrained machines (24-48 GB) where eager profile loading would
-consume 10-15 GB speculatively.
+Every worker starts with no models loaded, in every bootstrap mode, and loads
+each task's models on demand via ensure_task_loaded(), which the Rust pool
+sends before a worker's first request for the task.
 """
 
 from __future__ import annotations
 
 import threading
 
+from batchalign.worker._loads import SPEAKER_HOSTED_LOAD
 from batchalign.worker._main import build_worker_bootstrap_runtime, parse_worker_args
 from batchalign.worker._model_loading.bootstrap import (
     EnsureTaskResponse,
     ensure_task_loaded,
-    load_worker_profile_lazy,
+    start_worker,
 )
-from batchalign.worker._types import WorkerProfile, _state
+from batchalign.worker._types import TaskLoad, WorkerProfile, _state
 
 
 def _reset_state() -> None:
@@ -27,7 +27,7 @@ def _reset_state() -> None:
 def _build_gpu_bootstrap():
     """Build a GPU profile bootstrap runtime for testing."""
     args = parse_worker_args(
-        ["--profile", "gpu", "--lazy", "--lang", "eng", "--serving", "sequential"]
+        ["--profile", "gpu", "--lang", "eng", "--serving", "sequential"]
     )
     return build_worker_bootstrap_runtime(
         args,
@@ -35,35 +35,35 @@ def _build_gpu_bootstrap():
     )
 
 
-class TestLazyProfileStartup:
-    """Verify lazy profile workers start with no models loaded."""
+class TestWorkerStartup:
+    """Verify workers start with no models loaded."""
 
     def setup_method(self) -> None:
         _reset_state()
 
-    def test_lazy_profile_signals_ready_without_models(self) -> None:
+    def test_a_worker_signals_ready_without_models(self) -> None:
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
         assert _state.ready is True
-        assert _state.loaded_tasks == set()
-        assert _state.command == "lazy-profile:gpu"
+        assert _state.loads.completed() == frozenset()
+        assert _state.command == "profile:gpu"
         assert _state.lang == "eng"
 
-    def test_lazy_profile_preserves_bootstrap_for_later(self) -> None:
+    def test_a_worker_preserves_bootstrap_for_later(self) -> None:
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
         assert _state.bootstrap is bootstrap
         assert _state.bootstrap.profile == WorkerProfile.GPU
 
-    def test_lazy_profile_has_no_fa_model(self) -> None:
+    def test_a_worker_holds_no_model_at_start(self) -> None:
+        """Every model a worker holds is a load's entry, and a started worker
+        has none: there is no per-model field to be anything but empty."""
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
-        assert _state.whisper_fa_model is None
-        assert _state.wave2vec_fa_model is None
-        assert _state.whisper_asr_model is None
+        assert not any(_state.loads.has(load) for load in TaskLoad)
 
 
 class TestEnsureTaskLoaded:
@@ -82,7 +82,7 @@ class TestEnsureTaskLoaded:
 
     def test_ensure_task_unknown_task_raises(self) -> None:
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
         try:
             ensure_task_loaded("nonexistent_task")
@@ -93,16 +93,20 @@ class TestEnsureTaskLoaded:
     def test_ensure_task_idempotent(self) -> None:
         """Second call for same task returns already_loaded immediately."""
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
-        # Manually mark a task as loaded (simulating a previous ensure_task).
-        _state.loaded_tasks.add("speaker")
+        # A previous ensure_task recorded the hosted speaker load.
+        first = ensure_task_loaded("speaker")
+        assert first.status == "loaded"
+        host = _state.loads.get(SPEAKER_HOSTED_LOAD)
 
         result = ensure_task_loaded("speaker")
         assert result.status == "already_loaded"
         assert result.task == "speaker"
         # The check is timed, never reported as a constant.
         assert result.elapsed_s >= 0.0
+        # The repeat recorded nothing: the entry is the first load's host.
+        assert _state.loads.get(SPEAKER_HOSTED_LOAD) is host
 
     def test_ensure_task_result_fields(self) -> None:
         """EnsureTaskResponse has correct fields."""
@@ -111,23 +115,22 @@ class TestEnsureTaskLoaded:
         assert result.task == "fa"
         assert result.elapsed_s == 1.23
 
-    def test_ensure_task_speaker_is_noop_load(self) -> None:
-        """Speaker uses lazy request-time loading, ensure_task just marks it."""
+    def test_ensure_task_passes_engine_overrides(self) -> None:
+        """Engine overrides from ensure_task reach the task's load: an
+        override naming a model the load does not know is refused."""
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
+        try:
+            ensure_task_loaded("speaker", {"speaker": "nemo"})
+            raise AssertionError("should have raised ValueError")
+        except ValueError as e:
+            assert "speaker=" in str(e)
+        # Refused before anything loaded, so nothing was recorded.
+        assert _state.loads.completed() == frozenset()
         result = ensure_task_loaded("speaker")
         assert result.status == "loaded"
-        assert "speaker" in _state.loaded_tasks
-
-    def test_ensure_task_passes_engine_overrides(self) -> None:
-        """Engine overrides from ensure_task are merged with bootstrap defaults."""
-        bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
-
-        # Speaker is a no-op load, but it exercises the override merging path.
-        result = ensure_task_loaded("speaker", {"speaker": "pyannote"})
-        assert result.status == "loaded"
+        assert _state.loads.completed() == frozenset({TaskLoad.SPEAKER_HOSTED})
 
 
 class TestEnsureTaskThreadSafety:
@@ -139,7 +142,7 @@ class TestEnsureTaskThreadSafety:
     def test_concurrent_ensure_task_loads_once(self) -> None:
         """Two threads calling ensure_task for the same task should only load once."""
         bootstrap = _build_gpu_bootstrap()
-        load_worker_profile_lazy(bootstrap)
+        start_worker(bootstrap)
 
         results: list[EnsureTaskResponse] = []
         errors: list[Exception] = []
@@ -160,22 +163,16 @@ class TestEnsureTaskThreadSafety:
 
         assert not errors, f"Unexpected errors: {errors}"
         assert len(results) == 2
-        # At most one should be "loaded", the other "already_loaded"
-        statuses = {r.status for r in results}
-        assert "loaded" in statuses or "already_loaded" in statuses
+        # Exactly one load ran; the other call found its entry.
+        assert sorted(r.status for r in results) == ["already_loaded", "loaded"]
+        assert _state.loads.completed() == frozenset({TaskLoad.SPEAKER_HOSTED})
 
 
-class TestCLILazyFlag:
-    """Verify the --lazy CLI flag is parsed correctly."""
+def test_the_lazy_flag_is_gone() -> None:
+    """Every worker starts empty, so there is no lazy mode to ask for."""
+    import pytest
 
-    def test_lazy_flag_parsed(self) -> None:
-        args = parse_worker_args(
+    with pytest.raises(SystemExit):
+        parse_worker_args(
             ["--profile", "gpu", "--lazy", "--lang", "eng", "--serving", "sequential"]
         )
-        assert args.lazy is True
-
-    def test_no_lazy_flag_default(self) -> None:
-        args = parse_worker_args(
-            ["--profile", "gpu", "--lang", "eng", "--serving", "sequential"]
-        )
-        assert args.lazy is False

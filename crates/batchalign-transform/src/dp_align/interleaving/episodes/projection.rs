@@ -122,100 +122,61 @@ impl<'source> SearchProjection<'source> {
                 continuation: turn.continuation,
             })
             .collect();
-        let nodes = match Budget::nodes(&turns) {
-            Ok(nodes) => nodes,
+        let prepared = match PreparedGraph::admit(&turns) {
+            Ok(prepared) => prepared,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        let (graph, projected_addresses) = Graph::of(&turns, nodes);
-        control.check()?;
-        let source = projected_addresses
-            .iter()
-            .map(|a| turns[a.utterance].words[a.word].as_str())
-            .collect();
-        let reference = &self.projected_reference;
-        let relation = Relation::new(source, reference, self.mode);
-        let (evidence, selected) = match Band::admit(
-            &graph,
-            &relation,
-            projected_addresses.len(),
-            reference.len(),
-            control,
-        )? {
-            Ok(band) => {
-                let forward = match ForwardScores::observe(&band, control)? {
-                    Ok(forward) => forward,
-                    Err(refusal) => return Ok(Err(refusal)),
-                };
-                let optimum = forward.last().get(graph.rank[graph.end]);
-                let mut evidence: Vec<_> = projected_addresses
-                    .iter()
-                    .map(|_| WordEvidence {
-                        candidates: Vec::new(),
-                        can_be_missing: false,
-                    })
-                    .collect();
-                let mut backward = band.terminal();
-                band.observe_edges(forward.last(), &backward, None, optimum, &mut evidence);
-                let mut candidate_count = 0usize;
-                let mut end = reference.len();
-                // Exactly the admitted graph proof, not a second monotonic alignment.
-                while end > 0 {
-                    let block = forward.block_ending_at(end, control)?;
-                    for (k, prefix) in block.steps_rev() {
-                        control.check()?;
-                        let next = backward;
-                        backward = band.backward(&next, k);
-                        candidate_count += band.observe_edges(
-                            prefix,
-                            &backward,
-                            Some((&next, k)),
-                            optimum,
-                            &mut evidence,
-                        );
-                        if candidate_count > CANDIDATES {
-                            return Ok(Err(LocalInterleavingRefusal::Budget(
-                                LocalInterleavingBudget::CandidateBudgetExceeded,
-                            )));
-                        }
-                    }
-                    end = block.start();
-                }
-                match forward.traceback(control)? {
-                    Ok(selected) => (evidence, selected),
-                    Err(inconsistency) => {
-                        return Ok(Err(LocalInterleavingRefusal::Inconsistent(inconsistency)));
-                    }
-                }
-            }
-            Err(refused) => {
-                let observed = match packed::observe(refused, control)? {
-                    Ok(observed) => observed,
-                    Err(refusal) => return Ok(Err(refusal)),
-                };
-                (observed.words, observed.selected)
-            }
+        let graph = prepared.materialize(control)?;
+        let observed = match graph.observe(&self.projected_reference, self.mode, control)? {
+            Ok(observed) => observed,
+            Err(refusal) => return Ok(Err(refusal)),
         };
+        drop(turns);
+        self.lift(observed, control)
+    }
+
+    fn lift<C: WorkControl + ?Sized>(
+        self,
+        observed: CompletedGraphObservation,
+        control: &C,
+    ) -> Result<Result<LocalInterleaving<'source>, LocalInterleavingRefusal>, C::Error> {
+        control.check()?;
+        let data = observed.into_data();
+        let evidence = data.words;
+        let selected = data.selected;
+        let frontiers = data.frontiers;
+        let Self {
+            original,
+            reference,
+            addresses,
+            projected,
+            projected_reference,
+            source_map,
+            reference_map,
+            mode: _,
+        } = self;
+        drop(projected);
+        drop(projected_reference);
         let selected = selected
             .into_iter()
             .map(|matched| Selected {
-                source: self.source_map[matched.source],
-                reference: self.reference_map[matched.reference],
+                source: source_map[matched.source],
+                reference: reference_map[matched.reference],
             })
             .collect();
         // Omitted words are provably never matched. Lift candidates through
         // this owner's reference layout before exposing any common capability.
-        let mut words: Vec<_> = self
-            .addresses
+        let mut words: Vec<_> = addresses
             .iter()
             .map(|_| WordEvidence {
                 candidates: Vec::new(),
                 can_be_missing: true,
             })
             .collect();
-        for (&original, mut observed) in self.source_map.iter().zip(evidence) {
+        for (&original, mut observed) in source_map.iter().zip(evidence) {
             observed.candidates.reverse();
             for reference in &mut observed.candidates {
-                *reference = self.reference_map[*reference];
+                *reference = reference_map[*reference];
             }
             words[original] = observed;
         }
@@ -226,21 +187,17 @@ impl<'source> SearchProjection<'source> {
                 (!evidence.can_be_missing && !evidence.candidates.is_empty()).then_some(index)
             })
             .collect();
-        let search_frontiers = search_frontiers(&self.original)
+        let search_frontiers = frontiers
             .into_iter()
             .map(|frontier| SearchFrontier {
-                before: self
-                    .addresses
-                    .partition_point(|a| a.utterance < frontier.before),
-                after: self
-                    .addresses
-                    .partition_point(|a| a.utterance < frontier.after),
+                before: addresses.partition_point(|a| a.utterance < frontier.before),
+                after: addresses.partition_point(|a| a.utterance < frontier.after),
             })
             .collect();
         Ok(Ok(LocalInterleaving {
-            turns: self.original,
-            reference: self.reference,
-            addresses: self.addresses,
+            turns: original,
+            reference,
+            addresses,
             words,
             selected,
             search_frontiers,

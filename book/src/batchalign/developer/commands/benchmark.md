@@ -1,7 +1,7 @@
 # benchmark: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-04 21:53 EDT
+**Last updated:** 2026-11-05 14:17 EST
 
 Implementation guide for the `benchmark` command. For user-facing
 documentation, see [User Guide: benchmark](../../user-guide/commands/benchmark.md).
@@ -52,7 +52,7 @@ roles return a typed validation failure, not a catalog `expect` after ASR.
 The main-annotated materializer retains a producer-built
 `CompareMetricsCsvTable`, not serialized CSV to be reconstructed later. The
 writer encodes this table once and consumes the final `PostValidated` CHAT
-proof, including any checked abbreviation merge. Both primary and sidecar use
+proof. Both primary and sidecar use
 the existing requested-and-staged output writer.
 
 Only those successful writes construct the private `WrittenBenchmark` receipt.

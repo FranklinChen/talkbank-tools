@@ -6,6 +6,12 @@
 This is the shortest path for adding a new command, workflow family, or engine
 without fighting the refactor stream.
 
+Every CLI-affecting change must update the
+[CLIARE readiness and compatibility record](cliare-compliance.md) as part of
+development review. Preserve the recorded legacy command pathways; normalize
+their inputs into typed intent rather than duplicating execution policy.
+Measurement findings do not authorize compatibility removal.
+
 If you read code before prose, start at
 `crates/batchalign/src/recipe_runner/catalog.rs`. That table is the
 contributor-facing map: every released command is one entry in it. From there,

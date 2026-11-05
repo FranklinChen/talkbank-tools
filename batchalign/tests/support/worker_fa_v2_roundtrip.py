@@ -18,10 +18,8 @@ import json
 import sys
 from pathlib import Path
 
-from batchalign.worker._fa_v2 import (
-    ForcedAlignmentExecutionHostV2,
-    execute_forced_alignment_request_v2,
-)
+from batchalign.tests._loaded_hosts import prepare_fa_fixture_on, whisper_fa
+from batchalign.worker._fa_v2 import execute_forced_alignment_request_v2
 from batchalign.worker._types_v2 import ExecuteRequestV2
 
 
@@ -57,10 +55,9 @@ def main() -> int:
     request = ExecuteRequestV2.model_validate_json(
         request_path.read_text(encoding="utf-8")
     )
-    response = execute_forced_alignment_request_v2(
-        request,
-        ForcedAlignmentExecutionHostV2(whisper_runner=_fake_whisper_runner),
-    )
+    host = whisper_fa(_fake_whisper_runner, engine="whisper-fa-roundtrip")
+    request = prepare_fa_fixture_on(request, host)
+    response = execute_forced_alignment_request_v2(request, host)
     response_path.write_text(
         json.dumps(response.model_dump(mode="json"), indent=2, sort_keys=True),
         encoding="utf-8",

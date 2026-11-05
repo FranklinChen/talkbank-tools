@@ -28,8 +28,6 @@ pub(crate) enum SpeakerTurnsSource {
     PyannoteAiPrecision2,
     /// Local pyannote diarization.
     Pyannote,
-    /// Local NVIDIA NeMo diarization.
-    Nemo,
 }
 
 impl SpeakerTurnsSource {
@@ -38,7 +36,6 @@ impl SpeakerTurnsSource {
         match backend {
             SpeakerBackendV2::PyannoteAi => Self::PyannoteAiPrecision2,
             SpeakerBackendV2::Pyannote => Self::Pyannote,
-            SpeakerBackendV2::Nemo => Self::Nemo,
         }
     }
 
@@ -46,7 +43,6 @@ impl SpeakerTurnsSource {
         match self {
             Self::PyannoteAiPrecision2 => "batchalign3:pyannote_ai:precision-2",
             Self::Pyannote => "batchalign3:pyannote",
-            Self::Nemo => "batchalign3:nemo",
         }
     }
 }
@@ -221,7 +217,6 @@ mod tests {
                 "batchalign3:pyannote_ai:precision-2",
             ),
             (SpeakerBackendV2::Pyannote, "batchalign3:pyannote"),
-            (SpeakerBackendV2::Nemo, "batchalign3:nemo"),
         ];
 
         for (backend, expected) in cases {

@@ -1,7 +1,7 @@
 # transcribe: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-11-03 15:36 EST
+**Last updated:** 2026-11-05 19:37 EST
 
 Implementation guide for the `transcribe` command. For user-facing
 documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe.md).
@@ -32,7 +32,7 @@ documentation, see [User Guide: transcribe](../../user-guide/commands/transcribe
 | ASR worker IPC | `batchalign/inference/asr.py` | Python-hosted ASR engines; Rev is Rust-owned |
 | Raw Rev evidence cache | `crates/batchalign/src/revai/evidence_cache.rs` | Provider-media identity, exact transcript JSON or typed legacy envelope, miss authorization (submit, or resume a recorded unfinished job), durable commit, pending-job record, fakeable Rev boundary |
 | Rev job wait | `crates/batchalign/src/revai/poll.rs` | Typestate `SubmittedJob -> Polling -> PollEnd`: a `PollPolicy` (deadline, transient budget, interval schedule) is the only way to start a wait; a transient poll failure consumes budget, a terminal one ends the wait, and an unfinished job comes back by name (`Awaited::Unfinished`) for the cache to record. Failure verdicts come from `RevAiError::classify`, the client's one table. Tested at the socket against `revai/scripted_server.rs` with a virtual clock |
-| Speaker worker IPC | `batchalign/inference/speaker.py`: `infer_speaker_prepared_audio()` | Exhaustive dispatch over pyannoteAI, local Pyannote, and NeMo, returning a backend-specific evidence variant |
+| Speaker worker IPC | `batchalign/inference/speaker.py`: `infer_speaker_prepared_audio()` | Exhaustive dispatch over pyannoteAI and local Pyannote, returning a backend-specific evidence variant |
 | Local Pyannote graph | `batchalign/inference/local_pyannote_model.json` + `pyannote_local.py` | One validated manifest pins the pipeline, segmentation, and embedding commits; Rust hashes the same manifest into the evidence revision |
 | pyannoteAI adapter | `batchalign/inference/pyannote_ai.py` | Typed prepare, upload, submit, complete lifecycle for Precision-2 exclusive diarization |
 
@@ -168,7 +168,9 @@ All ASR post-processing runs in Rust (`crates/batchalign-transform/src/asr_postp
 ### 8-stage pipeline
 
 1. **Compound merging**: rejoin compound words split by ASR
-   - Language-specific: English phrasal verbs, CJK terms, etc.
+   - One English list (`data/compounds.json`, 3,584 pairs); the merged word
+     is timed from the first word's start to the second word's end, and a
+     pair with an untimed word is kept as two words
    - Implemented: `compounds::merge_compounds()`
 
 2. **Han-script normalization** (`yue`: simplified→HK traditional + domain replacements; `nan`: simplified→Taiwan traditional)
@@ -362,7 +364,7 @@ execute_v2 request:
 {
   "task": "speaker",
   "prepared_audio": { path, ... },
-  "backend": "pyannote_ai" | "pyannote" | "nemo",
+  "backend": "pyannote_ai" | "pyannote",
   "num_speakers": 2
 }
 
@@ -377,15 +379,15 @@ execute_v2 response:
 }
 ```
 
-Local Pyannote and NeMo responses use the `pyannote` and `nemo` evidence
-variants, respectively, each with its model-native millisecond segment list.
+Local Pyannote responses use the `pyannote` evidence variant, with its
+model-native millisecond segment list.
 The FFI rejects a response whose evidence variant does not match the backend
 in the request.
 
 The typed CLI selector `SpeakerEngineName` maps exhaustively to
 `SpeakerBackendV2`. Integrated enabled diarization defaults to `PyannoteAi`;
 standalone `diarize` deliberately defaults to local `Pyannote` but can select
-`PyannoteAi` or `Nemo` explicitly. Both consumers call
+`PyannoteAi` explicitly. Both consumers call
 `resolve_speaker_evidence_for_audio()`, so neither can bypass the evidence
 cache or construct a different model revision. The cloud adapter uses explicit lifecycle
 states: `PreparedWav`, `UploadedMedia`, `SubmittedDiarizationJob`, and

@@ -604,7 +604,6 @@ mod tests {
                 pauses: false,
                 boundaries: Default::default(),
                 wor: true.into(),
-                merge_abbrev: false.into(),
                 media_dir: None,
                 bullet_repair: false,
                 review_level: Default::default(),

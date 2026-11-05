@@ -138,20 +138,9 @@ def load_fa_confirm() -> FaConfirmHandle:
     import torch
     from torchaudio.pipelines import MMS_FA as bundle
 
-    from batchalign.worker._progress import emit_download_event
+    from batchalign.inference.fa import mms_fa_model
 
-    # ``get_model()`` downloads to torchaudio's hub cache on first use
-    # (~1.2 GB). Surface the wait on the BA3 protocol channel (time
-    # transparency rule); false positives when already cached are a far
-    # smaller UX cost than a silent multi-minute wait.
-    emit_download_event(
-        stage="downloading_torchaudio_mms_fa",
-        user_message=(
-            "Downloading Wave2Vec MMS_FA bundle for placement confirmation "
-            "(one-time, ~1.2 GB; future runs will use the local cache)…"
-        ),
-    )
-    model = bundle.get_model(with_star=True).to(torch.device("cpu"))
+    model = mms_fa_model(purpose="placement confirmation").to(torch.device("cpu"))
     return FaConfirmHandle(
         model=model,
         tokenizer=bundle.get_tokenizer(),

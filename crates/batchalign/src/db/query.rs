@@ -56,6 +56,8 @@ impl JobDB {
             )?;
             let command: String = row.try_get("command")?;
             let options: CommandOptions = deserialize_job_field(&job_id, "options", &options_json)?;
+            let status: String = row.try_get("status")?;
+            crate::options::report_retired_merge_abbrev(&job_id, &status, &options_json, &options);
             let filenames = deserialize_job_field(&job_id, "filenames", &filenames_json)?;
             let has_chat = deserialize_job_field(&job_id, "has_chat", &has_chat_json)?;
             let source_paths = deserialize_job_field(&job_id, "source_paths", &source_paths_json)?;
@@ -67,7 +69,7 @@ impl JobDB {
                 command,
                 lang: row.try_get("lang")?,
                 num_speakers: row.try_get("num_speakers")?,
-                status: row.try_get("status")?,
+                status,
                 error: row.try_get("error")?,
                 staging_dir: row.try_get("staging_dir")?,
                 filenames,

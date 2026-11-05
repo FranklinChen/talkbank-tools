@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, assert_never, cast
+from typing import TYPE_CHECKING, Annotated, TypeAlias, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
@@ -106,11 +106,6 @@ class UtsegModelNotFoundError(ModelNotLoadedError):
     """
 
 
-# Stage identifier for the opt-in fallback notice. Stage names form a
-# closed protocol vocabulary consumed by the dashboard / CLI for
-# filtering and dedupe; the language goes in user_message, not the stage.
-_STAGE_UTSEG_FALLBACK_OPT_IN = "utseg_unsupported_language_fallback"
-
 # Per-process dedupe: warn once per requested language. Worker processes
 # don't outlive a deploy, so the set never needs eviction.
 _FALLBACK_NOTICE_FIRED: set[str] = set()
@@ -126,7 +121,8 @@ def _emit_stanza_fallback_notice(requested_lang: str) -> None:
     # Avoid a circular import at module load time, the progress
     # protocol pulls in worker config that imports this module
     # transitively in some test setups.
-    from batchalign.worker._progress import emit_download_event
+    from batchalign.worker._progress import Phase, emit_phase_event
+    from batchalign.worker._types_v2 import PhaseEdgeV2
 
     if requested_lang in _FALLBACK_NOTICE_FIRED:
         return
@@ -140,10 +136,9 @@ def _emit_stanza_fallback_notice(requested_lang: str) -> None:
 
     L.warning("utseg opt-in fallback: lang=%r → Stanza", requested_lang)
 
-    emit_download_event(
-        stage=_STAGE_UTSEG_FALLBACK_OPT_IN,
-        user_message=user_message,
-    )
+    # The stage is a closed phase name (`Phase`); the language goes in the
+    # message, not the stage, so the dashboard can filter and dedupe on it.
+    emit_phase_event(Phase.UTSEG_FALLBACK_OPT_IN, PhaseEdgeV2.BEGIN, user_message)
 
 
 class UtsegBatchItem(BaseModel):
@@ -329,10 +324,30 @@ class UtsegInferenceRequest(BaseModel):
     items: tuple[WorkerJSONValue, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PinnedBoundaryModel:
+    """The utterance-boundary model the utseg load built for this worker's
+    language, at the revision Rust pinned."""
+
+    model: BertUtteranceModel
+
+
+@dataclass(frozen=True, slots=True)
+class NoPinnedBoundaryModel:
+    """Rust pinned no boundary model for this worker's language (it injects a
+    pin only for a language it seeds one for), so the boundary-model segmenter
+    is refused by name here, never substituted."""
+
+
+BoundaryModel: TypeAlias = PinnedBoundaryModel | NoPinnedBoundaryModel
+"""What the utseg load built for the boundary-model segmenter: one of two
+cases by type, matched exhaustively where a request consumes it."""
+
+
 def batch_infer_utseg(
     req: UtsegInferenceRequest,
     load_stanza_pipeline: Callable[[LanguageCode], LoadedPipeline],
-    utterance_boundary_model: BertUtteranceModel | None = None,
+    boundary_model: BoundaryModel,
 ) -> BatchInferResponse:
     """Batch utterance segmentation with the segmenter the request names: a
     boundary model's evidence, or Stanza constituency trees.
@@ -345,8 +360,9 @@ def batch_infer_utseg(
     load_stanza_pipeline : callable
         The worker's ``load_utseg_pipeline``: the language's constituency
         pipeline, built once and reused across batches, behind its own guard.
-    utterance_boundary_model : BertUtteranceModel | None
-        The loaded boundary model, when this worker has one.
+    boundary_model : BoundaryModel
+        What the utseg load built: the pinned boundary model, or the fact
+        that this worker's language has none.
 
     Returns tree bracket notation strings. Assignment computation is done in Rust.
     """
@@ -357,18 +373,22 @@ def batch_infer_utseg(
 
     match req.segmenter:
         case UtsegSegmenterV2.BOUNDARY_MODEL:
-            if utterance_boundary_model is None:
-                raise UtsegModelNotFoundError(
-                    f"The request names the boundary-model segmenter for language "
-                    f"'{req.lang}', and this worker has no utterance-boundary "
-                    f"model loaded. Rust names that segmenter only for a language "
-                    f"whose model it pinned for this worker, so check this "
-                    f"worker's model download and load logs."
-                )
+            match boundary_model:
+                case PinnedBoundaryModel(model=model):
+                    pass
+                case NoPinnedBoundaryModel():
+                    raise UtsegModelNotFoundError(
+                        f"The request names the boundary-model segmenter for "
+                        f"language '{req.lang}', and this worker's utseg load "
+                        f"had no boundary model pinned. Rust names that segmenter "
+                        f"only for a language whose model it pinned for this "
+                        f"worker, so check this worker's model download and load "
+                        f"logs."
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
             timed = [
-                entry.measure(
-                    partial(_boundary_outcome, utterance_boundary_model, entry.index)
-                )
+                entry.measure(partial(_boundary_outcome, model, entry.index))
                 for entry in pending
             ]
             L.info(

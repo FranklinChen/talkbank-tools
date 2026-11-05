@@ -161,10 +161,12 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
 ):
     from batchalign.inference import qwen_forced_alignment
     from batchalign.worker._handlers import _reported_engine
+    from batchalign.worker._loads import FA_LOAD
     from batchalign.worker._model_loading.forced_alignment import load_fa_engine
     from batchalign.worker._types import (
         InferTask,
         NumSpeakers,
+        TaskLoadRegistry,
         WorkerBootstrapRuntime,
         _state,
     )
@@ -179,12 +181,14 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
     assert host.cache_identity.model_id == fixture["legacy"]
     assert host.cache_identity.wire_name == fixture["current"]
     assert fixture["legacy"] != fixture["current"]
-    monkeypatch.setattr(_state, "fa_model_name", None)
-    monkeypatch.setattr(_state, "qwen_fa_host", None)
+    loads = TaskLoadRegistry()
+    monkeypatch.setattr(_state, "loads", loads)
     monkeypatch.setattr(
         qwen_forced_alignment, "load_qwen_fa", lambda *_args, **_kwargs: host
     )
-    load_fa_engine(
+    # Nothing has loaded: the report names no FA engine rather than guessing.
+    assert _reported_engine(InferTask.FA) is None
+    loaded = load_fa_engine(
         WorkerBootstrapRuntime(
             task=InferTask.FA,
             lang="yue",
@@ -192,6 +196,10 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
             engine_overrides={"fa": "qwen3_fa"},
         )
     )
+    # The identity is carried by the host the load built, and the report reads
+    # it from that host once it is recorded.
+    assert loaded.engine == fixture["current"]
+    loads.record(FA_LOAD, loaded)
     assert _reported_engine(InferTask.FA) == fixture["current"]
 
 

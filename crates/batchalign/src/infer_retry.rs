@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::LanguageCode3;
 use crate::scheduling::RetryPolicy;
 use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
+use crate::worker::error::WorkerError;
 use crate::worker::pool::WorkerPool;
 use tracing::warn;
 
@@ -124,56 +125,84 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
     progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     cancellation: Cancellation<'_>,
 ) -> Result<ExecuteResponseV2, ServerError> {
-    let retry_policy = RetryPolicy::default();
+    retry_worker_operation(cancellation, "execute_v2", || {
+        Box::pin(pool.dispatch_execute_v2_with_progress(lang, request, progress_tx))
+    })
+    .await
+    .map_err(ServerError::from)
+}
 
-    for attempt_number in 1..=retry_policy.max_attempts {
-        let attempt = cancellation
-            .supervise(Box::pin(pool.dispatch_execute_v2_with_progress(
-                lang,
-                request,
-                progress_tx,
-            )))
-            .await?;
+/// Why [`retry_worker_operation`] stopped without a result.
+#[derive(Debug)]
+pub(crate) enum RetryEnd {
+    /// The last attempt failed in a way the policy does not retry, or the
+    /// attempts ran out.
+    Failed(WorkerError),
+    /// The cancellation fired, during an attempt or a backoff.
+    Cancelled,
+}
 
-        match attempt {
-            Ok(response) => return Ok(response),
-            Err(error) => {
-                let category = classify_worker_error(&error);
-                if let NextAttempt::RetryAfter(backoff_ms) =
-                    retry_policy.after_failure(attempt_number, category)
-                {
-                    warn!(
-                        task = ?request.task,
-                        lang = %lang,
-                        attempt_number,
-                        max_attempts = retry_policy.max_attempts,
-                        error = %error,
-                        category = %category,
-                        %backoff_ms,
-                        "Retrying execute_v2 after transient worker failure"
-                    );
-                    cancellation
-                        .sleep(Duration::from_millis(backoff_ms.0))
-                        .await?;
-                    continue;
-                }
-
-                return Err(ServerError::Worker(error));
-            }
+impl From<RetryEnd> for ServerError {
+    fn from(end: RetryEnd) -> Self {
+        match end {
+            RetryEnd::Failed(error) => Self::Worker(error),
+            RetryEnd::Cancelled => Self::Cancelled,
         }
     }
+}
 
-    // Loop invariant: every iteration either returns `Ok(...)` on
-    // success, returns `Err(...)` on a non-retryable category, returns
-    // `Err(Cancelled)` from either select above, or `continue`s after a
-    // backoff. The terminal `continue` is gated by
-    // `attempt_number < retry_policy.max_attempts`, so the for-loop bound
-    // is exclusive. This `unreachable!` therefore covers the case where
-    // the loop exits without taking any return path, which the bound
-    // guarantees cannot happen.
-    #[allow(clippy::unreachable)]
-    {
-        unreachable!("retry loop should return on success, cancellation, or terminal failure")
+/// Run one worker operation, retrying transient failures under the default
+/// [`RetryPolicy`]: the one retry loop for worker operations.
+///
+/// Each failure is classified ([`classify_worker_error`]); a retryable one
+/// within the attempt budget is logged and retried after the policy's
+/// backoff, anything else ends the loop. `cancellation` is raced against
+/// both the attempt and the backoff, so a cancelled job stops at once rather
+/// than after another attempt or sleep (the 43-minute incident this module's
+/// contract records). `what` names the operation in the log line.
+///
+/// Each attempt is an [`crate::owned_future::OwnedFuture`], the form
+/// [`Cancellation::supervise`] races, boxed by the caller, so the loop is not
+/// generic over each attempt's own future type.
+pub(crate) async fn retry_worker_operation<'a, T, F>(
+    cancellation: Cancellation<'_>,
+    what: &'static str,
+    mut attempt: F,
+) -> Result<T, RetryEnd>
+where
+    F: FnMut() -> crate::owned_future::OwnedFuture<'a, Result<T, WorkerError>>,
+{
+    let retry_policy = RetryPolicy::default();
+    let mut attempt_number = 1;
+    loop {
+        let outcome = cancellation
+            .supervise(attempt())
+            .await
+            .map_err(|_| RetryEnd::Cancelled)?;
+        let error = match outcome {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let category = classify_worker_error(&error);
+        match retry_policy.after_failure(attempt_number, category) {
+            NextAttempt::RetryAfter(backoff_ms) => {
+                warn!(
+                    what,
+                    attempt_number,
+                    max_attempts = retry_policy.max_attempts,
+                    error = %error,
+                    category = %category,
+                    %backoff_ms,
+                    "Retrying after a transient worker failure"
+                );
+                cancellation
+                    .sleep(Duration::from_millis(backoff_ms.0))
+                    .await
+                    .map_err(|_| RetryEnd::Cancelled)?;
+                attempt_number += 1;
+            }
+            NextAttempt::Stop(_) => return Err(RetryEnd::Failed(error)),
+        }
     }
 }
 
@@ -405,5 +434,66 @@ mod tests {
             std::task::Poll::Ready(Err(ServerError::Cancelled))
         ));
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    /// A crash, the classic transient worker failure.
+    fn crash() -> WorkerError {
+        WorkerError::ProcessExited {
+            code: None,
+            stderr: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_failure_is_retried_until_it_succeeds() {
+        let mut attempts = 0;
+        let result =
+            retry_worker_operation(Cancellation::NotWired { reason: "test" }, "test op", || {
+                attempts += 1;
+                let attempt = attempts;
+                Box::pin(async move {
+                    if attempt < 3 {
+                        Err(crash())
+                    } else {
+                        Ok(attempt)
+                    }
+                })
+            })
+            .await;
+        assert!(matches!(result, Ok(3)), "{result:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_final_failure_stops_at_once() {
+        let mut attempts = 0;
+        let result: Result<(), RetryEnd> =
+            retry_worker_operation(Cancellation::NotWired { reason: "test" }, "test op", || {
+                attempts += 1;
+                Box::pin(async { Err(WorkerError::SpawnFailed("no interpreter".into())) })
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(RetryEnd::Failed(WorkerError::SpawnFailed(_)))
+        ));
+        assert_eq!(attempts, 1, "a terminal failure is not retried");
+    }
+
+    /// A job cancelled while an attempt runs ends the loop as `Cancelled`,
+    /// with no retry: the cancellation wins the supervised race (it is
+    /// checked first), so neither the failed attempt nor a backoff follows.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_job_ends_the_loop_without_another_attempt() {
+        let token = CancellationToken::new();
+        let mut attempts = 0;
+        let result: Result<(), RetryEnd> =
+            retry_worker_operation(Cancellation::Token(&token), "test op", || {
+                attempts += 1;
+                token.cancel();
+                Box::pin(async { Err(crash()) })
+            })
+            .await;
+        assert!(matches!(result, Err(RetryEnd::Cancelled)), "{result:?}");
+        assert_eq!(attempts, 1);
     }
 }

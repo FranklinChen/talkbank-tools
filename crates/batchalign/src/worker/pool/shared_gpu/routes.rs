@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::types::worker_v2::{ExecuteResponseV2, WorkerRequestIdV2};
+use crate::types::worker_v2::{ExecuteResponseV2, LoadProgressV2, WorkerRequestIdV2};
 use crate::worker::InferTask;
 use crate::worker::error::WorkerError;
 use crate::worker::handle::{ControlRequestId, NoiseLimit, ReportedFailure};
@@ -307,6 +307,15 @@ pub(crate) struct ArmedControl<T> {
     pub(crate) answer: oneshot::Receiver<ControlAnswer<T>>,
 }
 
+/// An armed `ensure_task`: like [`ArmedControl`], plus the progress the
+/// worker reports while it loads, which keeps the load's stall window open
+/// (`SharedChannel::ensure_task`).
+pub(crate) struct ArmedLoad {
+    pub(crate) request_id: ControlRequestId,
+    pub(crate) answer: oneshot::Receiver<ControlAnswer<EnsureTaskResponse>>,
+    pub(crate) progress: mpsc::UnboundedReceiver<LoadProgressV2>,
+}
+
 /// The op waiting in the slot. Each variant holds a sender for its own reply
 /// type, so a reply of one op can never be delivered to another, and a
 /// waiter knows what it asked for: the id its request carried and, for
@@ -320,6 +329,10 @@ enum ControlWaiter {
         request_id: ControlRequestId,
         task: InferTask,
         reply: oneshot::Sender<ControlAnswer<EnsureTaskResponse>>,
+        /// Where the worker's load progress goes while it loads. Typed to
+        /// carry a load's progress only, so a request's work cannot reach a
+        /// load's stall window.
+        progress: mpsc::UnboundedSender<LoadProgressV2>,
     },
 }
 
@@ -441,18 +454,40 @@ impl ControlSlot {
     }
 
     /// Arm the slot for an `ensure_task(task)` op under a fresh request id.
-    pub(crate) fn arm_ensure_task(
-        &self,
-        task: InferTask,
-    ) -> Result<ArmedControl<EnsureTaskResponse>, WorkerError> {
+    pub(crate) fn arm_ensure_task(&self, task: InferTask) -> Result<ArmedLoad, WorkerError> {
         let (reply, answer) = oneshot::channel();
+        let (progress_tx, progress) = mpsc::unbounded_channel();
         let request_id = ControlRequestId::next();
         self.arm(ControlWaiter::EnsureTask {
             request_id: request_id.clone(),
             task,
             reply,
+            progress: progress_tx,
         })?;
-        Ok(ArmedControl { request_id, answer })
+        Ok(ArmedLoad {
+            request_id,
+            answer,
+            progress,
+        })
+    }
+
+    /// Hand a load's progress to the op waiting in the slot when it is a
+    /// model load; `false` when no load is waiting to take it.
+    ///
+    /// Progress is observability, never an answer: it does not end or fail
+    /// any op. A load's receiver gone since arming is a load that stopped
+    /// waiting, and the event is simply not taken.
+    pub(crate) fn progress(&self, event: LoadProgressV2) -> bool {
+        let state = lock_recovered(&self.0);
+        match &*state {
+            ControlState::Waiting(ControlWaiter::EnsureTask { progress, .. }) => {
+                progress.send(event).is_ok()
+            }
+            ControlState::Waiting(ControlWaiter::Capabilities { .. })
+            | ControlState::Idle
+            | ControlState::ShuttingDown { .. }
+            | ControlState::Closed(_) => false,
+        }
     }
 
     /// Begin shutdown for `why`: a live waiter is answered with

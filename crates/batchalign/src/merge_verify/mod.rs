@@ -269,13 +269,14 @@ pub enum MergeVerifyError {
         path: PathBuf,
     },
     /// Complete named source admission refused the draft.
-    #[error("draft {path} failed CHAT admission: {source}")]
+    #[error("draft {path}: {source}")]
     SourceAdmission {
         /// Draft that was judged.
         path: PathBuf,
-        /// Typed refusal, retaining internal failure versus invalidity.
+        /// Typed refusal bound to the draft's text, retaining internal
+        /// failure versus invalidity and each finding's line.
         #[source]
-        source: batchalign_transform::ValidatedParseError,
+        source: crate::error::SourceRefusal<batchalign_transform::ValidatedParseError>,
     },
     /// The transform could not establish checked output admission.
     #[error("output for session '{session}' failed CHAT admission: {source}")]
@@ -475,7 +476,10 @@ impl PreparedSession {
         })?;
         let source = batchalign_transform::parse_source_with_parser(parser, &text)
             .admit(TranscriptName::for_path(&path), &NullErrorSink)
-            .map_err(|source| MergeVerifyError::SourceAdmission { path, source })?
+            .map_err(|error| MergeVerifyError::SourceAdmission {
+                path,
+                source: crate::error::SourceRefusal::in_source(error, &text),
+            })?
             .into_valid_file();
         let utterance_count = source
             .document()
@@ -691,22 +695,22 @@ pub fn run(
 }
 
 impl MergeVerifyError {
-    /// Preserve producer failure taxonomy at the CLI/server presentation seam.
-    pub(crate) fn is_internal(&self) -> bool {
+    /// Whose fault the failure is, preserving the producer's taxonomy at the
+    /// CLI/server presentation seam.
+    pub(crate) fn fault(&self) -> crate::error::RefusalFault {
+        use crate::error::RefusalFault;
         match self {
-            Self::SourceAdmission { source, .. } => {
-                crate::error::chat_admission_is_internal(source)
-            }
+            Self::SourceAdmission { source, .. } => source.fault(),
             Self::Io { .. }
             | Self::OutputAdmission { .. }
             | Self::MainTierChanged { .. }
-            | Self::QueueSerialize { .. } => true,
+            | Self::QueueSerialize { .. } => RefusalFault::ToolFailure,
             Self::VerdictsParse { .. }
             | Self::MissingSession { .. }
             | Self::UnsafeSession { .. }
             | Self::DuplicateSession { .. }
             | Self::DuplicateVerdict { .. }
-            | Self::OrdinalOutOfRange { .. } => false,
+            | Self::OrdinalOutOfRange { .. } => RefusalFault::InvalidInput,
         }
     }
 }

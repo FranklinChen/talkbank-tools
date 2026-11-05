@@ -30,6 +30,8 @@ pub(crate) enum FileStage {
     RecoveringUtteranceTiming,
     /// Fallback timing recovery after an FA failure.
     RecoveringTimingFallback,
+    /// Source-bound input preparation and model resource planning.
+    PreparingAlignment,
     /// Main forced-alignment stage.
     Aligning,
     /// Main transcription stage.
@@ -74,6 +76,7 @@ impl FileStage {
             Self::ResolvingAudio => FileProgressStage::ResolvingAudio,
             Self::RecoveringUtteranceTiming => FileProgressStage::RecoveringUtteranceTiming,
             Self::RecoveringTimingFallback => FileProgressStage::RecoveringTimingFallback,
+            Self::PreparingAlignment => FileProgressStage::PreparingAlignment,
             Self::Aligning => FileProgressStage::Aligning,
             Self::Transcribing => FileProgressStage::Transcribing,
             Self::Benchmarking => FileProgressStage::Benchmarking,

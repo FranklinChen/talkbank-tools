@@ -99,7 +99,9 @@ fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> W
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         runtime: WorkerRuntimeConfig::for_tests().with_state_dir(state_dir.path().to_path_buf()),
         ..WorkerConfig::for_tests()
     }
@@ -130,7 +132,9 @@ async fn spawn_test_echo_worker() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -153,7 +157,9 @@ async fn health_check_works() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -177,7 +183,9 @@ async fn spawn_test_echo_worker_task_bootstrap() {
         profile: WorkerProfile::Stanza,
         task: Some(InferTask::Morphosyntax),
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -212,7 +220,9 @@ async fn a_real_workers_catalog_report_admits_kazakh() {
         profile: WorkerProfile::Stanza,
         task: Some(InferTask::Morphosyntax),
         lang: WorkerLanguage::PerFile,
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<120>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<120>(),
+        ),
         ..WorkerConfig::for_tests()
     };
     let mut lease = common::test_worker_pool::shared_test_worker_pool()
@@ -256,7 +266,9 @@ async fn capabilities_test_echo() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -303,7 +315,9 @@ async fn infer_echo_returns_payload() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -328,7 +342,9 @@ async fn batch_infer_echo_returns_items() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -361,7 +377,9 @@ async fn pool_dispatch_batch_infer_spawns_and_processes() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -397,7 +415,9 @@ async fn pool_reuses_existing_worker() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -426,7 +446,9 @@ async fn pool_multiple_task_groups() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -462,7 +484,9 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -512,7 +536,9 @@ async fn pool_pre_scale_uses_infer_targets() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -561,14 +587,17 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
     let registry_path = registry_path_for(&state_dir);
 
     let external = test_echo_tcp_config(python.clone(), &state_dir);
-    let (external_pid, _external_port) = spawn_tcp_daemon(&external, 0)
-        .await
-        .expect("spawn external tcp daemon");
+    let (external_pid, _external_port) =
+        spawn_tcp_daemon(&external, 0, &batchalign::host_memory::NoIdleWorkers)
+            .await
+            .expect("spawn external tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -602,14 +631,17 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
     let mut stale_owned = test_echo_tcp_config(python.clone(), &state_dir);
     stale_owned.runtime.server_instance_id = Some("dead-owner-instance".to_string());
     stale_owned.runtime.server_process_id = Some(4_000_000);
-    let (stale_pid, _stale_port) = spawn_tcp_daemon(&stale_owned, 0)
-        .await
-        .expect("spawn stale server-owned tcp daemon");
+    let (stale_pid, _stale_port) =
+        spawn_tcp_daemon(&stale_owned, 0, &batchalign::host_memory::NoIdleWorkers)
+            .await
+            .expect("spawn stale server-owned tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -648,22 +680,26 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
     let registry_path = registry_path_for(&state_dir);
 
     let external = test_echo_tcp_config(python.clone(), &state_dir);
-    let (external_pid, _external_port) = spawn_tcp_daemon(&external, 0)
-        .await
-        .expect("spawn external tcp daemon");
+    let (external_pid, _external_port) =
+        spawn_tcp_daemon(&external, 0, &batchalign::host_memory::NoIdleWorkers)
+            .await
+            .expect("spawn external tcp daemon");
 
     let mut owned = test_echo_tcp_config(python.clone(), &state_dir);
     owned.runtime.server_instance_id = Some("owning-server-instance".to_string());
     owned.runtime.server_process_id = Some(std::process::id());
     let owned_runtime = owned.runtime.clone();
-    let (owned_pid, _owned_port) = spawn_tcp_daemon(&owned, 0)
-        .await
-        .expect("spawn server-owned tcp daemon");
+    let (owned_pid, _owned_port) =
+        spawn_tcp_daemon(&owned, 0, &batchalign::host_memory::NoIdleWorkers)
+            .await
+            .expect("spawn server-owned tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -698,7 +734,9 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
@@ -743,7 +781,9 @@ async fn pool_serializes_worker_bootstrap_per_key() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: wrapped_python.to_string_lossy().into_owned(),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(3),
         verbose: 0,
@@ -804,11 +844,18 @@ async fn spawn_failure_bad_python_path() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let err = match WorkerHandle::spawn(config).await {
+    let err = match WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    {
         Err(e) => e,
         Ok(_) => panic!("expected spawn to fail with bad python path"),
     };
@@ -843,11 +890,18 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let handle = WorkerHandle::spawn(config).await.expect("spawn failed");
+    let handle = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("spawn failed");
     assert!(*handle.pid() > 0, "should have a valid pid");
     assert_eq!(handle.transport(), "stdio");
 }
@@ -874,11 +928,18 @@ async fn spawn_failure_includes_worker_startup_stderr() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let err = match WorkerHandle::spawn(config).await {
+    let err = match WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    {
         Err(e) => e,
         Ok(_) => panic!("expected spawn to fail with synthetic stderr"),
     };
@@ -922,11 +983,18 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         num_speakers: NumSpeakers(1),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
+    let mut handle = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("spawn failed");
     let health = handle.health_check().await.expect("health check failed");
     assert_eq!(health.status, batchalign::worker::WorkerHealthStatus::Ok);
     assert_eq!(health.command, "profile:stanza");
@@ -942,7 +1010,9 @@ async fn profile_groups_related_tasks_into_single_worker() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -982,7 +1052,9 @@ async fn each_profile_gets_its_own_worker() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,

@@ -1,7 +1,7 @@
 # Testing
 
 **Status:** Current
-**Last updated:** 2026-10-21 17:09 EDT
+**Last updated:** {{git-dates:page}}
 
 ## Philosophy
 
@@ -254,7 +254,7 @@ Two rules make this hold rather than merely read well:
 
 `CliRunBudget` and `HarnessBudget` own the one-shot durations that have no
 progress to observe: an `assert_cmd` subprocess timeout, a session shutdown, a
-fixture's `ready_timeout_s`. They buy no extension, only a single place where
+fixture's startup stall (`LoadingStall`). They buy no extension, only a single place where
 each budget is written down.
 
 **A subprocess that owns its own wait does not get a second number.**
@@ -283,10 +283,16 @@ queue and failed with `1/1 local startup slots in use`, twice in consecutive
 change sets, while passing alone in about 12.65 seconds. The bound was not too
 small; it was measuring the wrong thing.
 
-Note that `ready_timeout_s` buys BOTH halves:
-`memory_guard::acquire_spawn_permit` passes it to the host-memory lease wait and
-then to the readiness wait. `HarnessBudget::FixtureWorkerReady` sizes it for
-contention plus startup rather than startup alone.
+The queue is no longer inside the fixture's number. A spawn's host-memory
+lease (`memory_guard::acquire_spawn_permit`) queues with no limit, reported,
+and a cancelled job stops it by dropping its future
+(`HostMemoryCoordinator::queue_for_lease`); only a lease no host could fit is
+refused, at once. What the configured `worker_startup_stall_s` governs is the
+readiness wait alone: a `LoadingStall` window that each advancing progress
+report from the starting worker re-arms (see `read_ready_line`), for a stdio
+worker and a TCP daemon alike. A stub worker that reports nothing meets the
+window as a fixed limit. `HarnessBudget::FixtureWorkerReady` sizes it for the
+worker's own startup.
 
 Durations a test *configures* are not deadlines and do not belong to these
 types: `test_delay_ms`, how long a stub interpreter hangs, and the simulated
@@ -992,9 +998,31 @@ cargo xtask lint-wide-structs     # Enforces reviewed field caps on wide structs
 cargo xtask lint-ci-hygiene       # Version sync, legacy terms, retired packages
 ```
 
-Both are included in `make ci-local`. Thin test proxies in
-`crates/batchalign/tests/` invoke them so `cargo test` still catches
-regressions.
+`lint-wide-structs` is also reached by CI through
+`make batchalign-ci-rust` → `make lint`. It reviews named field count (at least
+10 fields), boolean-field growth and stale allowance entries under `crates/`.
+It is not a byte-size measurement, heap-allocation bound or enum-layout census.
+`lint-ci-hygiene` has its own named CI target; consult the Makefile/workflows
+rather than relying on removed test proxies.
+
+The same Rust lint target runs Clippy with warnings denied, including its
+default `large_enum_variant` warning. That catches lopsided variants, not every
+large enum or struct. The same invocation explicitly enables `large_futures`,
+`large_stack_frames`, `large_stack_arrays` and `large_types_passed_by_value`
+for all targets of its six CI-gated Rust crates, with warnings denied. These
+checks run through the existing lint target, not a second Cargo pass.
+Compact producer-owned execution handles constrain parent future layout;
+redundant tests of the standard boxed pointer's size are unnecessary.
+These lints still do not establish a workspace-wide byte-size or heap budget. A `Vec`/`Box` handle's inline size also says nothing about the
+heap population it owns.
+
+When reviewing size or copy costs, measure the hot boundary and preserve
+consuming typestate transitions. Box a large owned payload or future where its
+producer issues it when justified; changing ownership to borrowing merely to
+silence a lint can reopen repeat-execution or mismatched-input states. Verify
+pipeline/future changes in an optimized binary build as well as focused tests:
+layout-depth failures can escape ordinary checks. Runtime memory qualification
+must additionally cover native model scratch and retained allocations.
 
 ## Deterministic simulation testing (turmoil)
 

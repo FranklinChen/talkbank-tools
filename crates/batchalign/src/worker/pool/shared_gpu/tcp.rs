@@ -9,7 +9,7 @@
 
 use tokio::io::BufReader;
 
-use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
+use crate::types::worker_v2::ExecuteResponseV2;
 use crate::worker::WorkerPid;
 use crate::worker::error::WorkerError;
 
@@ -43,21 +43,18 @@ impl SharedGpuTcpWorker {
     /// Send one typed V2 execute request concurrently.
     pub(crate) async fn execute_v2(
         &self,
-        request: &ExecuteRequestV2,
+        permit: &crate::worker::pool::RunPermit<'_>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.channel.execute_v2(request).await
+        self.channel.execute_v2(permit).await
     }
 
-    /// Load one task in a lazy TCP worker.
+    /// Prepare this daemon for `load` (`ensure_task`), returning its proof.
     pub(crate) async fn ensure_task(
         &self,
-        task: crate::worker::InferTask,
-        engine_overrides: Option<&std::collections::BTreeMap<String, String>>,
-        timeout: crate::api::PositiveSeconds,
-    ) -> Result<(), WorkerError> {
-        self.channel
-            .ensure_task(task, engine_overrides, timeout)
-            .await
+        load: &crate::worker::pool::TaskLoad,
+        preparation: &crate::worker::pool::LoadPreparation,
+    ) -> Result<std::sync::Arc<crate::worker::pool::Loaded>, WorkerError> {
+        self.channel.ensure_task(load, preparation).await
     }
 
     /// Query this exact TCP worker's live capability and engine identity.

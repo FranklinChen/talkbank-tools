@@ -8,13 +8,10 @@
 //! # Why the shell is not CHAT-specific
 //!
 //! It was, until 2026-09-02: `finalize_success` returned a `String` that the
-//! shell wrote as CHAT, and a `should_merge_abbrev: bool` rode along as the
-//! eighth positional argument. A command producing a JSON evidence file had
-//! nowhere to go, and the honest options were a third copy of this shell or a
-//! flag the CHAT path ignored. Returning [`FileOutput`] instead deletes the
-//! argument, unifies the writeback for all three commands, and makes
-//! "abbreviation merging on a JSON document" unrepresentable rather than
-//! silently ignored.
+//! shell wrote as CHAT. A command producing a JSON evidence file had nowhere
+//! to go, and the honest options were a third copy of this shell or a flag
+//! the CHAT path ignored. Returning [`FileOutput`] instead unifies the
+//! writeback for all three commands.
 
 use std::sync::Arc;
 
@@ -23,10 +20,10 @@ use tracing::warn;
 
 use crate::error::ServerError;
 use crate::runner::util::{
-    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, classify_server_error,
-    spawn_observed_progress_forwarder, user_facing_error,
+    AfterFailure, FileAttempts, FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink,
+    classify_server_error, spawn_observed_progress_forwarder, user_facing_error,
 };
-use crate::scheduling::{FailureCategory, NextAttempt, RetryPolicy, StopReason, WorkUnitKind};
+use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::{PendingJobFile, RunnerJobSnapshot};
 
 use super::audio_output::{FileOutput, write_primary_output_artifact};
@@ -81,10 +78,6 @@ pub(crate) struct AudioTaskReporting {
 }
 
 /// Shared runner-owned shell for one audio-backed file task.
-///
-/// `should_merge_abbrev` used to be the eighth positional argument and no
-/// longer is: it is a property of the CHAT document the task returns, so it
-/// travels with that document instead.
 pub(crate) async fn run_audio_file_task<Task>(
     job: &RunnerJobSnapshot,
     sink: Arc<dyn RunnerEventSink>,
@@ -104,23 +97,15 @@ where
     let job_id = &job.identity.job_id;
     let filename = file.filename.as_ref();
     let file_index = file.file_index;
-    let retry_policy = RetryPolicy::default();
-    for attempt_number in 1..=retry_policy.max_attempts {
-        if attempt_number > 1 {
-            lifecycle
-                .restart_attempt(work_unit_kind, running_stage)
-                .await;
-        } else {
-            lifecycle.stage(running_stage).await;
-        }
-
+    let mut attempts = FileAttempts::begin(lifecycle, work_unit_kind, running_stage).await;
+    loop {
         // The observer records each checkout of this attempt that waits on a
         // saturated pool (without a deadline); the file shows "waiting for a
         // worker" while one does.
         let (progress_tx, wait_observer, forwarder) =
             spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
 
-        let attempt = crate::worker::pool::checkout_wait::observing_checkout_waits(
+        let attempt = crate::worker::pool::checkout_wait::observing_pool_waits(
             wait_observer,
             task.run_attempt(progress_tx),
         )
@@ -139,13 +124,13 @@ where
                             error = %error,
                             "Audio command finalization failed"
                         );
-                        lifecycle
+                        return lifecycle
                             .fail(
                                 &format!("Failed to finalize {command_label} output: {error}"),
                                 FailureCategory::System,
                             )
-                            .await;
-                        return FileTaskOutcome::TerminalStateRecorded;
+                            .await
+                            .into();
                     }
                 };
                 lifecycle.stage(FileStage::Writing).await;
@@ -168,7 +153,7 @@ where
                             error = %error,
                             "Failed to write audio command output"
                         );
-                        lifecycle
+                        return lifecycle
                             .fail(
                                 // Both the sentence and the category come off
                                 // the typed failure: a document refused by the
@@ -179,16 +164,15 @@ where
                                 &error.operator_message(command_label),
                                 error.category(),
                             )
-                            .await;
-                        return FileTaskOutcome::TerminalStateRecorded;
+                            .await
+                            .into();
                     }
                 };
 
                 // Done, or Diagnosed when a generating producer's output was
                 // written with its findings: terminal either way, never an
                 // error and never retried.
-                written.record(lifecycle).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                return written.record(lifecycle).await.into();
             }
             Err(error) => {
                 let category = classify_server_error(&error);
@@ -201,41 +185,26 @@ where
                     raw_error = %raw_msg,
                     "Audio command error (raw)"
                 );
-                let err_msg = user_facing_error(category, command_label, filename, &raw_msg);
-                // Only a worker's failure is retried here; the policy decides
-                // whether this one is, from its category and the budget.
-                let next = if let ServerError::Worker(_) = &error {
-                    retry_policy.after_failure(attempt_number, category)
-                } else {
-                    NextAttempt::Stop(StopReason::Final)
-                };
-                if let NextAttempt::RetryAfter(backoff_ms) = next {
-                    if let Err(crate::chat_ops::fa::utr::UtrCancelled) =
-                        task.on_retryable_worker_failure(lifecycle, &error).await
-                    {
-                        lifecycle
-                            .fail("Timing recovery cancelled", FailureCategory::Cancelled)
-                            .await;
-                        return FileTaskOutcome::TerminalStateRecorded;
+                let message = user_facing_error(category, command_label, filename, &raw_msg);
+                attempts = match attempts.after_error(&error, category, message).await {
+                    AfterFailure::Retry(grant) => {
+                        // Timing recovery runs while the retry is granted and
+                        // not yet spent, so a cancelled recovery ends the file.
+                        if let Err(crate::chat_ops::fa::utr::UtrCancelled) =
+                            task.on_retryable_worker_failure(lifecycle, &error).await
+                        {
+                            return grant
+                                .abandon("Timing recovery cancelled", FailureCategory::Cancelled)
+                                .await
+                                .into();
+                        }
+                        grant.wait().await
                     }
-                    lifecycle
-                        .retry_after(
-                            backoff_ms.duration(),
-                            category,
-                            &format!("{err_msg}; retrying in {backoff_ms} ms"),
-                        )
-                        .await;
-                    tokio::time::sleep(backoff_ms.duration()).await;
-                    continue;
-                }
-
-                lifecycle.fail(&err_msg, category).await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    AfterFailure::Recorded(recorded) => return recorded.into(),
+                };
             }
         }
     }
-
-    FileTaskOutcome::MissingTerminalState
 }
 
 #[cfg(test)]
@@ -249,7 +218,6 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
-    use super::super::audio_output::MergeAbbreviations;
     use super::*;
     use crate::api::{
         CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, MachineTime, NumSpeakers,
@@ -418,8 +386,11 @@ mod tests {
         ) -> Result<Self::AttemptOutput, ServerError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
             if attempt == 0 {
-                Err(ServerError::Worker(WorkerError::ReadyTimeout {
-                    timeout_s: crate::api::PositiveSeconds::literal::<1>(),
+                Err(ServerError::Worker(WorkerError::Stalled {
+                    waited_for: crate::worker::LoadingWait::Ready,
+                    stall: crate::worker::LoadingStall::new(
+                        crate::api::PositiveSeconds::literal::<1>(),
+                    ),
                 }))
             } else {
                 Ok(crate::pipeline::post_validate::PostValidated::for_test(
@@ -437,7 +408,6 @@ mod tests {
                 document: output.into(),
                 shortfalls: Vec::new(),
                 exclusions: Vec::new(),
-                merge_abbreviations: MergeAbbreviations::Leave,
             }))
         }
 
@@ -534,7 +504,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded));
+        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded(_)));
         let state = state.lock().unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(recoveries.load(Ordering::SeqCst), 1);
@@ -595,7 +565,6 @@ mod tests {
                 document: output,
                 shortfalls: Vec::new(),
                 exclusions: Vec::new(),
-                merge_abbreviations: MergeAbbreviations::Leave,
             }))
         }
     }
@@ -636,7 +605,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded));
+        assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded(_)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "never retried");
         let state = state.lock().unwrap();
         assert_eq!((state.done, state.errors, state.retries), (0, 0, 0));

@@ -1,7 +1,7 @@
 # Whisper Usage in Batchalign
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-05 23:04 EST
 
 ## Overview
 
@@ -109,11 +109,9 @@ flowchart LR
   resolved language, Cantonese included, forces that language's token and the
   transcription task. The worker never maps a language code itself, and its
   loader refuses a token the loaded checkpoint lacks.
-- **Preloading workers.** A worker that preloads ASR with no engine named
-  (an align job's GPU worker) resolves its own engine and falls back to stock
-  Whisper for most languages, so it also receives the decode language when
-  Whisper has a token. For a language without one it receives nothing, and
-  refuses at load only if it does fall back to Whisper.
+- **No preloading.** A worker loads ASR only in the `ensure_task` of an ASR
+  request, whose plan names the engine, so no worker resolves an ASR engine
+  of its own.
 
 A token is a necessary condition, not a quality claim: Whisper decodes some
 of its 100 languages far better than others.
@@ -237,19 +235,14 @@ first non-Rev.AI ASR engine that is Rust-owned (`is_rust_owned`).
 
 ## Per-language defaults
 
-The fallback dispatch when no `--asr-engine` is set
-AND no Rev.AI key is configured is **not** unconditionally Whisper. The
-worker resolver consults a per-language default table
-(`_LANG_DEFAULTS` in `batchalign/worker/_model_loading/asr.py`) before
-falling through to Whisper. Currently:
-
-- `yue` (Cantonese) → FunASR/SenseVoice (per the 2026-05 Cantonese ASR
-  benchmark, where vanilla Whisper-large-v3 was the worst-measured
-  engine on TalkBank Tier 3 child speech)
-- all other languages → Whisper (the documented historical fallback)
-
-To override the per-language default, pass an explicit
-`--asr-engine <engine>`. The override always wins.
+There are none in the worker. The control plane chooses the ASR engine
+(`--asr-engine`, defaulting to Rev.AI for every language) and names it to the
+worker's ASR load; the worker loads exactly what it is named and, when it is
+named nothing (the plan's ASR runs in Rust, as Rev.AI and whisper.cpp do),
+loads nothing. A worker-side table (`_LANG_DEFAULTS`) used to pick FunASR for
+`yue` and Whisper for everything else when no engine was named; it never chose
+a transcript's engine, only what a Rev.AI job's worker loaded, and it is gone.
+For Cantonese, pass `--asr-engine funaudio` (see the Cantonese reference).
 
 ## Model Selection
 

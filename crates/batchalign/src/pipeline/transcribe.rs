@@ -84,6 +84,19 @@ struct Postprocessed {
     /// The segmenter that changed the words, for the provenance stamp:
     /// `None` when the language has none or nothing was segmented.
     word_segmenter: Option<ReportedEngineName>,
+    /// What the abbreviation step did, for the provenance stamp.
+    abbreviations: AbbreviationMerging,
+}
+
+/// Whether `--merge-abbrev` ran on a transcript's recognized words. Made by
+/// the step itself (`resolve_abbreviations`) and carried to CHAT assembly, so
+/// the output's stamp records what ran, not what was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbbreviationMerging {
+    /// The job did not ask for the merge; the words are as recognized.
+    NotRequested,
+    /// The merge ran over the speaker-attributed words.
+    Ran,
 }
 
 /// The generated document, judged once at assembly by the producer
@@ -1182,6 +1195,7 @@ use preprocessing::prepare_asr_chunks_with_snapshot;
 use preprocessing::stage_asr_postprocess;
 pub(crate) use preprocessing::{
     apply_prechat_segmentations, build_prechat_utseg_items, prepare_asr_chunks,
+    resolve_abbreviations,
 };
 #[cfg(test)]
 mod tests;

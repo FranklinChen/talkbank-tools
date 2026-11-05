@@ -7,12 +7,15 @@
 //! keeping a recording-wide source-state × reference matrix in memory.
 
 use super::{Alignable, FuzzyComparison, MatchMode, PreparedFuzzyWord, WordEvidence};
+use crate::dp_align::LiteralMatchMode;
 use crate::dp_align::control::{Uninterrupted, WorkControl, uninterrupted};
 
+mod graph;
+use graph::{CompletedGraphObservation, Edge, Graph, PreparedGraph};
 mod band;
-use band::{Band, ForwardScores};
+use band::{Band, BandAlternative, ForwardScores};
 mod packed;
-pub use packed::{PackedSearchCost, PackedSearchStage, PackedSearchStatus};
+pub use packed::{PackedSearchCost, PackedSearchStage, PackedSearchStatus, PackedSearchWork};
 mod projection;
 
 const WORK_CELLS: usize = 64_000_000;
@@ -463,8 +466,6 @@ impl<'source> LocalInterleaving<'source> {
     }
 }
 
-struct Budget;
-
 /// An episode preserves the first turn and the following speaker's turn/word
 /// order as two chains. Every prefix of that following run is a legal choice;
 /// choosing one consumes the whole episode before the next source boundary.
@@ -493,214 +494,11 @@ fn episodes<'a>(turns: &'a [SpeakerTurn<'_>]) -> impl Iterator<Item = Episode> +
     })
 }
 
-// Use the same episode owner as Graph::of. A sweep retains the outermost
-// episodes containing each turn without expanding every range (O(turns+episodes)).
-fn search_frontiers(turns: &[SpeakerTurn<'_>]) -> Vec<SearchFrontier> {
-    let mut ends: Vec<_> = (0..turns.len()).map(|i| i + 1).collect();
-    for episode in episodes(turns) {
-        ends[episode.first] = ends[episode.first].max(episode.following_end);
-    }
-    let mut left = 0;
-    let mut right = 0;
-    ends.iter()
-        .enumerate()
-        .map(|(ordinal, &end)| {
-            // ends[ordinal] >= ordinal+1, so this cursor cannot pass the current
-            // turn. Expired intervals need no queue or sentinel boundary.
-            while ends[left] <= ordinal {
-                left += 1;
-            }
-            right = right.max(end);
-            SearchFrontier {
-                before: left,
-                after: right,
-            }
-        })
-        .collect()
-}
-
-impl Budget {
-    fn nodes(turns: &[SpeakerTurn<'_>]) -> Result<usize, LocalInterleavingRefusal> {
-        let refused =
-            LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::GraphShape,
-                required_at_least: usize::MAX,
-            });
-        let mut nodes = turns.len().checked_add(1).ok_or(refused)?;
-        for turn in turns {
-            nodes = nodes
-                .checked_add(turn.words.len().saturating_sub(1))
-                .ok_or(refused)?;
-        }
-        for episode in episodes(turns) {
-            let second = turns[episode.first + 1..episode.following_end]
-                .iter()
-                .try_fold(0usize, |count, turn| count.checked_add(turn.words.len()))
-                .ok_or(refused)?;
-            let states = turns[episode.first]
-                .words
-                .len()
-                .checked_add(1)
-                .and_then(|a| second.checked_add(1).and_then(|b| a.checked_mul(b)))
-                .ok_or(refused)?;
-            nodes = nodes.checked_add(states.saturating_sub(2)).ok_or(refused)?;
-        }
-        // Bound graph construction itself, before allocating adjacency lists.
-        // The former dense budget needed at least six rows for every node.
-        if nodes > SCORE_CELLS / 6 {
-            return Err(LocalInterleavingRefusal::Budget(
-                LocalInterleavingBudget::MemoryBudgetExceeded,
-            ));
-        }
-        Ok(nodes)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Edge {
-    to: usize,
-    word: Option<usize>,
-}
-
-struct Graph {
-    edges: Vec<Vec<Edge>>,
-    incoming: Vec<Vec<Edge>>,
-    order: Vec<usize>,
-    rank: Vec<usize>,
-    depth: Vec<usize>,
-    end: usize,
-}
-
-impl Graph {
-    fn of(turns: &[SpeakerTurn<'_>], capacity: usize) -> (Self, Vec<Address>) {
-        let mut edges = vec![Vec::new(); turns.len() + 1];
-        edges.reserve(capacity - edges.len());
-        let mut addresses = Vec::new();
-        let mut offsets = Vec::with_capacity(turns.len());
-        for (utterance, turn) in turns.iter().enumerate() {
-            offsets.push(addresses.len());
-            addresses.extend((0..turn.words.len()).map(|word| Address { utterance, word }));
-            let mut node = utterance;
-            for word in 0..turn.words.len() {
-                let next = if word + 1 == turn.words.len() {
-                    utterance + 1
-                } else {
-                    edges.push(Vec::new());
-                    edges.len() - 1
-                };
-                edges[node].push(Edge {
-                    to: next,
-                    word: Some(offsets[utterance] + word),
-                });
-                node = next;
-            }
-            if turn.words.is_empty() {
-                edges[node].push(Edge {
-                    to: utterance + 1,
-                    word: None,
-                });
-            }
-        }
-        for episode in episodes(turns) {
-            let utterance = episode.first;
-            let second_start = offsets[utterance + 1];
-            let second_end = offsets
-                .get(episode.following_end)
-                .copied()
-                .unwrap_or(addresses.len());
-            let (a, b) = (turns[utterance].words.len(), second_end - second_start);
-            if a == 0 && b == 0 {
-                edges[utterance].push(Edge {
-                    to: episode.following_end,
-                    word: None,
-                });
-                continue;
-            }
-            let mut grid = Vec::with_capacity((a + 1) * (b + 1));
-            for i in 0..=a {
-                for j in 0..=b {
-                    grid.push(if i == 0 && j == 0 {
-                        utterance
-                    } else if i == a && j == b {
-                        episode.following_end
-                    } else {
-                        edges.push(Vec::new());
-                        edges.len() - 1
-                    });
-                }
-            }
-            for i in 0..=a {
-                for j in 0..=b {
-                    let node = grid[i * (b + 1) + j];
-                    if i < a {
-                        edges[node].push(Edge {
-                            to: grid[(i + 1) * (b + 1) + j],
-                            word: Some(offsets[utterance] + i),
-                        });
-                    }
-                    if j < b {
-                        edges[node].push(Edge {
-                            to: grid[i * (b + 1) + j + 1],
-                            word: Some(second_start + j),
-                        });
-                    }
-                }
-            }
-        }
-        let mut incoming = vec![Vec::new(); edges.len()];
-        for (from, outgoing) in edges.iter().enumerate() {
-            for edge in outgoing {
-                incoming[edge.to].push(Edge {
-                    to: from,
-                    word: edge.word,
-                });
-            }
-        }
-        let mut degree: Vec<_> = incoming.iter().map(Vec::len).collect();
-        let mut order = vec![0];
-        let mut cursor = 0;
-        while cursor < order.len() {
-            for edge in &edges[order[cursor]] {
-                degree[edge.to] -= 1;
-                if degree[edge.to] == 0 {
-                    order.push(edge.to);
-                }
-            }
-            cursor += 1;
-        }
-        // Every complete path consumes all source words once. Consequently a
-        // node has one consumed-word depth, even when reached via an episode.
-        let mut depth = vec![0; edges.len()];
-        for &from in &order {
-            for edge in &edges[from] {
-                depth[edge.to] = depth[from] + usize::from(edge.word.is_some());
-            }
-        }
-        // Stable sorting retains topological order among epsilon-linked nodes.
-        order.sort_by_key(|&node| depth[node]);
-        let mut rank = vec![0; edges.len()];
-        for (slot, &node) in order.iter().enumerate() {
-            rank[node] = slot;
-        }
-        (
-            Self {
-                edges,
-                incoming,
-                order,
-                rank,
-                depth,
-                end: turns.len(),
-            },
-            addresses,
-        )
-    }
-}
-
 enum Relation<'source> {
     Literal {
         source: Vec<&'source str>,
         reference: &'source [String],
-        mode: MatchMode,
+        mode: LiteralMatchMode,
     },
     Fuzzy {
         source: Vec<PreparedFuzzyWord<'source>>,
@@ -720,10 +518,15 @@ impl<'source> Relation<'source> {
                     .collect(),
                 policy: FuzzyComparison::new(threshold),
             },
-            _ => Self::Literal {
+            MatchMode::Exact => Self::Literal {
                 source,
                 reference,
-                mode,
+                mode: LiteralMatchMode::Exact,
+            },
+            MatchMode::CaseInsensitive => Self::Literal {
+                source,
+                reference,
+                mode: LiteralMatchMode::AsciiInsensitive,
             },
         }
     }
@@ -733,10 +536,7 @@ impl<'source> Relation<'source> {
                 source,
                 reference,
                 mode,
-            } => match mode {
-                MatchMode::Exact => source[word] == reference[k],
-                _ => source[word].eq_ignore_ascii_case(&reference[k]),
-            },
+            } => mode.matches_words(source[word], &reference[k]),
             Self::Fuzzy {
                 source,
                 reference,

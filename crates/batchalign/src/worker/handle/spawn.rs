@@ -12,12 +12,12 @@ use tokio::process::Command;
 use tracing::info;
 
 use super::config::WorkerConfig;
-use super::protocol::TcpReadySignal;
+use super::protocol::ReadyTransport;
 use crate::worker::error::WorkerError;
 use crate::worker::python::worker_command;
 use crate::worker::serving::WorkerServing;
 use crate::worker::target::task_name;
-use crate::worker::{WorkerBootstrapMode, WorkerProfile, WorkerTarget};
+use crate::worker::{WorkerProfile, WorkerTarget};
 
 /// Build the `std::process::Command` for a stdio-transport Python worker.
 ///
@@ -42,11 +42,9 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     }
     match config.bootstrap_target() {
         WorkerTarget::Profile(profile) => {
+            // Every worker starts with no models: each task's load is its
+            // `ensure_task`, before the task's first request.
             cmd.arg("--profile").arg(profile.name());
-            // LazyProfile: start with no models, load on demand via ensure_task.
-            if config.runtime.bootstrap_mode == WorkerBootstrapMode::LazyProfile {
-                cmd.arg("--lazy");
-            }
         }
         WorkerTarget::InferTask(task) => {
             cmd.arg("--task").arg(task_name(task));
@@ -133,25 +131,41 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
 /// Unlike [`WorkerHandle::spawn`](super::WorkerHandle::spawn) which creates a
 /// child process tied directly to the current Rust process, this launches a
 /// standalone Python process with `--transport tcp` that:
-/// 1. Loads models, binds a TCP port
+/// 1. Starts with no model, binds a TCP port
 /// 2. Registers itself in `workers.json`
-/// 3. Prints a ready signal to stderr
+/// 3. Reports its startup on stdout, progress then its ready line, exactly
+///    as a stdio worker does, and stops writing there
 /// 4. Continues running until explicitly shut down
+///
+/// The startup is read by the stdio worker's own reader
+/// ([`WorkerHandle::read_ready_line`](super::WorkerHandle), its preamble
+/// included) under the configured startup stall window, so a daemon that
+/// keeps reporting progress may take as long as it needs and one that goes
+/// quiet is [`WorkerError::Stalled`]. It used to report only a ready line, on
+/// stderr, which the spawner scanned under a fixed total limit, giving up
+/// after 100 lines that were not it.
 ///
 /// If [`WorkerRuntimeConfig::server_instance_id`](super::config::WorkerRuntimeConfig::server_instance_id)
 /// is present, the daemon registers itself as **server-owned** and should be
 /// retired by that same server instance on shutdown. Otherwise it registers as
 /// **external** and may be reused across server restarts.
 ///
+/// A startup that has to queue for host memory retires idle workers through
+/// `reclaim`.
+///
 /// Returns `(pid, port)` on success after waiting for the ready signal.
-pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, u16), WorkerError> {
+pub async fn spawn_tcp_daemon(
+    config: &WorkerConfig,
+    port: u16,
+    reclaim: &dyn crate::host_memory::MemoryReclaim,
+) -> Result<(u32, u16), WorkerError> {
     if config.task.is_some() {
         return Err(WorkerError::SpawnFailed(
             "persistent TCP workers only support profile bootstrap targets".into(),
         ));
     }
     // Memory guard, same as WorkerHandle::spawn().
-    let spawn_permit = crate::worker::memory_guard::acquire_spawn_permit(config).await?;
+    let spawn_permit = crate::worker::memory_guard::acquire_spawn_permit(config, reclaim).await?;
 
     let mut cmd = worker_command(&config.python_path);
     cmd.arg("--transport")
@@ -219,9 +233,11 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
         cmd.env(key, value);
     }
 
-    // Detach: stdin from /dev/null, stdout to /dev/null, stderr piped (for ready signal).
+    // Detach stdin. Stdout carries the startup (progress, then the ready
+    // line) and the daemon stops writing to it there; stderr is piped so a
+    // failed startup's tail can be read, and drained to the log after.
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     // On Unix, create a new session (setsid) so the worker is fully detached
@@ -259,71 +275,73 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
     }
     let _spawn_permit = spawn_permit;
 
-    // Read stderr for the ready signal: {"ready": true, "pid": N, "transport": "tcp", "port": P}
-    let stderr = child
-        .stderr
+    let stdout = child
+        .stdout
         .take()
-        .ok_or_else(|| WorkerError::SpawnFailed("TCP daemon stderr not captured".into()))?;
-    let mut stderr_reader = tokio::io::BufReader::new(stderr);
+        .ok_or_else(|| WorkerError::SpawnFailed("TCP daemon stdout not captured".into()))?;
+    let mut stdout_reader = tokio::io::BufReader::new(stdout);
+    let mut stderr_reader = tokio::io::BufReader::new(
+        child
+            .stderr
+            .take()
+            .ok_or_else(|| WorkerError::SpawnFailed("TCP daemon stderr not captured".into()))?,
+    );
 
-    let ready = tokio::time::timeout(
-        config.ready_timeout_s.duration(),
-        read_tcp_ready_signal(&mut stderr_reader),
-    )
-    .await
-    .map_err(|_| WorkerError::ReadyTimeout {
-        timeout_s: config.ready_timeout_s,
-    })?
-    .map_err(|e| WorkerError::ReadyParseFailed(format!("TCP daemon ready failed: {e}")))?;
+    // The stdio worker's reader, preamble and stall window included; any
+    // way the startup goes wrong ends the child once, with its stderr tail.
+    let started = async {
+        let ready =
+            super::WorkerHandle::read_ready_line(&mut stdout_reader, config.startup_stall).await?;
+        match (ready.ready, ready.transport) {
+            (true, ReadyTransport::Tcp { host, port }) => Ok((ready.pid, host, port)),
+            (false, _) => Err(WorkerError::ReadyParseFailed(
+                "TCP daemon emitted ready line with ready=false".to_string(),
+            )),
+            (true, ReadyTransport::Stdio) => Err(WorkerError::ReadyParseFailed(
+                "a worker spawned as a TCP daemon reported a stdio ready line".to_string(),
+            )),
+        }
+    }
+    .await;
+    let (pid, host, port) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            return Err(super::WorkerHandle::finalize_startup_failure(
+                &mut child,
+                &mut stderr_reader,
+                error,
+            )
+            .await);
+        }
+    };
 
-    // Detach stderr reader: the daemon continues on its own.
-    // We intentionally do NOT wait on the child or hold its handle.
-    // The process is now a standalone daemon managed by the OS.
-    drop(stderr_reader);
+    // The daemon writes nothing more to stdout; its stderr is drained to the
+    // log for as long as this process lives. We intentionally do NOT wait on
+    // the child: it is now a standalone daemon managed by the OS.
+    drop(stdout_reader);
+    let label = config.bootstrap_label();
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut line = String::new();
+        while matches!(stderr_reader.read_line(&mut line).await, Ok(read) if read > 0) {
+            let trimmed = line.trim_end();
+            if !trimmed.is_empty() {
+                tracing::debug!(worker = %label, "{}", trimmed);
+            }
+            line.clear();
+        }
+    });
 
     info!(
         profile = %config.bootstrap_label(),
         lang = %config.lang,
-        pid = ready.0,
-        port = ready.1,
+        pid,
+        %host,
+        port,
         "TCP worker daemon ready"
     );
 
-    Ok(ready)
-}
-
-/// Read the TCP ready signal from a daemon's stderr.
-async fn read_tcp_ready_signal<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<(u32, u16), String> {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut line = String::new();
-    let mut attempts = 0;
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => return Err("TCP daemon closed stderr without ready signal".into()),
-            Ok(_) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if let Ok(signal) = serde_json::from_str::<TcpReadySignal>(trimmed)
-                    && signal.ready
-                {
-                    let port = signal.port.unwrap_or(0);
-                    return Ok((signal.pid, port));
-                }
-                // Not the ready line, might be a log line, skip it.
-                attempts += 1;
-                if attempts > 100 {
-                    return Err("Too many non-ready lines on stderr".into());
-                }
-            }
-            Err(e) => return Err(format!("Failed to read TCP daemon stderr: {e}")),
-        }
-    }
+    Ok((pid, port))
 }
 
 /// How this worker serves requests: the pool's decision, the same value the

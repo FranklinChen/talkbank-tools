@@ -72,12 +72,10 @@ impl<'a> BenchmarkOutputPlan<'a> {
         let lifecycle = FileRunTracker::new(self.sink, self.job_id, self.file.filename.as_ref());
         match self.write(outputs).await {
             Ok(written) => written.complete().await,
-            Err(error) => {
-                lifecycle
-                    .fail(&error.to_string(), classify_server_error(&error))
-                    .await;
-                FileTaskOutcome::TerminalStateRecorded
-            }
+            Err(error) => lifecycle
+                .fail(&error.to_string(), classify_server_error(&error))
+                .await
+                .into(),
         }
     }
 
@@ -133,8 +131,8 @@ impl WrittenBenchmark<'_> {
     async fn complete(self) -> FileTaskOutcome {
         FileRunTracker::new(self.sink, self.job_id, self.file.filename.as_ref())
             .complete_with_result(self.primary.display_path, self.primary.content_type)
-            .await;
-        FileTaskOutcome::TerminalStateRecorded
+            .await
+            .into()
     }
 }
 
@@ -257,7 +255,7 @@ mod tests {
             .expect("admitted output plan");
             assert!(matches!(
                 plan.persist(outputs()).await,
-                FileTaskOutcome::TerminalStateRecorded
+                FileTaskOutcome::TerminalStateRecorded(_)
             ));
             assert!(
                 sink.completed_files().is_empty(),

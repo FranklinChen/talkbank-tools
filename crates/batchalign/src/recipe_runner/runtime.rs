@@ -421,7 +421,6 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Compare(CompareOptions {
                     common: CommonOptions::default(),
-                    merge_abbrev: false.into(),
                 }),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,

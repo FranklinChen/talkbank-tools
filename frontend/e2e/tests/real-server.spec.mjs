@@ -320,7 +320,6 @@ async function submitMorphotagJob(request, baseUrl, { files, sourceDir }) {
       override_media_cache: true,
       retokenize: false,
       skipmultilang: false,
-      merge_abbrev: false,
     },
     paths_mode: false,
     source_paths: [],
@@ -504,13 +503,13 @@ test.describe("real Rust server e2e (React dashboard)", () => {
     await expect(page.getByRole("cell", { name: "real-failure.cha", exact: true })).toBeVisible();
     // Both the file row and results API expose the admission error.
     await expect(
-      page.locator("table").getByText(/CHAT replacement admission failed/),
+      page.locator("table").getByText(/the input transcript is not valid CHAT/),
     ).toBeVisible();
 
     const failedResults = await fetchJobResults(request, harness.baseUrl, jobId);
     expect(failedResults.status).toBe("failed");
     expect(failedResults.files).toHaveLength(1);
-    expect(failedResults.files[0].error).toContain("CHAT replacement admission failed");
+    expect(failedResults.files[0].error).toContain("the input transcript is not valid CHAT");
 
     const restartResponse = page.waitForResponse(
       (response) =>
@@ -547,7 +546,7 @@ test.describe("real Rust server e2e (React dashboard)", () => {
 
     await expect(page.getByRole("button", { name: "Restart" })).toBeVisible();
     await expect(
-      page.locator("table").getByText(/CHAT replacement admission failed/),
+      page.locator("table").getByText(/the input transcript is not valid CHAT/),
     ).toBeVisible();
 
     await page.getByRole("button", { name: "Delete" }).click();

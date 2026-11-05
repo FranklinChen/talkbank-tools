@@ -8,17 +8,17 @@
 use std::collections::BTreeSet;
 
 use batchalign_types::worker_v2::{
-    AvqiResultV2, OpenSmileResultV2, SpeakerBackendV2, SpeakerEmbeddingBackendV2,
-    SpeakerEmbeddingRequestV2, SpeakerEmbeddingResultV2, SpeakerInferenceEvidenceV2,
-    SpeakerInputV2, SpeakerResultV2, TaskRequestV2, TaskResultV2,
+    AvqiResultV2, OpenSmileResultV2, SpeakerBackendV2, SpeakerEmbeddingRequestV2,
+    SpeakerEmbeddingResultV2, SpeakerInferenceEvidenceV2, SpeakerInputV2, SpeakerResultV2,
+    TaskRequestV2, TaskResultV2,
 };
 use numpy::IntoPyArray;
 use pyo3::prelude::*;
 
 use crate::worker_artifacts::require_mono_prepared_audio;
 use crate::worker_execute::{
-    ExecuteFailure, ValidatedRequestV2, execute_request_v2, extract_task_payload,
-    parse_host_output, require_runner,
+    ExecuteFailure, LoadedRunner, ValidatedRequestV2, admit_loaded_host, execute_request_v2,
+    extract_task_payload, parse_host_output,
 };
 
 fn parse_opensmile_result(
@@ -40,8 +40,7 @@ fn parse_speaker_result(
     // inverted, so only the evidence's backend is checked here.
     match (&parsed.evidence, expected_backend) {
         (SpeakerInferenceEvidenceV2::PyannoteAi { .. }, SpeakerBackendV2::PyannoteAi)
-        | (SpeakerInferenceEvidenceV2::Pyannote { .. }, SpeakerBackendV2::Pyannote)
-        | (SpeakerInferenceEvidenceV2::Nemo { .. }, SpeakerBackendV2::Nemo) => Ok(parsed),
+        | (SpeakerInferenceEvidenceV2::Pyannote { .. }, SpeakerBackendV2::Pyannote) => Ok(parsed),
         _ => Err(ExecuteFailure::Runtime(format!(
             "speaker host evidence does not match requested backend {expected_backend:?}"
         ))),
@@ -51,7 +50,7 @@ fn parse_speaker_result(
 fn run_opensmile(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    prepared_audio_runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let opensmile_request = extract_task_payload(
         &request,
@@ -65,10 +64,6 @@ fn run_opensmile(
         &request.attachments,
         opensmile_request.audio_ref_id.as_ref(),
         "openSMILE V2",
-    )?;
-    let runner = require_runner(
-        prepared_audio_runner,
-        "no openSMILE host loaded for worker protocol V2",
     )?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let descriptor = audio.descriptor();
@@ -90,7 +85,7 @@ fn run_opensmile(
 fn run_avqi(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    prepared_audio_runner: Option<Py<PyAny>>,
+    runner: LoadedRunner,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let avqi_request = extract_task_payload(
         &request,
@@ -109,10 +104,6 @@ fn run_avqi(
         &request.attachments,
         avqi_request.sv_audio_ref_id.as_ref(),
         "AVQI V2",
-    )?;
-    let runner = require_runner(
-        prepared_audio_runner,
-        "no AVQI host loaded for worker protocol V2",
     )?;
     let cs_audio_array = cs_audio.samples()?.into_pyarray(py);
     let sv_audio_array = sv_audio.samples()?.into_pyarray(py);
@@ -135,9 +126,7 @@ fn run_avqi(
 fn run_speaker(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    pyannote_ai_prepared_audio_runner: Option<Py<PyAny>>,
-    pyannote_prepared_audio_runner: Option<Py<PyAny>>,
-    nemo_prepared_audio_runner: Option<Py<PyAny>>,
+    host: &Bound<'_, PyAny>,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let speaker_request = extract_task_payload(
         &request,
@@ -169,20 +158,10 @@ fn run_speaker(
     // without `--num-speakers` was silently forced to two speakers instead of
     // estimating, and no reader of the result could tell.
     let expected_speakers = speaker_request.expected_speakers.map(|value| value.0);
-    let runner = match speaker_request.backend {
-        SpeakerBackendV2::PyannoteAi => require_runner(
-            pyannote_ai_prepared_audio_runner,
-            "no pyannoteAI speaker host loaded for prepared-audio V2",
-        )?,
-        SpeakerBackendV2::Pyannote => require_runner(
-            pyannote_prepared_audio_runner,
-            "no pyannote speaker host loaded for prepared-audio V2",
-        )?,
-        SpeakerBackendV2::Nemo => require_runner(
-            nemo_prepared_audio_runner,
-            "no NeMo speaker host loaded for prepared-audio V2",
-        )?,
-    };
+    // The host is the load the request's backend names (local pyannote, or
+    // pyannoteAI, which is hosted); its own backend is checked against the
+    // request's.
+    let runner = admit_loaded_host(host, speaker_request.backend, "speaker")?;
     let audio_array = audio.samples()?.into_pyarray(py);
     let response = runner.call1(
         py,
@@ -237,7 +216,7 @@ fn require_answers_for_exactly_the_requested_spans(
 fn run_speaker_embedding(
     py: Python<'_>,
     request: ValidatedRequestV2<'_>,
-    pyannote_span_runner: Option<Py<PyAny>>,
+    host: &Bound<'_, PyAny>,
 ) -> Result<TaskResultV2, ExecuteFailure> {
     let embedding_request = extract_task_payload(
         &request,
@@ -252,12 +231,7 @@ fn run_speaker_embedding(
         embedding_request.audio_ref_id.as_ref(),
         "worker protocol V2 speaker embedding",
     )?;
-    let runner = match embedding_request.backend {
-        SpeakerEmbeddingBackendV2::Pyannote => require_runner(
-            pyannote_span_runner,
-            "no pyannote speaker-embedding host loaded for prepared-audio V2",
-        )?,
-    };
+    let runner = admit_loaded_host(host, embedding_request.backend, "speaker-embedding")?;
 
     // Preserve the V2 request schema across the Rust/Python boundary. Passing
     // JSON lets Python validate named fields instead of rebuilding typed
@@ -276,58 +250,50 @@ fn run_speaker_embedding(
     Ok(TaskResultV2::SpeakerEmbeddingResult(parsed))
 }
 
+/// Execute one openSMILE request with the analysis its (model-free) load
+/// recorded.
 #[pyfunction]
-#[pyo3(signature = (request, prepared_audio_runner=None))]
 pub(crate) fn execute_opensmile_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    prepared_audio_runner: Option<Py<PyAny>>,
+    prepared_audio_runner: Py<PyAny>,
 ) -> PyResult<String> {
-    execute_request_v2(request, |request| {
-        run_opensmile(py, request, prepared_audio_runner)
-    })
+    let runner = LoadedRunner::of_host(prepared_audio_runner);
+    execute_request_v2(request, |request| run_opensmile(py, request, runner))
 }
 
+/// Execute one AVQI request with the analysis its (model-free) load recorded.
 #[pyfunction]
-#[pyo3(signature = (request, prepared_audio_runner=None))]
 pub(crate) fn execute_avqi_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    prepared_audio_runner: Option<Py<PyAny>>,
+    prepared_audio_runner: Py<PyAny>,
 ) -> PyResult<String> {
-    execute_request_v2(request, |request| {
-        run_avqi(py, request, prepared_audio_runner)
-    })
+    let runner = LoadedRunner::of_host(prepared_audio_runner);
+    execute_request_v2(request, |request| run_avqi(py, request, runner))
 }
 
+/// Execute one diarization request on `loaded`, the host the request's
+/// speaker load built (`LoadedDiarization` on the Python side): its
+/// `backend` and `runner` are read from it.
 #[pyfunction]
-#[pyo3(signature = (request, pyannote_ai_prepared_audio_runner=None, pyannote_prepared_audio_runner=None, nemo_prepared_audio_runner=None))]
 pub(crate) fn execute_speaker_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    pyannote_ai_prepared_audio_runner: Option<Py<PyAny>>,
-    pyannote_prepared_audio_runner: Option<Py<PyAny>>,
-    nemo_prepared_audio_runner: Option<Py<PyAny>>,
+    loaded: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
-    execute_request_v2(request, |request| {
-        run_speaker(
-            py,
-            request,
-            pyannote_ai_prepared_audio_runner,
-            pyannote_prepared_audio_runner,
-            nemo_prepared_audio_runner,
-        )
-    })
+    execute_request_v2(request, |request| run_speaker(py, request, loaded))
 }
 
+/// Execute one embedding request on `loaded`, the host the embedding load
+/// built (`LoadedSpeakerEmbedding` on the Python side).
 #[pyfunction]
-#[pyo3(signature = (request, pyannote_span_runner=None))]
 pub(crate) fn execute_speaker_embedding_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
-    pyannote_span_runner: Option<Py<PyAny>>,
+    loaded: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
     execute_request_v2(request, |request| {
-        run_speaker_embedding(py, request, pyannote_span_runner)
+        run_speaker_embedding(py, request, loaded)
     })
 }

@@ -1,7 +1,7 @@
 # Worker Failure Classification and Retry Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:21 EDT
+**Last updated:** 2026-11-05 22:14 EST
 
 This chapter is the canonical contributor reference for how a Python
 worker exception becomes, or does not become, an end-user error. It
@@ -200,13 +200,12 @@ request loops reach it through `batchalign_core.error_envelope`, which raises
 `ValueError` on any other spelling. Python types the argument as the
 `WorkerErrorKind` `Literal` in `batchalign/worker/_protocol.py`.
 
-A stdio worker that cannot load its models at startup writes one such line
-(uncorrelated) in place of its ready line and exits. The Rust ready reader
-(`read_ready_line`) turns it into the startup error
-(`ReportedFailure::into_startup_error`), so a download that failed while a
-worker started is retried like one that failed in `ensure_task`, where an
-unexplained exit before the ready line could only be a system failure. A
-TCP daemon has no reader on its stdout and still exits with its traceback.
+No worker loads a model at startup, so no model load can fail before the
+ready line: every load runs in `ensure_task`, whose failure is a correlated
+error line answering it (`ReportedFailure::into_ensure_task_error`). The
+ready reader accepts only progress lines before the ready signal; the
+startup error line, and its reader `into_startup_error`, were removed with
+startup loading.
 
 #### Why `kind` and not a separate `bootstrap_error` op?
 
@@ -369,11 +368,11 @@ Each variant has a documented retryability class.
 | Variant | Fires when | Retryable? |
 |---|---|---|
 | `SpawnFailed(String)` | The Python child process can't start (missing python, OS resource limits) | **Terminal**: same config will fail again |
-| `ReadyTimeout { timeout_s }` | Worker started but didn't emit ready signal in time | Retryable, transient stall |
+| `Stalled { waited_for: LoadingWait, stall }` | A worker loading models (at startup, `LoadingWait::Ready`, or in `ensure_task`) reported no progress that advanced for a whole stall window. A download that keeps growing by at least 1 MiB per window is never stalled, however long it runs | Retryable (`WorkerTimeout`); the worker is retired. At a job's worker probe (`probe_command_worker`) it is retried under the request `RetryPolicy`, not turned into a job failure at once |
 | `ReadyParseFailed(String)` | Worker emitted invalid ready signal | **Terminal**: version mismatch |
 | `HealthCheckFailed(String)` | Periodic health probe failed | Retryable, pool replaces worker |
 | `ProcessExited { code, stderr }` | Worker died unexpectedly mid-job | Retryable, but if deterministic, replacement will die too |
-| `Timeout { waited_for, limit }` | A wait on the worker ran past its limit: a reply (`WorkerWait` names which op), a model load or a TCP connection | Retryable (`WorkerTimeout`). A sequential worker is retired (its late reply could still arrive), and so is a spawned shared GPU worker (the thread serving the request may still hold one of its slots); a shared GPU daemon connection is kept (replies are routed by request id, and the daemon is not this server's to restart) |
+| `Timeout { waited_for, limit }` | A wait on the worker ran past its fixed limit: a reply (`WorkerWait` names which op) or a TCP connection. Model loads are not limited this way; see `Stalled` | Retryable (`WorkerTimeout`). A sequential worker is retired (its late reply could still arrive), and so is a spawned shared GPU worker (the thread serving the request may still hold one of its slots); a shared GPU daemon connection is kept (replies are routed by request id, and the daemon is not this server's to restart) |
 | `Protocol(String)` | IPC framing or response shape was wrong (on either worker path: a sequential reply that fails to decode, or a shared GPU `execute_v2` line the protocol refuses) | Terminal-for-this-request, protocol desync |
 | `WorkerResponse(String)` | Worker returned `{"op":"error", "kind":"runtime"}` | Retryable, per-request failure |
 | **`Bootstrap { message, worker }`** | Worker returned `{"op":"error", "kind":"bootstrap"}` (worker `Exits`), or an execute response coded `model_unavailable` or `unsupported_language` (worker `Serves`) | **Terminal**: deterministic |
@@ -465,7 +464,7 @@ A V2 execute response that reports failure carries a `ProtocolErrorCodeV2`.
 code to a server error, used by the ASR, speaker and forced-alignment adapters,
 and never reads the message. A `RuntimeFailure` is decided by where the
 request's model runs (`ModelLocality`, from the backend the request named by
-an exhaustive match): a local model (Whisper, Qwen, FunASR, pyannote, NeMo,
+an exhaustive match): a local model (Whisper, Qwen, FunASR, pyannote,
 every forced-alignment engine) retains `LocalRuntime`; a remote provider
 (Tencent, Aliyun, Rev.AI, pyannoteAI) retains `ProviderTransient`. Both may
 retry within the configured budget. Neither generic code establishes OOM or
@@ -547,9 +546,8 @@ sequenceDiagram
 `ReportedFailure` in `handle/protocol.rs` is the decoded `op=error` line
 (`WorkerResponse::Error(ReportedFailure)`), and its four methods are the only
 mapping from a reported failure to a `WorkerError`: `into_worker_error` for an
-admitted request, `into_ensure_task_error` for the model load,
-`into_startup_error` for a line written in place of the ready line, and
-`into_health_error` for a health probe. The sequential stdio and TCP handles
+admitted request, `into_ensure_task_error` for the model load (every model
+loads there), and `into_health_error` for a health probe. The sequential stdio and TCP handles
 share the one `WorkerResponse` envelope, and the shared GPU reader
 (`worker/pool/shared_gpu/reader.rs`) decodes the same `ReportedFailure`, so a
 shared GPU dispatch reaches the same category, and the same retry decision, as
@@ -562,11 +560,18 @@ replies on the two worker paths".
 is the on-demand model-loading IPC, so a failure during it is deterministic
 across retries even if the worker's `_classify_dispatch_exception` does not
 know the specific error type. The orchestrator does not retry it; if the
-cause was transient, the user can re-submit the job. The two kinds a later
-attempt can get past keep their meaning: `download` is `ModelDownload` and
-`out_of_memory` is `DeviceOutOfMemory`. Each carries the kind's
-`worker_after`, so the `runtime` case (the worker went on serving) returns
-the handle to its pool and the `download` case retires it.
+cause was transient, the user can re-submit the job. The kinds with their
+own meaning keep it: `download` is `ModelDownload` (retried on a fresh
+worker), `out_of_memory` is `DeviceOutOfMemory` (retried after a backoff),
+and `access_denied` is `ModelAccessDenied`, the same category a request
+refused a gated model gets: not retried, its message naming the repository
+and the remedy. The worker classifies a `ModelAccessDeniedError` raised by a
+load as `access_denied` (`_classify_dispatch_exception`). Each carries the
+kind's `worker_after`, so the `runtime` case (the worker went on serving)
+returns the handle to its pool and the `download` and `access_denied` cases
+retire it. Tests: `a_failed_load_keeps_its_classification`
+(`handle/protocol.rs`) and the real-`ensure_task` cases in
+`batchalign/tests/test_serve_stdio_bootstrap_error.py`.
 
 ## The user-facing message
 
@@ -618,45 +623,54 @@ with another, and an empty forced-alignment miss is unrepresentable, so the
 public category cannot be emitted for the successful "nothing to infer"
 state.
 
-## The retry loop
+## The retry loops
 
-Source: `crates/batchalign/src/infer_retry.rs`.
+Retries happen at two levels, each with one owner.
+
+**A worker operation** (one `execute_v2` dispatch, or a job's worker probe) is
+retried by `infer_retry::retry_worker_operation`
+(`crates/batchalign/src/infer_retry.rs`): each failure is classified
+(`classify_worker_error`), the default `RetryPolicy` decides, and the job's
+cancellation is raced against both the attempt and the backoff, so a
+cancelled job stops at once. It ends as `RetryEnd::Failed` or
+`RetryEnd::Cancelled`. Here `after_failure` answers `Stop(Final)` for
+`WorkerBootstrap`, and the error returns immediately.
+
+**A file** (audio commands, benchmark, media analysis) is retried as a
+typestate in `runner/util/file_status/attempts.rs`:
 
 ```rust,ignore
-for attempt_number in 1..=retry_policy.max_attempts {
-    match pool.dispatch_execute_v2_with_progress(lang, request, progress_tx).await {
-        Ok(response) => return Ok(response),
+let mut attempts = FileAttempts::begin(&lifecycle, kind, stage).await;
+loop {
+    match run_attempt().await {
+        Ok(output) => return written.record(&lifecycle).await.into(),
         Err(error) => {
-            let category = classify_worker_error(&error);
-            if let NextAttempt::RetryAfter(backoff_ms) =
-                retry_policy.after_failure(attempt_number, category)
-            {
-                warn!(
-                    task = ?request.task,
-                    lang = %lang,
-                    attempt_number,
-                    max_attempts = retry_policy.max_attempts,
-                    error = %error,
-                    category = %category,
-                    %backoff_ms,
-                    "Retrying execute_v2 after transient worker failure"
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms.0)).await;
-                continue;
-            }
-
-            return Err(ServerError::Worker(error));
+            attempts = match attempts.after_error(&error, category, message).await {
+                AfterFailure::Retry(grant) => grant.wait().await, // record, back off, restart
+                AfterFailure::Recorded(recorded) => return recorded.into(), // error written
+            };
         }
     }
 }
 ```
 
-Here `after_failure` answers `Stop(Final)` for `WorkerBootstrap`, and the
-function returns the error immediately.
+`failed` takes a transient failure and consumes the attempt; `fail` records a
+final one, which no type offers a retry; `after_error` states the file-level
+rule once (only a worker's failure is retried). A `RetryGrant` exists only
+when the policy allows another attempt, and `RetryGrant::wait` is the only way
+back to one: it records the retry (the file shows "...; retrying in N ms"),
+waits the backoff and opens the next attempt. Work that must run before a
+retry (the audio path's timing recovery) runs while the grant is held, and
+`RetryGrant::abandon` records a terminal failure instead. Every recording
+call on `FileRunTracker` (`fail`, `record_setup_failure`, the `complete_*`
+family) returns a `TerminalRecorded`, and `FileTaskOutcome::TerminalStateRecorded`
+carries one, so a task cannot report a terminal state it did not record; the
+"returned without a terminal state" outcome (`MissingTerminalState`) was
+deleted. The supervisor races the job's cancellation around the whole file
+task.
 
-Future enhancement (not yet landed): emit a `progress_v2` event before
-each retry sleep so the UI shows "Retrying after worker error
-(attempt 2/3)…". This is a clean fit with the
+A worker-operation retry inside a request is not yet shown to the user while
+it backs off; a `progress_v2` event before each retry sleep would fit the
 [time-transparency principle](time-transparency.md).
 
 ## Adding a new bootstrap-class error type

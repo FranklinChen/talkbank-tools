@@ -10,11 +10,42 @@ import pytest
 
 from batchalign.inference.languages.cantonese._funaudio_common import (
     FunAsrSegment,
+    FunAsrSnapshots,
     FunAudioRecognizer,
+    ParaformerSnapshots,
+    SenseVoiceSnapshots,
 )
+from batchalign.tests._snapshots import modelscope_snapshot, repository_snapshot
 from batchalign.worker._model_errors import ModelOutputInvalidError
+from batchalign.worker._types_v2 import PhaseEdgeV2, PhaseV2
 
 _S = FunAsrSegment
+
+SENSEVOICE = SenseVoiceSnapshots(
+    asr=repository_snapshot("org/sensevoice"),
+    vad=repository_snapshot("org/vad"),
+)
+PARAFORMER = ParaformerSnapshots(
+    asr=modelscope_snapshot("iic/paraformer"),
+    vad=modelscope_snapshot("iic/vad"),
+    punc=modelscope_snapshot("iic/punc"),
+)
+
+
+def recognizer(
+    model: object = None, lang: str = "yue", snapshots: FunAsrSnapshots = SENSEVOICE
+) -> FunAudioRecognizer:
+    """A recognizer around a stand-in model, as ``load`` would return one."""
+    return FunAudioRecognizer(
+        lang=lang, device="cpu", snapshots=snapshots, label="test", model=model
+    )
+
+
+def fake_funasr(monkeypatch, auto_model: type) -> None:
+    """Install ``auto_model`` as ``funasr.AutoModel`` for one test."""
+    module = types.ModuleType("funasr")
+    module.AutoModel = auto_model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "funasr", module)
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +94,7 @@ class TestFunAsrSegmentFromRaw:
 class TestTranscribe:
     @staticmethod
     def _make_recognizer(lang: str = "yue") -> FunAudioRecognizer:
-        return FunAudioRecognizer(lang=lang)
+        return recognizer(lang=lang)
 
     def test_cantonese_sensevoice_words_are_units(self) -> None:
         rec = self._make_recognizer("yue")
@@ -221,7 +252,7 @@ class TestProtocolSafety:
         with pytest.raises(ModelOutputInvalidError, match="text"):
             batchalign_core.funaudio_segments_to_asr([{}])
 
-    def test_get_model_reports_missing_dependency(self, monkeypatch) -> None:
+    def test_load_reports_missing_dependency(self, monkeypatch) -> None:
         original_import = builtins.__import__
 
         def fake_import(name, *args, **kwargs):
@@ -232,83 +263,66 @@ class TestProtocolSafety:
         monkeypatch.setattr(builtins, "__import__", fake_import)
 
         with pytest.raises(ImportError, match="funasr"):
-            FunAudioRecognizer(lang="yue")._get_model()
+            FunAudioRecognizer.load(SENSEVOICE, lang="yue", device="cpu", label="t")
 
-    def test_get_model_suppresses_funasr_stdout(self, monkeypatch, capsys) -> None:
-        # Verifies the ``redirect_stdout`` swallow around the
-        # FunASR AutoModel construction: funasr's version banner
-        # ("funasr version: ...") must not leak to the worker stdout
-        # because that channel carries the V2 protocol's JSON
-        # request/response stream. The recognizer's own
-        # ``progress_v2`` JSON events ARE expected on stdout (they
-        # ARE the protocol) and are filtered out below.
-        fake_module = types.ModuleType("funasr")
-
+    def test_load_suppresses_funasr_stdout(self, monkeypatch, capsys) -> None:
+        # FunASR's version banner must not reach the worker's stdout, which
+        # carries the protocol. The recognizer's own `progress_v2` events ARE
+        # protocol and are filtered out below.
         class FakeAutoModel:
             def __init__(self, **_kwargs) -> None:
                 print("funasr version: 1.3.1.")
 
-        fake_module.AutoModel = FakeAutoModel
-        monkeypatch.setitem(sys.modules, "funasr", fake_module)
+        fake_funasr(monkeypatch, FakeAutoModel)
 
-        rec = FunAudioRecognizer(lang="yue")
-        rec._get_model()
+        FunAudioRecognizer.load(SENSEVOICE, lang="yue", device="cpu", label="t")
 
-        captured = capsys.readouterr()
-        # Strip our own protocol events; what remains MUST be empty
-        # (no FunASR banner, no other framework noise).
         non_protocol_lines = [
             line
-            for line in captured.out.splitlines()
+            for line in capsys.readouterr().out.splitlines()
             if line.strip() and '"op": "progress_v2"' not in line
         ]
-        assert non_protocol_lines == [], (
-            f"unexpected non-protocol stdout from _get_model(): {non_protocol_lines}"
-        )
+        assert non_protocol_lines == []
 
-    def test_get_model_uses_paraformer_constructor(self, monkeypatch) -> None:
-        fake_module = types.ModuleType("funasr")
+    @pytest.mark.parametrize(
+        ("snapshots", "expected"),
+        [
+            (
+                SENSEVOICE,
+                {"model": SENSEVOICE.asr.path, "vad_model": SENSEVOICE.vad.path},
+            ),
+            (
+                PARAFORMER,
+                {
+                    "model": str(PARAFORMER.asr.path),
+                    "vad_model": str(PARAFORMER.vad.path),
+                    "punc_model": str(PARAFORMER.punc.path),
+                },
+            ),
+        ],
+    )
+    def test_load_builds_each_composition_from_local_paths_only(
+        self, monkeypatch, snapshots, expected
+    ) -> None:
+        """No model id and no revision reaches FunASR, so it has nothing to
+        resolve against a hub: the worker materialized every member first."""
         seen: dict[str, object] = {}
 
         class FakeAutoModel:
             def __init__(self, **kwargs) -> None:
                 seen.update(kwargs)
 
-        fake_module.AutoModel = FakeAutoModel
-        monkeypatch.setitem(sys.modules, "funasr", fake_module)
+        fake_funasr(monkeypatch, FakeAutoModel)
 
-        # The auxiliary models and their revisions come from the pinned plan
-        # now; they used to be five literals inside `_get_model`, which is how
-        # a model could move without anything recording that it had.
-        rec = FunAudioRecognizer(
-            lang="yue",
-            model="paraformer-zh",
-            device="cuda",
-            model_revision="v2.0.4",
-            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            vad_revision="v2.0.4",
-            punc_model="iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-            punc_revision="v2.0.4",
+        loaded = FunAudioRecognizer.load(
+            snapshots, lang="yue", device="cuda", label="t"
         )
-        rec._get_model()
 
-        assert seen["model"] == "paraformer-zh"
-        assert seen["model_revision"] == "v2.0.4"
-        assert seen["vad_model"] == "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-        assert seen["vad_model_revision"] == "v2.0.4"
-        assert (
-            seen["punc_model"]
-            == "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
-        )
-        assert seen["punc_model_revision"] == "v2.0.4"
-
-    def test_get_model_refuses_paraformer_without_its_auxiliary_models(self) -> None:
-        """The Paraformer branch needs its voice-activity and punctuation
-        models: loading with FunASR's own defaults would silently run models
-        nothing recorded."""
-        rec = FunAudioRecognizer(lang="yue", model="paraformer-zh")
-        with pytest.raises(ValueError, match="voice-activity and punctuation"):
-            rec._get_model()
+        assert {key: seen[key] for key in expected} == expected
+        assert seen["device"] == "cuda"
+        assert seen["disable_update"] is True
+        assert not {key for key in seen if key.endswith("revision")}
+        assert loaded.snapshots == snapshots
 
     def test_run_model_suppresses_generate_stdout(self, capsys) -> None:
         class FakeModel:
@@ -316,8 +330,7 @@ class TestProtocolSafety:
                 print("funasr version: 1.3.1.")
                 return [{"text": "<|zh|> 好", "timestamp": [[0, 100]]}]
 
-        rec = FunAudioRecognizer(lang="yue")
-        rec._model = FakeModel()
+        rec = recognizer(FakeModel())
 
         segments = rec._run_model("dummy.wav")
 
@@ -334,8 +347,8 @@ class TestProtocolSafety:
                 self.calls.append(kwargs)
                 return {"text": "好。", "raw_text": "好", "timestamp": [[0, 100]]}
 
-        rec = FunAudioRecognizer(lang="zho", model="paraformer-zh")
-        rec._model = fake_model = FakeModel()
+        fake_model = FakeModel()
+        rec = recognizer(fake_model, lang="zho", snapshots=PARAFORMER)
 
         segments = rec._run_model("dummy.wav")
 
@@ -351,102 +364,38 @@ class TestProtocolSafety:
             def generate(self, **_kwargs):
                 return output
 
-        rec = FunAudioRecognizer(lang="yue")
-        rec._model = FakeModel()
+        rec = recognizer(FakeModel())
 
         with pytest.raises(ModelOutputInvalidError, match="expected a dict"):
             rec._run_model("dummy.wav")
 
 
-class TestFunaudioDownloadEvents:
-    """Time-transparency: FunASR's first-use model load must emit
-    ``progress_v2`` download events so the daemon log / dashboard /
-    TUI show "Loading FunASR model…" instead of dead air during the
-    multi-minute first-time HuggingFace download.
+class TestFunaudioLoadEvents:
+    """Time-transparency: loading the FunASR model takes seconds even from
+    local disk, so ``load`` brackets it with a ``progress_v2`` pair.
 
-    Per AGENTS.md §11 (talkbank-tools/AGENTS.md), every operation that
-    takes more than ~1 second must surface to all UI channels via
-    ``emit_download_event``. FunASR's lazy ``_get_model()`` was an
-    observability gap: this test pins the start/complete event pair
-    on cache miss and the no-event behavior on cache hit.
+    The download itself is announced (with measured progress) where it
+    happens, when the worker materializes the snapshots; ``load`` reads only
+    local paths. The former lazy ``_get_model`` and its "second call emits
+    nothing" test are gone: a recognizer is always loaded, so there is no
+    second load to suppress.
     """
 
-    def test_first_get_model_emits_start_and_complete_events(self, monkeypatch) -> None:
-        import sys
-
-        from batchalign.inference.languages.cantonese._funaudio_common import (
-            FunAudioRecognizer,
-        )
-
-        # Fake ``funasr.AutoModel`` so the test does not actually
-        # download or load a ~1 GB model from HuggingFace.
-        class _FakeAutoModel:
-            def __init__(self, **_kwargs):
+    def test_load_emits_start_and_complete_events(self, monkeypatch) -> None:
+        class FakeAutoModel:
+            def __init__(self, **_kwargs) -> None:
                 pass
 
-        fake_funasr_mod = type(sys)("fake_funasr_mod")
-        fake_funasr_mod.AutoModel = _FakeAutoModel  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "funasr", fake_funasr_mod)
-
-        # Capture every ``emit_download_event`` call so the test can
-        # assert on stage names + ordering.
-        events: list[dict[str, str]] = []
-
-        def fake_emit(stage: str, user_message: str, **_kwargs) -> None:
-            events.append({"stage": stage, "user_message": user_message})
-
+        fake_funasr(monkeypatch, FakeAutoModel)
+        events: list[tuple[str, object]] = []
         monkeypatch.setattr(
-            "batchalign.worker._progress.emit_download_event", fake_emit
+            "batchalign.worker._progress.write_load_progress",
+            lambda stage, measure: events.append((stage, measure)),
         )
 
-        rec = FunAudioRecognizer(lang="yue")
-        rec._get_model()
+        FunAudioRecognizer.load(PARAFORMER, lang="zho", device="cpu", label="t")
 
-        assert len(events) == 2, (
-            f"first _get_model() must emit start+complete events; "
-            f"got {len(events)} event(s): {events}"
-        )
-        assert events[0]["stage"] == "downloading_funaudio_asr"
-        assert (
-            "FunASR" in events[0]["user_message"]
-            or "FunAudio" in events[0]["user_message"]
-        )
-        assert events[1]["stage"] == "downloading_funaudio_asr_complete"
-
-    def test_second_get_model_call_is_cache_hit_no_events(self, monkeypatch) -> None:
-        # Once the model is loaded, subsequent ``_get_model()`` calls
-        # MUST NOT re-emit the download events; they would mislead
-        # the user into thinking another download is happening.
-        import sys
-
-        from batchalign.inference.languages.cantonese._funaudio_common import (
-            FunAudioRecognizer,
-        )
-
-        class _FakeAutoModel:
-            def __init__(self, **_kwargs):
-                pass
-
-        fake_funasr_mod = type(sys)("fake_funasr_mod")
-        fake_funasr_mod.AutoModel = _FakeAutoModel  # type: ignore[attr-defined]
-        monkeypatch.setitem(sys.modules, "funasr", fake_funasr_mod)
-
-        events: list[dict[str, str]] = []
-
-        def fake_emit(stage: str, user_message: str, **_kwargs) -> None:
-            events.append({"stage": stage, "user_message": user_message})
-
-        monkeypatch.setattr(
-            "batchalign.worker._progress.emit_download_event", fake_emit
-        )
-
-        rec = FunAudioRecognizer(lang="yue")
-        rec._get_model()  # First call: 2 events.
-        events.clear()
-        rec._get_model()  # Second call: cache hit, 0 events.
-        rec._get_model()  # Third call: same.
-
-        assert events == [], (
-            f"subsequent _get_model() calls must hit cache without "
-            f"emitting download events; got {events}"
-        )
+        assert events == [
+            ("loading_funaudio_asr", PhaseV2(edge=PhaseEdgeV2.BEGIN)),
+            ("loading_funaudio_asr", PhaseV2(edge=PhaseEdgeV2.COMPLETE)),
+        ]

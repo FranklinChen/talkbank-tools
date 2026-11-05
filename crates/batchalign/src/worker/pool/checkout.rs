@@ -172,7 +172,7 @@ impl Drop for CheckedOutWorker {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::atomic::Ordering;
 
     use tokio::sync::Semaphore;
@@ -191,7 +191,7 @@ mod tests {
     /// A minimal, well-formed `ready` line, the same shape
     /// `worker::handle::lifecycle`'s own tests use, PID hardcoded since
     /// nothing here asserts on it.
-    fn ready_line() -> String {
+    pub(in crate::worker::pool) fn ready_line() -> String {
         format!(
             concat!(
                 "{{\"ready\":true,\"pid\":424242,\"transport\":\"stdio\",\"runtime\":{{",
@@ -213,7 +213,7 @@ mod tests {
     /// write therefore always succeeds (the OS pipe buffer absorbs the
     /// small request) while its read never completes, exactly the shape
     /// of a real dispatch cancelled mid-attempt.
-    fn never_responds_script() -> String {
+    pub(in crate::worker::pool) fn never_responds_script() -> String {
         let escaped = ready_line().replace('\'', "'\\''");
         format!("printf '{escaped}'; sleep 300")
     }
@@ -270,8 +270,24 @@ mod tests {
         let mut worker = CheckedOutWorker::from_idle(&group, handle);
 
         let request = minimal_asr_request();
+        // A stub that never answers cannot complete `ensure_task`; the proof
+        // is recorded from an admitted load directly, as the transport
+        // records a confirmed one.
+        let (_ledger, admission) = super::super::task_load::tests::test_admission();
+        let admitted = admission
+            .admit(
+                &super::super::TaskLoad::for_request(&request),
+                crate::worker::WorkerPid(std::process::id()),
+            )
+            .await
+            .expect("the load fits the declared host");
+        let loaded = super::super::TaskLoads::default().record(admitted.confirm().await);
+        let permit = loaded
+            .run(super::super::task_load::tests::ready(&request), &admission)
+            .await
+            .expect("the request is its load's own");
         {
-            let mut attempt = Box::pin(worker.execute_v2_with_progress(&request, None));
+            let mut attempt = Box::pin(worker.execute_v2_with_progress(&permit, None));
             // Deterministic gate, not a sleep-based race: a single `poll`
             // either returns the attempt's outcome or `Pending`. The stub
             // never responds, so `Pending` here means the write already

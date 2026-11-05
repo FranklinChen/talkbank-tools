@@ -1,8 +1,8 @@
 """Aliyun NLS ASR provider for built-in HK/Cantonese engines.
 
-New-style provider: a ``load`` function (validates credentials, stores
-module-level state) and an ``infer`` function (processes a batch of ASR
-items).  No engine class.
+The ASR load validates the credentials and builds an :class:`AliyunAsr`, which
+the worker's load registry records; a request transcribes through that object,
+which also caches the account's NLS token. Nothing is held at module level.
 
 Aliyun NLS is **Cantonese-only** (``lang="yue"``).
 """
@@ -26,17 +26,8 @@ from batchalign.inference.asr import (
     AsrBatchItem,
     MonologueAsrResponse,
 )
-from batchalign.worker._types import (
-    BatchInferRequest,
-    BatchInferResponse,
-)
 
-from ._common import (
-    EngineOverrides,
-    ProviderNotLoaded,
-    answer_asr_batch,
-    read_asr_config,
-)
+from ._common import EngineOverrides, read_asr_config
 
 L = logging.getLogger("batchalign.hk.aliyun")
 
@@ -84,18 +75,8 @@ class AliyunSentenceResult:
     sentence_text: str
 
 
-# ---------------------------------------------------------------------------
-# Module-level state (populated by load_aliyun_asr)
-# ---------------------------------------------------------------------------
-
-_ak_id: str = ""
-_ak_secret: str = ""
-_appkey: str = ""
-
-# Cached Aliyun NLS token (valid for 24 hours)
-_cached_token: str = ""
-_cached_token_time: float = 0.0
-_TOKEN_TTL_S: float = 23 * 3600  # refresh after 23 hours (1 hour safety margin)
+# An Aliyun NLS token is valid for 24 hours; refresh after 23 (an hour's margin).
+_TOKEN_TTL_S: float = 23 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +177,20 @@ class _AliyunRunner:
 # ---------------------------------------------------------------------------
 
 
-def _get_token(ak_id: str, ak_secret: str) -> str:
-    """Return a cached Aliyun NLS token, refreshing if expired (24h validity)."""
-    global _cached_token, _cached_token_time
+@dataclass(frozen=True, slots=True)
+class _NlsToken:
+    """One Aliyun NLS token and the monotonic time it was issued."""
 
-    now = time.monotonic()
-    if _cached_token and (now - _cached_token_time) < _TOKEN_TTL_S:
-        return _cached_token
+    token: str
+    issued_at: float
 
+    def fresh(self, now: float) -> bool:
+        """Whether the token is still inside its refresh window at ``now``."""
+        return now - self.issued_at < _TOKEN_TTL_S
+
+
+def _request_token(ak_id: str, ak_secret: str) -> str:
+    """Ask Aliyun for a new NLS token with the account's access key."""
     try:
         from aliyunsdkcore.client import AcsClient
         from aliyunsdkcore.request import CommonRequest
@@ -227,9 +214,6 @@ def _get_token(ak_id: str, ak_secret: str) -> str:
     token = payload.get("Token", {}).get("Id")
     if not isinstance(token, str) or not token:
         raise RuntimeError("Aliyun token request did not return Token.Id")
-
-    _cached_token = token
-    _cached_token_time = now
     L.info("Aliyun NLS token refreshed")
     return token
 
@@ -259,19 +243,60 @@ def _ensure_wav(
 # ---------------------------------------------------------------------------
 
 
+class AliyunAsr:
+    """The Aliyun account one ASR load admitted, and its cached NLS token.
+
+    Not frozen: the token is refreshed in place once its window passes. Two
+    requests racing on an expired token each fetch one, and the later write
+    wins; both tokens are valid, so nothing is lost.
+    """
+
+    __slots__ = ("_ak_id", "_ak_secret", "_appkey", "_token")
+
+    def __init__(self, *, ak_id: str, ak_secret: str, appkey: str) -> None:
+        self._ak_id = ak_id
+        self._ak_secret = ak_secret
+        self._appkey = appkey
+        self._token: _NlsToken | None = None
+
+    def _current_token(self) -> str:
+        """A token inside its refresh window, fetched when there is none."""
+        now = time.monotonic()
+        match self._token:
+            case _NlsToken() as cached if cached.fresh(now):
+                return cached.token
+            case _:
+                token = _request_token(self._ak_id, self._ak_secret)
+                self._token = _NlsToken(token=token, issued_at=now)
+                return token
+
+    def transcribe(self, item: AsrBatchItem) -> MonologueAsrResponse:
+        """Run Aliyun websocket ASR on one item's audio and return monologues."""
+        return self._transcribe_path(item.audio_path)
+
+    def _transcribe_path(self, audio_path: AudioPath) -> MonologueAsrResponse:
+        token = self._current_token()
+        wav_path, temp_dir = _ensure_wav(audio_path)
+        try:
+            runner = _AliyunRunner(token=token, appkey=self._appkey, wav_path=wav_path)
+            results = runner.start()
+        finally:
+            if temp_dir is not None:
+                temp_dir.cleanup()
+        return _project_results(results)
+
+
 def load_aliyun_asr(
     lang: LanguageCode,
     engine_overrides: EngineOverrides | None,
     *,
     config: configparser.ConfigParser | None = None,
-) -> None:
-    """Validate Aliyun credentials and store them in module-level state.
+) -> AliyunAsr:
+    """Validate Aliyun credentials and build the provider one ASR load records.
 
     Aliyun NLS is Cantonese-only.  Raises ``ValueError`` if ``lang != "yue"``.
     Raises ``ConfigError`` if credentials are missing from ``~/.batchalign.ini``.
     """
-    global _ak_id, _ak_secret, _appkey
-
     if lang != "yue":
         raise ValueError(
             "Aliyun ASR currently supports lang='yue' (Cantonese) only, "
@@ -288,30 +313,18 @@ def load_aliyun_asr(
         config=config,
     )
 
-    _ak_id = creds["engine.aliyun.ak_id"]
-    _ak_secret = creds["engine.aliyun.ak_secret"]
-    _appkey = creds["engine.aliyun.ak_appkey"]
-    L.info("Aliyun ASR credentials loaded (appkey=%s...)", _appkey[:4])
+    appkey = creds["engine.aliyun.ak_appkey"]
+    L.info("Aliyun ASR credentials loaded (appkey=%s...)", appkey[:4])
+    return AliyunAsr(
+        ak_id=creds["engine.aliyun.ak_id"],
+        ak_secret=creds["engine.aliyun.ak_secret"],
+        appkey=appkey,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Provider infer function
 # ---------------------------------------------------------------------------
-
-
-def _transcribe_to_monologues(audio_path: AudioPath) -> MonologueAsrResponse:
-    """Run Aliyun websocket ASR on a single audio file and return monologues."""
-    token = _get_token(_ak_id, _ak_secret)
-    wav_path, temp_dir = _ensure_wav(audio_path)
-
-    try:
-        runner = _AliyunRunner(token=token, appkey=_appkey, wav_path=wav_path)
-        results = runner.start()
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
-
-    return _project_results(results)
 
 
 def _project_results(results: list[AliyunSentenceResult]) -> MonologueAsrResponse:
@@ -344,31 +357,4 @@ def _project_results(results: list[AliyunSentenceResult]) -> MonologueAsrRespons
     )
 
 
-def infer_aliyun_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:
-    """Run one typed Aliyun ASR request for worker protocol V2.
-
-    Aliyun still requires the websocket transport implemented in Python, but
-    the live V2 worker path should call that transport directly instead of
-    wrapping a single item in the batch-infer request shape.
-    """
-
-    return _transcribe_to_monologues(item.audio_path)
-
-
-def _transcribe_item(item: AsrBatchItem) -> MonologueAsrResponse:
-    """Transcribe one batch item's audio."""
-    return _transcribe_to_monologues(item.audio_path)
-
-
-def infer_aliyun_asr(req: BatchInferRequest) -> BatchInferResponse:
-    """Process a batch of ASR items via Aliyun NLS.
-
-    Each item is an :class:`AsrBatchItem`. Returns a tagged monologue
-    payload per item so Rust can own normalization and postprocessing.
-    """
-    transcribe = (
-        ProviderNotLoaded("Aliyun ASR provider not loaded: call load_aliyun_asr first")
-        if not _ak_id
-        else _transcribe_item
-    )
-    return answer_asr_batch("aliyun_asr", req.items, transcribe)
+__all__ = ["AliyunAsr", "load_aliyun_asr"]

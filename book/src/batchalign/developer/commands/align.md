@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:37 EST
+**Last updated:** 2026-11-05 14:17 EST
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -169,8 +169,7 @@ skip every media-access check. See the authoritative
 this became a transition on the typed proof
 (`PostValidated::with_provenance_injected`), the dispatch seam stamped that
 comment onto NoAlign and dummy documents too, so the sentence above was false by
-one line. A pass-through is now returned untouched by both the provenance stamp
-and the abbreviation merge.
+one line. A pass-through is now returned untouched by the provenance stamp.
 
 ---
 
@@ -246,7 +245,9 @@ FA group keys are BLAKE3 hashes over:
 The cache backend namespaces that key by task (`forced_alignment`) and the FA
 engine the worker keyed by the file's declared language reported, admitted at
 the per-language capability gate (`FaWorkerAdmission`, once per language per
-job) and carried as `FaCacheNamespace` byte for byte, so evidence cached by
+job, one memo cell per language so a language's probe, which may include a
+first model download, never holds up another language's files) and carried as
+`FaCacheNamespace` byte for byte, so evidence cached by
 earlier builds stays admissible. A worker that supports FA but names no engine
 cannot align: every file of that language fails naming the task rather than
 inventing a namespace.
@@ -553,7 +554,7 @@ files with `+<` or CA overlap markers) was **disabled 2026-03-30** due to:
 - `--utr-strategy two-pass` → `TwoPassOverlapUtr` (experimental; overlap-aware,
   gated until its segmentation and downstream overlap policy are validated)
 
-When both `total_audio_ms` and `max_group_ms` are available, a `GroupingContext` is
+When both the recording and `FaAggregationTarget` are available, a `GroupingContext` is
 passed to `TwoPassOverlapUtr` so it can detect and avoid the wider-window regression
 on non-English files. This is only consulted on explicit `--utr-strategy two-pass`;
 `Auto` does not reach this code path.
@@ -572,40 +573,28 @@ See [Incremental Processing](../../architecture/incremental-processing.md).
 
 ---
 
-## FA grouping constraints
+## FA grouping preferences and resource admission
 
-`group_utterances()` enforces two independent split constraints. A group is
-flushed when either is exceeded by adding the next utterance:
+`group_utterances()` proposes source-bound requests. Its positive
+`FaAggregationTarget` comes from the selected engine's row. It bounds joins and
+trailing padding; an individual utterance above it remains one unchanged,
+unpadded candidate. The target cannot authorize a model refusal. The historical
+values are retained as aggregation preferences, with no claim that they were
+measured model capacities.
 
-- **Time window**: not an option at all. It comes from the run's FA engine
-  (`FaParams::max_group_ms()` reads `FaEngineName::max_group_ms()`, which is the
-  `max_group` field of that engine's row in `FA_ENGINES`), so it differs between
-  engines and no caller can set it independently of the engine it belongs to
-- **Label-byte cap**: `MAX_GROUP_LABEL_BYTES = 448` (constant in
-  `grouping.rs`, counted through the `LabelBytes` newtype). Whisper's CTC FA
-  refuses more than 448 label TOKENS and raises a hard Python `ValueError`. The
-  budget is counted in UTF-8 BYTES because every token covers at least one
-  byte, so a byte count bounds the token count from above; a character count
-  does not, and would loosen the cap on non-Latin script. The cap applies to
-  every engine's groups, since grouping is not told which engine will align
-  them. Dense languages (Spanish, any long-word corpus) can hit it inside a
-  normal time window.
+The 448-byte `LabelBytes` rule is also a merge preference. It neither discards
+nor arbitrarily cuts a single utterance. Actual model labels are produced by
+that loaded backend's tokenizer/shaping operation and checked against its own
+configuration. UTF-8 bytes are not an admission proof for tokenizer labels.
 
-The cap is consulted only where two utterances are MERGED, so it bounds merges
-rather than every group: the flush guard is skipped when the current group is
-empty, and one utterance whose own labels exceed 448 bytes is sent as its own
-group, unsplit (fail gracefully rather than drop silently).
+Loaded-model preparation, input binding and a host-memory lease govern execution.
+See [FA preparation and adaptive admission](../adaptive-fa-admission.md) for
+implemented typestates, backend derivations, diagrams and the remaining adaptive
+partition integration. Source-bound anchor/context and partial-partition tests
+remain controls; passing them alone does not establish that the production
+resource planner is connected. Cache keys must be frozen only after final
+request geometry is known.
 
-The time window is also the budget for ONE utterance. An utterance whose own
-window exceeds it is split at the words utterance timing recovery heard into
-pieces that each fit (one group, one request per piece), or refused as
-`anchor_gap` (anchors farther apart than the budget: needs review),
-`anchors_unusable` (recovery matched the utterance but gave no usable cut, with
-a closed cause) or `over_budget` (recovery has nothing to say about it). See [Forced Alignment: Over-budget
-utterances](../../reference/forced-alignment.md#over-budget-utterances-anchored-splitting).
-
-See [Forced Alignment: FA grouping strategy](../../reference/forced-alignment.md#fa-grouping-strategy)
-for the full rationale, flowchart, and edge cases.
 
 ---
 
@@ -768,11 +757,13 @@ and compare word identities and endpoints, including partial and omitted tiers.
 
 Output admission also retains `DurableFaTimingCensus` in its alignment
 judgement: utterance/speaker order, lexical units, off-record status, main
-bullets and exact `%wor` labels/intervals. Provenance and abbreviation
-transitions re-run that same judgement. A later transform that changes this
-projection is refused rather than publishing an obsolete completion account.
-In particular, post-FA abbreviation collapsing cannot silently invalidate word
-counts or dependent timing, even if ordinary construction checking accepts it.
+bullets and exact `%wor` labels/intervals. The provenance transition re-runs
+that same judgement. A later transform that changes this projection is refused
+rather than publishing an obsolete completion account, so no post-FA edit can
+silently invalidate word counts or dependent timing, even if ordinary
+construction checking accepts it. (This is why `align` no longer has
+`--merge-abbrev`: collapsing letters after alignment changed the admitted
+words, and every file it changed was refused.)
 
 Every FA path builds a draft, `FaResult<ChatFile>`, and hands it to
 `FaAdmission::finish`, which takes it through Chatter's

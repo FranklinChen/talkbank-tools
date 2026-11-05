@@ -93,7 +93,7 @@ impl TagMarker {
     /// The `%mor` item written for this marker: the ONE place its spelling
     /// lives.
     ///
-    /// PENDING O5a (Franklin's open decision): today the marker is written as
+    /// PENDING O5a (the maintainer's open decision): today the marker is written as
     /// `punct|‡` and `punct|„`, and in Japanese as `cm|‡` and `cm|„`, which is
     /// exactly what the generic word path produced for a `PUNCT` token before
     /// this type existed (the Japanese branch writes every `PUNCT` token's

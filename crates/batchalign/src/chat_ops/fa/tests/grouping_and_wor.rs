@@ -8,6 +8,52 @@ use talkbank_model::UtteranceIdx;
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
 
+#[test]
+fn merged_candidate_retains_each_source_window_and_its_words_before_padding() {
+    let chat = parse_chat(include_str!(
+        "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
+    ));
+    let grouped = group_utterances(
+        &chat,
+        crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+        &test_recording(20_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(grouped.groups.len(), 1);
+    let group = &grouped.groups[0];
+    assert_eq!(group.audio_end_ms(), 11_500, "only the candidate is padded");
+    let GroupSpan::Single(single) = group.span() else {
+        panic!("two source utterances form one candidate");
+    };
+    let retained: Vec<_> = single
+        .source_utterances()
+        .map(|source| {
+            (
+                source.utterance(),
+                source.window().audio_start().get(),
+                source.window().end().get(),
+                source
+                    .words()
+                    .iter()
+                    .map(|word| word.text.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        retained,
+        vec![
+            (UtteranceIdx::new(0), 0, 5_000, vec!["hello", "world"]),
+            (
+                UtteranceIdx::new(1),
+                5_000,
+                10_000,
+                vec!["I", "want", "cookie"]
+            ),
+        ]
+    );
+}
+
 /// A recording of a stated length, for grouping tests.
 ///
 /// These call sites used to pass `Option<u64>`, and several passed `None`. That
@@ -23,7 +69,7 @@ fn test_group_utterances_single_group() {
     // The recording is the one the fixture describes: its last bullet ends at
     // 10 s, so there is no trailing gap to extend into and the group ends
     // exactly there.
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         20000,
         &test_recording(10_000),
@@ -59,7 +105,7 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
         .unwrap()
         .timing
         .start_ms;
-    let grouped = group_utterances(
+    let grouped = group_with_declared_window_limit(
         &chat,
         15_000,
         &test_recording(4_000_000),
@@ -109,12 +155,40 @@ fn group_window_budget_refuses_one_oversized_utterance_without_losing_the_next()
     );
 }
 
+/// A grouping preference must not masquerade as a model input constraint.
+/// The complete, supplied window is the request candidate; execution must
+/// admit its actual resource demand before it can reach the model.
+#[test]
+fn supplied_long_utterance_reaches_alignment_as_one_unchanged_request() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+         @ID:\teng|test|CHI|||||Child|||\n\
+         *CHI:\twe saw a bird .\x15100_20100\x15\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(20_100),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(
+        grouped.groups.len(),
+        1,
+        "a supplied 20-second utterance must reach resource admission, not be discarded by a grouping target"
+    );
+    let group = &grouped.groups[0];
+    assert_eq!(group.word_count(), 4);
+    assert_eq!(group.audio_start_ms(), 100);
+    assert_eq!(group.audio_end_ms(), 20_100);
+    assert!(grouped.decisions.is_empty());
+}
+
 #[test]
 fn group_window_budget_includes_trailing_padding() {
     let chat = parse_chat(include_str!(
         "../../../../../../test-fixtures/fa_two_timed_utterances.cha"
     ));
-    let grouped = group_utterances(
+    let grouped = group_with_declared_window_limit(
         &chat,
         10_000,
         &test_recording(20_000),
@@ -149,7 +223,7 @@ fn group_window_budget_preserves_the_extent_of_overlapping_utterances() {
         .unwrap()
         .timing
         .end_ms = 6_000;
-    let grouped = group_utterances(
+    let grouped = group_with_declared_window_limit(
         &chat,
         10_000,
         &test_recording(10_000),
@@ -216,7 +290,7 @@ fn test_wor_policy_retraced_spoken_tokens_match_between_fa_extraction_and_wor_ge
 fn test_group_utterances_backwards_bullets() {
     let input = include_str!("../../../../../../test-fixtures/fa_backwards_bullets.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         20000,
         &test_recording(600_000),
@@ -232,7 +306,7 @@ fn test_group_utterances_backwards_bullets() {
 fn test_group_utterances_splits_on_time() {
     let input = include_str!("../../../../../../test-fixtures/fa_split_on_time.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         20000,
         &test_recording(600_000),
@@ -287,7 +361,7 @@ fn test_group_utterances_splits_on_label_byte_cap() {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{fifty_words} .\x15100_5000\x15\n*CHI:\t{fifty_words} .\x155000_10000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         60_000,
         &test_recording(10_000),
@@ -338,7 +412,7 @@ fn test_group_utterances_splits_non_latin_conservatively_by_bytes() {
         "@UTF8\n@Begin\n@Languages:\thin\n@Participants:\tCHI Child\n@ID:\thin|test|CHI|||||Child|||\n*CHI:\t{thirty_words} .\x15100_5000\x15\n*CHI:\t{thirty_words} .\x155000_10000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         60_000,
         &test_recording(10_000),
@@ -388,7 +462,7 @@ fn test_group_utterances_does_not_split_one_oversized_utterance() {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|test|CHI|||||Child|||\n*CHI:\t{hundred_words} .\x15100_5000\x15\n@End\n"
     );
     let chat = parse_chat(&chat_text);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         60_000,
         &test_recording(10_000),
@@ -413,7 +487,7 @@ fn test_group_utterances_does_not_split_one_oversized_utterance() {
 fn test_group_utterances_requests_only_localized_words() {
     let input = include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         20000,
         &test_recording(10_000),
@@ -537,7 +611,7 @@ fn test_group_utterances_does_not_interpolate_missing_localization() {
     let input =
         include_str!("../../../../../../test-fixtures/fa_mixed_timed_untimed_interleaved.cha");
     let chat = parse_chat(input);
-    let groups = group_utterances(
+    let groups = group_with_declared_window_limit(
         &chat,
         20000,
         &test_recording(50000),

@@ -39,12 +39,18 @@
 //! - **The caller's.** A cancelled job drops its supervised file task, and
 //!   with it this future; nothing here needs a token of its own.
 //! - **Observability in progress.** A file task that installs a
-//!   [`CheckoutWaitObserver`] (the audio-file shell does, for every attempt)
+//!   [`PoolWaitObserver`] (the audio-file shell does, for every attempt)
 //!   is told when one of its checkouts starts and stops waiting, and shows
 //!   "waiting for a worker" while it does. The observer is carried by a task
 //!   local, as the job id for cancel-driven worker shutdown already is
 //!   (`job_tracker::CURRENT_JOB_ID`), so no dispatch signature between the
 //!   file task and the pool changes.
+//!
+//! The same observer hears the pool's other congestion wait: a worker
+//! startup or a model load queued for host memory
+//! (`HostMemoryCoordinator::queue_for_lease`), told through
+//! [`MemoryWaitObserver`], which the file shows as "waiting for host
+//! memory". That wait reports itself to the log on its own schedule.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -54,44 +60,143 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::api::{PositiveSeconds, WorkerLanguage};
+use crate::store::PoolWait;
 use crate::worker::WorkerTarget;
 use crate::worker::error::WorkerError;
 
 use super::WorkerKey;
 
-/// Told when a checkout under this task starts and stops waiting for a
-/// saturated pool. Implemented by the runner, which owns file progress.
-pub(crate) trait CheckoutWaitObserver: Send + Sync {
-    /// A checkout began waiting for a worker for `target` / `lang`.
-    fn waiting(&self, target: &WorkerTarget, lang: &WorkerLanguage);
-    /// That checkout stopped waiting: it got a worker, failed, or was dropped.
-    fn resumed(&self);
+/// Told when pool work under this task starts and stops waiting, and for
+/// what: a saturated pool, or host memory. Implemented by the runner, which
+/// owns file progress.
+pub(crate) trait PoolWaitObserver: Send + Sync {
+    /// A wait for `wait` began.
+    fn waiting(&self, wait: PoolWait);
+    /// That wait ended: it was served, failed, or was dropped.
+    fn resumed(&self, wait: PoolWait);
+    /// One scoped model preparation started, advanced, or ended.
+    fn model_load(&self, change: crate::store::ModelLoadChange);
 }
 
 tokio::task_local! {
-    /// The observer of the file task this checkout runs under, if any.
-    static CHECKOUT_WAIT_OBSERVER: Arc<dyn CheckoutWaitObserver>;
+    /// The observer of the file task this work runs under, if any.
+    static POOL_WAIT_OBSERVER: Observation;
 }
 
-/// Run `work` with `observer` told about every saturated checkout inside it.
+/// Run `work` with `observer` told about every pool wait inside it.
 ///
-/// Like every task local, it does not cross a `tokio::spawn`: a checkout in a
-/// spawned task waits unobserved, which loses the progress label and nothing
-/// else.
-pub(crate) async fn observing_checkout_waits<F: Future>(
-    observer: Arc<dyn CheckoutWaitObserver>,
+/// Worker startup captures this observation before moving to the pool's
+/// runtime, then reinstalls it for the lifetime of that startup.
+pub(crate) async fn observing_pool_waits<F: Future>(
+    observer: Arc<dyn PoolWaitObserver>,
     work: F,
 ) -> F::Output {
-    CHECKOUT_WAIT_OBSERVER.scope(observer, work).await
+    Observation::Reported(observer).scope(work).await
 }
 
-/// Whether this wait is being shown to a file's progress.
-enum Observation {
-    /// The task has an observer; it was told the wait began and is told when
-    /// it ends, by `Drop`, whichever way the wait ends.
-    Reported(Arc<dyn CheckoutWaitObserver>),
-    /// No file task observes this checkout (a health probe, a spawned task).
+/// Whether a wait is being shown to a file's progress.
+#[derive(Clone)]
+pub(crate) enum Observation {
+    /// The task has an observer; it is told when the wait begins and when it
+    /// ends.
+    Reported(Arc<dyn PoolWaitObserver>),
+    /// No file task observes this work (a health probe or background upkeep).
     Unobserved,
+}
+
+impl Observation {
+    /// The observer of the task this runs in, if any.
+    pub(crate) fn current() -> Self {
+        match POOL_WAIT_OBSERVER.try_with(Clone::clone) {
+            Ok(observation) => observation,
+            Err(_) => Self::Unobserved,
+        }
+    }
+
+    /// Carry an observation over a task boundary without binding the child
+    /// process to the caller's runtime.
+    pub(crate) async fn scope<F: Future>(self, work: F) -> F::Output {
+        POOL_WAIT_OBSERVER.scope(self, work).await
+    }
+
+    fn report(&self, report: impl FnOnce(&dyn PoolWaitObserver)) {
+        match self {
+            Self::Reported(observer) => report(observer.as_ref()),
+            Self::Unobserved => {}
+        }
+    }
+
+    fn model_load(&self, change: crate::store::ModelLoadChange) {
+        self.report(|observer| observer.model_load(change));
+    }
+
+    fn waiting(&self, wait: PoolWait) {
+        self.report(|observer| observer.waiting(wait));
+    }
+
+    fn resumed(&self, wait: PoolWait) {
+        self.report(|observer| observer.resumed(wait));
+    }
+}
+
+/// Owns the visible lifetime of a loading operation. Dropping the operation,
+/// including on cancellation or refusal, closes its observation. Request
+/// progress cannot be passed to this port.
+pub(crate) struct ObservedModelLoad(Observation);
+
+impl ObservedModelLoad {
+    pub(crate) fn begin() -> Self {
+        let observation = Observation::current();
+        observation.model_load(crate::store::ModelLoadChange::Started);
+        Self(observation)
+    }
+
+    pub(crate) fn for_wait(wait: &crate::worker::ResponseWait) -> Option<Self> {
+        match wait {
+            crate::worker::ResponseWait::Loading { .. } => Some(Self::begin()),
+            crate::worker::ResponseWait::Budget { .. } => None,
+        }
+    }
+
+    pub(crate) fn report(&self, event: &crate::types::worker_v2::LoadProgressV2) {
+        use crate::store::{ModelLoadChange, ModelLoadProgress};
+        use crate::types::worker_v2::LoadMeasureV2;
+        let progress = match event.measure {
+            LoadMeasureV2::DownloadGrowth { grown_kib } => {
+                ModelLoadProgress::Downloading { grown_kib }
+            }
+            LoadMeasureV2::Phase { .. } => ModelLoadProgress::Preparing,
+        };
+        self.0.model_load(ModelLoadChange::Advanced(progress));
+    }
+}
+
+impl Drop for ObservedModelLoad {
+    fn drop(&mut self) {
+        self.0.model_load(crate::store::ModelLoadChange::Ended);
+    }
+}
+
+/// A queued host-memory wait's observer: the file task it runs under, told
+/// the wait is for host memory. Built where the wait begins, inside the
+/// task, so the task local is read there.
+pub(crate) struct MemoryWaitObserver(Observation);
+
+impl MemoryWaitObserver {
+    /// The observer of the task this runs in.
+    pub(crate) fn current() -> Self {
+        Self(Observation::current())
+    }
+}
+
+impl crate::host_memory::QueuedLeaseObserver for MemoryWaitObserver {
+    fn queued(&self) {
+        self.0.waiting(PoolWait::HostMemory);
+    }
+
+    fn dequeued(&self) {
+        self.0.resumed(PoolWait::HostMemory);
+    }
 }
 
 /// How one park on a saturated pool ended.
@@ -157,13 +262,8 @@ impl SaturatedWait {
         lang: &WorkerLanguage,
         interval: PositiveSeconds,
     ) -> Self {
-        let observation = match CHECKOUT_WAIT_OBSERVER.try_with(Arc::clone) {
-            Ok(observer) => {
-                observer.waiting(target, lang);
-                Observation::Reported(observer)
-            }
-            Err(_) => Observation::Unobserved,
-        };
+        let observation = Observation::current();
+        observation.waiting(PoolWait::Worker);
         Self {
             target: *target,
             lang: lang.clone(),
@@ -235,10 +335,7 @@ impl SaturatedWait {
 
 impl Drop for SaturatedWait {
     fn drop(&mut self) {
-        match &self.observation {
-            Observation::Reported(observer) => observer.resumed(),
-            Observation::Unobserved => {}
-        }
+        self.observation.resumed(PoolWait::Worker);
     }
 }
 
@@ -252,7 +349,7 @@ pub(super) struct GroupCounts {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
@@ -261,14 +358,25 @@ mod tests {
     #[derive(Default)]
     pub(crate) struct RecordingObserver {
         pub(crate) events: Mutex<Vec<&'static str>>,
+        pub(crate) loads: Mutex<Vec<crate::store::ModelLoadChange>>,
     }
 
-    impl CheckoutWaitObserver for RecordingObserver {
-        fn waiting(&self, _target: &WorkerTarget, _lang: &WorkerLanguage) {
-            self.events.lock().unwrap().push("waiting");
+    impl PoolWaitObserver for RecordingObserver {
+        fn model_load(&self, change: crate::store::ModelLoadChange) {
+            self.loads.lock().unwrap().push(change);
         }
-        fn resumed(&self) {
-            self.events.lock().unwrap().push("resumed");
+
+        fn waiting(&self, wait: PoolWait) {
+            self.events.lock().unwrap().push(match wait {
+                PoolWait::Worker => "waiting",
+                PoolWait::HostMemory => "waiting_memory",
+            });
+        }
+        fn resumed(&self, wait: PoolWait) {
+            self.events.lock().unwrap().push(match wait {
+                PoolWait::Worker => "resumed",
+                PoolWait::HostMemory => "resumed_memory",
+            });
         }
     }
 
@@ -279,6 +387,81 @@ mod tests {
         )
     }
 
+    /// An owned child receives the observation on its runtime, including
+    /// memory waits, and closes its progress before releasing the publisher.
+    #[tokio::test]
+    async fn model_loading_progress_crosses_an_owned_spawn() {
+        use crate::store::ModelLoadChange;
+        let observer = Arc::new(RecordingObserver::default());
+        let weak = Arc::downgrade(&observer);
+        let observed = weak.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (child,) = observing_pool_waits(observer, async move {
+            let captured = Observation::current();
+            let child = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(captured.scope(
+                async move {
+                    let _loading = ObservedModelLoad::begin();
+                    let memory = MemoryWaitObserver::current();
+                    crate::host_memory::QueuedLeaseObserver::queued(&memory);
+                    crate::host_memory::QueuedLeaseObserver::dequeued(&memory);
+                    started.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+            )));
+            ready.await.unwrap();
+            assert_eq!(
+                observed.upgrade().unwrap().loads.lock().unwrap().as_slice(),
+                &[ModelLoadChange::Started]
+            );
+            assert_eq!(
+                observed
+                    .upgrade()
+                    .unwrap()
+                    .events
+                    .lock()
+                    .unwrap()
+                    .as_slice(),
+                &["waiting_memory", "resumed_memory"]
+            );
+            (child,)
+        })
+        .await;
+        let observer = weak
+            .upgrade()
+            .expect("the child owns the observer until it stops");
+        drop(child);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while observer.loads.lock().unwrap().last() != Some(&ModelLoadChange::Ended) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelling the child closes its progress");
+        assert_eq!(
+            observer.loads.lock().unwrap().as_slice(),
+            &[ModelLoadChange::Started, ModelLoadChange::Ended]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_loading_progress_ends_when_its_request_is_cancelled() {
+        use crate::store::ModelLoadChange;
+        let observer = Arc::new(RecordingObserver::default());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(observing_pool_waits(observer.clone(), async move {
+            let _loading = ObservedModelLoad::begin();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            observer.loads.lock().unwrap().as_slice(),
+            &[ModelLoadChange::Started, ModelLoadChange::Ended]
+        );
+    }
+
     /// The observer is told the wait began, and that it ended when the wait
     /// is dropped, including when the waiting future is cancelled mid-wait.
     #[tokio::test(flavor = "current_thread")]
@@ -286,7 +469,7 @@ mod tests {
         let observer = Arc::new(RecordingObserver::default());
         let (target, lang) = key();
         let pool_cancel = CancellationToken::new();
-        observing_checkout_waits(observer.clone(), async {
+        observing_pool_waits(observer.clone(), async {
             let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<60>());
             let parked = tokio::time::timeout(
                 std::time::Duration::from_millis(20),

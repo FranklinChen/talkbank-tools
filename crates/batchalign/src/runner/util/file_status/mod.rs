@@ -5,7 +5,9 @@
 //! - [`event_sink`]: runner event sink trait and store-backed implementation
 //! - [`tracker`]: per-file lifecycle helper and free state-mutation functions
 //! - [`supervision`]: spawning/draining supervised file tasks and fallback cleanup
+//! - [`attempts`]: one file's attempts under the retry policy, as a typestate
 
+mod attempts;
 mod event_sink;
 mod file_stage;
 mod supervision;
@@ -17,13 +19,16 @@ pub(crate) mod test_sink;
 mod tests;
 
 // Re-export everything at the same paths callers already use.
+pub(crate) use attempts::{AfterFailure, FileAttempts};
 pub(crate) use event_sink::{RunnerEventSink, StoreRunnerEventSink};
 pub(crate) use file_stage::FileStage;
-pub(crate) use tracker::{FileRunTracker, FileTaskOutcome, ProgressSender, ProgressUpdate};
+pub(crate) use tracker::{
+    FileRunTracker, FileTaskOutcome, ProgressSender, ProgressUpdate, TerminalRecorded,
+};
 
 pub(crate) use supervision::{
-    drain_supervised_file_tasks, force_terminal_file_states, observing_file_waits,
-    record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
+    UnfinishedFileCause, drain_supervised_file_tasks, force_terminal_file_states,
+    observing_file_waits, record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
     spawn_supervised_file_task,
 };
 pub(crate) use tracker::set_file_progress;

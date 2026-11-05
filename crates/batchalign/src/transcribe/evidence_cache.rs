@@ -123,10 +123,6 @@ impl SpeakerEvidenceModelRevision {
                 "pyannote-local-graph:{}",
                 blake3::hash(LOCAL_PYANNOTE_MODEL_MANIFEST.as_bytes()).to_hex()
             )),
-            SpeakerBackendV2::Nemo => BuildOwnedNamespace::derived(format!(
-                "nemo:diar_infer_general:ba-{}",
-                env!("CARGO_PKG_VERSION")
-            )),
         })
     }
 
@@ -729,9 +725,6 @@ fn validate_evidence_backend(
         ) | (
             SpeakerInferenceEvidenceV2::Pyannote { .. },
             SpeakerBackendV2::Pyannote
-        ) | (
-            SpeakerInferenceEvidenceV2::Nemo { .. },
-            SpeakerBackendV2::Nemo
         )
     );
     if matches {

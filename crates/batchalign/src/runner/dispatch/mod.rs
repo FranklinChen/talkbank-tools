@@ -81,6 +81,10 @@ pub(crate) enum WorkerProbeRefusal {
     /// named no engine where one is required.
     #[error("{0}")]
     Unavailable(#[source] crate::engine_reports::EngineIdentityUnavailable),
+    /// The job was cancelled while its worker was being probed: not a
+    /// refusal of the command, and nothing for the job to report.
+    #[error("cancelled while probing the worker")]
+    Cancelled,
 }
 
 impl WorkerProbeRefusal {
@@ -92,6 +96,7 @@ impl WorkerProbeRefusal {
         match self {
             Self::Probe(error) => crate::runner::util::classify_worker_error(error),
             Self::Unavailable(_) => crate::scheduling::FailureCategory::AnalysisUnavailable,
+            Self::Cancelled => crate::scheduling::FailureCategory::Cancelled,
         }
     }
 }
@@ -104,17 +109,32 @@ impl WorkerProbeRefusal {
 /// The one probe for a job-level command (the router, once per job) and for
 /// `align` (`FaWorkerAdmission`, once per language), so the two cannot drift
 /// in what they load, what they check or what they say when refusing.
+///
+/// A probe that fails the way a transient worker failure does (a crash, a
+/// startup stall while models download) is retried by the same loop a
+/// request's dispatch uses ([`crate::infer_retry::retry_worker_operation`]),
+/// and `cancellation` stops it during an attempt or a backoff. Probing is
+/// where a worker starts, and since models download before a worker serves,
+/// it is where a stalled first download surfaces; it used to fail the whole
+/// job at the first stall (2026-11-05), where the same failure inside a
+/// request would have been retried.
 pub(crate) async fn probe_command_worker(
     pool: &crate::worker::pool::WorkerPool,
     command: crate::api::ReleasedCommand,
     language: impl Into<crate::api::WorkerLanguage>,
     options: &crate::options::CommandOptions,
     gpu_models: &crate::worker::pool::GpuModelPlan,
+    cancellation: crate::infer_retry::Cancellation<'_>,
 ) -> Result<crate::worker::pool::LoadedCapabilities, WorkerProbeRefusal> {
-    let loaded = pool
-        .ensure_command_capabilities(command, language, options, gpu_models)
-        .await
-        .map_err(WorkerProbeRefusal::Probe)?;
+    let language = language.into();
+    let loaded = crate::infer_retry::retry_worker_operation(cancellation, "worker probe", || {
+        Box::pin(pool.ensure_command_capabilities(command, language.clone(), options, gpu_models))
+    })
+    .await
+    .map_err(|end| match end {
+        crate::infer_retry::RetryEnd::Failed(error) => WorkerProbeRefusal::Probe(error),
+        crate::infer_retry::RetryEnd::Cancelled => WorkerProbeRefusal::Cancelled,
+    })?;
     crate::capability::command_supported(
         &crate::command_model::command_spec(command).capabilities,
         loaded.reports(),

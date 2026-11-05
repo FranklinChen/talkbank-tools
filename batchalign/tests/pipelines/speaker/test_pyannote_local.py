@@ -12,9 +12,9 @@ from batchalign.inference._model_access_errors import ModelAccessDeniedError
 from batchalign.inference.pyannote_local import (
     PinnedHuggingFaceArtifact,
     _download_pinned_artifact,
-    _get_pyannote_pipeline,
     _load_pipeline,
     load_local_pyannote_model_graph,
+    load_local_pyannote_pipeline,
     resolve_huggingface_hub_token,
 )
 
@@ -44,7 +44,7 @@ def test_pinned_artifact_refuses_moving_or_escaping_inputs(value: object) -> Non
 
 
 @pytest.mark.parametrize("tampered", [None, "pipeline", "embedding", "segmentation"])
-def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
+def test_the_speaker_load_builds_only_pinned_artifacts(
     monkeypatch, tmp_path: Path, tampered: str | None
 ) -> None:
     """The runtime must consume the same immutable graph named by the cache."""
@@ -108,15 +108,9 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
         ),
     )
     monkeypatch.setattr(
-        "batchalign.inference.pyannote_local._emit_model_download_if_missing",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         "batchalign.inference.pyannote_local.resolve_huggingface_hub_token",
         lambda: "stub-token",
     )
-    monkeypatch.setattr("batchalign.inference.pyannote_local._PYANNOTE_PIPELINE", None)
-
     if tampered is not None:
         sources = {
             "pipeline": config_path,
@@ -125,13 +119,12 @@ def test_get_pyannote_pipeline_loads_only_pinned_artifacts(
         }
         sources[tampered].write_bytes(b"changed before admission")
         with pytest.raises(ValueError, match="integrity mismatch"):
-            _get_pyannote_pipeline()
+            load_local_pyannote_pipeline()
         assert loaded == []
         return
-    first = _get_pyannote_pipeline()
-    second = _get_pyannote_pipeline()
+    handle = load_local_pyannote_pipeline()
 
-    assert first is second
+    assert handle.pipeline == {"pipeline": loaded[0]}
     assert downloads == [
         (
             graph.pipeline.repo_id,

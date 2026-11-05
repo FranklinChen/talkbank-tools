@@ -213,6 +213,24 @@ infer_tasks! {
     WordSegmentation,
 }
 
+impl InferTask {
+    /// The task's name on the wire and in worker argv (its serde spelling).
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Morphosyntax => "morphosyntax",
+            Self::Utseg => "utseg",
+            Self::Translate => "translate",
+            Self::Coref => "coref",
+            Self::Fa => "fa",
+            Self::Asr => "asr",
+            Self::Opensmile => "opensmile",
+            Self::Avqi => "avqi",
+            Self::Speaker => "speaker",
+            Self::WordSegmentation => "word_segmentation",
+        }
+    }
+}
+
 /// Request for a single inference operation.
 ///
 /// The server owns all CHAT operations (parse, cache, inject, validate,
@@ -670,6 +688,20 @@ mod tests {
         };
         let json = serde_json::to_string(&req)?;
         assert!(json.contains("\"task\":\"translate\""));
+        Ok(())
+    }
+
+    /// `wire_name` is a second spelling of the serde name, written out so it
+    /// can be `const`; this holds the two to one spelling for every task.
+    #[test]
+    fn infer_task_wire_name_is_its_serde_name() -> Result<(), Box<dyn std::error::Error>> {
+        for task in InferTask::ALL {
+            assert_eq!(
+                serde_json::to_value(task)?,
+                serde_json::Value::from(task.wire_name()),
+                "{task:?}"
+            );
+        }
         Ok(())
     }
 

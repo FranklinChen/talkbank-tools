@@ -32,7 +32,7 @@ use super::super::util::{
     drain_supervised_file_tasks, probe_audio_duration, spawn_observed_progress_forwarder,
     spawn_supervised_file_task,
 };
-use super::audio_output::{ChatOutput, FileOutput, MergeAbbreviations};
+use super::audio_output::{ChatOutput, FileOutput};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 use super::fa_admission::FaWorkerRefusal;
 use super::utr::{UtrPassContext, run_utr_pass};
@@ -186,8 +186,6 @@ struct FaFileContext<'a> {
     fa_params: FaParams,
     /// Independently resolved policy for UTR ASR evidence.
     utr_cache_policy: crate::params::UtrCachePolicies,
-    /// Whether merge-abbrev should run before writing the result.
-    should_merge_abbrev: bool,
     /// Optional before-file path for incremental align reruns.
     before_path: Option<&'a std::path::Path>,
     /// Optional UTR engine for the pre-pass and fallback paths.
@@ -445,6 +443,8 @@ impl AudioFileTask for AlignAudioTask<'_> {
                 .model
                 .active_mut()
                 .recover_timing(async |file| {
+                    // UTR's ASR fetch owns its pinned future at the producer.
+                    // This hook needs no independent boxing or preparation.
                     run_utr_pass(
                         file,
                         UtrPassContext {
@@ -454,7 +454,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
                             audio_identity: &media.identity,
                             cache_policy: self.utr_cache_policy,
                             audio_duration: media.duration,
-                            max_group_ms: Some(self.admitted.params().max_group_ms()),
+                            aggregation_target: Some(self.admitted.params().aggregation_target()),
                             filename: &self.destination.filename,
                             engine: pending.engine(),
                             strategy: &self.utr_strategy,
@@ -528,9 +528,6 @@ struct FaOutputDestination<'a> {
     filename: String,
     dumper: &'a DebugDumper,
     debug_traces: bool,
-    /// Whether to merge abbreviations before writing: a property of the CHAT
-    /// this run produces, not of the alignment.
-    merge_abbreviations: MergeAbbreviations,
 }
 
 /// Turn an admitted FA result into the file output the writer takes: retain
@@ -550,10 +547,8 @@ async fn finalize_fa_output(
         filename,
         dumper,
         debug_traces,
-        merge_abbreviations,
     } = destination;
-    let (file_index, debug_traces, merge_abbreviations) =
-        (*file_index, *debug_traces, *merge_abbreviations);
+    let (file_index, debug_traces) = (*file_index, *debug_traces);
     let retention = FaEvidenceRetention::requested(dumper.is_enabled(), debug_traces);
     // The document leaves as the PROOF `FaAdmission` produced, never as a
     // fresh serialization of the model beside it: that second
@@ -612,7 +607,6 @@ async fn finalize_fa_output(
         document: document.into(),
         shortfalls,
         exclusions,
-        merge_abbreviations,
     }))
 }
 
@@ -648,7 +642,6 @@ pub(crate) async fn dispatch_fa_infer(
     ));
     let fa_params = plan.options.fa_params;
     let utr_cache_policy = plan.utr_cache_policy;
-    let should_merge_abbrev = plan.options.merge_abbrev.should_merge();
     let utr_engine = plan.options.utr_engine;
     let utr_strategy = plan.options.utr_strategy;
     let media_dir = plan.media_dir;
@@ -704,7 +697,6 @@ pub(crate) async fn dispatch_fa_infer(
                     },
                     fa_params,
                     utr_cache_policy,
-                    should_merge_abbrev,
                     before_path: before_path.as_ref().map(|p| p.as_path()),
                     utr_engine: utr_engine.as_ref(),
                     utr_strategy,
@@ -740,7 +732,6 @@ async fn process_one_fa_file(
         engine,
         fa_params,
         utr_cache_policy,
-        should_merge_abbrev,
         before_path,
         utr_engine,
         utr_strategy: _,
@@ -762,10 +753,10 @@ async fn process_one_fa_file(
     let utr_engine = match fa_params.main_bullets.admit_utr(utr_engine) {
         Ok(admitted) => admitted,
         Err(refused) => {
-            lifecycle
+            return lifecycle
                 .fail(&refused.to_string(), FailureCategory::Validation)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -788,10 +779,10 @@ async fn process_one_fa_file(
         Ok(content) => content,
         Err(e) => {
             let err_msg = format!("Failed to read input: {e}");
-            lifecycle
+            return lifecycle
                 .fail(&err_msg, FailureCategory::InputMissing)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
 
@@ -805,13 +796,13 @@ async fn process_one_fa_file(
     ) {
         Ok(source) => source,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(
                     &error.to_string(),
                     crate::runner::util::classify_server_error(&error),
                 )
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
     // Read the WHOLE `@Languages:` header in one step. The reading lives on
@@ -834,8 +825,15 @@ async fn process_one_fa_file(
             | talkbank_model::LanguageDeclarationError::Rejected
             | talkbank_model::LanguageDeclarationError::Repeated),
         ) => {
-            lifecycle.fail(&format!("align: unusable @Languages declaration: {error}; fix the header before aligning"), FailureCategory::Validation).await;
-            return FileTaskOutcome::TerminalStateRecorded;
+            return lifecycle
+                .fail(
+                    &format!(
+                        "align: unusable @Languages declaration: {error}; fix the header before aligning"
+                    ),
+                    FailureCategory::Validation,
+                )
+                .await
+                .into();
         }
     };
     let declared_languages = match DeclaredLanguages::from_header(
@@ -851,8 +849,10 @@ async fn process_one_fa_file(
                  parseable ISO 639-3 code. Align reads each file's language from its own \
                  header and has no `--lang` to stand in for it; fix the header and re-run."
             );
-            lifecycle.fail(&msg, FailureCategory::Validation).await;
-            return FileTaskOutcome::TerminalStateRecorded;
+            return lifecycle
+                .fail(&msg, FailureCategory::Validation)
+                .await
+                .into();
         }
         Err(HeaderLanguageError::NoHeader) => {
             let msg = format!(
@@ -862,8 +862,10 @@ async fn process_one_fa_file(
                  timing-recovery engine and the provenance stamp all name the language \
                  the file actually declares."
             );
-            lifecycle.fail(&msg, FailureCategory::Validation).await;
-            return FileTaskOutcome::TerminalStateRecorded;
+            return lifecycle
+                .fail(&msg, FailureCategory::Validation)
+                .await
+                .into();
         }
     };
     // The selected aligner has to be able to handle every language THIS file
@@ -882,10 +884,10 @@ async fn process_one_fa_file(
     let admitted = match validate_fa_language_support(declared_languages, fa_params) {
         Ok(admitted) => admitted,
         Err(error) => {
-            lifecycle
+            return lifecycle
                 .fail(&error.to_string(), FailureCategory::Validation)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
     let file_lang: LanguageCode3 = admitted.primary_language().clone();
@@ -897,10 +899,10 @@ async fn process_one_fa_file(
     let engine = match engine.admit(&file_lang).await {
         Ok(engine) => engine,
         Err(refusal) => {
-            lifecycle
+            return lifecycle
                 .fail(&refusal.to_string(), refusal.category())
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
     let services = engine.services(pipeline, job.dispatch.options.common().debug_dir.as_deref());
@@ -918,7 +920,6 @@ async fn process_one_fa_file(
         filename: filename.to_string(),
         dumper,
         debug_traces: job.dispatch.debug_traces,
-        merge_abbreviations: MergeAbbreviations::from_option(should_merge_abbrev),
     };
     let reporting = AudioTaskReporting {
         work_unit_kind: WorkUnitKind::FileForcedAlignment,
@@ -959,25 +960,25 @@ async fn process_one_fa_file(
         let prior_text = match tokio::fs::read_to_string(path).await {
             Ok(text) => text,
             Err(error) => {
-                lifecycle
+                return lifecycle
                     .fail(
                         &format!("Failed to read declared before-file: {error}"),
                         FailureCategory::InputMissing,
                     )
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    .await
+                    .into();
             }
         };
         match crate::fa::RetainedFaPrior::admit(&prior_text) {
             Ok(prior) => alignment = alignment.with_prior(prior),
             Err(error) => {
-                lifecycle
+                return lifecycle
                     .fail(
                         &error.to_string(),
                         crate::runner::util::classify_server_error(&error),
                     )
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    .await
+                    .into();
             }
         }
     }
@@ -995,10 +996,10 @@ async fn process_one_fa_file(
     {
         Ok(media) => media,
         Err(unavailable) => {
-            lifecycle
+            return lifecycle
                 .fail(&unavailable.to_string(), FailureCategory::Validation)
-                .await;
-            return FileTaskOutcome::TerminalStateRecorded;
+                .await
+                .into();
         }
     };
     let utr_audio_path = media.utr_audio_path(utr_engine);
@@ -1037,7 +1038,7 @@ async fn process_one_fa_file(
                             audio_identity: &media.identity,
                             cache_policy: utr_cache_policy,
                             audio_duration: media.duration,
-                            max_group_ms: Some(admitted.params().max_group_ms()),
+                            aggregation_target: Some(admitted.params().aggregation_target()),
                             filename,
                             engine: utr_engine,
                             strategy: &context.utr_strategy,
@@ -1047,10 +1048,9 @@ async fn process_one_fa_file(
                     )
                     .await
                 });
-                let recovered = crate::worker::pool::checkout_wait::observing_checkout_waits(
-                    utr_waits, recovered,
-                )
-                .await;
+                let recovered =
+                    crate::worker::pool::checkout_wait::observing_pool_waits(utr_waits, recovered)
+                        .await;
                 // Every update the pre-pass sent is published before the next
                 // stage.
                 drop(utr_progress);
@@ -1058,10 +1058,10 @@ async fn process_one_fa_file(
                 match UtrRecovery::from_initial(utr_engine, recovered) {
                     Ok(recovery) => recovery,
                     Err(crate::chat_ops::fa::utr::UtrCancelled) => {
-                        lifecycle
+                        return lifecycle
                             .fail("Timing recovery cancelled", FailureCategory::Cancelled)
-                            .await;
-                        return FileTaskOutcome::TerminalStateRecorded;
+                            .await
+                            .into();
                     }
                 }
             }
@@ -1074,10 +1074,10 @@ async fn process_one_fa_file(
                 UtrRecovery::not_run()
             }
             Err(error) => {
-                lifecycle
+                return lifecycle
                     .fail(&error.to_string(), FailureCategory::Validation)
-                    .await;
-                return FileTaskOutcome::TerminalStateRecorded;
+                    .await
+                    .into();
             }
         }
     };

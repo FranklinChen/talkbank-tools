@@ -46,7 +46,8 @@
 use super::FaInputDocument;
 use crate::chat_ops::ChatFile;
 use crate::error::{
-    AlignmentMediaRefusal, ServerError, SuggestedMediaName, TimingObligationOrigin,
+    AdmissionFailure, AlignmentMediaRefusal, RefusalFault, ServerError, SourceRefusal,
+    SuggestedMediaName, TimingObligationOrigin,
 };
 use crate::types::results::{FaOutput, FaResult};
 use batchalign_transform::AdmittedSourceChat;
@@ -566,7 +567,9 @@ pub(crate) fn read_fa_source_named(
         }
     }) {
         Ok(admitted) => AdmittedAlignmentSource::Planned(admitted.into_disposition()),
-        Err(failure) => AdmittedAlignmentSource::NeverTimed(admit_never_timed(failure, &name)?),
+        Err(failure) => {
+            AdmittedAlignmentSource::NeverTimed(admit_never_timed(failure, &name, text)?)
+        }
     };
     let (mut file, pending_timing) = match source {
         AdmittedAlignmentSource::Planned(AdmittedDisposition::Preserved(source)) => {
@@ -748,20 +751,25 @@ fn working_parts(pending: PendingTimingChatFile) -> (ChatFile, MediaTimingObliga
 fn admit_never_timed(
     failure: ReplacementFailure,
     name: &TranscriptName<'_>,
+    source: &str,
 ) -> Result<PendingTimingChatFile, ServerError> {
+    // Every refusal below is of `source`, so each reports its findings' lines.
+    let refused =
+        |failure| ServerError::ChatReplacementAdmission(SourceRefusal::in_source(failure, source));
+    // A tool failure is no verdict on the document; nothing here may admit it.
+    if failure.fault() == RefusalFault::ToolFailure {
+        return Err(refused(failure));
+    }
     let ReplacementFailure::Validation(validation) = failure else {
-        return Err(ServerError::ChatReplacementAdmission(failure));
+        return Err(refused(failure));
     };
     let document = validation.document();
-    let eligible = !validation.has_internal_failure()
-        && !validation.has_incomplete_parse()
+    let eligible = !validation.has_incomplete_parse()
         && matches!(document.timing_evidence(), TranscriptTimingEvidence::Absent)
         && !batchalign_transform::parse::is_no_align(document)
         && !batchalign_transform::parse::is_dummy(document);
     if !eligible {
-        return Err(ServerError::ChatReplacementAdmission(
-            ReplacementFailure::Validation(validation),
-        ));
+        return Err(refused(ReplacementFailure::Validation(validation)));
     }
     match validation
         .into_unchecked()
@@ -772,9 +780,7 @@ fn admit_never_timed(
         // only E544 deferred, accept it with nothing deferred: the two
         // Chatter admissions disagree, which is a tool fault, not the input's.
         Ok(TimingRegenerationAdmission::Ready(_)) => Err(ServerError::AdmissionDisagreement),
-        Err(refused) => Err(ServerError::ChatReplacementAdmission(
-            ReplacementFailure::Validation(refused),
-        )),
+        Err(validation) => Err(refused(ReplacementFailure::Validation(validation))),
     }
 }
 
@@ -794,8 +800,8 @@ mod tests {
 
     #[test]
     fn pending_timing_reports_missing_localization_without_write_authority() {
+        use crate::chat_ops::fa::AnchorIndex;
         use crate::chat_ops::fa::coordinates::{Ms, Recording};
-        use crate::chat_ops::fa::{AnchorIndex, group_utterances};
         let word_only = SOURCE.replace(" . \u{15}0_500\u{15}", " .");
         let corrupt = pending_word_only(&word_only);
         let pending = read_fa_source(&corrupt).expect("source-bound pending timing");
@@ -803,7 +809,7 @@ mod tests {
             panic!("pending active input")
         };
         let recording = Recording::of_duration(Ms(20_000)).expect("nonempty recording");
-        let grouping = group_utterances(
+        let grouping = crate::chat_ops::fa::group_with_declared_window_limit(
             &active.chat_file,
             1_000,
             &recording,
@@ -830,7 +836,7 @@ mod tests {
         let FaInputDocument::Active(active) = pending.attempt() else {
             panic!("pending retry")
         };
-        let grouping = group_utterances(
+        let grouping = crate::chat_ops::fa::group_with_declared_window_limit(
             &active.chat_file,
             30_000,
             &recording,
@@ -865,7 +871,7 @@ mod tests {
                 utterance.main.content.bullet = measured_bullet.clone();
             }
         }
-        let grouping = group_utterances(
+        let grouping = crate::chat_ops::fa::group_with_declared_window_limit(
             &active.chat_file,
             100,
             &recording,
@@ -1333,12 +1339,17 @@ mod tests {
             ),
         ] {
             let failure = match read_named(&source) {
-                Err(ServerError::ChatReplacementAdmission(failure)) => failure,
+                Err(ServerError::ChatReplacementAdmission(refusal)) => refusal,
                 Err(other) => panic!("{case}: refused for another reason: {other}"),
                 Ok(_) => panic!("{case}: admitted"),
             };
-            assert!(!failure.has_internal_failure(), "{case}: {failure}");
+            assert_eq!(
+                failure.fault(),
+                crate::error::RefusalFault::InvalidInput,
+                "{case}: {failure}"
+            );
             let codes: Vec<&str> = failure
+                .error()
                 .diagnostics()
                 .iter()
                 .filter(|diagnostic| diagnostic.severity == talkbank_model::Severity::Error)

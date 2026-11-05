@@ -41,7 +41,9 @@ pub fn echo_pool_config(
         test_echo: true,
         test_delay_ms,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..PoolConfig::for_tests()
     }
 }

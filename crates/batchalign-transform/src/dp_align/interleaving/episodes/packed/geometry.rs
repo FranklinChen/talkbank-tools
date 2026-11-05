@@ -1,6 +1,61 @@
 //! Conservative checkpoint storage and representation-specific work admission.
 
 use super::*;
+#[cfg(test)]
+use std::num::NonZeroUsize;
+
+/// Geometry preparation consumes the literal input exactly once. Row
+/// alternatives retain this owner rather than rebuilding the graph survey.
+#[derive(Debug)]
+pub(super) struct SurveyedLiteralSearch<'g, 's> {
+    prepared: PreparedLiteralSearch<'g, 's>,
+    survey: GraphSurvey,
+}
+
+impl<'g, 's> SurveyedLiteralSearch<'g, 's> {
+    pub(super) fn observe<C: WorkControl + ?Sized>(
+        prepared: PreparedLiteralSearch<'g, 's>,
+        control: &C,
+    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+        Ok(
+            GraphSurvey::observe(prepared.graph(), control)?
+                .map(|survey| Self { prepared, survey }),
+        )
+    }
+
+    pub(super) fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
+        &self.prepared
+    }
+
+    /// A declared test stride enters before the survey and admission, never
+    /// by mutating a plan whose work/storage were computed for another stride.
+    #[cfg(test)]
+    pub(super) fn testing<C: WorkControl + ?Sized>(
+        prepared: PreparedLiteralSearch<'g, 's>,
+        block: NonZeroUsize,
+        control: &C,
+    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+        Ok(GraphSurvey::observe_schedule(
+            CheckpointSchedule {
+                graph: prepared.graph(),
+                strides: [block.get(); 4],
+            },
+            control,
+        )?
+        .map(|survey| Self { prepared, survey }))
+    }
+
+    pub(super) fn project(
+        &self,
+        representation: Representation,
+    ) -> Result<Geometry, LocalInterleavingRefusal> {
+        self.survey.project(
+            self.prepared.reference().len(),
+            self.prepared.preparation(),
+            representation,
+        )
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Representation {
@@ -21,42 +76,59 @@ pub(super) fn work_refusal(required_at_least: usize) -> LocalInterleavingBudget 
     }
 }
 
-impl Geometry {
-    #[cfg(test)]
-    pub(super) fn observe<C: WorkControl + ?Sized>(
-        graph: &Graph,
-        n: usize,
-        preparation: usize,
-        control: &C,
-    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
-        Self::for_representation(graph, n, preparation, Representation::Full, control)
+/// Representation-independent graph preparation, observed once and retained
+/// with its input owner while full and viable rows are considered.
+#[derive(Debug)]
+struct GraphSurvey {
+    count: usize,
+    strides: [usize; 4],
+    retained: [usize; 4],
+    peak: usize,
+    word_edges: usize,
+    epsilon_edges: usize,
+    merges: usize,
+}
+
+/// The survey's schedule and graph are one input. Neither projection nor an
+/// admitted execution plan can replace this already-observed population.
+struct CheckpointSchedule<'graph> {
+    graph: &'graph Graph,
+    strides: [usize; 4],
+}
+
+impl<'graph> CheckpointSchedule<'graph> {
+    fn automatic(graph: &'graph Graph) -> Self {
+        let count = graph.order.len();
+        let mut stride = 1;
+        while stride < count.div_ceil(stride) {
+            stride += 1;
+        }
+        Self {
+            graph,
+            strides: [1usize, 2, 4, 8].map(|factor| stride.saturating_mul(factor).min(count)),
+        }
     }
-    pub(super) fn for_representation<C: WorkControl + ?Sized>(
+}
+
+impl GraphSurvey {
+    fn observe<C: WorkControl + ?Sized>(
         graph: &Graph,
-        n: usize,
-        preparation: usize,
-        representation: Representation,
         control: &C,
     ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+        Self::observe_schedule(CheckpointSchedule::automatic(graph), control)
+    }
+
+    fn observe_schedule<C: WorkControl + ?Sized>(
+        schedule: CheckpointSchedule<'_>,
+        control: &C,
+    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
+        let CheckpointSchedule { graph, strides } = schedule;
         let count = graph.order.len();
         if count.saturating_add(1) > SCORE_CELLS {
             return Ok(Err(LocalInterleavingRefusal::Budget(
                 LocalInterleavingBudget::MemoryBudgetExceeded,
             )));
         }
-        let width = match representation {
-            Representation::Full => n,
-            Representation::Viable { span } => span,
-        }
-        .div_ceil(64);
-        let mut stride = 1;
-        while stride < count.div_ceil(stride) {
-            stride += 1;
-        }
-        let strides: Vec<_> = [1usize, 2, 4, 8]
-            .into_iter()
-            .map(|factor| stride.saturating_mul(factor).min(count))
-            .collect();
         let mut delta = vec![0isize; count + 1];
         let mut word_edges = 0usize;
         let mut epsilon_edges = 0usize;
@@ -114,14 +186,42 @@ impl Geometry {
             live += change;
             peak_backward = peak_backward.max(live as usize);
         }
-        let peak = peak_forward.max(peak_backward).saturating_add(1);
+        Ok(Ok(Self {
+            count,
+            strides,
+            retained,
+            peak: peak_forward.max(peak_backward).saturating_add(1),
+            word_edges,
+            epsilon_edges,
+            merges,
+        }))
+    }
+
+    /// Pure projection over already-observed graph facts. It cannot revisit
+    /// adjacency or allocate another liveness survey.
+    fn project(
+        &self,
+        n: usize,
+        preparation: usize,
+        representation: Representation,
+    ) -> Result<Geometry, LocalInterleavingRefusal> {
+        let Self {
+            count,
+            strides,
+            retained,
+            peak,
+            word_edges,
+            epsilon_edges,
+            merges,
+        } = *self;
+        let width = match representation {
+            Representation::Full => n,
+            Representation::Viable { span } => span,
+        }
+        .div_ceil(64);
         let row = width.saturating_mul(BIT_WORDS);
-        let mut best = Self {
-            block: strides[0],
-            work: usize::MAX,
-            cells: usize::MAX,
-        };
-        for (index, &block) in strides.iter().enumerate() {
+        let candidates = std::array::from_fn::<_, 4, _>(|index| {
+            let block = strides[index];
             // Retained checkpoints carry node indices and Vec headers.
             // Reserve simultaneous reconstruction roots/rows, reverse rows,
             // prefix summaries, scratch masks and conservative map metadata.
@@ -150,35 +250,40 @@ impl Geometry {
                     Representation::Full => passes.saturating_mul(width),
                     Representation::Viable { .. } => 0,
                 })
-                // Reserve both geometry surveys if a full-profile attempt
-                // precedes viability admission, plus all four graph traversals,
-                // expiry scans, edge observation and selected-path probes.
+                // Keep the conservative metadata allowance while admission is
+                // migrated. Only one geometry survey is performed; this also
+                // covers traversal, expiry, edge and selected-path probes.
                 .saturating_add(count.saturating_mul(24))
                 .saturating_add(word_edges.saturating_add(epsilon_edges).saturating_mul(16))
                 .saturating_add(n.saturating_mul(6))
                 .saturating_add(retained[index].saturating_mul(peak.ilog2() as usize + 2));
-            let candidate = Self { block, work, cells };
+            Geometry { block, work, cells }
+        });
+        // Four real candidates make the population nonempty by construction;
+        // the initial best is a candidate, never an all-MAX sentinel.
+        let [first, rest @ ..] = candidates;
+        let geometry = rest.into_iter().fold(first, |best, candidate| {
             let fits = candidate.work <= WORK_CELLS && candidate.cells <= SCORE_CELLS;
             let best_fits = best.work <= WORK_CELLS && best.cells <= SCORE_CELLS;
             if (fits && !best_fits)
                 || (fits && best_fits && candidate.cells < best.cells)
                 || (!fits && !best_fits && candidate.work < best.work)
             {
-                best = candidate;
+                candidate
+            } else {
+                best
             }
-        }
-        // There is always at least one stride for the nonempty graph.
-        let geometry = best;
+        });
         if geometry.work > WORK_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::Budget(work_refusal(
+            return Err(LocalInterleavingRefusal::Budget(work_refusal(
                 geometry.work,
-            ))));
-        }
-        if geometry.cells > SCORE_CELLS {
-            return Ok(Err(LocalInterleavingRefusal::Budget(
-                LocalInterleavingBudget::MemoryBudgetExceeded,
             )));
         }
-        Ok(Ok(geometry))
+        if geometry.cells > SCORE_CELLS {
+            return Err(LocalInterleavingRefusal::Budget(
+                LocalInterleavingBudget::MemoryBudgetExceeded,
+            ));
+        }
+        Ok(geometry)
     }
 }

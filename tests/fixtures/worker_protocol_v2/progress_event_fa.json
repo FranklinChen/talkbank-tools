@@ -1,6 +1,9 @@
 {
+  "scope": "request",
   "request_id": "req-fa-0002",
-  "completed": 1,
-  "total": 3,
-  "stage": "forced_alignment"
+  "stage": "forced_alignment",
+  "progress": {
+    "completed": 1,
+    "total": 3
+  }
 }

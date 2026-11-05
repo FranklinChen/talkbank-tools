@@ -1,9 +1,8 @@
 //! Shared output-finalization for audio-backed commands.
 //!
-//! `align` and `transcribe` both produce one primary CHAT artifact per file and
-//! both optionally run `merge_abbrev` before persisting it. `speaker-identify`
-//! is audio-backed in exactly the same way and produces a JSON evidence
-//! document instead. Keeping the persistence policy in one place makes the
+//! `align` and `transcribe` both produce one primary CHAT artifact per file.
+//! `speaker-identify` is audio-backed in exactly the same way and produces a
+//! JSON evidence document instead. Keeping the persistence policy in one place makes the
 //! per-file orchestrators easier to test and stops the three drifting.
 //!
 //! # Why the document and its kind travel together
@@ -12,15 +11,11 @@
 //! produced the document is the only thing that knows what kind it is, and
 //! pairing "here is some text" with "and by the way write it as CHAT" at a
 //! separate call site is a relationship maintained by convention, where the
-//! wrong combination type-checks. Carrying them together also makes the
-//! nonsense pair unrepresentable: `merge_abbreviations` is a field of the CHAT
-//! variant, so there is no way to ask for abbreviation merging on a JSON
-//! evidence file and have it silently ignored.
+//! wrong combination type-checks.
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::pipeline::post_validate::{
-    AbbreviationMergeRefused, Exclusion, OutputReport, PostValidationFailure, ProducedOutput,
-    Shortfall,
+    Exclusion, OutputReport, PostValidationFailure, ProducedOutput, Shortfall,
 };
 use crate::recipe_runner::materialize::PlannedMaterializedFile;
 use crate::recipe_runner::runtime::{
@@ -29,8 +24,6 @@ use crate::recipe_runner::runtime::{
 };
 use crate::scheduling::FailureCategory;
 use crate::store::RunnerFilesystemConfig;
-
-pub(crate) use crate::pipeline::post_validate::MergeAbbreviations;
 
 /// A judged CHAT document with what the writer must report beside it.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,8 +36,6 @@ pub(crate) struct ChatOutput {
     /// Parts of the input the producer left out on purpose, reported with
     /// the file's outcome as information; they never diagnose it.
     pub(crate) exclusions: Vec<Exclusion>,
-    /// Whether to merge abbreviations before writing.
-    pub(crate) merge_abbreviations: MergeAbbreviations,
 }
 
 /// What one per-file attempt produced, and therefore how it is persisted.
@@ -92,17 +83,6 @@ pub(crate) enum OutputWriteFailure {
     /// written.
     #[error("{0}")]
     Refused(#[from] PostValidationFailure),
-    /// The abbreviation merge broke a document that had already passed its
-    /// gate. Nothing was written.
-    ///
-    /// Its own arm rather than a `Refused`, because the two send an operator
-    /// to different places: `Refused` means the command's output is wrong,
-    /// this means the command's output was RIGHT and a cosmetic transform
-    /// applied afterwards is wrong. The refusal carries the admissible
-    /// unmerged proof, which this seam declines to write; see the
-    /// `MergeAbbreviations::Merge` arm below.
-    #[error("{0}")]
-    MergeRefused(#[from] Box<AbbreviationMergeRefused>),
     /// The filesystem refused the write.
     #[error("{0}")]
     Io(#[from] std::io::Error),
@@ -112,11 +92,9 @@ impl OutputWriteFailure {
     /// Classify this failure for the control plane.
     pub(crate) fn category(&self) -> FailureCategory {
         match self {
-            Self::Refused(_)
-            | Self::MergeRefused(_)
-            | Self::Io(_)
-            | Self::Planning(_)
-            | Self::ContentKind(_) => FailureCategory::System,
+            Self::Refused(_) | Self::Io(_) | Self::Planning(_) | Self::ContentKind(_) => {
+                FailureCategory::System
+            }
         }
     }
 
@@ -131,9 +109,6 @@ impl OutputWriteFailure {
         match self {
             Self::Refused(failure) => {
                 format!("Refused to write {command_label} output; nothing was written: {failure}")
-            }
-            Self::MergeRefused(refused) => {
-                format!("Refused to write {command_label} output; nothing was written: {refused}")
             }
             Self::Io(error) => format!("Failed to write {command_label} output: {error}"),
             Self::Planning(error) => format!("Failed to plan {command_label} output: {error}"),
@@ -174,7 +149,10 @@ pub(crate) enum WrittenOutput {
 impl WrittenOutput {
     /// Record the file's terminal phase for what was written: `Done` for a
     /// clean output, `Diagnosed` (never an error, never retried) otherwise.
-    pub(crate) async fn record(self, lifecycle: &crate::runner::util::FileRunTracker<'_>) {
+    pub(crate) async fn record(
+        self,
+        lifecycle: &crate::runner::util::FileRunTracker<'_>,
+    ) -> crate::runner::util::TerminalRecorded {
         match self {
             Self::Clean {
                 artifact,
@@ -182,7 +160,7 @@ impl WrittenOutput {
             } => {
                 lifecycle
                     .complete_clean(artifact.display_path, artifact.content_type, exclusions)
-                    .await;
+                    .await
             }
             Self::Diagnosed {
                 artifact,
@@ -196,7 +174,7 @@ impl WrittenOutput {
                         diagnostics,
                         exclusions,
                     )
-                    .await;
+                    .await
             }
         }
     }
@@ -216,24 +194,13 @@ pub(crate) async fn write_primary_chat_output_artifact(
     source_filename: &str,
     output: ChatOutput,
 ) -> Result<WrittenOutput, OutputWriteFailure> {
+    // The proof is written as judged: nothing between the judgement and the
+    // write touches the bytes.
     let ChatOutput {
-        document,
+        document: proof,
         shortfalls,
         exclusions,
-        merge_abbreviations,
     } = output;
-    // The merge is the last transition on the proof, and it re-runs the
-    // judgement the proof already carries. Nothing between it and the write may
-    // touch the bytes.
-    //
-    // POLICY: a refusal carries `unmerged`, an admissible document this seam
-    // declines to write, and `?` is where that choice is made. Writing it
-    // instead would ship a file whose requested merge silently did not happen;
-    // failing surfaces a defect in the merge, which is what a broken merge is.
-    let proof = match merge_abbreviations {
-        MergeAbbreviations::Merge => document.with_abbreviations_merged()?,
-        MergeAbbreviations::Leave => document,
-    };
     let primary_output =
         primary_output_artifact(command, options, &DisplayPath::from(source_filename))?;
     if primary_output.content_type != crate::api::ContentType::Chat {
@@ -241,7 +208,7 @@ pub(crate) async fn write_primary_chat_output_artifact(
     }
     let target = ChatOutputTarget::new(filesystem, file_index, &primary_output.display_path);
     write_chat_output_artifact_with_provenance_gate(&target, &proof).await?;
-    // Read from the proof that was WRITTEN (after the merge), so the reported
+    // Read from the proof that was WRITTEN, so the reported
     // findings describe the bytes on disk, with every shortfall of the run.
     // Exclusions are not asked: they never decide the standing.
     Ok(match OutputReport::of(&proof, &shortfalls) {
@@ -319,8 +286,6 @@ pub(crate) async fn write_primary_output_artifact(
 
 #[cfg(test)]
 mod tests {
-    use batchalign_transform::serialize::to_chat_string;
-
     use super::*;
     use crate::api::ContentType;
     use crate::pipeline::post_validate::PostValidated;
@@ -370,31 +335,10 @@ mod tests {
         }
     }
 
-    /// The abbreviation merge is a transition on the PROOF, so a document
-    /// gated at L1 comes back merged and still proven.
-    #[test]
-    fn merging_a_built_output_collapses_a_known_abbreviation() {
-        let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I do it .\n@End\n";
-        let parser = crate::chat_parser();
-        let merged = PostValidated::gate_owned(
-            batchalign_transform::parse::parse_lenient(&parser, chat).0,
-            ReleasedCommand::Transcribe,
-        )
-        .expect("a valid transcribe document passes its own gate")
-        .with_abbreviations_merged()
-        .expect("a valid document with abbreviations merged still passes its gate");
-        let reparsed = to_chat_string(merged.document());
-        assert!(
-            reparsed.contains("FBI"),
-            "merge_abbrev should collapse 'F B I' into 'FBI', got: {reparsed}"
-        );
-    }
-
     /// RED FIRST (review item 5): the bytes written must be bytes a gate
     /// judged. This seam returned a bare `String`, so output that fails the
     /// gate reached `write_chat_output_artifact_with_provenance_gate`
-    /// unexamined; and when `merge_abbrev` was on, the merge ran AFTER
-    /// whatever gate had run upstream and its result was written unjudged.
+    /// unexamined.
     #[test]
     fn gating_a_built_output_refuses_a_document_that_lost_its_terminator() {
         let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I do it\n@End\n";
@@ -422,8 +366,7 @@ mod tests {
         );
     }
 
-    /// A valid NoAlign source retains exact bytes through the real writer,
-    /// including when cosmetic merging was requested.
+    /// A valid NoAlign source retains exact bytes through the real writer.
     #[tokio::test]
     async fn a_declared_pass_through_is_written_unchanged_not_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -453,8 +396,6 @@ mod tests {
                 document: PostValidated::pass_through(unchanged, ReleasedCommand::Align).into(),
                 shortfalls: Vec::new(),
                 exclusions: Vec::new(),
-                // Even with the merge requested, a pass-through is left alone.
-                merge_abbreviations: MergeAbbreviations::Merge,
             },
         )
         .await
@@ -521,7 +462,6 @@ mod tests {
                 .into(),
                 shortfalls: Vec::new(),
                 exclusions: vec![excluded_note()],
-                merge_abbreviations: MergeAbbreviations::Leave,
             },
         )
         .await
@@ -561,8 +501,8 @@ mod tests {
     }
 
     /// RED FIRST (2026-10-06): a generating producer's diagnosed output
-    /// reaches disk through the real writer, with the merge it asked for, and
-    /// the writer reports the diagnosis instead of a clean write or a refusal.
+    /// reaches disk through the real writer, and the writer reports the
+    /// diagnosis instead of a clean write or a refusal.
     #[tokio::test]
     async fn a_diagnosed_transcript_is_written_and_reported_diagnosed() {
         use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
@@ -581,7 +521,7 @@ mod tests {
         for line in &mut generated.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.content = TierContentItems::new(
-                    ["F", "B", "I", "said", "b2"]
+                    ["FBI", "said", "b2"]
                         .into_iter()
                         .map(|word| {
                             UtteranceContent::Word(Box::new(Word::new(
@@ -604,7 +544,6 @@ mod tests {
                 document: PostValidated::produced(generated, ReleasedCommand::Transcribe),
                 shortfalls: Vec::new(),
                 exclusions: Vec::new(),
-                merge_abbreviations: MergeAbbreviations::Merge,
             },
         )
         .await

@@ -307,7 +307,6 @@ impl JobSubmission {
     /// ASR-detect). Those must never carry `PerFile`; if they do, something
     /// downstream of the CLI built a malformed `JobSubmission`.
     fn validate_lang_command_pairing(&self) -> Result<PairedLanguage<'_>, ValidationError> {
-        use crate::dispatch_language::{CommandLanguageSource, language_source};
         use crate::types::domain::LanguageSpec;
 
         // Read from the ONE owner of this question rather than restating it.
@@ -316,10 +315,7 @@ impl JobSubmission {
         // spellings disagreed: submission required coref to arrive as
         // `PerFile`, while coref's dispatch refused anything that was not a
         // resolved code, so every coref job was admitted and then refused.
-        let is_per_file_command = matches!(
-            language_source(self.command),
-            CommandLanguageSource::PerFile
-        );
+        let is_per_file_command = crate::dispatch_language::takes_no_job_language(self.command);
 
         match (&self.lang, is_per_file_command) {
             (LanguageSpec::PerFile, true) => Ok(PairedLanguage::PerFile),
@@ -1229,7 +1225,6 @@ mod tests {
             source_dir: Default::default(),
             options: CommandOptions::Utseg(UtsegOptions {
                 common: CommonOptions::default(),
-                merge_abbrev: Default::default(),
                 // The Stanza route, which is what the registry admits.
                 utseg_fallback: crate::params::UtsegFallbackPolicy::AllowStanza,
             }),
@@ -1319,7 +1314,6 @@ mod tests {
                 common: CommonOptions::default(),
                 asr_engine: AsrEngineName::Whisper,
                 wor: true.into(),
-                merge_abbrev: false.into(),
             }),
             paths_mode: true,
             output_paths: source_paths

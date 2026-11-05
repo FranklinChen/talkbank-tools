@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::dp_align::LiteralMatchMode;
-
 #[derive(Clone, Copy)]
 pub(super) enum RowRequest {
     Full,
@@ -23,40 +22,29 @@ enum AdmittedRows {
 }
 
 pub(super) struct AdmittedProblem<'g, 's> {
-    refused: RefusedBand<'g, 's>,
-    source: &'g [&'s str],
-    reference: &'s [String],
-    mode: LiteralMatchMode,
+    surveyed: SurveyedLiteralSearch<'g, 's>,
     rows: AdmittedRows,
 }
+
+/// A rejected representation returns the original preparation owner. It cannot
+/// duplicate the paid witness or coexist with an admitted execution plan.
+#[derive(Debug)]
+pub(super) struct RejectedRows<'g, 's> {
+    pub(super) input: SurveyedLiteralSearch<'g, 's>,
+    pub(super) cause: LocalInterleavingRefusal,
+}
+
 impl<'g, 's> AdmittedProblem<'g, 's> {
     pub(super) fn observe<C: WorkControl + ?Sized>(
-        refused: RefusedBand<'g, 's>,
+        surveyed: SurveyedLiteralSearch<'g, 's>,
         request: RowRequest,
         control: &C,
-    ) -> Result<Result<Self, LocalInterleavingRefusal>, C::Error> {
-        if !matches!(
-            refused.refusal(),
-            LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
-                phase: LocalInterleavingWorkPhase::BandedSearch,
-                ..
-            })
-        ) {
-            return Ok(Err(refused.refusal()));
-        }
-        let Relation::Literal {
-            source,
-            reference,
-            mode,
-        } = refused.relation()
-        else {
-            return Ok(Err(refused.refusal()));
-        };
-        let Some(mode) = policy(*mode) else {
-            return Ok(Err(refused.refusal()));
-        };
-        let source_slack = source.len() - refused.feasible();
-        let reference_slack = reference.len() - refused.feasible();
+    ) -> Result<Result<Self, RejectedRows<'g, 's>>, C::Error> {
+        let prepared = surveyed.prepared();
+        let source = prepared.source();
+        let reference = prepared.reference();
+        let source_slack = source.len() - prepared.feasible();
+        let reference_slack = reference.len() - prepared.feasible();
         let representation = match request {
             RowRequest::Full => Representation::Full,
             RowRequest::Viable => Representation::Viable {
@@ -65,15 +53,15 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
                     .min(reference.len()),
             },
         };
-        let geometry = match Geometry::for_representation(
-            refused.graph(),
-            reference.len(),
-            refused.preparation(),
-            representation,
-            control,
-        )? {
+        control.check()?;
+        let geometry = match surveyed.project(representation) {
             Ok(value) => value,
-            Err(refusal) => return Ok(Err(refusal)),
+            Err(cause) => {
+                return Ok(Err(RejectedRows {
+                    input: surveyed,
+                    cause,
+                }));
+            }
         };
         let rows = match request {
             RowRequest::Full => AdmittedRows::Full(FullRows { geometry }),
@@ -83,25 +71,19 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
                 reference_slack,
             }),
         };
-        Ok(Ok(Self {
-            refused,
-            source,
-            reference,
-            mode,
-            rows,
-        }))
+        Ok(Ok(Self { surveyed, rows }))
     }
-    pub(super) fn refused(&self) -> RefusedBand<'g, 's> {
-        self.refused
+    pub(super) fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
+        self.surveyed.prepared()
     }
     pub(super) fn source(&self) -> &'g [&'s str] {
-        self.source
+        self.prepared().source()
     }
     pub(super) fn reference(&self) -> &'s [String] {
-        self.reference
+        self.prepared().reference()
     }
     pub(super) fn mode(&self) -> LiteralMatchMode {
-        self.mode
+        self.prepared().mode()
     }
     pub(super) fn geometry(&self) -> &Geometry {
         match &self.rows {
@@ -109,22 +91,15 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
             AdmittedRows::Viable(rows) => &rows.geometry,
         }
     }
-    #[cfg(test)]
-    pub(super) fn geometry_mut(&mut self) -> &mut Geometry {
-        match &mut self.rows {
-            AdmittedRows::Full(rows) => &mut rows.geometry,
-            AdmittedRows::Viable(rows) => &mut rows.geometry,
-        }
-    }
     pub(super) fn source_slack(&self) -> usize {
         match &self.rows {
-            AdmittedRows::Full(_) => self.source.len(),
+            AdmittedRows::Full(_) => self.source().len(),
             AdmittedRows::Viable(rows) => rows.source_slack,
         }
     }
     pub(super) fn reference_slack(&self) -> usize {
         match &self.rows {
-            AdmittedRows::Full(_) => self.reference.len(),
+            AdmittedRows::Full(_) => self.reference().len(),
             AdmittedRows::Viable(rows) => rows.reference_slack,
         }
     }

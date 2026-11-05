@@ -103,7 +103,8 @@ impl PoolSpawnRuntime {
     }
 
     /// Create one worker process on the pool's runtime and wait for it to be
-    /// ready.
+    /// ready, retiring the pool's idle workers (`idle`) if its startup has to
+    /// queue for host memory.
     ///
     /// The spawn runs as a task ON the captured runtime, so the child's pipes,
     /// and the stderr-drain task `WorkerHandle::spawn` starts for it, both
@@ -111,17 +112,22 @@ impl PoolSpawnRuntime {
     pub(super) async fn spawn_worker(
         &self,
         config: WorkerConfig,
+        idle: super::idle_eviction::IdleWorkers,
     ) -> Result<WorkerHandle, WorkerError> {
         let handle = self
             .0
             .as_ref()
             .ok_or_else(|| Self::unbound("spawn a worker"))?;
-        handle
-            .spawn(async move { WorkerHandle::spawn(config).await })
-            .await
-            .map_err(|error| {
-                WorkerError::SpawnFailed(format!("worker spawn task did not complete: {error}"))
-            })?
+        let observation = super::checkout_wait::Observation::current();
+        tokio_util::task::AbortOnDropHandle::new(
+            handle.spawn(observation.scope(async move {
+                WorkerHandle::spawn(config, std::sync::Arc::new(idle)).await
+            })),
+        )
+        .await
+        .map_err(|error| {
+            WorkerError::SpawnFailed(format!("worker spawn task did not complete: {error}"))
+        })?
     }
 
     /// Convert one worker into a shared GPU worker on the pool's runtime.
@@ -188,5 +194,75 @@ impl PoolSpawnRuntime {
             }
             None => drop(worker),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::store::{ModelLoadChange, ModelLoadProgress};
+    use crate::worker::pool::checkout_wait::{observing_pool_waits, tests::RecordingObserver};
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Cancel the actual pool spawn before ready, after its child has
+    /// reported growth. The OS process and its progress must both retire.
+    #[tokio::test]
+    async fn model_loading_progress_cancellation_reaps_a_not_ready_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("starting-worker");
+        std::fs::write(&script, r##"#!/bin/sh
+printf '%s' "$$" > "$BATCHALIGN_STATE_DIR/starting.pid"
+printf '%s\n' '{"op":"progress_v2","event":{"scope":"load","stage":"downloading_model","measure":{"kind":"download_growth","grown_kib":64}}}'
+exec /bin/sleep 600
+"##).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = WorkerConfig::for_tests();
+        config.python_path = script.to_str().unwrap().to_string();
+        config.runtime = config.runtime.with_state_dir(dir.path().to_path_buf());
+        let runtime = PoolSpawnRuntime::captured_at_construction();
+        let observer = Arc::new(RecordingObserver::default());
+        let task = tokio::spawn(observing_pool_waits(observer.clone(), async move {
+            runtime
+                .spawn_worker(
+                    config,
+                    super::super::idle_eviction::IdleWorkers(Default::default()),
+                )
+                .await
+        }));
+        let growth = ModelLoadChange::Advanced(ModelLoadProgress::Downloading { grown_kib: 64 });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !observer.loads.lock().unwrap().contains(&growth) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the spawned worker's progress reaches its file");
+        let pid = std::fs::read_to_string(dir.path().join("starting.pid")).unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let running = tokio::process::Command::new("/bin/kill")
+                    .arg("-0")
+                    .arg(pid.trim())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await
+                    .unwrap()
+                    .success();
+                let ended = observer.loads.lock().unwrap().last() == Some(&ModelLoadChange::Ended);
+                if !running && ended {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled startup reaps its process and closes progress");
+        assert_eq!(
+            observer.loads.lock().unwrap().as_slice(),
+            &[ModelLoadChange::Started, growth, ModelLoadChange::Ended,]
+        );
     }
 }

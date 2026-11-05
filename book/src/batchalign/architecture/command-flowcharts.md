@@ -1,7 +1,7 @@
 # Command Flowcharts
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:37 EST
+**Last updated:** 2026-11-05 19:37 EST
 
 Option-driven flowcharts for every batchalign processing command. Each
 diagram shows how CLI flags route through different code paths at runtime.
@@ -50,8 +50,8 @@ flowchart TD
     full --> engine_select
 
     engine_select{--fa-engine?}
-    engine_select -->|whisper| whisper_fa[Whisper engine\nonset times only\nmax_group_ms from the engine = 20000]
-    engine_select -->|wav2vec / cantonese| wav2vec_fa[Wave2Vec engines\nword start+end\nmax_group_ms from the engine = 15000]
+    engine_select -->|whisper| whisper_fa[Whisper engine\nonset times only\nloaded-model input and memory checks]
+    engine_select -->|wav2vec / cantonese| wav2vec_fa[Wave2Vec engines\nword start+end\nloaded-model input and memory checks]
 
     whisper_fa --> pause_check
     wav2vec_fa --> pause_check
@@ -64,7 +64,7 @@ flowchart TD
     heal --> cache_check
 
     cache_check[Cache lookup: BLAKE3 keys]
-    cache_check --> worker_infer[execute_v2(task="fa") misses → Python FA worker\nprepared audio + prepared text]
+    cache_check --> worker_infer["execute_v2(task=#quot;fa#quot;) misses → Python FA worker\nprepared audio + prepared text"]
     worker_infer --> dp_align_fa[DP-align model output → transcript words]
     dp_align_fa --> inject_fa[Inject word-level timings into AST]
 
@@ -87,14 +87,9 @@ flowchart TD
     wor_check -->|--wor| gen_wor["Generate %wor tier\n(from the RESOLVED state)"]
     wor_check -->|--nowor| skip_wor[Omit %wor tier]
 
-    gen_wor --> merge_check
-    skip_wor --> merge_check
+    gen_wor --> validate[Post-validate → serialize CHAT output]
+    skip_wor --> validate
 
-    merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations transform]
-    merge_check -->|No| validate
-
-    merge --> validate[Post-validate → serialize CHAT output]
     validate --> done([Output .cha file])
 ```
 
@@ -409,8 +404,11 @@ flowchart TD
 
     postprocess --> speaker_apply{Dedicated speaker\nsegments present?}
     speaker_apply -->|Yes| project["project_speakers_onto_chunks()\nAssign timed words by summed overlap\nSplit at speaker changes"]
-    speaker_apply -->|No| utseg_check{"with_utseg?\ndefault: true"}
-    project --> utseg_check
+    speaker_apply -->|No| abbrev_check{"--merge-abbrev?\ndefault: off"}
+    project --> abbrev_check
+    abbrev_check -->|Yes| merge_abbrev["merge_abbreviations on the recognized words\nletters of one speaker spelling a known abbreviation\nbecome one word timed by the union of the letters"]
+    abbrev_check -->|No| utseg_check{"with_utseg?\ndefault: true"}
+    merge_abbrev --> utseg_check
 
     utseg_check -->|Yes| run_utseg[process_utseg_with_evidence\nBERT-based re-segmentation]
     utseg_check -->|No| build_chat
@@ -418,13 +416,10 @@ flowchart TD
     run_utseg --> build_chat["build_chat → ChatFile AST\nHeaders, participants, %wor tiers"]
     build_chat --> mor_check{"with_morphosyntax?\ndefault: false"}
     mor_check -->|Yes| run_mor[process_morphosyntax\nPOS + lemma + depparse]
-    mor_check -->|No| merge_check
+    mor_check -->|No| output[Serialize → .cha output]
 
-    run_mor --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| output
+    run_mor --> output
 
-    merge --> output[Serialize → .cha output]
     output --> done([Output .cha file])
 ```
 
@@ -434,7 +429,7 @@ flowchart TD
 
 Produces anonymous acoustic speaker turns without ASR or CHAT mutation. The
 standalone command defaults to local Pyannote and can explicitly select
-pyannoteAI Precision-2 or local NeMo. Integrated
+pyannoteAI Precision-2. Integrated
 `transcribe --diarization enabled` defaults to pyannoteAI Precision-2 and is
 shown separately in the transcribe diagram above. Both use the same typed
 raw/derived speaker-evidence cache.
@@ -452,10 +447,8 @@ flowchart TD
     prepare --> select{--speaker-engine}
     select -->|pyannote default| local[Local TalkBank Pyannote]
     select -->|pyannote-ai| cloud[Paid pyannoteAI Precision-2]
-    select -->|nemo| nemo[Local NeMo]
     local --> validate[Validate + durably commit raw evidence]
     cloud --> validate
-    nemo --> validate
     validate --> normalize
     normalize --> tracks[Map native labels deterministically\nto anonymous PAR0..PARn tracks]
     tracks --> turns[Write one .turns.json artifact\nper input file]
@@ -492,16 +485,11 @@ flowchart TD
     lang_check -->|No: --multilang| process_all[MultilingualPolicy::ProcessAll\nProcess all utterances regardless of language]
 
     skip_non_primary --> worker
-    process_all --> worker[execute_v2(task="morphosyntax")\nprepared_text batch → Stanza NLP pipeline]
+    process_all --> worker["execute_v2(task=#quot;morphosyntax#quot;)\nprepared_text batch → Stanza NLP pipeline"]
     worker --> inject_results[inject_results → insert %mor/%gra tiers]
 
-    inject_results --> merge_check
+    inject_results --> validate[Alignment validation\n%mor word count must match main tier]
 
-    merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| validate
-
-    merge --> validate[Alignment validation\n%mor word count must match main tier]
     validate --> done([Output .cha file])
 ```
 
@@ -524,12 +512,9 @@ flowchart TD
     start([utseg invoked]) --> parse[Parse all files → ASTs]
     parse --> collect[collect_payloads\nExtract word sequences per utterance]
     collect --> cache[Cache lookup: BLAKE3 keys\nwords + lang]
-    cache --> worker[execute_v2(task="utseg") misses\nprepared_text batch → raw parse trees]
+    cache --> worker["execute_v2(task=#quot;utseg#quot;) misses\nprepared_text batch → raw parse trees"]
     worker --> apply[Apply segmentation\nSplit/merge utterances at predicted boundaries]
-    apply --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    apply --> serialize[Serialize → .cha output]
     serialize --> done([Output .cha files])
 ```
 
@@ -544,12 +529,9 @@ flowchart TD
     start([translate invoked]) --> parse[Parse all files → ASTs]
     parse --> collect[collect_payloads\nExtract utterance text + source/target language]
     collect --> cache[Cache lookup: BLAKE3 keys\ntext + src_lang + tgt_lang]
-    cache --> worker[execute_v2(task="translate") misses\none utterance per request, paced and retried by the provider policy → raw translation]
+    cache --> worker["execute_v2(task=#quot;translate#quot;) misses\none utterance per request, paced and retried by the provider policy → raw translation"]
     worker --> inject[inject %xtra tiers with translated text]
-    inject --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    inject --> serialize[Serialize → .cha output]
     serialize --> done([Output .cha files])
 ```
 
@@ -563,12 +545,9 @@ Coreference resolution. Document-level, sparse output, English-only.
 flowchart TD
     start([coref invoked]) --> parse[Parse all files → ASTs]
     parse --> collect[collect_payloads\nExtract sentences: full document context]
-    collect --> worker[execute_v2(task="coref")\nprepared_text batch → structured chain refs]
+    collect --> worker["execute_v2(task=#quot;coref#quot;)\nprepared_text batch → structured chain refs"]
     worker --> inject[inject %xcoref tiers, sparse\nOnly utterances with coreferent mentions]
-    inject --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| serialize
-    merge --> serialize[Serialize → .cha output]
+    inject --> serialize[Serialize → .cha output]
     serialize --> done([Output .cha files])
 
     style collect fill:#ffd,stroke:#aa0
@@ -592,11 +571,11 @@ flowchart TD
     found -->|No| fail[Report file error]
     found -->|Yes| parse_gold[Admit gold source\n→ AdmittedComparisonReference]
     parse_gold --> morph[process_morphosyntax\nmain transcript only]
-    morph --> parse_main[MorphotaggedMain::from_proof\n→ the judged main document\n(never re-parsed from text)]
-    parse_main --> bundle[compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics]
+    morph --> parse_main["MorphotaggedMain::from_proof\n→ the judged main document\n(never re-parsed from text)"]
+    parse_main --> bundle["compare()\nconform + one whole-file alignment\nComparisonBundle: main view, gold view,\nstructural word matches, metrics"]
     parse_gold --> bundle
-    bundle --> released[GoldProjectedCompareMaterializer\nproject_gold_structurally()]
-    bundle --> internal_main[MainAnnotatedCompareMaterializer (internal/benchmark)\ninject %xsrep / %xsmor on main]
+    bundle --> released["GoldProjectedCompareMaterializer\nproject_gold_structurally()"]
+    bundle --> internal_main["MainAnnotatedCompareMaterializer (internal/benchmark)\ninject %xsrep / %xsmor on main"]
     released --> safe{Exact structural match?}
     safe -->|Yes| copy[Copy %mor / %gra / %wor]
     safe -->|No, full gold coverage| mor_only[Project %mor only]
@@ -604,11 +583,8 @@ flowchart TD
     copy --> goldannot[Inject %xsrep / %xsmor on gold]
     mor_only --> goldannot
     keep --> goldannot
-    goldannot --> merge_check
+    goldannot --> metrics[Write .compare.csv]
     internal_main --> internal_done([Internal main-annotated view])
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| metrics[Write .compare.csv]
-    merge --> metrics
     metrics --> done([Output .cha + .compare.csv])
 ```
 
@@ -635,7 +611,7 @@ flowchart TD
     compare --> worker
     custom --> worker
 
-    worker[execute_v2(task=\"opensmile\") → Python worker\nExtracts acoustic features from prepared audio]
+    worker["execute_v2(task=#quot;opensmile#quot;) → Python worker\nExtracts acoustic features from prepared audio"]
     worker --> output[Write CSV output\nContent-type: csv]
     output --> done([Output .csv files])
 ```
@@ -652,7 +628,7 @@ artifacts, and sends a live V2 request. Requires paired continuous speech
 flowchart TD
     start([avqi invoked]) --> resolve[Resolve paired audio files\n.cs.wav + .sv.wav per speaker]
     resolve --> prep[Rust audio prep\nprepare CS + SV PCM artifacts]
-    prep --> worker[execute_v2(task=\"avqi\") → Python worker\nparselmouth + torchaudio analysis]
+    prep --> worker["execute_v2(task=#quot;avqi#quot;) → Python worker\nparselmouth + torchaudio analysis"]
     worker --> output[Write AVQI results\nHarmonics-to-noise ratio, jitter, shimmer, etc.]
     output --> done([Output results])
 ```
@@ -669,10 +645,7 @@ flowchart TD
     start([benchmark invoked]) --> resolve[Resolve audio file + companion gold .cha]
     resolve --> transcribe[Rust transcribe workflow\nProduce hypothesis CHAT]
     transcribe --> compare[Rust compare workflow\nDP alignment + WER metrics]
-    compare --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[Merge abbreviations in hypothesis CHAT output]
-    merge_check -->|No| output
-    merge --> output[Write hypothesis .cha + .compare.csv]
+    compare --> output[Write hypothesis .cha + .compare.csv]
     output --> done([Output results])
 ```
 

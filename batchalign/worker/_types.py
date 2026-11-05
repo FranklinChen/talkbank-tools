@@ -21,7 +21,16 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias, assert_never
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    assert_never,
+    cast,
+)
 
 from pydantic import (
     AfterValidator,
@@ -42,21 +51,7 @@ from batchalign.inference._domain_types import (
     RevAiApiKey,
     TimestampMs,
 )
-
-if TYPE_CHECKING:
-    from batchalign.inference.qwen_forced_alignment import QwenFaHost
-    from batchalign.inference.translate import LoadedTranslation
-    from batchalign.inference.types import (
-        Wave2VecFAHandle,
-        WhisperASRHandle,
-        WhisperFAHandle,
-    )
-    from batchalign.models.utterance.infer import BertUtteranceModel
-    from batchalign.worker._pipeline_cache import StanzaPipelineCache
-    from batchalign.worker._types_v2 import (
-        AsrModelIdentityV2,
-        AsrRequestedModelsV2,
-    )
+from batchalign.worker._pipeline_cache import StanzaPipelineCache
 
 JSONPrimitive = str | int | float | bool | None
 
@@ -124,11 +119,153 @@ class WorkerProfile(str, Enum):
     IO = "io"
 
 
-PROFILE_TASKS: dict[WorkerProfile, set[str]] = {
-    WorkerProfile.GPU: {"asr", "fa", "speaker"},
-    WorkerProfile.STANZA: {"morphosyntax", "utseg", "coref"},
-    WorkerProfile.IO: {"translate", "opensmile", "avqi", "word_segmentation"},
-}
+class TaskLoad(Enum):
+    """Every load one worker can complete: the closed set ``ensure_task`` names.
+
+    The Python half of Rust's ``TaskLoad`` (``worker/pool/task_load.rs``). A
+    task's engine is fixed by the worker key, so it is not part of the load,
+    with one exception: the speaker model is not worker identity (one GPU
+    worker serves every speaker model), so each speaker model is its own load,
+    and pyannoteAI, which is hosted and builds nothing, is a load of its own
+    rather than an absent model.
+    """
+
+    MORPHOSYNTAX = "morphosyntax"
+    UTSEG = "utseg"
+    TRANSLATE = "translate"
+    COREF = "coref"
+    FA = "fa"
+    ASR = "asr"
+    OPENSMILE = "opensmile"
+    AVQI = "avqi"
+    WORD_SEGMENTATION = "word_segmentation"
+    SPEAKER_HOSTED = "speaker:pyannote_ai"
+    SPEAKER_LOCAL_PYANNOTE = "speaker:pyannote"
+    SPEAKER_EMBEDDING = "speaker:embedding:pyannote"
+
+
+def task_load(task: InferTask, engine_overrides: Mapping[str, str]) -> TaskLoad:
+    """The load ``ensure_task`` is asked for, from its task and its overrides.
+
+    The one parse from the wire to a :class:`TaskLoad`. Only the speaker task
+    reads its overrides: ``speaker`` names the local diarization engine and
+    ``speaker_embedding`` the embedding model, at most one of them (the plan
+    has one speaker slot), and neither for a hosted engine. Any other
+    combination is a control plane defect and is refused here, before
+    anything loads, so a refused load is never recorded.
+    """
+    match task:
+        case InferTask.MORPHOSYNTAX:
+            return TaskLoad.MORPHOSYNTAX
+        case InferTask.UTSEG:
+            return TaskLoad.UTSEG
+        case InferTask.TRANSLATE:
+            return TaskLoad.TRANSLATE
+        case InferTask.COREF:
+            return TaskLoad.COREF
+        case InferTask.FA:
+            return TaskLoad.FA
+        case InferTask.ASR:
+            return TaskLoad.ASR
+        case InferTask.OPENSMILE:
+            return TaskLoad.OPENSMILE
+        case InferTask.AVQI:
+            return TaskLoad.AVQI
+        case InferTask.WORD_SEGMENTATION:
+            return TaskLoad.WORD_SEGMENTATION
+        case InferTask.SPEAKER:
+            pass
+        case _:
+            assert_never(task)
+    diarization = engine_overrides.get("speaker")
+    embedding = engine_overrides.get("speaker_embedding")
+    match (diarization, embedding):
+        case (None, None):
+            return TaskLoad.SPEAKER_HOSTED
+        case ("pyannote", None):
+            return TaskLoad.SPEAKER_LOCAL_PYANNOTE
+        case (None, "pyannote"):
+            return TaskLoad.SPEAKER_EMBEDDING
+        case _:
+            raise ValueError(
+                "the speaker task load takes at most one speaker model: "
+                "'speaker' = 'pyannote' or 'speaker_embedding' = 'pyannote'; got "
+                f"speaker={diarization!r} speaker_embedding={embedding!r}"
+            )
+
+
+Host = TypeVar("Host")
+"""The loaded host one :class:`LoadKey` stands for. Invariant on purpose."""
+
+
+# A classic invariant TypeVar, not PEP 695 syntax: the parameter is a phantom
+# (no field uses it), and mypy infers an unused PEP 695 parameter as
+# covariant, under which `record(ASR_LOAD, <an FA host>)` type-checks with the
+# host solved as their join. Invariance is what makes the pairing a check.
+@dataclass(frozen=True, slots=True)
+class LoadKey(Generic[Host]):  # noqa: UP046
+    """One :class:`TaskLoad`, typed by the host its load builds.
+
+    The type parameter is the pairing: :meth:`TaskLoadRegistry.record` takes a
+    ``LoadKey[H]`` with an ``H``, and :meth:`TaskLoadRegistry.get` returns an
+    ``H``, so recording the wrong host under a load, or reading a load as the
+    wrong host, is a type error. The keys are the module constants in
+    ``batchalign.worker._loads``, one per load.
+    """
+
+    load: TaskLoad
+
+
+def not_loaded_message(load: TaskLoad) -> str:
+    """The one wording of "this load has not completed here", for every
+    route that refuses a request whose load is absent."""
+    return (
+        f"the {load.value} load has not completed on this worker: the control "
+        "plane prepares a worker (ensure_task) before its first request for a load"
+    )
+
+
+class LoadAlreadyRecorded(RuntimeError):
+    """A second record of one load: a load inserts exactly one entry."""
+
+
+class TaskLoadRegistry:
+    """What this worker's loads built, by load: the Python mirror of Rust's
+    ``TaskLoads``.
+
+    Empty at startup in every mode. ``ensure_task_loaded`` is the only writer
+    (:meth:`record`, the transition from not loaded to loaded), and each entry
+    is the host the load built, holding the model itself, never a copy. A
+    request resolves its load once, at its boundary (:meth:`get`): absent is
+    the named ``model_unavailable`` refusal, present is the host its handler
+    receives.
+    """
+
+    __slots__ = ("_hosts",)
+
+    def __init__(self) -> None:
+        # Values are the host each key's type parameter names; `record` is the
+        # only writer and takes the key and host together, which is what makes
+        # the cast in `get` sound.
+        self._hosts: dict[TaskLoad, object] = {}
+
+    def record(self, key: LoadKey[Host], host: Host) -> None:
+        """Record one completed load. A second record of a load is refused."""
+        if key.load in self._hosts:
+            raise LoadAlreadyRecorded(f"the {key.load.value} load is already recorded")
+        self._hosts[key.load] = host
+
+    def get(self, key: LoadKey[Host]) -> Host | None:
+        """The host ``key``'s load built, or ``None`` when it has not loaded."""
+        return cast("Host | None", self._hosts.get(key.load))
+
+    def has(self, load: TaskLoad) -> bool:
+        """Whether ``load`` completed on this worker."""
+        return load in self._hosts
+
+    def completed(self) -> frozenset[TaskLoad]:
+        """Every load this worker completed."""
+        return frozenset(self._hosts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +284,16 @@ class WorkerBootstrapRuntime:
 
 
 class AsrEngine(str, Enum):
-    """Which ASR backend is loaded for this worker."""
+    """Which worker-hosted ASR engine an ASR load builds, as the control plane
+    names it in the ``asr`` override.
+
+    Rev.AI and whisper.cpp are not here: they run in the Rust control plane,
+    which never names them to a worker (``EngineSelection`` drops an engine
+    with no worker loader), so a worker cannot be asked to load one.
+    """
 
     WHISPER = "whisper"
     WHISPER_HUB = "whisper_hub"
-    REV = "rev"
     TENCENT = "tencent"
     ALIYUN = "aliyun"
     FUNAUDIO = "funaudio"
@@ -441,10 +583,6 @@ class BatchInferResponse(BaseModel):
     results: list[InferResponse]
 
 
-BatchInferHandler = Callable[[BatchInferRequest], BatchInferResponse]
-"""Callable signature for one fully wired batch-infer task handler."""
-
-
 # ---------------------------------------------------------------------------
 # Application state
 # ---------------------------------------------------------------------------
@@ -453,9 +591,11 @@ BatchInferHandler = Callable[[BatchInferRequest], BatchInferResponse]
 class _WorkerState:
     """Mutable state for the worker process.
 
-    Model objects are loaded directly at worker startup. The stanza_*
-    fields hold loaded Stanza pipelines for morphosyntax/utseg inference.
-    The fa_* fields hold loaded forced alignment models.
+    Built at import time, before any load. Every load's model is an entry
+    of ``loads``, recorded by the load that built it. The one model store
+    here besides it is ``stanza_pipelines``: a bounded cache of per-language
+    Stanza pipelines, loaded on a request's first use of a language rather
+    than by a load, which the morphosyntax and utseg runners read.
     """
 
     def __init__(self) -> None:
@@ -467,83 +607,27 @@ class _WorkerState:
         self.ready: bool = False
         self.bootstrap: WorkerBootstrapRuntime | None = None
 
-        # Stanza models for morphosyntax. A BOUNDED cache rather than a dict:
-        # pipelines are hundreds of megabytes each and this process is
-        # long-lived, so residency needs a ceiling. `None` still means "no
-        # Stanza bootstrap ran in this worker", which is a different fact from
-        # "the cache is empty" and is what the infer host refuses on.
+        # Stanza models for morphosyntax and utseg. A BOUNDED cache rather than
+        # a dict: pipelines are hundreds of megabytes each and this process is
+        # long-lived, so residency needs a ceiling. Present from the start
+        # (empty), because it holds pipelines loaded per language on first
+        # use, not one load's model; the morphosyntax load's host reads it.
         # The tokenizer contexts live INSIDE the cache, beside the pipelines
         # they belong to; they used to be a second dict keyed alike, which
         # nothing kept in step.
-        self.stanza_pipelines: StanzaPipelineCache | None = None
+        self.stanza_pipelines: StanzaPipelineCache = StanzaPipelineCache()
         # There is no process-wide Stanza lock: every pipeline in the cache
         # carries its own guard (`LoadedPipeline.calling`), so one pipeline is
         # never called by two threads at once, in any interpreter mode.
 
-        self.utterance_boundary_model: BertUtteranceModel | None = None
-        self.utterance_model_name: str = ""
+        # What this worker's loads built, by load. Empty at startup in every
+        # mode; `ensure_task_loaded` is the only writer, and every request
+        # resolves its load here once, at its boundary.
+        self.loads: TaskLoadRegistry = TaskLoadRegistry()
 
-        # Translation: ONE record naming the backend, its reported engine
-        # identity and the callable that runs it, set together by the loader
-        # that loaded them. It used to be three parallel fields, and nothing
-        # stopped a caller from reading an engine name that belonged to a
-        # backend loaded before the current one.
-        self.translation: LoadedTranslation | None = None
-
-        # FA models (typed handles from load_whisper_fa / load_wave2vec_fa)
-        self.whisper_fa_model: WhisperFAHandle | None = None
-        self.wave2vec_fa_model: Wave2VecFAHandle | None = None
-        # The Qwen3 aligner arrives as a whole host rather than a bare handle,
-        # because the language it was loaded for is part of what it is: the
-        # label is fixed at load time and never travels on the FA wire.
-        self.qwen_fa_host: QwenFaHost | None = None
-        # The identity of the loaded forced-alignment model, set by the loader
-        # that loaded it; None until an FA engine has loaded. It is the FA
-        # cache namespace on the Rust side, so it is never guessed: the old
-        # empty-string default fell back to the default engine's enum value,
-        # naming a model this process had not loaded.
-        self.fa_model_name: str | None = None
-
-        # ASR model
-        self.whisper_asr_model: WhisperASRHandle | None = None
-        self.rev_api_key: RevAiApiKey | None = None
-        self.asr_engine: AsrEngine = AsrEngine.WHISPER
-
-        # The models Rust told this worker to load, when it named an ASR
-        # engine at all. `None` is a REAL case, not a missing value: the
-        # control plane fills in only forced alignment for a worker's
-        # preloaded tasks, so an align job's GPU worker preloads ASR without
-        # naming an engine (see `EngineSelection::for_target`, which explains
-        # why injecting an ASR default there would overrule a better-informed
-        # per-language choice). Such a worker loads its own default and
-        # reports an unpinned identity.
-        self.asr_pinned_models: AsrRequestedModelsV2 | None = None
-
-        # What the ASR engine ACTUALLY loaded, recorded by the loader that
-        # loaded it and attached to every ASR result this worker returns. The
-        # bridge checks it against the pin above, so a model that moved is
-        # refused by name instead of silently changing transcripts.
-        self.asr_model_identity: AsrModelIdentityV2 | None = None
-
-        # Tracks which tasks have been loaded (for LazyProfile mode).
-        # Empty at startup in lazy mode; populated as ensure_task_loaded() is
-        # called. In eager (Profile/Task) mode, populated during bootstrap.
-        self.loaded_tasks: set[str] = set()
-
-        # Serializes on-demand model loading in LazyProfile mode. Prevents
-        # concurrent ensure_task calls from loading the same model twice.
+        # Serializes on-demand model loading. Prevents concurrent ensure_task
+        # calls from loading the same model twice.
         self.loading_lock: threading.Lock = threading.Lock()
-
-        # Request-time batch inference handlers registered during bootstrap.
-        # Dynamic tasks such as translation, FA, and ASR should resolve their
-        # engine-specific routing here instead of branching on raw state in the
-        # hot request path.
-        self.batch_infer_handlers: dict[InferTask, BatchInferHandler] = {}
-
-        # Transient progress callback set by the V2 execution path during a
-        # long-running morphosyntax batch.  Read by the handler to emit
-        # ProgressEventV2 lines.  None when no V2 request is in flight.
-        self.active_progress_callback: Callable[[int, int], None] | None = None
 
     def stanza_version(self) -> str | None:
         """The installed Stanza version, or ``None`` when none can be named.
@@ -581,30 +665,6 @@ class _WorkerState:
         """
         version = self.stanza_version()
         return None if version is None else f"stanza-{version}"
-
-    def register_batch_infer_handler(
-        self,
-        task: InferTask,
-        handler: BatchInferHandler,
-    ) -> None:
-        """Install the concrete batch-infer handler for one loaded task."""
-        self.batch_infer_handlers[task] = handler
-
-    def batch_infer_handler(
-        self,
-        task: InferTask,
-    ) -> BatchInferHandler | None:
-        """Return the bootstrap-installed batch handler for one task."""
-        return self.batch_infer_handlers.get(task)
-
-    def clear_batch_infer_handlers(self) -> None:
-        """Clear any previously registered task handlers.
-
-        Worker startup is a one-command bootstrap boundary. Clearing the
-        registry before reconfiguration keeps test setup and future worker
-        reinitialization paths from accidentally reusing stale engine wiring.
-        """
-        self.batch_infer_handlers.clear()
 
 
 _state = _WorkerState()

@@ -10,9 +10,16 @@ use batchalign_transform::decisions::{
 use super::coordinates::{FaWindow, FileMs, Ms, Recording, WindowFault};
 use super::extraction::collect_fa_words;
 use super::presence::RecordingPresence;
-use super::split::{AnchoredSplit, NonEmptyWords, OverBudgetWindow, Pieces};
+use super::resource_partition::{ResourceParts, ResourceSplit};
+#[cfg(test)]
+use super::split::OverBudgetWindow;
+use super::split::{AnchoredSplit, NonEmptyWords, Pieces};
 use super::utr::{AnchorIndex, CorridorCeiling, CorridorFloor, SearchProvenance};
 use super::{FaWord, TimeSpan};
+
+mod population;
+pub(crate) use population::SourceUtterance;
+use population::{GroupPopulation, RecordedUtterance};
 
 /// A group of utterances clustered for FA, and the audio it is aligned against.
 ///
@@ -33,23 +40,39 @@ pub struct FaGroup {
 
 /// How a group's audio is presented to the aligner.
 ///
-/// Only `Anchored` may exceed the engine budget. Its request pieces each fit;
-/// unavailable pieces keep their words but grant no request. `Single` fits.
+/// These are source-bound request candidates, not resource permits. Each
+/// execution needs preparation against its loaded model and a host lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupSpan {
-    /// One window, within budget, covering every word of the group.
+    /// One complete window covering every word of the group.
     Single(SingleSpan),
     /// One over-budget utterance, aligned piece by piece at recovered word
     /// anchors. Never merged with another utterance.
     Anchored(AnchoredSplit),
+    /// Actual model/host constraints determined this source-owned partition.
+    Resource(ResourceSplit),
 }
 
-/// One or more within-budget utterances aligned in one request.
+/// One or more localized utterances proposed as one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleSpan {
     window: FaWindow,
-    words: Vec<FaWord>,
-    utterances: Vec<UtteranceIdx>,
+    population: GroupPopulation,
+}
+
+impl SingleSpan {
+    /// A single span owns exactly one complete nonempty candidate. There is no
+    /// optional request to check or missing-request fallback to manufacture.
+    pub(crate) fn request(&self) -> GroupUnit<'_> {
+        GroupUnit {
+            words: self.population.words(),
+            window: self.window,
+        }
+    }
+    /// Retained localized source windows, before candidate merging/padding.
+    pub(crate) fn source_utterances(&self) -> impl ExactSizeIterator<Item = SourceUtterance<'_>> {
+        self.population.sources()
+    }
 }
 
 /// One request's share of a group: the consecutive words it aligns and the
@@ -57,9 +80,37 @@ pub struct SingleSpan {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GroupUnit<'g> {
     /// The words, a contiguous slice of the group's words.
-    pub(crate) words: &'g [FaWord],
+    words: &'g [FaWord],
     /// The window, within the engine budget.
-    pub(crate) window: FaWindow,
+    window: FaWindow,
+}
+
+impl<'g> GroupUnit<'g> {
+    pub(crate) fn from_supplied(source: &'g super::main_bullets::SuppliedRetrySource) -> Self {
+        Self {
+            words: source.words(),
+            window: source.window(),
+        }
+    }
+
+    pub(crate) fn words(self) -> &'g [FaWord] {
+        self.words
+    }
+    pub(crate) fn window(self) -> FaWindow {
+        self.window
+    }
+    pub(crate) fn from_piece(piece: &'g super::AnchoredPiece) -> Self {
+        Self {
+            words: piece.request_words(),
+            window: piece.window(),
+        }
+    }
+    pub(crate) fn from_resource(request: &'g super::resource_partition::ResourceRequest) -> Self {
+        Self {
+            words: request.words(),
+            window: request.window(),
+        }
+    }
 }
 
 /// The requests one group is executed as, by shape: a single group's one
@@ -70,6 +121,39 @@ pub(crate) enum GroupUnits<'g> {
     Whole(GroupUnit<'g>),
     /// An anchored partition, including explicit unavailable word ranges.
     Pieces(Pieces<'g>),
+    /// Resource-planned requests and explicit unavailable word ranges.
+    Resource(ResourceParts<'g>),
+}
+
+#[cfg(test)]
+pub(crate) enum GroupRequestIter<'g> {
+    Whole(std::option::IntoIter<GroupUnit<'g>>),
+    Declared(Pieces<'g>),
+    Resource(ResourceParts<'g>),
+}
+
+#[cfg(test)]
+impl<'g> Iterator for GroupRequestIter<'g> {
+    type Item = GroupUnit<'g>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Whole(request) => request.next(),
+            Self::Declared(parts) => parts.find_map(|part| match part {
+                super::AnchoredPart::Request(piece) => Some(GroupUnit {
+                    words: piece.request_words(),
+                    window: piece.window(),
+                }),
+                super::AnchoredPart::Unavailable(_) => None,
+            }),
+            Self::Resource(parts) => parts.find_map(|part| match part {
+                super::resource_partition::ResourcePart::Request(piece) => Some(GroupUnit {
+                    words: piece.request_words(),
+                    window: piece.window(),
+                }),
+                super::resource_partition::ResourcePart::Unavailable(_) => None,
+            }),
+        }
+    }
 }
 
 /// A group's words in the order injection consumes timings, without
@@ -104,6 +188,22 @@ impl<'g> Iterator for GroupWords<'g> {
 }
 
 impl FaGroup {
+    /// Actual candidate requests, including their complete borrowed context;
+    /// an unavailable word population can never appear as an executable unit.
+    #[cfg(test)]
+    pub(crate) fn requests(&self) -> GroupRequestIter<'_> {
+        match self.units() {
+            GroupUnits::Whole(request) => GroupRequestIter::Whole(Some(request).into_iter()),
+            GroupUnits::Pieces(parts) => GroupRequestIter::Declared(parts),
+            GroupUnits::Resource(parts) => GroupRequestIter::Resource(parts),
+        }
+    }
+    /// Only the resource planner can produce this closed source geometry.
+    pub(crate) fn from_resource_split(split: ResourceSplit) -> Self {
+        Self {
+            span: GroupSpan::Resource(split),
+        }
+    }
     /// Supply raw groups only in unit tests of downstream timing/recovery code.
     /// Production callers obtain groups exclusively from `group_utterances`.
     #[cfg(test)]
@@ -114,16 +214,16 @@ impl FaGroup {
     ) -> Self {
         // These downstream fixtures declare a recording ending at their window.
         let recording = Recording::of_duration(Ms(audio_span.end_ms)).expect("fixture recording");
+        let window = FaWindow::within(
+            &recording,
+            FileMs::new(audio_span.start_ms),
+            FileMs::new(audio_span.end_ms),
+        )
+        .expect("fixture window");
         Self {
             span: GroupSpan::Single(SingleSpan {
-                window: FaWindow::within(
-                    &recording,
-                    FileMs::new(audio_span.start_ms),
-                    FileMs::new(audio_span.end_ms),
-                )
-                .expect("fixture window"),
-                words,
-                utterances: utterance_indices,
+                window,
+                population: GroupPopulation::declared_fixture(window, words, utterance_indices),
             }),
         }
     }
@@ -143,6 +243,7 @@ impl FaGroup {
         match &self.span {
             GroupSpan::Single(single) => single.window,
             GroupSpan::Anchored(split) => split.window(),
+            GroupSpan::Resource(split) => split.window(),
         }
     }
 
@@ -154,7 +255,8 @@ impl FaGroup {
     /// The group's words, in the order injection consumes timings.
     pub fn words(&self) -> GroupWords<'_> {
         match &self.span {
-            GroupSpan::Single(single) => GroupWords::Single(single.words.iter()),
+            GroupSpan::Single(single) => GroupWords::Single(single.population.words().iter()),
+            GroupSpan::Resource(split) => GroupWords::Single(split.words().iter()),
             GroupSpan::Anchored(split) => GroupWords::Anchored {
                 pieces: split.pieces(),
                 current: [].iter(),
@@ -165,17 +267,19 @@ impl FaGroup {
     /// How many words the group holds.
     pub fn word_count(&self) -> usize {
         match &self.span {
-            GroupSpan::Single(single) => single.words.len(),
+            GroupSpan::Single(single) => single.population.words().len(),
             GroupSpan::Anchored(split) => split.pieces().map(|piece| piece.words().len()).sum(),
+            GroupSpan::Resource(split) => split.words().len(),
         }
     }
 
     /// The utterances the group covers, in file order: one for an anchored
     /// group, by construction.
-    pub fn utterance_indices(&self) -> &[UtteranceIdx] {
+    pub fn utterance_indices(&self) -> Vec<UtteranceIdx> {
         match &self.span {
-            GroupSpan::Single(single) => &single.utterances,
-            GroupSpan::Anchored(split) => std::slice::from_ref(split.utterance()),
+            GroupSpan::Single(single) => single.population.utterance_indices(),
+            GroupSpan::Anchored(split) => vec![*split.utterance()],
+            GroupSpan::Resource(split) => vec![*split.utterance()],
         }
     }
 
@@ -204,69 +308,24 @@ impl FaGroup {
     /// their words; assembly supplies their untimed slots before injection.
     pub(crate) fn units(&self) -> GroupUnits<'_> {
         match &self.span {
-            GroupSpan::Single(single) => GroupUnits::Whole(GroupUnit {
-                words: &single.words,
-                window: single.window,
-            }),
+            GroupSpan::Single(single) => GroupUnits::Whole(single.request()),
             GroupSpan::Anchored(split) => GroupUnits::Pieces(split.pieces()),
+            GroupSpan::Resource(split) => GroupUnits::Resource(split.pieces()),
         }
     }
 }
 
-/// The most label BYTES any one FA group may carry, whatever engine aligns it.
+/// Historical UTF-8 label-byte preference for joining utterances.
 ///
-/// The number is Whisper's CTC decoder limit, which is stated in TOKENS:
-/// exceeding it causes a Python-side `ValueError: Labels' sequence length N
-/// cannot exceed the maximum allowed length of 448 tokens`. It is applied to
-/// EVERY group, not only Whisper's, and the name says so, because the previous
-/// name (`WHISPER_FA_MAX_LABEL_TOKENS`) claimed an engine-specific contract
-/// that nothing here can honour: [`group_utterances`] is never told which
-/// engine will align its groups. Its two production call sites pass a CHAT
-/// file, a millisecond budget and a recording, so gating the cap on the engine
-/// is a change to those call sites and to this signature, not to this
-/// constant. Until then the tightest engine's limit is applied uniformly,
-/// which is conservative for the others: a group smaller than an engine needs
-/// is a waste, where one larger than it accepts is a failed request.
+/// This bounds merges, not individual utterances and not a model's actual
+/// tokenizer population. It was introduced to avoid large Whisper joins;
+/// conditioning/special labels and backend tokenization must be checked by
+/// loaded-model preparation. Bytes are not a proof of token capacity.
 ///
-/// # Why BYTES, and why that is the conservative choice
-///
-/// The budget is not the same quantity as the limit, so one of the two
-/// directions of error is safe and the other is not. Every token of any of
-/// these tokenizers occupies at least one UTF-8 byte of the text it covers, so
-/// a byte count BOUNDS the token count from above: under the byte cap implies
-/// under the token limit, for every script. A CHARACTER count does not bound
-/// it, and outside ASCII it is smaller than the byte count, so counting
-/// characters LOOSENS the cap against a limit stated in tokens and can let a
-/// group through that provokes the very `ValueError` the cap exists to
-/// prevent. It was briefly changed to characters on the reasoning that "a
-/// token is a character", which is true of no tokenizer any of these engines
-/// uses.
-///
-/// Bytes therefore over-split non-Latin scripts, roughly threefold for
-/// Devanagari, CJK and most Indic scripts and twofold for Cyrillic and Greek.
-/// That is a known and deliberate cost: more, smaller FA groups still align
-/// correctly, where an oversized group is a hard engine failure. Tightening it
-/// means asking the engine for its real tokenizer, not swapping one proxy for
-/// a looser one.
-///
-/// # Known limit: this bounds a MERGE, not every group
-///
-/// The cap is enforced in [`PendingGroup::append`], which is the only place
-/// two utterances are joined. A SINGLE utterance whose own labels exceed the
-/// cap is never split: it becomes its own group and is sent as it stands. So
-/// the guarantee is "merging never creates an oversized group", not "no group
-/// exceeds the cap". Splitting one utterance would mean splitting its audio
-/// window and its word list at a position nothing here can justify, so it is
-/// deliberately left to the engine to refuse.
-///
-/// The one split grouping does make is for DURATION, not labels: an utterance
-/// whose window exceeds the engine budget is cut at words UTR heard (see
-/// `chat_ops::fa::split`), where the anchors are the justification. Its
-/// pieces carry fewer labels as a side effect, but a within-budget utterance
-/// over the label cap is still sent whole.
-///
-/// The unit is a BYTE. See [`LabelBytes`], which is the only way to produce a
-/// value that may be compared against this.
+/// The unit remains bytes, counted through [`LabelBytes`]. Changing it to
+/// characters would change the existing merge policy for non-ASCII text.
+/// A single utterance above this preference stays one unchanged candidate;
+/// neither dropping words nor inventing an audio cut is permitted.
 pub const MAX_GROUP_LABEL_BYTES: usize = 448;
 
 /// A count of label BYTES, the unit [`MAX_GROUP_LABEL_BYTES`] is in.
@@ -317,7 +376,7 @@ impl LabelBytes {
 /// trailing fillers (`&-you_know`, `&-sort_of`) that live between utterances.
 /// The extension is capped at this value to avoid bleeding into the next
 /// utterance's content.
-const TRAILING_GAP_EXTENSION_MS: u64 = 1500;
+pub(super) const TRAILING_GAP_EXTENSION_MS: u64 = 1500;
 
 /// What grouping produced.
 ///
@@ -339,34 +398,75 @@ pub struct Grouping {
 
 /// Group utterances from a ChatFile into FA segments.
 ///
-/// Every [`GroupSpan::Single`] window fits `max_group_ms`, including trailing
-/// padding. A single utterance that cannot fit is split at the word anchors
-/// UTR recovered for it. An [`GroupSpan::Anchored`] partition retains bounded
-/// requests even when another part is unavailable. Complete partitions record
-/// `window_split_at_anchors`; partial ones record each unavailable `anchor_gap`.
-/// A whole utterance is still refused as `anchors_unusable`
-/// when recovery matched the utterance but gave no usable cut, `over_budget`
-/// when recovery has nothing to say about it. Its supplied timing and words
-/// are preserved rather than clipped or fabricated.
+/// The target bounds joins and trailing padding only. A valid utterance above
+/// that target remains one unchanged candidate, with no merge or padding
+/// capability. Its feasibility belongs to loaded-model preparation and host
+/// admission, not the aggregation preference. No word is discarded to fit it.
 ///
 /// Utterances require supplied timing or source-bound UTR search evidence.
 /// Word counts and neighbouring bullets cannot locate an unsupported utterance;
 /// missing localization is reported in [`Grouping::decisions`].
 ///
 /// * `chat_file` - The parsed CHAT file whose utterances will be grouped.
-/// * `max_group_ms` - Maximum audio window duration (in milliseconds) per
-///   group. When adding an utterance would push the group past this limit,
-///   a new group is started.
+/// * `target` - Positive preference for joining neighbouring utterances.
 /// * `recording` - The audio being aligned against. Required, not optional:
 ///   when it was an `Option<u64>` a `None` made this function silently SKIP
 ///   every untimed utterance, so whether a word was ever aligned depended on
 ///   whether anyone had probed the media.
 /// * `anchors` - Word anchors from the UTR pass over this same document, or
-///   [`AnchorIndex::not_observed`] when none ran; with no anchors, no
-///   utterance is split and every over-budget one is refused `over_budget`.
+///   [`AnchorIndex::not_observed`] when none ran. Absence of anchors cannot
+///   turn an aggregation preference into refusal of a supplied utterance.
 pub fn group_utterances(
     chat_file: &ChatFile,
-    max_group_ms: u64,
+    target: crate::types::engines::FaAggregationTarget,
+    recording: &Recording,
+    anchors: &AnchorIndex,
+) -> Grouping {
+    group_with_policy(
+        chat_file,
+        WindowPolicy::Aggregation(target),
+        recording,
+        anchors,
+    )
+}
+
+/// Exercise the anchored partition policy against an explicitly declared
+/// fixture capacity. Engine aggregation preferences cannot call this path.
+#[cfg(test)]
+pub(crate) fn group_with_declared_window_limit(
+    chat_file: &ChatFile,
+    capacity_ms: u64,
+    recording: &Recording,
+    anchors: &AnchorIndex,
+) -> Grouping {
+    group_with_policy(
+        chat_file,
+        WindowPolicy::DeclaredCapacity(Ms(capacity_ms)),
+        recording,
+        anchors,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum WindowPolicy {
+    Aggregation(crate::types::engines::FaAggregationTarget),
+    #[cfg(test)]
+    DeclaredCapacity(Ms),
+}
+
+impl WindowPolicy {
+    fn target(self) -> Ms {
+        match self {
+            Self::Aggregation(target) => Ms(target.milliseconds()),
+            #[cfg(test)]
+            Self::DeclaredCapacity(capacity) => capacity,
+        }
+    }
+}
+
+fn group_with_policy(
+    chat_file: &ChatFile,
+    policy: WindowPolicy,
     recording: &Recording,
     anchors: &AnchorIndex,
 ) -> Grouping {
@@ -375,7 +475,6 @@ pub fn group_utterances(
     let mut groups = Vec::new();
     let mut decisions = Vec::new();
     let mut pending: Option<Pending> = None;
-    let budget = Ms(max_group_ms);
     let mut extracted = Vec::new();
     let utterances = chat_file
         .lines
@@ -446,8 +545,8 @@ pub fn group_utterances(
                 false,
             ));
         }
-        let window = match GroupWindow::admit(&localized, budget, recording) {
-            Ok(window) => window,
+        let (window, source) = match GroupWindow::for_merge(localized, policy, recording) {
+            Ok(admitted) => admitted,
             Err(refusal) => {
                 // Neither outcome below joins a pending group: a refused
                 // utterance makes no request, and an anchored one is a group
@@ -459,13 +558,20 @@ pub fn group_utterances(
                 }
                 let speaker = utt.main.speaker.as_str().to_owned();
                 let refused = match refusal {
-                    WindowRefusal::Oversized(over) => {
-                        match AnchoredSplit::plan(
-                            over,
-                            utterance,
-                            localized.words,
-                            anchors.lookup(utterance),
-                        ) {
+                    MergeSeparation::Unmerged(source) => {
+                        groups.push(FaGroup {
+                            span: GroupSpan::Single(SingleSpan {
+                                window: source.window(),
+                                population: GroupPopulation::one(source),
+                            }),
+                        });
+                        continue;
+                    }
+                    #[cfg(test)]
+                    MergeSeparation::Oversized { over, source } => {
+                        let (utterance, words) = source.into_words();
+                        match AnchoredSplit::plan(over, utterance, words, anchors.lookup(utterance))
+                        {
                             Ok(split) => {
                                 let refused: Vec<_> = split
                                     .pieces()
@@ -508,7 +614,7 @@ pub fn group_utterances(
                             Err(refusal) => refusal.into_refused_window(over),
                         }
                     }
-                    WindowRefusal::OutsideRecording(fault) => {
+                    MergeSeparation::OutsideRecording(fault) => {
                         fault_refusal(fault, FileMs::new(span.start_ms))
                     }
                 };
@@ -526,8 +632,7 @@ pub fn group_utterances(
         };
         let next = PendingGroup {
             window,
-            words: localized.words.into_vec(),
-            utterances: vec![utterance],
+            population: GroupPopulation::one(source),
             label_bytes,
         };
         let next_start = next.window.window.audio_start().get();
@@ -541,6 +646,7 @@ pub fn group_utterances(
                 }
             },
             // An anchored group is never merged with a neighbour.
+            #[cfg(test)]
             Some(anchored @ Pending::Anchored(_)) => {
                 groups.push(anchored.finish(next_start));
                 Pending::Merging(next)
@@ -564,6 +670,7 @@ pub fn group_utterances(
 /// fallback-span argument: proportional arithmetic cannot grant localization.
 /// Supplied timing and UTR evidence can still be wrong acoustically.
 struct LocalizedUtterance {
+    utterance: UtteranceIdx,
     words: NonEmptyWords,
     span: TimeSpan,
     /// Where `span` came from, for the request evidence.
@@ -643,6 +750,7 @@ impl LocalizedUtterance {
             }
         };
         Some(Self {
+            utterance,
             words,
             span,
             localization,
@@ -658,15 +766,21 @@ struct GroupWindow {
 }
 
 /// Why a window was not admitted as (part of) a single group.
-#[derive(Debug)]
-enum WindowRefusal {
+enum MergeSeparation {
     OutsideRecording(WindowFault),
+    /// Valid source window that exceeds a joining preference. Kept whole,
+    /// without merge or padding capability, for actual resource admission.
+    Unmerged(RecordedUtterance),
     /// A real window inside the recording, longer than the engine budget:
     /// what an anchored split partitions.
-    Oversized(OverBudgetWindow),
+    #[cfg(test)]
+    Oversized {
+        over: OverBudgetWindow,
+        source: RecordedUtterance,
+    },
 }
 
-impl From<WindowFault> for WindowRefusal {
+impl From<WindowFault> for MergeSeparation {
     fn from(fault: WindowFault) -> Self {
         Self::OutsideRecording(fault)
     }
@@ -693,30 +807,43 @@ fn fault_refusal(fault: WindowFault, window_start: FileMs) -> RefusedWindow {
 }
 
 impl GroupWindow {
-    fn admit(
-        localized: &LocalizedUtterance,
-        budget: Ms,
+    fn for_merge(
+        localized: LocalizedUtterance,
+        policy: WindowPolicy,
         recording: &Recording,
-    ) -> Result<Self, WindowRefusal> {
+    ) -> Result<(Self, RecordedUtterance), MergeSeparation> {
         let span = localized.span;
         let window = FaWindow::within(
             recording,
             FileMs::new(span.start_ms),
             FileMs::new(span.end_ms),
         )?;
+        let source = RecordedUtterance::new(localized.utterance, localized.words, window);
         // Non-emptiness is already proven: `FaWindow::within` refused an empty
         // span above, through `WindowFault::Empty`.
-        if let Some(over) = OverBudgetWindow::exceeding(window, budget) {
-            return Err(WindowRefusal::Oversized(over));
+        let budget = policy.target();
+        if window.end().get() - window.audio_start().get() > budget.0 {
+            return Err(match policy {
+                WindowPolicy::Aggregation(_) => MergeSeparation::Unmerged(source),
+                #[cfg(test)]
+                WindowPolicy::DeclaredCapacity(_) => MergeSeparation::Oversized {
+                    over: OverBudgetWindow::exceeding(window, budget)
+                        .expect("declared capacity is exceeded"),
+                    source,
+                },
+            });
         }
-        Ok(Self {
-            window,
-            end_limit: FileMs::new(
-                span.start_ms
-                    .saturating_add(budget.0)
-                    .min(recording.duration().get()),
-            ),
-        })
+        Ok((
+            Self {
+                window,
+                end_limit: FileMs::new(
+                    span.start_ms
+                        .saturating_add(budget.0)
+                        .min(recording.duration().get()),
+                ),
+            },
+            source,
+        ))
     }
 
     fn extend_into_trailing_gap(&mut self, next_start: u64) {
@@ -733,7 +860,8 @@ impl GroupWindow {
 enum Pending {
     /// Within-budget utterances, which the next one may still join.
     Merging(PendingGroup),
-    /// An anchored group, which nothing joins; only its padding is pending.
+    /// An anchored group retained only by declared-capacity controls.
+    #[cfg(test)]
     Anchored(AnchoredSplit),
 }
 
@@ -742,6 +870,7 @@ impl Pending {
     fn finish(self, next_start: u64) -> FaGroup {
         match self {
             Self::Merging(group) => group.finish(next_start),
+            #[cfg(test)]
             Self::Anchored(mut split) => {
                 split.extend_into_trailing_gap(
                     FileMs::new(next_start),
@@ -760,13 +889,12 @@ impl Pending {
 /// when a split is necessary.
 struct PendingGroup {
     window: GroupWindow,
-    words: Vec<FaWord>,
-    utterances: Vec<UtteranceIdx>,
+    population: GroupPopulation,
     label_bytes: LabelBytes,
 }
 
 impl PendingGroup {
-    fn append(&mut self, mut next: Self) -> Result<(), Self> {
+    fn append(&mut self, next: Self) -> Result<(), Self> {
         if next.window.window.audio_start().get() < self.window.window.audio_start().get()
             || next.window.window.end().get() > self.window.end_limit.get()
             || self
@@ -784,8 +912,7 @@ impl PendingGroup {
             .saturating_sub(self.window.window.end().get());
         self.window.window = self.window.window.extend_by(Ms(extension));
         self.label_bytes = self.label_bytes.saturating_add(next.label_bytes);
-        self.words.append(&mut next.words);
-        self.utterances.append(&mut next.utterances);
+        self.population.append(next.population);
         Ok(())
     }
 
@@ -794,8 +921,7 @@ impl PendingGroup {
         FaGroup {
             span: GroupSpan::Single(SingleSpan {
                 window: self.window.window,
-                words: self.words,
-                utterances: self.utterances,
+                population: self.population,
             }),
         }
     }

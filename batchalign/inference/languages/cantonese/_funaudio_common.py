@@ -7,10 +7,12 @@ import json
 import logging
 from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, assert_never
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.worker._model_errors import ModelOutputInvalidError
+from batchalign.worker._model_loading.modelscope_hub import ModelScopeSnapshot
+from batchalign.worker._model_loading.pinned_hub import RepositorySnapshot
 
 from ._asr_types import AsrGenerationPayload, AsrMonologue, TimedWord
 
@@ -67,67 +69,92 @@ class FunAsrSegment:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SenseVoiceSnapshots:
+    """SenseVoice and its voice-activity model, materialized on local disk.
+
+    Each member is a ``RepositorySnapshot``: every file of a Hugging Face
+    repository, resolved at its pinned commit by ``resolve_repository``
+    (FunASR reads whatever its ``config.yaml`` names), not a path anyone
+    could name, and not a Transformers snapshot, which would lack them.
+    """
+
+    asr: RepositorySnapshot
+    vad: RepositorySnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class ParaformerSnapshots:
+    """Paraformer with its voice-activity and punctuation models, on local disk.
+
+    Each member is a ``ModelScopeSnapshot``, admitted only complete (no
+    partial download, checkpoint present) by
+    ``_model_loading.modelscope_hub.resolve_modelscope_snapshot``. A bare path
+    used to be accepted here, and a directory a stalled download had left
+    without its ``model.pt`` loaded with untrained weights.
+    """
+
+    asr: ModelScopeSnapshot
+    vad: ModelScopeSnapshot
+    punc: ModelScopeSnapshot
+
+
+# The two FunASR compositions BA3 runs. Which one a recognizer holds decides
+# how it is constructed and how it is asked to transcribe, by an exhaustive
+# match rather than by looking for "paraformer" in a model name.
+FunAsrSnapshots = SenseVoiceSnapshots | ParaformerSnapshots
+
+
 class FunAudioRecognizer:
-    """Wrapper around FunASR model invocation plus Rust-owned projection."""
+    """A FunASR model loaded in memory, ready to transcribe.
+
+    The only way to make one in production is ``load``, from snapshots already
+    on local disk, so a recognizer always holds a loaded model: there is no
+    unloaded state and no first-use path. That is the point. The model used to
+    be built lazily, inside the first transcription request, and when the
+    snapshot was not cached FunASR downloaded it right there, under a time
+    budget meant for decoding the audio. On 2026-11-05 a 14-minute Paraformer
+    download timed that request out and a retry started the download over.
+    Downloads now happen before the worker reports ready (see
+    ``_download_liveness``), and this type is why a request cannot reach one.
+    """
 
     def __init__(
         self,
-        lang: LanguageCode = "yue",
-        model: str = "FunAudioLLM/SenseVoiceSmall",
-        device: str = "cpu",
         *,
-        model_path: str | None = None,
-        model_revision: str | None = None,
-        vad_model: str | None = None,
-        vad_model_path: str | None = None,
-        vad_revision: str | None = None,
-        punc_model: str | None = None,
-        punc_revision: str | None = None,
+        lang: LanguageCode,
+        device: str,
+        snapshots: FunAsrSnapshots,
+        label: str,
+        model: Any,
     ) -> None:
-        """Store language/model configuration and defer model loading until first use.
+        """Wrap an already-constructed FunASR model. Use ``load``.
 
-        The worker fills the keyword arguments from the pinned plan, and the
-        two branches need different things because the two hubs behave
-        differently. The Hugging Face branch gets LOCAL PATHS, because FunASR's
-        HF download drops the revision it is handed and would otherwise fetch
-        whatever the hub currently serves. The ModelScope branch gets ids and
-        tags, which it does honour. All ``None`` is the direct-caller path.
+        Direct construction exists for tests, which supply a fake model.
         """
         self.lang = lang
-        self.model_name = model
         self.device = device
-        self.model_path = model_path
-        self.model_revision = model_revision
-        self.vad_model = vad_model
-        self.vad_model_path = vad_model_path
-        self.vad_revision = vad_revision
-        self.punc_model = punc_model
-        self.punc_revision = punc_revision
-        self._model: Any | None = None
+        self.snapshots = snapshots
+        self.label = label
+        self._model = model
 
-    def _get_model(self) -> Any:
-        """Return a cached FunASR model instance, creating it on first call.
+    @classmethod
+    def load(
+        cls,
+        snapshots: FunAsrSnapshots,
+        *,
+        lang: LanguageCode,
+        device: str,
+        label: str,
+    ) -> FunAudioRecognizer:
+        """Construct the FunASR model from local snapshots, eagerly.
 
-        On cache miss (first call per worker lifetime), emits a pair of
-        ``progress_v2`` download events bracketing the
-        ``AutoModel(...)`` construction so the daemon log / dashboard /
-        TUI show "Loading FunASR model… (first-run download may take
-        several minutes)" instead of dead air. Subsequent calls hit the
-        ``self._model is not None`` short-circuit above and emit
-        nothing: a future call cannot mislead the user into thinking
-        another download is happening.
-
-        Per AGENTS.md §11 time-transparency rule; mirrors the eager
-        eager-loading pattern in ``_qwen_common.QwenRecognizerConfig`` but
-        without the eager-call-at-bootstrap shape because FunASR's
-        worker bootstrap is deliberately lazy. Late binding of
-        ``emit_download_event`` (import inside the function) keeps the
-        recognizer importable in test contexts that don't bring up the
-        full worker stack.
+        ``label`` names the checkpoint for logs and errors (its model id).
+        Loading from disk still takes seconds, so it is announced as a
+        ``progress_v2`` pair for the time-transparency rule; it downloads
+        nothing, and ``disable_update`` keeps FunASR from checking the network
+        for a newer release of itself.
         """
-        if self._model is not None:
-            return self._model
-
         try:
             with redirect_stdout(io.StringIO()):
                 from funasr import AutoModel
@@ -137,110 +164,88 @@ class FunAudioRecognizer:
                 "environment. Reinstall batchalign3 or install funasr."
             ) from exc
 
-        from batchalign.worker._progress import emit_download_event
+        from batchalign.worker._progress import Phase, emit_phase_event
+        from batchalign.worker._types_v2 import PhaseEdgeV2
 
-        emit_download_event(
-            stage="downloading_funaudio_asr",
-            user_message=(
-                f"Loading FunASR model {self.model_name} ({self.device}); "
-                f"the first run downloads it (SenseVoice from Hugging Face, "
-                f"Paraformer from ModelScope), which may take several minutes…"
-            ),
+        emit_phase_event(
+            Phase.LOADING_FUNAUDIO_ASR,
+            PhaseEdgeV2.BEGIN,
+            f"Loading FunASR model {label} ({device})…",
         )
-
+        # FunASR prints a version banner to stdout, which carries the worker
+        # protocol; it is swallowed here and around every generate call.
         with redirect_stdout(io.StringIO()):
-            if "paraformer" not in self.model_name:
-                # SenseVoice, on Hugging Face. Both the checkpoint and its
-                # voice-activity model are passed as resolved local paths, so
-                # FunASR loads exactly what the plan pinned rather than
-                # re-resolving a name against the live hub.
-                self._model = AutoModel(
-                    model=self.model_path or self.model_name,
-                    output_timestamps=True,
-                    vad_model=self.vad_model_path or self.vad_model or "fsmn-vad",
-                    vad_kwargs={"max_single_segment_time": 30000},
-                    device=self.device,
-                    hub="hf",
-                    cache={},
-                    language=self.lang,
-                    use_itn=True,
-                    batch_size_s=60,
-                    output_timestamp=True,
-                    ban_emo_unk=False,
-                    merge_vad=True,
-                    merge_length_s=15,
-                )
-            else:
-                # Paraformer, on ModelScope, which DOES honour the revisions
-                # it is given. The auxiliary models and their tags come from
-                # the plan; they used to be five literals here, which is how a
-                # model could move without anything recording that it had.
-                # ``model_revision`` alone may be absent, for a checkpoint the
-                # manifest does not pin.
-                if not (
-                    self.vad_model
-                    and self.vad_revision
-                    and self.punc_model
-                    and self.punc_revision
-                ):
-                    raise ValueError(
-                        "the Paraformer composition needs its voice-activity and "
-                        "punctuation models with their revisions; the worker "
-                        "supplies them from the pinned plan"
+            match snapshots:
+                case SenseVoiceSnapshots(asr=asr, vad=vad):
+                    model = AutoModel(
+                        model=asr.path,
+                        output_timestamps=True,
+                        vad_model=vad.path,
+                        vad_kwargs={"max_single_segment_time": 30000},
+                        device=device,
+                        hub="hf",
+                        cache={},
+                        language=lang,
+                        use_itn=True,
+                        batch_size_s=60,
+                        output_timestamp=True,
+                        ban_emo_unk=False,
+                        merge_vad=True,
+                        merge_length_s=15,
+                        disable_update=True,
                     )
-                # The checkpoint's own revision is passed only when the plan
-                # pinned one. It used to fall back to the branch name
-                # ``master``, which names a moving head rather than a release:
-                # nothing had asked for that branch, and the registry records
-                # this member's revision as not exposed, so the substitution
-                # reached no provenance and a checkpoint could move between two
-                # runs that report the same identity. An unpinned checkpoint is
-                # a real state (a user may name a Paraformer this build does
-                # not pin, which the manifest types as floating), so the honest
-                # load asks for no revision instead of inventing one.
-                paraformer_kwargs: dict[str, Any] = {
-                    "model": self.model_path or self.model_name,
-                    "vad_model": self.vad_model,
-                    "vad_model_revision": self.vad_revision,
-                    "punc_model": self.punc_model,
-                    "punc_model_revision": self.punc_revision,
-                }
-                if self.model_revision is not None:
-                    paraformer_kwargs["model_revision"] = self.model_revision
-                self._model = AutoModel(**paraformer_kwargs)
-
-        emit_download_event(
-            stage="downloading_funaudio_asr_complete",
-            user_message=f"FunASR model loaded ({self.model_name}).",
+                case ParaformerSnapshots(asr=asr, vad=vad, punc=punc):
+                    model = AutoModel(
+                        model=str(asr.path),
+                        vad_model=str(vad.path),
+                        punc_model=str(punc.path),
+                        device=device,
+                        disable_update=True,
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        emit_phase_event(
+            Phase.LOADING_FUNAUDIO_ASR,
+            PhaseEdgeV2.COMPLETE,
+            f"FunASR model loaded ({label}).",
         )
-        return self._model
+        return cls(
+            lang=lang, device=device, snapshots=snapshots, label=label, model=model
+        )
 
     def _run_model(self, source_path: str) -> list[FunAsrSegment]:
         """Invoke FunASR and parse output into typed segments."""
-        model = self._get_model()
+        model = self._model
         with redirect_stdout(io.StringIO()):
-            if "paraformer" in self.model_name:
-                # `raw_text` is the only Paraformer field whose tokens are
-                # parallel to `timestamp`; see `FunAsrSegment`.
-                output = model.generate(
-                    input=source_path, output_timestamp=True, return_raw_text=True
-                )
-            else:
-                output = model.generate(
-                    input=source_path,
-                    cache={},
-                    language=self.lang,
-                    output_timestamps=True,
-                    vad_model="fsmn-vad",
-                    vad_kwargs={"max_single_segment_time": 60000},
-                    ban_emo_unk=False,
-                    use_itn=True,
-                    batch_size_s=60,
-                    merge_vad=True,
-                    merge_length_s=15,
-                    output_timestamp=True,
-                    spk_model="cam++",
-                )
+            match self.snapshots:
+                case ParaformerSnapshots():
+                    # `raw_text` is the only Paraformer field whose tokens are
+                    # parallel to `timestamp`; see `FunAsrSegment`.
+                    output = model.generate(
+                        input=source_path, output_timestamp=True, return_raw_text=True
+                    )
+                case SenseVoiceSnapshots():
+                    # No model names here: the voice-activity model is the one
+                    # loaded from its snapshot. The `vad_model="fsmn-vad"` and
+                    # `spk_model="cam++"` this call used to pass were inert
+                    # (identical output with and without them, measured on
+                    # 2026-11-05), and a hub name reaching FunASR at request
+                    # time is the route a download could take.
+                    output = model.generate(
+                        input=source_path,
+                        cache={},
+                        language=self.lang,
+                        output_timestamps=True,
+                        vad_kwargs={"max_single_segment_time": 60000},
+                        ban_emo_unk=False,
+                        use_itn=True,
+                        batch_size_s=60,
+                        merge_vad=True,
+                        merge_length_s=15,
+                        output_timestamp=True,
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
 
         raw_list: list[dict[str, Any]]
         if isinstance(output, dict):
@@ -256,14 +261,14 @@ class FunAudioRecognizer:
         for index, raw in enumerate(raw_list):
             if not isinstance(raw, dict):
                 raise ModelOutputInvalidError(
-                    f"FunASR model {self.model_name}, segment {index + 1}: "
+                    f"FunASR model {self.label}, segment {index + 1}: "
                     f"expected a dict, got {type(raw).__name__}"
                 )
             try:
                 segments.append(FunAsrSegment.from_raw(raw))
             except ModelOutputInvalidError as error:
                 raise ModelOutputInvalidError(
-                    f"FunASR model {self.model_name}, segment {index + 1}: {error}"
+                    f"FunASR model {self.label}, segment {index + 1}: {error}"
                 ) from error
         return segments
 

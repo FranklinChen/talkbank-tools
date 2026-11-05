@@ -71,15 +71,30 @@ def test_qwen_recognizer_transcribe_produces_word_timestamps() -> None:
 
     from batchalign.inference.languages.cantonese._qwen_common import (
         QwenRecognizerConfig,
+        QwenSnapshots,
+    )
+    from batchalign.inference.qwen_forced_alignment import (
+        QWEN_FORCED_ALIGNER_MODEL_ID,
+    )
+    from batchalign.worker._model_loading.pinned_hub import (
+        resolve_transformers,
+        unpinned,
     )
 
+    model_id = "Qwen/Qwen3-ASR-0.6B-hf"
+    # The production route: resolve both snapshots first, then load from disk.
+    snapshots = QwenSnapshots(
+        asr=resolve_transformers(unpinned(model_id), kind="ASR"),
+        aligner=resolve_transformers(
+            unpinned(QWEN_FORCED_ALIGNER_MODEL_ID), kind="forced alignment"
+        ),
+    )
     config = QwenRecognizerConfig(
         lang="yue",
-        model_id="Qwen/Qwen3-ASR-0.6B-hf",
         device="cpu",
         recognition=SEGMENTATION_MODEL_POLICY,
     )
-    recognizer = config.load()
+    recognizer = config.load(snapshots)
     _payload, timed_words = recognizer.transcribe(str(audio))
 
     assert timed_words, (

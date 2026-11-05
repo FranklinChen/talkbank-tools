@@ -132,11 +132,8 @@ def _install_translator(monkeypatch: pytest.MonkeyPatch, translator: type) -> An
         ),
     )
     from batchalign.worker._model_loading import translation as loader
-    from batchalign.worker._types import _state
 
-    loader._load_google_translate()
-    assert _state.translation is not None
-    return _state.translation.translate
+    return loader._load_google_translate().translate
 
 
 def test_google_session_carries_checked_source_and_target(monkeypatch):

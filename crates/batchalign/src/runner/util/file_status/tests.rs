@@ -89,7 +89,7 @@ async fn events_inside_a_file_task_name_the_file() {
 
     let task = spawn_supervised_file_task(DisplayPath::from("lecture.cha"), "test", async {
         tracing::warn!("a decision that needs review");
-        FileTaskOutcome::TerminalStateRecorded
+        FileTaskOutcome::TerminalStateRecorded(super::TerminalRecorded::for_tests())
     });
     let abnormal = drain_supervised_file_tasks(
         &RecordingSink::default(),
@@ -116,6 +116,44 @@ fn test_config() -> crate::config::ServerConfig {
     crate::config::ServerConfig {
         max_concurrent_jobs: Some(2),
         ..Default::default()
+    }
+}
+
+/// Exercise the real store boundary: stopping queued work is cancellation;
+/// an unexplained dispatch exit is still a system error. Neither is success.
+#[tokio::test]
+async fn unfinished_file_cleanup_preserves_the_jobs_exit_cause() {
+    for (cause, category, forced) in [
+        (
+            UnfinishedFileCause::Cancelled,
+            FailureCategory::Cancelled,
+            0,
+        ),
+        (
+            UnfinishedFileCause::UnexpectedExit,
+            FailureCategory::System,
+            1,
+        ),
+    ] {
+        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
+        let store = Arc::new(JobStore::for_tests(
+            test_config(),
+            None,
+            tx,
+            Arc::new(crate::clock::SystemClock),
+        ));
+        let sink = StoreRunnerEventSink::wrap(store.clone());
+        let job_id = JobId::from("unfinished-job");
+        store.submit(make_job("unfinished-job")).await.unwrap();
+        assert_eq!(
+            force_terminal_file_states(sink.as_ref(), &job_id, cause).await,
+            forced
+        );
+        let detail = store.get_job_detail(&job_id).await.unwrap();
+        assert_eq!(detail.file_statuses.len(), 1);
+        let file = &detail.file_statuses[0];
+        assert_eq!(file.status, FileStatusKind::Error);
+        assert_eq!(file.error_category, Some(category));
     }
 }
 
@@ -226,6 +264,7 @@ async fn progress_forwarder_routes_updates_through_sink_boundary() {
 /// a dropped end would leave the file counted as waiting.
 #[tokio::test]
 async fn forwarder_drains_queued_wait_changes_before_finishing() {
+    use crate::store::PoolWait::HostMemory;
     use crate::store::WorkerWaitChange::{Ended, Started};
     let sink = Arc::new(RecordingSink::default());
     let (tx, observer, forwarder) = spawn_observed_progress_forwarder(
@@ -233,58 +272,19 @@ async fn forwarder_drains_queued_wait_changes_before_finishing() {
         JobId::from("job-waits"),
         "a.cha".to_string(),
     );
-    let target = crate::worker::WorkerTarget::infer_task(crate::worker::InferTask::Morphosyntax);
-    let lang = crate::api::WorkerLanguage::from(crate::api::LanguageCode3::eng());
-    observer.waiting(&target, &lang);
+    observer.waiting(HostMemory);
     drop(tx);
-    observer.resumed();
+    observer.resumed(HostMemory);
     drop(observer);
     tokio::time::timeout(Duration::from_secs(1), forwarder.finished())
         .await
         .expect("the forwarder finishes once its sender and observer are gone");
     assert_eq!(
         sink.worker_waits(),
-        vec![("a.cha".to_owned(), Started), ("a.cha".to_owned(), Ended)]
-    );
-}
-
-#[tokio::test]
-async fn supervised_task_marks_non_terminal_exit_as_error() {
-    let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-    let store = Arc::new(JobStore::for_tests(
-        test_config(),
-        None,
-        tx,
-        std::sync::Arc::new(crate::clock::SystemClock),
-    ));
-    let sink = StoreRunnerEventSink::wrap(store.clone());
-    let job_id = JobId::from("job-1");
-    store.submit(make_job("job-1")).await.unwrap();
-
-    sink.mark_file_processing(&job_id, "a.cha", sink.now())
-        .await;
-
-    let tasks = vec![spawn_supervised_file_task(
-        DisplayPath::from("a.cha"),
-        "test file task",
-        async { FileTaskOutcome::MissingTerminalState },
-    )];
-
-    let abnormal =
-        drain_supervised_file_tasks(sink.as_ref(), &job_id, &CancellationToken::new(), tasks).await;
-    assert_eq!(abnormal, 1);
-
-    let detail = store.get_job_detail(&job_id).await.unwrap();
-    let file = detail
-        .file_statuses
-        .into_iter()
-        .find(|entry| entry.filename == "a.cha")
-        .unwrap();
-    assert_eq!(file.status, FileStatusKind::Error);
-    assert!(
-        file.error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("exited without recording a terminal file state"))
+        vec![
+            ("a.cha".to_owned(), Started(HostMemory)),
+            ("a.cha".to_owned(), Ended(HostMemory))
+        ]
     );
 }
 

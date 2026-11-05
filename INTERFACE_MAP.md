@@ -1,7 +1,7 @@
 # Python/Rust Interface Map
 
 **Status:** Current
-**Last updated:** 2026-10-02 23:08 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 This document is the unified reference for all Python/Rust interface boundaries in batchalign3.
 
@@ -54,7 +54,7 @@ does not join an uncancellable OS stdin read.
 | Rust request type | `crates/batchalign-types/src/worker_v2/requests.rs::AsrRequestV2` |
 | Rust response type | `crates/batchalign-types/src/worker_v2/responses.rs::ExecuteResponseV2` |
 | Python executor | `batchalign/worker/_asr_v2.py::execute_asr_request_v2()` |
-| Python host | `batchalign/worker/_asr_v2.py::AsrExecutionHostV2` |
+| Python host | `batchalign/worker/_loads.py::LoadedLocalAsr` / `LoadedProviderAsr`, built by `_model_loading/asr.py::load_asr_engine` and resolved from `_state.loads` by `_execute_v2.py` |
 | Whisper bridge | `batchalign/inference/asr.py` (local model) |
 | HK providers | `batchalign/inference/languages/cantonese/` (Tencent, FunASR, Aliyun) |
 | Schema | `ipc-schema/worker_v2/AsrRequestV2.json`, `ipc-schema/worker_v2/ExecuteResponseV2.json`, and the model identity types: `AsrRequestedModelsV2.json`, `AsrModelIdentityV2.json`, `RequestedModelV2.json`, `LoadedModelV2.json`, `RequestedRevisionV2.json`, `ObservedRevisionV2.json` |
@@ -68,9 +68,12 @@ does not join an uncancellable OS stdin read.
   disagreement by name (which role, which id, requested against observed). For
   a provider backend it admits BEFORE calling the provider, so a plan/worker
   mismatch costs no paid request
-- A worker that recorded no identity is refused per engine rather than having
-  one inferred from the request: an identity taken from the request would
-  record what was asked for as though it had been seen
+- The executor is handed the loaded host itself and reads its `backend`,
+  `runner` and `model_identity` from it (`admit_loaded_host`): a request for
+  another backend is refused as `model_unavailable`, and the identity is the
+  one the load recorded with the model, never inferred from the request (an
+  identity taken from the request would record what was asked for as though
+  it had been seen). A Rev.AI request is refused by name: it runs in Rust
 - Side-effects: None (stateless)
 
 **Cross-references:**
@@ -92,11 +95,17 @@ does not join an uncancellable OS stdin read.
 | Rust FFI | `crates/batchalign-pyo3/src/worker_fa_exec.rs::execute_forced_alignment_request_v2()` |
 | Rust request type | `crates/batchalign-types/src/worker_v2/requests.rs::ForcedAlignmentRequestV2` |
 | Python executor | `batchalign/worker/_fa_v2.py::execute_forced_alignment_request_v2()` |
+| Python host | `batchalign/worker/_loads.py::LoadedWhisperFa` / `LoadedWordFa`, built by `_model_loading/forced_alignment.py::load_fa_engine` |
 | Schema | `ipc-schema/worker_v2/ForcedAlignmentRequestV2.json` |
 
 **Rust/Python contract:**
-- Input: `ForcedAlignmentRequestV2` with prepared audio + normalized text
+- Input: `ForcedAlignmentRequestV2` with prepared audio + normalized text,
+  and the loaded FA host, whose `backend` is checked against the request's
 - Output: Word timing results or error
+- Whisper's runner takes the shaped text (and an attention-capture context);
+  Wave2Vec, Cantonese Wave2Vec and Qwen3 share one call shape, the audio and
+  the words, and answer one row per word
+- The host's `engine` is the FA identity the capability report names
 - Side-effects: None
 
 **Cross-references:**
@@ -147,12 +156,13 @@ does not join an uncancellable OS stdin read.
 |--------|----------|
 | Rust FFI | `crates/batchalign-pyo3/src/worker_media_exec.rs::execute_speaker_request_v2()` |
 | Python executor | `batchalign/worker/_speaker_v2.py::execute_speaker_request_v2()` |
+| Python host | `batchalign/worker/_loads.py::LoadedDiarization` (local pyannote, or pyannoteAI, a load of its own that builds nothing), built by `_model_loading/speaker.py` |
 | Schema | `ipc-schema/worker_v2/SpeakerRequestV2.json` |
 
 **Rust/Python contract:**
 - Input: `SpeakerRequestV2` with prepared audio
 - Output: backend-tagged evidence: completed pyannoteAI job output or local
-  Pyannote/NeMo segments
+  Pyannote segments
 - Side-effects: pyannoteAI requests upload temporary media and submit a paid
   provider job; local backends have no external service side effect
 
@@ -172,9 +182,11 @@ does not join an uncancellable OS stdin read.
 **Rust/Python contract (since 2026-08-21):** Rust owns request parsing,
 task/payload agreement, prepared-batch loading and item-count checks, the
 failure taxonomy, and result normalization into the typed V2 payloads. Python
-keeps the host of loaded model runners plus one adapter per task, which
-parses the frozen batch into typed batch items, manages the morphosyntax
-progress callback, and calls the model. Translation builds the frozen
+resolves the task's load in `_state.loads` once (absent is `model_unavailable`)
+and passes one adapter over the loaded host (`LoadedMorphosyntax`,
+`LoadedUtseg`, `LoadedTranslate`, `LoadedCoref`), which parses the frozen batch
+into typed batch items, hands morphosyntax the request's own progress callback
+as an argument, and calls the model. Translation builds the frozen
 `TranslateInferenceRequest` with mandatory checked source and target codes;
 its Rust-to-Python callback carries `(source, target, batch_json)`. Other NLP
 tasks retain `BatchInferRequest`. Legacy batch translation explicitly admits

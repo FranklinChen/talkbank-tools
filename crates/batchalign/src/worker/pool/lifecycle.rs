@@ -5,8 +5,6 @@ use std::sync::atomic::Ordering;
 
 use tracing::{error, info, warn};
 
-use batchalign_types::worker::InferTask;
-
 use crate::api::NumSpeakers;
 use crate::worker::error::WorkerError;
 use crate::worker::handle::{WorkerConfig, WorkerHandle};
@@ -370,7 +368,10 @@ impl WorkerPool {
         // and refunds the permit alongside the per-key fetch_sub.
         match self
             .spawn_runtime
-            .spawn_worker(self.worker_config(key)?)
+            .spawn_worker(
+                self.worker_config(key)?,
+                idle_eviction::IdleWorkers(self.groups.clone()),
+            )
             .await
         {
             Ok(mut handle) => {
@@ -435,7 +436,7 @@ fn worker_config_for_key(
             pool_config.runtime.provider_accounts.tencent_engine(),
         )?,
         test_echo: pool_config.test_echo,
-        ready_timeout_s: pool_config.ready_timeout_s,
+        startup_stall: pool_config.startup_stall,
         verbose: pool_config.verbose,
         runtime: pool_config.runtime.clone(),
         task_timeouts: pool_config.task_timeouts,
@@ -522,20 +523,15 @@ pub(super) fn spawn_engine_overrides(
     serde_json::to_string(&map).map_err(|error| WorkerError::SpawnFailed(error.to_string()))
 }
 
-/// The decode language for a worker that may load stock Whisper, decided from
-/// the same token table admission asked. The worker never maps a language
-/// code itself.
+/// The decode language for a worker whose key names stock Whisper, decided
+/// from the same token table admission asked. The worker never maps a
+/// language code itself.
 ///
-/// Stock Whisper loads in two ways, and they fail differently:
-/// - **Named**: the request chose it. Admission already refused a language
-///   with no Whisper token, so a refusal here is a broken invariant and fails
-///   the spawn.
-/// - **Fallback**: a worker that preloads ASR with no engine named (an align
-///   job's GPU worker; see `EngineSelection::for_target` for why none is
-///   named) resolves its own engine, and stock Whisper is its fallback for
-///   most languages. Its language may have no token because the worker will
-///   pick another engine, so nothing is sent, and the worker refuses only if
-///   it does fall back to Whisper.
+/// Admission already refused a language with no Whisper token, so a refusal
+/// here is a broken invariant and fails the spawn. A worker whose key names
+/// no ASR engine loads none: no ASR request can reach it (an ASR route needs
+/// the plan's ASR engine, which is then in the key), and every load is the
+/// task's `ensure_task`.
 fn stock_whisper_decode_language(
     key: &WorkerKey,
 ) -> Result<Option<crate::types::worker_v2::WhisperDecodeLanguageV2>, WorkerError> {
@@ -562,9 +558,6 @@ fn stock_whisper_decode_language(
             AsrLanguageAuthority::Table(LanguageTable::WhisperCpp | LanguageTable::RevAi)
             | AsrLanguageAuthority::EngineOwned,
         ) => Ok(None),
-        None if key.target.preloaded_tasks().contains(&InferTask::Asr) => {
-            Ok(WhisperDecodeLanguageV2::for_worker_language(&key.language).ok())
-        }
         None => Ok(None),
     }
 }
@@ -748,7 +741,10 @@ pub(super) async fn run_health_check(
                 }
             };
 
-            match spawn_runtime.spawn_worker(config).await {
+            match spawn_runtime
+                .spawn_worker(config, idle_eviction::IdleWorkers(groups_ref.clone()))
+                .await
+            {
                 Ok(handle) => {
                     if let Err(error) = observed_worker_runtimes.admit(handle.runtime_identity()) {
                         tracing::error!(
@@ -842,44 +838,11 @@ async fn pressure_evict_idle_workers_if_needed(
     );
 
     for sample in to_evict {
-        // Find and remove the matching worker from the group's idle
-        // queue. Lock is held just long enough to remove the handle;
-        // the async shutdown happens after `drop(idle)`.
-        let group = &sample.group;
-        let (removed, leaving) = {
-            let mut idle = super::lock_recovered(&group.idle);
-            let Some(pos) = idle.iter().position(|h| h.pid() == sample.pid) else {
-                // Worker checked out since snapshot, leave it for
-                // the next eviction round if pressure persists.
-                continue;
-            };
-            // Consume the matching idle-permit. Failure means an
-            // existing permit-vs-idle-handle invariant violation
-            // upstream; surface it rather than silently masking.
-            match group.available.try_acquire() {
-                Ok(permit) => permit.forget(),
-                Err(e) => warn!(
-                    pid = %sample.pid,
-                    error = %e,
-                    "Idle queue had handle but no matching permit; eviction continuing without permit consumption"
-                ),
-            }
-            let Some(handle) = idle.remove(pos) else {
-                // VecDeque::remove(pos) only returns None if pos is
-                // out of bounds, but we just got pos from
-                // position(...) under the same lock. Treat as a
-                // best-effort skip rather than a panic.
-                continue;
-            };
-            // The victim is still counted in `total` through its shutdown,
-            // which can take seconds; the guard accounts for it from the
-            // moment it leaves the queue until it is retired, so a saturated
-            // checkout never mistakes it for a lost worker.
-            (handle, super::AwayFromQueue::new(group, 1))
-        };
-        let mut worker = removed;
-        let _ = worker.shutdown_in_place().await;
-        leaving.retire();
+        if !idle_eviction::retire_sampled(&sample).await {
+            // Checked out since the snapshot: left for the next round if
+            // pressure persists.
+            continue;
+        }
         info!(
             pid = %sample.pid,
             rss_mb = sample.rss_mb,

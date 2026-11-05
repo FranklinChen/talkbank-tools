@@ -38,7 +38,6 @@ expression: sub
     "end_overlap_policy": "preserve_cross_speaker",
     "main_bullets": "derive",
     "wor": true,
-    "merge_abbrev": false,
     "bullet_repair": false,
     "review_level": "none"
   },

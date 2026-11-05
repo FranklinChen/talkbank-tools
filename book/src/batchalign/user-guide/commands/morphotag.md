@@ -108,13 +108,8 @@ flowchart TD
 
     worker[execute_v2(task='morphosyntax')\nprepared_text batch → Stanza NLP pipeline\nper-language semaphore-bounded dispatch]
     worker --> inject_results[inject_results → insert %mor/%gra tiers]
-    inject_results --> merge_check
+    inject_results --> validate[Alignment validation\n%mor word count must match main tier]
 
-    merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| validate
-
-    merge --> validate[Alignment validation\n%mor word count must match main tier]
     validate --> done([Output .cha files])
 ```
 
@@ -150,7 +145,6 @@ clap parse error, the CLI surface deliberately rejects it. See the
 | `--retokenize` / `--keeptokens` | `--keeptokens` | Retokenize main lines to UD tokenization (may split/merge words), or preserve existing tokenization |
 | `--skipmultilang` / `--multilang` | `--multilang` | Skip utterances in non-primary languages, or process all |
 | `--lexicon FILE` |: | Comma-separated manual lexicon override file (read on client, injected as typed options) |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
 | `--no-l2-morphotag` | off | Opt out of L2 dispatch. With this flag, `@s` code-switched words emit `L2\|xxx` placeholders instead of real POS/lemma/deprel annotations (legacy behavior, kept for reproducibility of older analyses) |
 | `--no-pos-hints` | off | Opt out of transcriber `$POS` hint respect. By default, after morphotag the pipeline overrides any `%mor` POS that disagrees with the CLAN→UD-mapped hint on main-tier words carrying `$POS` suffixes. Lemma and features from Stanza are preserved. Pass `--no-pos-hints` to skip the override pass and keep Stanza's POS as-is. See [Transcriber `$POS` Hints](../../reference/pos-hints.md) for the mechanism and coverage table |
 | `--ca-policy honor\|analyze` | `honor` | Honor `@Options: CA` pass-through, or explicitly run morphotag while preserving that header. Use `analyze` only when the corpus reconstruction record calls for an analyzed CA edition |

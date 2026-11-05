@@ -29,9 +29,12 @@ if TYPE_CHECKING:
         WhisperFAHandle,
     )
     from batchalign.inference.whisper_attention import WhisperAttentionCapture
+    from batchalign.worker._model_loading.pinned_hub import TransformersSnapshot
 
 
 L = logging.getLogger("batchalign.worker")
+
+MMS_FA_ALGORITHM_ID = "wave2vec-fa-mms-v2-label-complete"
 
 
 # ---------------------------------------------------------------------------
@@ -93,42 +96,29 @@ class Wave2VecIndexedResponse(BaseModel):
 WHISPER_FA_ENGINE_ID = "whisper-fa-large-v2-open-begin-v3"
 
 
-def _resolve_whisper_identity(model: str) -> WhisperModelIdentity | None:
-    """Resolve one small config artifact before loading that exact hub revision.
-
-    Local custom directories remain usable without claiming a hub identity.
-    Do not resolve the symlink: the snapshot directory, not its blob, names
-    the commit. This does not depend on private Transformers config fields.
-    """
-    from pathlib import Path
-
-    from huggingface_hub import hf_hub_download
-
-    if Path(model).is_dir():
-        return None
-    config = Path(hf_hub_download(model, "config.json"))
-    if config.parent.parent.name != "snapshots":
-        raise ValueError("Whisper config did not resolve to a hub snapshot")
-    return WhisperModelIdentity(model, config.parent.name)
+WHISPER_FA_MODEL_ID = "openai/whisper-large-v2"
+"""The hub model the Whisper FA engine loads."""
 
 
 def load_whisper_fa(
-    model: str = "openai/whisper-large-v2",
+    snapshot: TransformersSnapshot,
     target_sample_rate: SampleRate = 16000,
     *,
     device_policy=None,
 ) -> WhisperFAHandle:
-    """Load a Whisper FA model. Returns a typed handle."""
+    """Load a Whisper FA model from ``snapshot``. Returns a typed handle
+    whose identity is the snapshot's model and commit.
+
+    The snapshot is the identity: it used to be found by a separate
+    ``config.json`` download before a load by name, two hub calls that could
+    disagree, and a local directory loaded with no identity at all.
+    """
     import torch
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
     from batchalign.device import resolve_inference_device
     from batchalign.inference.audio import bind_whisper_token_timestamp_extractor
     from batchalign.inference.types import WhisperFAHandle
-    from batchalign.worker._progress import (
-        HF_ARTIFACTS_WHISPER,
-        emit_hf_download_if_missing,
-    )
 
     device = resolve_inference_device(device_policy)
 
@@ -137,29 +127,21 @@ def load_whisper_fa(
     else:
         torch_dtype = torch.float32
 
-    # Multi-GB Whisper FA model download, make the wait visible. Probe
-    # the full Whisper artifact set so a partial-cache state (e.g.,
-    # tokenizer.json evicted while weights remain) still triggers a
-    # download notification.
-    emit_hf_download_if_missing(
-        model, kind="forced alignment", artifacts=HF_ARTIFACTS_WHISPER
-    )
-
-    identity = _resolve_whisper_identity(model)
-    revision = identity.revision if identity is not None else None
     whisper_model = WhisperForConditionalGeneration.from_pretrained(
-        model, revision=revision, attn_implementation="eager", torch_dtype=torch_dtype
+        snapshot.path,
+        attn_implementation="eager",
+        torch_dtype=torch_dtype,
     )
+    processor = WhisperProcessor.from_pretrained(snapshot.path)
     bind_whisper_token_timestamp_extractor(whisper_model)
     whisper_model.to(device)
     whisper_model.eval()
-    processor = WhisperProcessor.from_pretrained(model, revision=revision)
 
     return WhisperFAHandle(
         model=whisper_model,
         processor=processor,
         sample_rate=target_sample_rate,
-        model_identity=identity,
+        model_identity=WhisperModelIdentity(snapshot.model_id, snapshot.commit),
     )
 
 
@@ -301,8 +283,6 @@ def infer_whisper_fa(
     result = window.timed_tokens(handle.processor, np.arange(matrix.shape[0]), indices)
     if capture is not None:
         identity = handle.model_identity
-        if identity is None:
-            raise ValueError("attention capture requires a resolved model identity")
         capture.record(
             token_ids=tokens.tolist(),
             token_texts=[handle.processor.decode(token) for token in tokens],
@@ -333,31 +313,46 @@ def load_wave2vec_fa(
     device_policy=None,
 ) -> Wave2VecFAHandle:
     """Load a Wave2Vec FA model. Returns a typed handle."""
-    import torchaudio
+    from torchaudio.pipelines import MMS_FA
 
     from batchalign.device import resolve_inference_device
+    from batchalign.inference.fa_ctc_resources import MmsAlphabet
     from batchalign.inference.types import Wave2VecFAHandle
-    from batchalign.worker._progress import emit_download_event
 
-    bundle = torchaudio.pipelines.MMS_FA
     device = resolve_inference_device(device_policy)
-
-    # ``MMS_FA.get_model()`` downloads to torchaudio's hub cache on first use
-    # (~1.2 GB). torchaudio prints its own progress to stderr; surface a
-    # parallel event on the BA3 protocol channel so every UI sees the wait.
-    # Best-effort cache check: torchaudio doesn't expose a clean API for
-    # this, so we always emit. False positives (cached, but we still notify)
-    # are a much smaller UX cost than silent multi-minute waits.
-    emit_download_event(
-        stage="downloading_torchaudio_mms_fa",
-        user_message=(
-            "Downloading Wave2Vec MMS_FA bundle for forced alignment "
-            "(one-time, ~1.2 GB; future runs will use the local cache)…"
-        ),
+    model = mms_fa_model(purpose="forced alignment").to(device)
+    return Wave2VecFAHandle(
+        model=model,
+        sample_rate=target_sample_rate,
+        alphabet=MmsAlphabet.admit(MMS_FA.get_dict()),
     )
-    model = bundle.get_model()
-    model = model.to(device)
-    return Wave2VecFAHandle(model=model, sample_rate=target_sample_rate)
+
+
+def mms_fa_model(*, purpose: str) -> torch.nn.Module:
+    """The torchaudio MMS_FA model with its star token, its first download
+    watched.
+
+    Always with the star (``with_star=True``, torchaudio's default): forced
+    alignment maps characters its dictionary lacks to the ``*`` wildcard
+    (``infer_wave2vec_fa``), and placement confirmation lets it absorb
+    unspoken material, so neither can use the model without that output.
+
+    ``MMS_FA.get_model()`` downloads to torch hub's cache on first use
+    (~1.2 GB). Under ``download_liveness`` that is announced only when bytes
+    arrive (a cached bundle says nothing) and its growth reported, which keeps
+    it inside the worker's startup stall window. Shared by forced alignment
+    (``load_wave2vec_fa``) and placement confirmation (``load_fa_confirm``),
+    so the bundle is watched and named once.
+    """
+    import torchaudio
+
+    from batchalign.worker._download_liveness import TorchHubBundle, download_liveness
+
+    with download_liveness(
+        TorchHubBundle("mms_fa"),
+        what=f"the Wave2Vec MMS_FA bundle for {purpose} (~1.2 GB)",
+    ):
+        return torchaudio.pipelines.MMS_FA.get_model(with_star=True)
 
 
 def infer_wave2vec_fa(
@@ -373,78 +368,38 @@ def infer_wave2vec_fa(
     """
     import torch
     import torchaudio.functional as AF
-    from torchaudio.pipelines import MMS_FA as bundle
 
-    def _build_target_tokens(
-        source_words: list[str],
-        dictionary: dict[str, int],
-    ) -> tuple[torch.Tensor, list[int]]:
-        # MMS_FA uses CTC blank index 0 internally, and at least '-' maps there in
-        # the live dictionary. Strip blank-mapped chars at the engine boundary
-        # instead of changing the shared word model. If a word would become empty,
-        # fall back to the wildcard token so word-slot accounting still works.
-        wildcard = dictionary["*"]
-        blank_index = 0
-        transcript_tokens: list[int] = []
-        word_lengths: list[int] = []
+    from batchalign.inference.fa_ctc_resources import MmsTargetSequence
 
-        for word in source_words:
-            word_tokens: list[int] = []
-            for char in word.lower():
-                token = dictionary.get(char, wildcard)
-                if token == blank_index:
-                    continue
-                word_tokens.append(token)
-            if not word_tokens:
-                word_tokens = [wildcard]
-            transcript_tokens.extend(word_tokens)
-            word_lengths.append(len(word_tokens))
-
-        return torch.tensor(transcript_tokens, dtype=torch.int64), word_lengths
-
+    targets = MmsTargetSequence.from_words(words, handle.alphabet)
     device = next(handle.model.parameters()).device
 
     audio = audio_chunk.to(device)
-    emission, _ = handle.model(audio.unsqueeze(0))
-    emission = emission.cpu().detach()
+    with torch.inference_mode():
+        emission, _ = handle.model(audio.unsqueeze(0))
+        emission = emission.cpu().detach()
 
-    dictionary = bundle.get_dict()
-    transcript, word_lengths = _build_target_tokens(words, dictionary)
+    transcript = torch.tensor(targets.ids, dtype=torch.int64)
 
     path, scores = AF.forced_align(emission, transcript.unsqueeze(0))
     alignments, scores = path[0], scores[0]
     scores = scores.exp()
     merged_path = AF.merge_tokens(alignments, scores)
 
-    def unflatten(
-        list_: list[torch.Tensor], lengths: list[int]
-    ) -> list[list[torch.Tensor]]:
-        i = 0
-        ret = []
-        for length in lengths:
-            ret.append(list_[i : i + length])
-            i += length
-        return ret
-
-    word_spans = unflatten(merged_path, word_lengths)
+    aligned = targets.bind_spans(merged_path)
     ratio = audio.size(0) / emission.size(1)
     result: Wave2VecFAResult = [
         Wave2VecWordAlignment(
-            word=word,
+            word=word.source,
             interval_ms=(
-                int(((spans[0].start * ratio) / handle.sample_rate) * 1000),
-                int(((spans[-1].end * ratio) / handle.sample_rate) * 1000),
+                int(((word.spans[0].start * ratio) / handle.sample_rate) * 1000),
+                int(((word.spans[-1].end * ratio) / handle.sample_rate) * 1000),
             ),
             model_score=(
-                sum(span.score * (span.end - span.start) for span in spans)
-                / sum(span.end - span.start for span in spans)
+                sum(span.score * (span.end - span.start) for span in word.spans)
+                / sum(span.end - span.start for span in word.spans)
             ),
         )
-        # `strict` because `_build_target_tokens` appends exactly one entry to
-        # `word_lengths` per word (empty words fall back to the wildcard token),
-        # and `unflatten` returns one span-group per length. That 1:1 is held by
-        # two functions agreeing, not by a type, so enforce it here rather than
-        # dropping trailing words if either side ever changes.
-        for word, spans in zip(words, word_spans, strict=True)
+        for word in aligned.words
     ]
     return result

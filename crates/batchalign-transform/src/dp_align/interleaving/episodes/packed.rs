@@ -1,21 +1,19 @@
-//! Optional exact packed proof, admitted only after a work-refused literal band.
+//! Literal packed proof consumes one source-bound preparation.
 //! One input-bound operation owns both row representations and proof lifecycle.
 
-use super::band::RefusedBand;
+use super::band::PreparedLiteralSearch;
 use super::*;
-use crate::dp_align::packed_literal::{
-    BIT_WORDS, LiteralReference, ReferenceOrder, policy, reverse_bits,
-};
+use crate::dp_align::packed_literal::{BIT_WORDS, LiteralReference, ReferenceOrder, reverse_bits};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     marker::PhantomData,
 };
 
 mod geometry;
-use geometry::{Geometry, Representation, work_refusal};
+use geometry::{Geometry, Representation};
 mod kernel;
 mod profiles;
-pub use kernel::cost::{PackedSearchCost, PackedSearchStage, PackedSearchStatus};
+pub use kernel::cost::{PackedSearchCost, PackedSearchStage, PackedSearchStatus, PackedSearchWork};
 
 enum Stop<E> {
     Cancelled(E),
@@ -26,11 +24,8 @@ trait PackedControl: WorkControl {
     fn profile_width(&self, _words: usize) {}
     /// The stop a packed profile operation returns when its arithmetic
     /// contradicts the search's own invariants: checked in every build and
-    /// refused, never only debug-asserted.
+    /// prepared, never only debug-asserted.
     fn refuse(&self, inconsistency: LocalInterleavingInconsistency) -> Self::Error;
-}
-trait CandidateControl: PackedControl {
-    fn candidate(&self) -> Result<(), Self::Error>;
 }
 #[cfg(test)]
 impl PackedControl for Uninterrupted {
@@ -66,10 +61,10 @@ fn before(bits: &[u64], summary: &[usize], k: usize) -> usize {
 }
 
 pub(super) fn observe<C: WorkControl + ?Sized>(
-    refused: RefusedBand<'_, '_>,
+    prepared: PreparedLiteralSearch<'_, '_>,
     control: &C,
 ) -> Result<Result<Observation, LocalInterleavingRefusal>, C::Error> {
-    kernel::observe(refused, control)
+    kernel::observe(prepared, control)
 }
 
 #[cfg(test)]

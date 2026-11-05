@@ -43,7 +43,9 @@ fn test_pool(python: String) -> WorkerPool {
     WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable periodic health checks
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -66,13 +68,20 @@ async fn worker_killed_mid_batch_infer_returns_error() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         // Add a delay so we have time to kill the worker mid-request
         test_delay_ms: 5000,
         ..WorkerConfig::for_tests()
     };
 
-    let mut handle = WorkerHandle::spawn(config).await.expect("spawn failed");
+    let mut handle = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("spawn failed");
     let pid = *handle.pid();
 
     // Send a request that will take 5s (test_delay_ms), then kill the worker
@@ -216,7 +225,7 @@ async fn worker_death_before_ready_surfaces_stderr() {
         writeln!(f, "#!/bin/sh").expect("write");
         writeln!(
             f,
-            "echo '{{\"op\": \"progress_v2\", \"event\": {{\"request_id\": \"\", \"completed\": 0, \"total\": 0, \"stage\": \"refreshing_stanza_catalog\"}}}}'"
+            "echo '{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"refreshing_stanza_catalog\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}'"
         )
         .expect("write");
         writeln!(f, "echo 'Traceback (most recent call last):' >&2").expect("write");
@@ -238,11 +247,18 @@ async fn worker_death_before_ready_surfaces_stderr() {
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
-    let err = match WorkerHandle::spawn(config).await {
+    let err = match WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    {
         Err(err) => err,
         Ok(_) => panic!("spawn must fail when the worker dies before ready"),
     };
@@ -257,10 +273,12 @@ async fn worker_death_before_ready_surfaces_stderr() {
 // T078: Worker timeout integration tests
 // ---------------------------------------------------------------------------
 
-/// A worker that takes longer than `ready_timeout_s` to start should produce
-/// a `ReadyTimeout` error.
+/// A worker whose interpreter cannot be started fails at once with
+/// `SpawnFailed` rather than waiting out its startup window. The startup stall
+/// itself (a worker that starts but reports nothing) is tested where the
+/// window is applied: `read_ready_line`'s `a_silent_starting_worker_is_stalled`.
 #[tokio::test]
-async fn worker_ready_timeout_fires() {
+async fn a_worker_that_cannot_spawn_fails_rather_than_waiting() {
     let python = crate::prerequisite::worker_test_python();
     let config = WorkerConfig {
         python_path: python,
@@ -270,7 +288,9 @@ async fn worker_ready_timeout_fires() {
         // Use an impossibly short timeout (100ms) so the worker can't possibly start in time
         // ... except test-echo workers start very fast. Instead, use a bad python path
         // to ensure the worker never sends a ready signal.
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<1>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<1>(),
+        ),
         ..WorkerConfig::for_tests()
     };
 
@@ -281,7 +301,11 @@ async fn worker_ready_timeout_fires() {
         python_path: "/nonexistent/python3".into(),
         ..config
     };
-    let result = WorkerHandle::spawn(bad_config).await;
+    let result = WorkerHandle::spawn(
+        bad_config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await;
     match result {
         Err(WorkerError::SpawnFailed(msg)) => {
             eprintln!("Got expected SpawnFailed: {msg}");
@@ -304,7 +328,9 @@ async fn fast_health_check_interval_does_not_break_dispatch() {
     let pool = WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<1>(), // fast health checks
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
@@ -369,7 +395,9 @@ async fn multi_file_job_produces_per_file_results() {
         python_path: python,
         test_echo: true,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         ..PoolConfig::for_tests()
@@ -431,7 +459,6 @@ async fn multi_file_job_produces_per_file_results() {
         source_dir: Default::default(),
         options: CommandOptions::Morphotag(MorphotagOptions {
             common: CommonOptions::default(),
-            merge_abbrev: Default::default(),
 
             ..Default::default()
         }),

@@ -28,10 +28,13 @@ impl HostExecutionPolicy {
     /// Resolve host policy from one concrete memory tier.
     ///
     /// - Small (<24 GB): `Task` mode, separate single-task workers.
-    /// - Medium (24-48 GB): `LazyProfile` mode, one worker per profile but
-    ///   models loaded on demand via `ensure_task`. Prevents the speculative
-    ///   10-15 GB eager loading that causes memory guard deadlocks.
-    /// - Large/Fleet (>48 GB): `Profile` mode, eager loading.
+    /// - Medium (24-48 GB): `LazyProfile` mode, one worker per profile, not
+    ///   pre-scaled.
+    /// - Large/Fleet (>48 GB): `Profile` mode, one worker per profile,
+    ///   pre-scaled for a batch.
+    ///
+    /// In every mode no model loads at a worker's start: each loads in its
+    /// task's `ensure_task`, before the task's first request.
     pub fn from_memory_tier(memory_tier: MemoryTier) -> Self {
         match memory_tier.kind {
             MemoryTierKind::Small => Self {

@@ -58,7 +58,7 @@ become a word anchor. The corridor retains the exact source word census and may 
 at the actual recording edge when no following bound is proved. It grants no
 word timing, main-tier bullet or output permission. Request containment, engine
 budgets and final complete timing remain separate admissions; contradictory or
-over-budget search bounds are refused rather than clipped into convenient crops.
+resource-infeasible search bounds must retain their actual constraint rather than be clipped into convenient crops. A grouping target alone cannot authorize refusal.
 
 The `utr-debug` research report is schema 8. Existing complete candidate
 envelopes retain their previous shape. Partial-order envelopes carry

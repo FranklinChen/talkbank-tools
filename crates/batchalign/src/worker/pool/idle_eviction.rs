@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
+use crate::host_memory::{MemoryReclaim, Reclaimed};
 use crate::worker::WorkerPid;
+use tracing::warn;
 
 use super::rss_observer::refresh_rss_mb_for_pids;
 use super::{GroupsMap, WorkerGroup, WorkerKey, lock_recovered};
@@ -134,6 +136,74 @@ pub(super) fn snapshot_idle_workers_with_rss(groups: &GroupsMap) -> Vec<IdleWork
         .collect()
 }
 
+/// Retire one sampled idle worker: take it off its group's idle queue with
+/// its permit, shut it down, and account for it until it is gone (the
+/// teardown every eviction uses). `false` when the worker was checked out
+/// since the sample, so it is serving a request and stays.
+pub(super) async fn retire_sampled(sample: &IdleWorkerSample) -> bool {
+    let group = &sample.group;
+    // Taken off the queue under its lock, held only that long; the shutdown
+    // happens after it is released.
+    let (mut worker, leaving) = {
+        let mut idle = super::lock_recovered(&group.idle);
+        let Some(worker) = idle
+            .iter()
+            .position(|handle| handle.pid() == sample.pid)
+            .and_then(|position| idle.remove(position))
+        else {
+            return false;
+        };
+        // Consume the idle permit that matched the handle. A missing one is
+        // an upstream permit-versus-queue defect, surfaced rather than
+        // masked; the worker still goes.
+        match group.available.try_acquire() {
+            Ok(permit) => permit.forget(),
+            Err(error) => warn!(
+                pid = %sample.pid,
+                %error,
+                "Idle queue had a worker but no matching permit; retiring it without one"
+            ),
+        }
+        // The worker is still counted in `total` through its shutdown,
+        // which can take seconds; the guard accounts for it from the moment
+        // it leaves the queue until it is retired, so a saturated checkout
+        // never mistakes it for a lost worker.
+        (worker, super::AwayFromQueue::new(group, 1))
+    };
+    if let Err(error) = worker.shutdown_in_place().await {
+        warn!(pid = %sample.pid, %error, "Idle worker did not shut down cleanly");
+    }
+    leaving.retire();
+    true
+}
+
+/// The pool's idle workers, as the room a queued host-memory request asks
+/// for: one reclaim retires the largest idle worker, which releases its
+/// leases and its memory.
+#[derive(Clone)]
+pub(crate) struct IdleWorkers(pub(super) GroupsMap);
+
+#[async_trait::async_trait]
+impl MemoryReclaim for IdleWorkers {
+    async fn reclaim_one(&self) -> Reclaimed {
+        let mut samples = snapshot_idle_workers_with_rss(&self.0);
+        samples.sort_by_key(|sample| std::cmp::Reverse(sample.rss_mb));
+        for sample in samples {
+            if retire_sampled(&sample).await {
+                tracing::info!(
+                    pid = %sample.pid,
+                    rss_mb = sample.rss_mb,
+                    target = %sample.key.target.label(),
+                    lang = %sample.key.language,
+                    "Retired an idle worker to make room for a queued host-memory request"
+                );
+                return Reclaimed::Retired;
+            }
+        }
+        Reclaimed::NothingIdle
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +211,44 @@ mod tests {
     use crate::worker::pool::{EngineSelection, WorkerKey};
     use crate::worker::{WorkerProfile, WorkerTarget};
     use tokio::sync::Semaphore;
+
+    /// A queued request's reclaim retires the pool's idle worker: off its
+    /// queue with its permit consumed, shut down and no longer counted. The
+    /// next reclaim finds nothing idle, so a waiting request falls back to
+    /// polling instead of retiring in a loop.
+    #[tokio::test]
+    async fn a_reclaim_retires_an_idle_worker_and_then_finds_none() {
+        use std::sync::atomic::Ordering;
+
+        // The stub names its own shell's PID in its ready line (the shared
+        // script's fixed PID is no process), so the reclaim's sample reads a
+        // live process's resident memory, as it does for a real worker.
+        let script =
+            super::super::checkout::tests::never_responds_script().replace("424242", "'\"$$\"'");
+        let handle = crate::worker::handle::WorkerHandle::spawn_stub_for_test(&script).await;
+        let group = Arc::new(WorkerGroup::new(
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(Semaphore::new(0)),
+            WorkerProfile::Stanza,
+            EngineSelection::none(),
+        ));
+        group.total.fetch_add(1, Ordering::Relaxed);
+        lock_recovered(&group.idle).push_back(handle);
+        group.available.add_permits(1);
+        let key = WorkerKey::without_engine_selection(
+            WorkerTarget::Profile(WorkerProfile::Stanza),
+            WorkerLanguage::from(LanguageCode3::eng()),
+        );
+        let idle = IdleWorkers(Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::from([(key, group.clone())]),
+        )));
+
+        assert_eq!(idle.reclaim_one().await, Reclaimed::Retired);
+        assert!(lock_recovered(&group.idle).is_empty());
+        assert_eq!(group.available.available_permits(), 0);
+        assert_eq!(group.total.load(Ordering::Relaxed), 0);
+        assert_eq!(idle.reclaim_one().await, Reclaimed::NothingIdle);
+    }
 
     fn make_sample(pid: u32, rss_mb: u64) -> IdleWorkerSample {
         let spawn_permits = Arc::new(Semaphore::new(0));

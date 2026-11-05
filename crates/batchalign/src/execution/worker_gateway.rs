@@ -27,7 +27,6 @@ pub(crate) struct MorphotagRuntimeOptions {
     pub(crate) l2_policy: crate::params::L2MorphotagPolicy,
     pub(crate) pos_hint_policy: crate::params::PosHintPolicy,
     pub(crate) ca_policy: crate::options::CaMorphotagPolicy,
-    pub(crate) should_merge_abbrev: bool,
     /// Review-tier verbosity for the incremental morphotag path
     /// Legacy review-level request retained for stored-job compatibility.
     /// No value emits CHAT decision tiers.

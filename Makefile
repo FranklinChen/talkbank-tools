@@ -417,7 +417,9 @@ lint:
 	@# error, which is why every other CI-gated target here enumerates crates.
 	cargo clippy -p batchalign-types -p batchalign-core -p batchalign-fa-core \
 		-p batchalign -p batchalign-transform -p batchalign-pyo3 \
-		--all-targets -- -D warnings
+		--all-targets -- -D warnings \
+		-W clippy::large_futures -W clippy::large_stack_frames \
+		-W clippy::large_stack_arrays -W clippy::large_types_passed_by_value
 	@echo "==> push gate covers CI"
 	@# Static check that scripts/gate.sh runs what the workflow runs. The
 	@# hook drifted into a weaker subset and reported success for three pushes

@@ -309,7 +309,9 @@ pub async fn start_live_server(
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own startup; see `HarnessBudget::FixtureWorkerReady`.
-        ready_timeout_s: HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            HarnessBudget::FixtureWorkerReady.as_positive_seconds(),
+        ),
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
         ..PoolConfig::for_tests()
@@ -515,7 +517,6 @@ pub fn default_options_for(command: &str) -> CommandOptions {
             boundaries: Default::default(),
             pauses: false,
             wor: true.into(),
-            merge_abbrev: false.into(),
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
@@ -547,23 +548,19 @@ pub fn default_options_for(command: &str) -> CommandOptions {
         }),
         "translate" => CommandOptions::Translate(TranslateOptions {
             common: CommonOptions::default(),
-            merge_abbrev: false.into(),
             ..TranslateOptions::default()
         }),
         "coref" => CommandOptions::Coref(CorefOptions {
             common: CommonOptions::default(),
-            merge_abbrev: false.into(),
         }),
         "utseg" => CommandOptions::Utseg(UtsegOptions {
             common: CommonOptions::default(),
-            merge_abbrev: false.into(),
             utseg_fallback: false.into(),
         }),
         "benchmark" => CommandOptions::Benchmark(BenchmarkOptions {
             common: CommonOptions::default(),
             asr_engine: batchalign::options::AsrEngineName::RevAi,
             wor: false.into(),
-            merge_abbrev: false.into(),
         }),
         "opensmile" => CommandOptions::Opensmile(OpensmileOptions {
             common: CommonOptions::default(),
@@ -571,7 +568,6 @@ pub fn default_options_for(command: &str) -> CommandOptions {
         }),
         "compare" => CommandOptions::Compare(CompareOptions {
             common: CommonOptions::default(),
-            merge_abbrev: false.into(),
         }),
         "avqi" => CommandOptions::Avqi(AvqiOptions {
             common: CommonOptions::default(),

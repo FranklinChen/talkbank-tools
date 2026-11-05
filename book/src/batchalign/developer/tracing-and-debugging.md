@@ -461,7 +461,7 @@ sequenceDiagram
     UT->>UT: parse_lenient(chat_text)
     Note over UT: parse error detected!
     UT->>LOG: warn!(chat_text, errors)
-    UT-->>BC: Err("utseg pre-validation failed")
+    UT-->>BC: Err("the input transcript is not valid CHAT")
 ```
 
 **Without `--debug-dir`:** check server logs for the `warn!` containing the

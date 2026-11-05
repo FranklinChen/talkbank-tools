@@ -3,6 +3,337 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
+## Unreleased
+
+Alignment behavior in this candidate:
+
+- Valid supplied utterance windows can proceed beyond the former fixed duration
+  policy, using loaded-model constraints and source-bound request admission.
+- `--main-bullets keep` permits one exact supplied-window retry for missing word
+  timings, preserving already accepted timings.
+- Packed and monotonic UTR paths avoid former universal execution-work cutoffs;
+  remaining storage/candidate policies still apply.
+- Live progress advances as individual results are retained, and cancellation
+  remains distinct from an unexpected system failure.
+- Mixed Cantonese/Latin source content is retained during model preparation.
+
+Implementation details follow.
+
+- UTR graph construction consumes input-owned episode preparation rather than
+  accepting turns and a detached capacity. Graph and corridor construction reuse
+  the same observed episodes; prefix offsets replace repeated following-run
+  sums and an end-offset fallback. Materialization checks cancellation and
+  reserves actual node/word populations. Existing graph/storage/candidate
+  quotas remain pending shared host-memory admission.
+
+- Alignment publishes each retained request result before advancing to the next
+  model request, instead of retaining the entire batch before updating progress.
+  Ledger-owned counters include reused, cached and shared output units. A
+  completed counter can still include untimed words; final diagnostics remain
+  authoritative. Optional supplied-window recovery uses a single-request owner
+  and returns one result directly.
+
+- Monotonic fuzzy correspondence no longer rejects inputs at a universal
+  64-million word-pair cutoff. Input-owned preparation compares distinct original
+  spellings once and reuses only complete candidate rows. Sparse scoring uses
+  separate forward and backward states, releases each phase's scratch, and never
+  fills uncomputed ranks with zero. Candidate refusals report the actual caller
+  allowance; remaining resource policies still await adaptive host admission.
+
+- Monotonic literal correspondence no longer rejects a storage-admitted proof
+  because its prospective work exceeds 64 million operations. The consuming
+  proof owns its exact input, checkpoint stride and candidate allowance; caller
+  interruption remains supported. This repairs a reproduced near-matching
+  5,000-word case with only 4,999 optimal edges. Remaining legacy storage and
+  candidate policies still await adaptive host admission.
+
+- Packed UTR proof collects all-optimal candidates in per-word bit blocks,
+  admitting only newly observed positions before mutation. Repeated candidate
+  observations no longer allocate or search a global tree of word/position
+  pairs. Only a complete proof materializes addressed word evidence. Declared
+  test checkpoint strides now enter before survey/admission; admitted geometry
+  cannot be changed afterward. Existing resource caps and matching policies
+  remain unchanged while shared-memory admission is completed.
+
+- FA virtual preparation forbids numerical fallback for unsupported metadata
+  operations. One admitted owner couples the copied model, virtual epoch,
+  storage census and allocation ledger; attention calls retain that ledger.
+  Copy validation precedes mode changes, and the parameter/buffer census is no
+  longer repeated. Missing metadata is an explicit preparation failure, not
+  permission to run a real kernel on zero inputs to discover its shape.
+
+- Virtual FA attention projection now observes internal score, softmax and mask
+  allocations through the installed composite kernels. Bound virtual calls keep
+  their original inputs and epoch; missing capabilities refuse explicitly.
+  Selecting math attention alone had left these allocations hidden behind an
+  output-only FakeTensor result. Normal request admission and source-bound
+  partitioning consume the revised demand; no acoustic model is run twice.
+
+- UTR canonical witness preparation retains matching prefixes/suffixes once
+  and scores only the unmatched interior. Complete witnesses allocate no row.
+  Input-bound consuming admission chooses an affordable scalar or packed
+  representation before execution instead of using a one-million-cell switch;
+  a refused projection cannot hide an affordable equivalent representation.
+  Matching/correspondence semantics and cancellation remain unchanged; the
+  remaining fixed resource policies still await adaptive shared-memory admission.
+
+- Whisper and Qwen retain admitted fixed preparation facts once per loaded
+  model, including geometry and model-storage accounting. Qwen carries its
+  model and convolution geometry together; Whisper pins its alignment heads
+  and tokenizer prefix. Invalid fixed metadata stays refused for that epoch.
+  Request bindings, text/shape checks and isolated virtual projection remain
+  per request; no cache identity changes.
+
+- Alignment and UTR preparation producers retain large asynchronous state
+  machines behind owned pinned futures, including the legacy direct CLI path.
+  Parents embed compact handles while admitted inputs and request/cache
+  authority remain single-use. This removes a caller-specific retry workaround
+  without changing command forms, alignment policies or cache identities.
+  The existing CI lint invocation now checks large futures, stack frames,
+  stack arrays and value arguments for its Rust targets.
+
+- CPU forced-alignment preparation includes internal convolution scratch that
+  virtual operator outputs did not expose. Slow MM and NNPACK use distinct,
+  source-qualified allocation paths, including copies and grouped-output
+  lifetimes. NNPACK uses its own sizing-only query; the model is not run again.
+  Unqualified CPU layouts or sizing outcomes report preparation unavailable.
+  Process-memory and retained-workspace qualification remain separate.
+
+- MMS alignment retains one validated immutable alphabet for preparation and
+  execution, plus fixed loaded-model metadata for its request preparer.
+  Requests no longer rebuild the vocabulary or requalify fixed native-layout,
+  device and model-storage facts. Input-shaped projection, constraints and
+  memory leases remain per request; this does not change alignment cache keys.
+
+- UTR's admitted packed correspondence search no longer stops when its
+  diagnostic work counter reaches 64 million operations. Work totals retain
+  exact counts or an explicit lower bound on numeric overflow; they cannot
+  reject a proof. Preparation/representation work, storage and candidate limits
+  remain while shared-memory admission is being completed. Full/viable row
+  admission now shares one owned graph survey instead of repeating preparation.
+  CPU search clears the preceding ASR-window progress counts so a completed
+  provider stage does not misleadingly remain displayed as completed recovery.
+
+- `align --main-bullets keep` and `exact` may recover missing word timing with
+  one exact supplied-window attempt. It uses the complete utterance without
+  trailing padding, leaves accepted primary timings unchanged, and retains
+  explicit unresolved results. Preparation, cache and model/memory admission
+  remain shared; cache-required runs never infer. This replaces the earlier
+  promise that these policies affect output only.
+
+- Forced alignment checks complete utterances against the loaded model's input
+  constraints and projected memory, replacing fixed per-utterance duration
+  refusals. Resource-driven splits preserve source anchors, disjoint answer
+  ranges and explicitly unavailable words. Temporary memory pressure waits for
+  a shared coordinator lease instead of changing transcript geometry.
+- Alignment preparation has one owner per immutable input. Initial and child
+  cache hits skip decoding and model preparation; repeated context proposals
+  reuse preparation, shared contexts execute once, and fallback reuses prepared
+  PCM and text. The CLI and dashboard show `Preparing alignment` during this
+  work. FA evidence schema 11 records actual resource or decoder constraints.
+  This changes the internal worker and shared-memory ledger contracts: server,
+  workers and clients sharing the ledger must be upgraded together.
+
+- MMS forced alignment runs its encoder in inference mode, avoiding an
+  unnecessary autograd graph. One typed label sequence now owns source-word
+  partitions through native CTC result admission; incomplete or surplus label
+  spans are rejected before they can produce word timings. A new MMS FA cache
+  identity prevents earlier unchecked results from hiding this repair.
+
+- Cantonese forced-alignment romanization preserves unmapped source spans
+  inside mixed words instead of dropping them beside recognized characters.
+  The romanizer must account for the complete source word; malformed or
+  incomplete results are reported as invalid model output. The changed input
+  shaping has a new FA cache identity, so prior results cannot mask the repair.
+
+- Stopping a job now records its unprocessed files as cancelled, instead of
+  reporting a system failure for each file that was still queued. Completed
+  output and diagnosed files keep their existing results. A runner that ends
+  unexpectedly still reports a system failure for unaccounted work.
+
+- File status now shows worker preparation and measured model-download growth,
+  including during a cold worker's startup and on-demand loads over stdio,
+  shared-GPU and TCP request paths. Host-memory waits during worker startup
+  reach the file as well. Preparation ends on success, failure or cancellation
+  and restores the pipeline's current stage and counts. Cancelling startup
+  also cancels its owned child task and reaps a not-yet-ready worker instead
+  of detaching it with an open wait. These display changes
+  do not change model residency or memory admission.
+
+- A worker start or model load waiting for host memory now makes room
+  itself: it retires the pool's largest idle worker and tries again, one
+  worker at a time, instead of waiting for idle workers to leave on their
+  own. Workers that are serving requests are never retired for it.
+- Model memory reservations are sized from what a model holds while it runs
+  a request, not from what loading it adds. Loading leaves most weights
+  unread until the first request, so the old figures were far too small:
+  local pyannote now reserves about 2.8 GB while loading (was 0.5 GB), the
+  speaker-embedding model 0.6 GB (was 0.5 GB), and coreference 3.2 GB per
+  batch (was 0.8 GB). A loaded model's reservation also keeps the part its
+  first request has yet to read, rather than dropping to a quarter of it.
+- Known issue: coreference memory grows faster than the document it
+  resolves, and a coref job sends each transcript as one document. A long
+  transcript can need far more memory than its reservation (tens of GB in
+  the worst case measured), enough to exhaust a laptop. How coreference is
+  bounded is not yet decided.
+- Two settings are renamed, because neither ever was a timeout:
+  `worker_ready_timeout_s` is now `worker_startup_stall_s` (default 300) and
+  `ensure_task_timeout_s` is now `ensure_task_stall_s` (default 120). Each is
+  how long a starting worker, or a model load, may go without reporting
+  progress. A configuration file still using an old name fails at startup,
+  naming the key; rename it. The new keys refuse `0`.
+- A worker waits for host memory instead of failing after a fixed time. When
+  the machine's memory is reserved by other work, a worker that cannot start
+  and a model that cannot load wait in turn until it is free: the file shows
+  "Waiting for host memory" and the server log says what it waits for once a
+  minute. A worker's start used to give up after `worker_ready_timeout_s` of
+  waiting and fail the file. Cancelling the job ends the wait. Only a model larger than the machine can ever hold
+  (its total memory less `memory_gate_mb`) is refused, at once, naming the
+  sizes, and it is not retried.
+- Every model a worker holds is now reserved with the host's memory
+  coordinator, each by its own load, for as long as the worker holds it: the
+  local pyannote pipeline, the speaker-embedding model and coreference
+  included, which nothing reserved before (a worker holding Whisper and local
+  pyannote could be under-reserved). A worker's own start reserves only its
+  baseline (Python and its libraries, about 350 MB), not a whole profile's
+  worth of models, so on a full host a worker starts and its model waits,
+  rather than the start being refused. The sizes are in the memory-safety
+  chapter, each marked measured or estimated. All batchalign3 processes on a
+  host must run this build or later: an older one cannot read the new
+  reservations in the shared memory ledger. `BATCHALIGN_SPAWN_MIN_MEMORY_MB`
+  is gone; the coordinator's reserve (`memory_gate_mb`) is the one floor.
+- A TCP worker daemon reports its startup progress and its ready line on its
+  standard output, as a stdio worker does, under the startup stall window. It
+  printed only a ready line, on standard error, which the server waited for
+  under a fixed limit and stopped looking for after 100 other lines.
+
+- Cantonese forced alignment (`--fa-engine wav2vec_canto`) now romanizes words
+  only for Cantonese (`yue`), as documented. It romanized every language: the
+  aligner's language was never recorded, so it stayed `yue` whatever the
+  worker served. A non-Cantonese file aligned with this engine now has its
+  words aligned as written.
+- A Rev.AI (or whisper.cpp) job's worker no longer loads a local recognizer.
+  When the plan names no worker-hosted ASR engine, the worker's ASR load now
+  loads nothing; it used to guess one (FunASR for Cantonese, Whisper
+  otherwise) whenever no Rev.AI key had reached the worker. The transcript's
+  engine was never affected: Rev.AI is the default for every language,
+  Cantonese included, and the Cantonese reference no longer says FunASR is
+  the default for `yue`. Pass `--asr-engine funaudio` to use it.
+- No worker loads a model when it starts, on any host. Each model loads
+  before the first file that needs it, with progress, and the wait lasts as
+  long as the download keeps growing. On a large host (more than 48 GB) a
+  first file therefore waits for its model to load instead of finding it
+  preloaded; in exchange a worker holds only the models its own jobs asked
+  for (an align job's worker no longer holds a recognizer it never runs, and
+  a morphotag worker no longer holds utterance-segmentation or coreference
+  models). Diarization by local pyannote, `speaker-identify` and `coref` no
+  longer download their models inside the first file, where a slow download
+  could time that file out and the retry started it over. A coref worker
+  holds its model only while a batch runs. Jobs using different speaker
+  models share one GPU worker, which loads each model the first time a
+  request asks for it. A coref job's readiness check now prepares the
+  English worker its files actually reach. A model this machine is refused
+  (a gated repository with no accepted terms) is reported as an access
+  denial naming the repository and the remedy, and is not retried, as it was
+  when it failed inside a file.
+- The NeMo speaker engine is removed. It was never installable: no NeMo
+  package was ever a dependency, so `--speaker-engine nemo` could not run in a
+  standard install. `--speaker-engine nemo` is now refused at the command line
+  as an unknown value; the choices are `pyannote` and `pyannote-ai`. A stored
+  job or engine override that still names `nemo` is refused as an unknown
+  speaker engine rather than run on a different one.
+- A model a worker has to download is now fetched before the worker accepts
+  work, and the wait has no fixed time limit: BA3 waits as long as the
+  download keeps growing, and stops only when nothing new has arrived for
+  `worker_ready_timeout_s` (default 300 s) or, on medium-memory hosts,
+  `ensure_task_timeout_s` (default 120 s). Both settings now mean "time
+  without progress" rather than "total time". Previously a first-time
+  Paraformer download happened inside the first transcription and could time
+  that file out, and the retry started the download over; a first-time Qwen
+  download could likewise exceed the 300 s startup limit.
+- The Paraformer models (checkpoint, voice activity, punctuation) are
+  downloaded from ModelScope at their pinned versions and loaded from disk,
+  like the SenseVoice ones from Hugging Face; FunASR no longer resolves any
+  model name against a hub itself. A model is loaded only when its files are
+  complete: one an interrupted download left partial is completed first.
+- Every model a worker downloads while starting now reports its progress:
+  Whisper alignment, the MMS alignment models, Qwen alignment, Seamless and
+  NLLB translation, the machine-ear models, Stanza language packs and lemma
+  resources. Before, these said only "downloading" and "done", so a long
+  download could be judged stalled. The pyannote pipeline, speaker embedding
+  and Stanza coreference report progress too. A download is announced only
+  when data actually arrives, never guessed in advance: a guess called a
+  partially downloaded model "cached" and let it download without a word.
+- Loading Qwen ASR no longer says "first-run download may take several
+  minutes", since its models are downloaded (with progress) before it loads;
+  it now reads "Loading Qwen3-ASR model <name>". The model name it logs is
+  the one that loads, which a `qwen_model` override could previously
+  misstate.
+- Whisper alignment, Seamless and NLLB translation, Qwen alignment and the
+  machine-ear models now download before they load, like the ASR models, and
+  record the exact revision that loaded. Whisper alignment no longer makes a
+  separate request just to learn its revision.
+- A Qwen ASR checkpoint named in the old spelling (a `qwen_model` override
+  without `-hf`) is now refused with the corrected name before anything
+  downloads. It used to be refused only after its download.
+- A benchmark file that is retried now says when the retry happens
+  ("retrying in N ms"), as the other commands' files do.
+- On a fresh install, the Stanza resource catalog download is announced as
+  it starts and when it finishes. It is smaller than the size progress is
+  reported in, so it would otherwise have downloaded without a word.
+- On a shared GPU worker, a model load that reported download progress was
+  failed by its own progress report. Progress now reaches the load and keeps
+  it waiting.
+- A download that slows to a trickle (under 1 MiB per stall window, about
+  3.4 KB/s at the default) counts as stalled, so the worker is replaced and
+  the load retried rather than waiting days on a stuck connection.
+- Starting a job's worker is retried after a transient failure (a crash, a
+  stalled download), with the same three attempts and backoff a request gets.
+  It used to fail the whole job at the first such failure.
+- A worker reports the runtime identity it started with. It used to observe
+  it after loading its models, and loading FunASR's dependencies changes the
+  installed-package inventory Python sees, so a FunASR worker could be refused
+  as "a different runtime" by its own server. A refusal for a different
+  runtime now names the component that differs, with both values.
+- FunASR is now 1.4.22 (was held at 1.4.12). Releases 1.4.13 and 1.4.14
+  required NumPy below 2 and stay excluded; 1.4.22 installs with NumPy 2.
+- A transcript refused before processing because it is not valid CHAT now
+  says so, and names the line of each problem: "the input transcript is not
+  valid CHAT: line 7: E316 ... Correct the transcript and submit it again;
+  nothing was written". It used to read "CHAT replacement admission failed"
+  or "CHAT pre-validation failed", which named an internal stage, read as
+  Batchalign having broken the file, and gave no line. The refusal still
+  happens before any media or recognition, so it costs nothing. `merge-verify`
+  and the UTR replay evaluation report refused drafts the same way.
+- Whose fault a refused admission is (the transcript's or the tool's) is now
+  decided once, from the failure's own kind, and the message, HTTP status and
+  failure category all follow it. Previously each re-derived it from a flag,
+  which counted a parser that could not retain its source as invalid input
+  (HTTP 400, `Validation`); it is now an internal fault (HTTP 500, `System`),
+  as Chatter documents it.
+- `--merge-abbrev` is now a `transcribe` option only, and it merges with true
+  timing. Single letters the recognizer emitted for an abbreviation (`F B I`)
+  are merged into one word (`FBI`) on the recognizer's own words, before the
+  transcript is built, so the merged word is timed from its first letter's
+  start to its last letter's end. Letters of different speakers are never
+  merged, and a run with an untimed letter is kept as letters rather than
+  given a span nobody observed. The output's stamp carries `merge_abbrev=true`
+  when the merge ran. The merge used to rewrite the finished CHAT, which could
+  give a merged word no truthful timing.
+- `align`, `morphotag`, `utseg`, `translate`, `coref`, `compare` and
+  `benchmark` no longer accept `--merge-abbrev` or `--no-merge-abbrev`; both
+  are refused at the command line. On `align` the flag never produced a
+  merged file: the merge changed words the alignment had admitted, so every
+  file it touched was refused. A job stored by an earlier server with
+  `merge_abbrev` in its options still loads; for these commands the key is
+  dropped, and a stored `true` is logged as a warning naming the job, which
+  does not merge.
+- When `transcribe` joins two recognized words into a known English compound
+  (`air` `plane` becomes `airplane`), the merged word is now timed from the
+  first word's start to the second word's end. It used to keep only the first
+  word's timing, so its bullet ended where the second word began. A pair with
+  an untimed word is now kept as two words rather than merged.
+
 ## 0.8.8 (November 5, 2026)
 
 - The provider accounts (the Rev.AI key, Tencent's keys and engine, Aliyun's

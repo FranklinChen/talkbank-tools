@@ -86,7 +86,10 @@ pub fn run(args: &UtrAlignmentEvalArgs) -> Result<(), CliError> {
     // A replay retains every tier. The named admission producer owns its proof;
     // parseability alone cannot authorize matching or publishing evidence.
     let chat = parse_source_with_parser(&parser, chat_text)
-        .admit(TranscriptName::Named(stem), &NullErrorSink)?
+        .admit(TranscriptName::Named(stem), &NullErrorSink)
+        .map_err(|error| {
+            CliError::ChatAdmission(crate::error::SourceRefusal::in_source(error, chat_text))
+        })?
         .into_valid_file();
     let token_bytes = std::fs::read(&args.tokens)?;
     // Retained tokens were dumped after script normalization, which is not

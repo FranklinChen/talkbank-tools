@@ -25,8 +25,8 @@ use super::context::{
     JobDispatchRequest, MemoryGateFailurePolicy, ServerExecutionHost,
 };
 use super::util::{
-    FileRunTracker, RunnerEventSink, compute_job_workers, force_terminal_file_states,
-    preflight_validate_media,
+    FileRunTracker, RunnerEventSink, UnfinishedFileCause, compute_job_workers,
+    force_terminal_file_states, preflight_validate_media,
 };
 
 /// Build the future that owns one background job lifecycle.
@@ -363,7 +363,14 @@ async fn run_hosted_job(
     }
 
     // Force unfinished files to terminal status
-    let forced_errors = force_terminal_file_states(sink.as_ref(), job_id).await;
+    let Some(before_cleanup) = store.completion_snapshot(job_id).await else {
+        return Ok(HostedJobRunOutcome::Completed);
+    };
+    let cause = match before_cleanup.cancelled {
+        true => UnfinishedFileCause::Cancelled,
+        false => UnfinishedFileCause::UnexpectedExit,
+    };
+    let forced_errors = force_terminal_file_states(sink.as_ref(), job_id, cause).await;
 
     // Set final job status
     let Some(completion) = store.completion_snapshot(job_id).await else {

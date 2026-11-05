@@ -22,9 +22,9 @@ import logging
 # "No handlers could be found" warnings.  The CLI adds its own handlers.
 logging.getLogger("batchalign").addHandler(logging.NullHandler())
 
-# Suppress noisy third-party loggers without touching the root logger
-for _name in ("nemo_logger", "nemo", "pytorch_lightning"):
-    logging.getLogger(_name).setLevel(logging.WARNING)
+# Suppress a noisy third-party logger (Lightning, which pyannote.audio pulls
+# in) without touching the root logger.
+logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
 
 # Re-exports the public error surface. The star is deliberate, and this import
 # deliberately follows the logging configuration above so that importing the

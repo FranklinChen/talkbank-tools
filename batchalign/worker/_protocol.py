@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, cast
+from typing import TYPE_CHECKING, Literal, TextIO, cast
 
 import batchalign_core
 
@@ -56,8 +56,16 @@ from batchalign.worker._protocol_ops import (
     dispatch_protocol_message,
     prepare_protocol_message,
 )
-from batchalign.worker._runtime_identity import observe_worker_runtime
+from batchalign.worker._runtime_identity import WorkerRuntimeIdentity
 from batchalign.worker._types import WorkerJSONValue
+from batchalign.worker._types_v2 import (
+    LoadMeasureV2,
+    LoadProgressV2,
+    ProgressEventV2,
+    RequestProgressV2,
+    UnitProgressV2,
+    WorkerRequestIdV2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +178,27 @@ def _protocol_stream() -> TextIO:
     return sys.stdout if _protocol_out is None else _protocol_out
 
 
+def release_protocol_stdout() -> None:
+    """End a TCP daemon's startup stream: its protocol lines go nowhere now.
+
+    A TCP daemon reports its startup (progress, then the ready line) on the
+    stdout it claimed, which its spawner reads exactly as it reads a stdio
+    worker's. The spawner stops reading at the ready line and the daemon
+    outlives it, so after the ready line the daemon must not write to that
+    pipe: a write into a pipe nobody reads blocks once the pipe fills, and
+    one into a pipe whose reader exited fails. Protocol lines written after
+    this (progress of a request served over a socket) go to the null device,
+    which is where a TCP daemon's stdout used to point all along. Called
+    once, right after the ready line.
+    """
+    global _protocol_out
+    stream = _protocol_stream()
+    stream.flush()
+    if _protocol_out is not None:
+        _protocol_out.close()
+    _protocol_out = open(os.devnull, "w", encoding="utf-8")
+
+
 def _write_json(payload: dict[str, WorkerJSONValue]) -> None:
     """Emit a single JSON message line on the protocol stream."""
     out = _protocol_stream()
@@ -177,31 +206,44 @@ def _write_json(payload: dict[str, WorkerJSONValue]) -> None:
     out.flush()
 
 
-def write_progress_event(
-    request_id: str,
-    completed: int,
-    total: int,
-    stage: str = "stanza_processing",
-) -> None:
-    """Emit a progress event line during a long-running V2 task.
+def _write_progress(event: ProgressEventV2) -> None:
+    """Emit one progress event line.
 
     The Rust worker handle reads these intermediate JSON lines before the
     final response. Progress events use the ``progress_v2`` op tag so
     the handle can distinguish them from the final ``execute_v2`` response.
     Before the ready line they are bootstrap preamble, which the Rust
     supervisor's ``read_ready_line`` logs; the line is the same either way.
+    Private: a caller says which kind of progress it has through
+    :func:`write_load_progress` or :func:`write_request_progress`.
     """
+    _write_json({"op": "progress_v2", "event": event.model_dump(mode="json")})
 
-    payload: dict[str, WorkerJSONValue] = {
-        "op": "progress_v2",
-        "event": {
-            "request_id": request_id,
-            "completed": completed,
-            "total": total,
-            "stage": stage,
-        },
-    }
-    _write_json(payload)
+
+def write_load_progress(stage: str, measure: LoadMeasureV2) -> None:
+    """Report a model load moving: a download's growth or a phase boundary.
+
+    A ``load``-scoped event, which no request owns: the Rust side routes it to
+    a waiting load by its scope, where it may re-arm the stall window
+    (``RunningWait::observe_load``). A load cannot report items: the measure is
+    a ``DownloadGrowthV2`` or a ``PhaseV2``, never units.
+    """
+    _write_progress(LoadProgressV2(stage=stage, measure=measure))
+
+
+def write_request_progress(
+    request_id: WorkerRequestIdV2, stage: str, units: UnitProgressV2
+) -> None:
+    """Report request work counted in items, for the request ``request_id``.
+
+    A ``request``-scoped event carrying units only: request work is never a
+    download or a phase, so a count written here can only be read as items,
+    and never re-arms a model load. The id must name the request (pydantic
+    refuses an empty one, as Rust does).
+    """
+    _write_progress(
+        RequestProgressV2(request_id=request_id, stage=stage, progress=units)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,12 +339,16 @@ def _classify_dispatch_exception(exc: BaseException) -> WorkerErrorKind:
     decided by :mod:`batchalign.inference._transient_failures`, the module the
     Rust worker boundary reads for the same two questions, so a failure is
     classified alike whether it escapes an op or a model host's request. A
-    later attempt may succeed after either. ``"bootstrap"`` for the typed
-    deterministic load failure, which recurs identically. ``"runtime"`` for
-    everything else.
+    later attempt may succeed after either. ``"access_denied"`` for a model
+    this worker is refused (a gated repository): every model loads inside
+    ``ensure_task``, so this is where a refused load is named, and the server
+    reports it as an access denial with its remedy rather than retrying it.
+    ``"bootstrap"`` for the typed deterministic load failure, which recurs
+    identically. ``"runtime"`` for everything else.
 
     Side-effect-free: takes the exception, returns the wire kind.
     """
+    from batchalign.inference._model_access_errors import ModelAccessDeniedError
     from batchalign.inference._transient_failures import (
         is_device_out_of_memory,
         is_model_download_failure,
@@ -313,6 +359,8 @@ def _classify_dispatch_exception(exc: BaseException) -> WorkerErrorKind:
         return "download"
     if is_device_out_of_memory(exc):
         return "out_of_memory"
+    if isinstance(exc, ModelAccessDeniedError):
+        return "access_denied"
     if isinstance(exc, UnsupportedLanguageError):
         return "bootstrap"
     return "runtime"
@@ -328,17 +376,27 @@ def _ends_worker(kind: WorkerErrorKind) -> bool:
     return batchalign_core.error_kind_ends_worker(kind)
 
 
-def _print_ready() -> None:
+def _ready_envelope(
+    transport: Literal["stdio", "tcp"], runtime: WorkerRuntimeIdentity
+) -> dict[str, WorkerJSONValue]:
+    """The ready line both transports print, read by Rust's one reader
+    (``read_ready_line``): the transport tags the rest of the line."""
+    return {
+        "ready": True,
+        "pid": os.getpid(),
+        "transport": transport,
+        "runtime": runtime.json_value(),
+    }
+
+
+def _print_ready(runtime: WorkerRuntimeIdentity) -> None:
     """Print a JSON ready line on the protocol stream so the Rust parent can
-    discover us."""
-    _write_json(
-        {
-            "ready": True,
-            "pid": os.getpid(),
-            "transport": "stdio",
-            "runtime": observe_worker_runtime().json_value(),
-        }
-    )
+    discover us.
+
+    ``runtime`` is the identity ``main`` observed at process start, before
+    any model was loaded; see ``batchalign.worker._main.main``.
+    """
+    _write_json(_ready_envelope("stdio", runtime))
 
 
 def _serve_stdio() -> None:
@@ -488,23 +546,17 @@ def _serve_stdio_concurrent(max_threads: int = 4) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _print_ready_tcp(host: str, port: TcpPort) -> None:
-    """Print a JSON ready line to stderr so the CLI launcher can detect startup.
+def _print_ready_tcp(host: str, port: TcpPort, runtime: WorkerRuntimeIdentity) -> None:
+    """Print the TCP daemon's ready line on the protocol stream, then end it.
 
-    Unlike stdio mode where ready goes to stdout (consumed by the Rust parent),
-    TCP mode prints to stderr since stdout is not connected to any parent pipe.
+    The same envelope a stdio worker prints (``_print_ready``), on the same
+    stream, read by the same Rust reader (``read_ready_line``) under the same
+    startup stall window: the startup progress before it is the preamble that
+    re-arms that window. It adds where the daemon listens. The stream then
+    ends (:func:`release_protocol_stdout`), since the spawner reads no further.
     """
-    ready = json.dumps(
-        {
-            "ready": True,
-            "pid": os.getpid(),
-            "transport": "tcp",
-            "host": host,
-            "port": port,
-        }
-    )
-    sys.stderr.write(ready + "\n")
-    sys.stderr.flush()
+    _write_json({**_ready_envelope("tcp", runtime), "host": host, "port": port})
+    release_protocol_stdout()
 
 
 def _handle_tcp_connection_sequential(
@@ -691,6 +743,7 @@ def _handle_tcp_connection_concurrent(
 def _serve_tcp(
     host: str,
     port: TcpPort,
+    runtime: WorkerRuntimeIdentity,
     *,
     registry_path: Path | None = None,
 ) -> None:
@@ -714,7 +767,7 @@ def _serve_tcp(
 
     register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
 
-    _print_ready_tcp(host, actual_port)
+    _print_ready_tcp(host, actual_port, runtime)
     logger.info("TCP worker listening on %s:%d (sequential)", host, actual_port)
 
     try:
@@ -733,6 +786,7 @@ def _serve_tcp(
 def _serve_tcp_concurrent(
     host: str,
     port: TcpPort,
+    runtime: WorkerRuntimeIdentity,
     max_threads: int = 4,
     *,
     registry_path: Path | None = None,
@@ -752,7 +806,7 @@ def _serve_tcp_concurrent(
 
     register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
 
-    _print_ready_tcp(host, actual_port)
+    _print_ready_tcp(host, actual_port, runtime)
     logger.info(
         "TCP worker listening on %s:%d (concurrent, %d threads)",
         host,

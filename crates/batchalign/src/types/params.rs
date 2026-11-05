@@ -7,7 +7,6 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::api::DurationMs;
 use crate::chat_ops::CacheTaskName;
 use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::{AudioIdentity, WordGapHealing};
@@ -69,17 +68,19 @@ impl From<WorTierPolicy> for bool {
     }
 }
 
-/// Whether abbreviation merging should run before writing output.
+/// Whether transcribe merges single letters that spell a known abbreviation
+/// (`F B I` to `FBI`) on the recognizer's words, before CHAT is built.
 ///
-/// Replaces the `merge_abbrev: bool` option-family flag with an explicit policy
-/// that still serializes to the existing boolean wire format.
+/// Transcribe's `merge_abbrev` option, and no other command's. Serializes to
+/// the boolean wire format the option has always had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "bool", from = "bool")]
 #[derive(Default)]
 pub enum MergeAbbrevPolicy {
-    /// Merge abbreviated forms into their expanded spellings.
+    /// Merge each run of letters spelling a known abbreviation into one word,
+    /// timed by the union of the letters' intervals.
     Merge,
-    /// Preserve abbreviated forms as written.
+    /// Keep the letters as recognized.
     #[default]
     Keep,
 }
@@ -527,14 +528,14 @@ impl FaParams {
         )
     }
 
-    /// Longest audio window handed to this run's engine in one dispatch.
+    /// Preference for joining neighbours; not a limit on one request.
     ///
     /// Derived rather than stored, so it cannot disagree with the engine
     /// beside it. It was a field until 2026-08-14, which meant the value could
     /// be set from one engine and read beside another, and made the test that
     /// checked them equal a test of nothing.
-    pub fn max_group_ms(&self) -> DurationMs {
-        self.engine.max_group_ms()
+    pub fn aggregation_target(&self) -> crate::types::engines::FaAggregationTarget {
+        self.engine.aggregation_target()
     }
 }
 

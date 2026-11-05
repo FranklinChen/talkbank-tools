@@ -69,7 +69,6 @@ async fn stanza_profile_groups_morphotag_and_utseg() {
             override_media_cache: true,
             ..CommonOptions::default()
         },
-        merge_abbrev: false.into(),
         utseg_fallback: false.into(),
     });
 

@@ -469,7 +469,9 @@ fn test_echo_pool_config(python_path: &str) -> PoolConfig {
         python_path: python_path.into(),
         test_echo: true,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        ready_timeout_s: batchalign::api::PositiveSeconds::literal::<30>(),
+        startup_stall: batchalign::worker::LoadingStall::new(
+            batchalign::api::PositiveSeconds::literal::<30>(),
+        ),
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         ..PoolConfig::for_tests()

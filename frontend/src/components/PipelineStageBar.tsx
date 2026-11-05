@@ -52,7 +52,7 @@ const PHASES: Phase[] = [
     label: "Align",
     color: "bg-indigo-400",
     activeBg: "bg-indigo-500",
-    stages: new Set<FileProgressStage>(["aligning", "applying_results"]),
+    stages: new Set<FileProgressStage>(["preparing_alignment", "aligning", "applying_results"]),
   },
   {
     key: "analyze",

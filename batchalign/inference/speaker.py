@@ -9,15 +9,14 @@ split is:
 - Rust owns any higher-level document semantics or workflow policy above this
   boundary.
 
-Production entry point: ``infer_speaker_prepared_audio()`` receives
-Rust-prepared mono PCM and dispatches to the appropriate backend.
+Production entry points, one per backend: ``infer_pyannote_ai_prepared_audio``
+(hosted, loads nothing) and ``infer_local_pyannote_prepared_audio``, which
+takes the pipeline the worker's speaker task load built.
 """
 
 from __future__ import annotations
 
 import logging
-import wave
-from contextlib import contextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import numpy as np
@@ -28,63 +27,58 @@ from batchalign.inference._domain_types import (
     SpeakerId,
     TimestampMs,
 )
-from batchalign.inference.pyannote_local import _get_pyannote_pipeline
 
 if TYPE_CHECKING:
-    import torch
+    from batchalign.inference.pyannote_local import LoadedPyannotePipeline
 
 L = logging.getLogger("batchalign.worker")
 
 
-def infer_speaker_prepared_audio(
+def infer_pyannote_ai_prepared_audio(
     audio: np.ndarray,
     sample_rate_hz: int,
-    *,
-    num_speakers: NumSpeakers | None = None,
-    engine: SpeakerEngine = "pyannote",
-    device_policy=None,
+    num_speakers: NumSpeakers | None,
 ) -> SpeakerResponse:
-    """Run one prepared-audio diarization item through the requested backend.
+    """Diarize one prepared-audio item on pyannoteAI, a hosted API.
 
     ``num_speakers`` of ``None`` means "not specified", which the CLI defines
-    as auto-detect, and BOTH engines honour it (ruled by the operator,
-    2026-08-21): pyannote estimates the count natively, and NeMo runs with
-    oracle mode off so clustering estimates a count bounded by the config's
-    ``max_num_speakers``. A specified count still forces exactly that count
-    on either engine.
-
-    The default used to be ``2`` at all three levels of this module and again
-    in Rust, so a caller who said nothing got exactly two speakers and no way
-    to tell that from having asked for two.
+    as auto-detect (ruled by the operator, 2026-08-21): pyannoteAI is sent no
+    count and estimates it. A specified count forces exactly that count.
     """
 
-    if engine == "pyannote_ai":
-        from batchalign.inference.pyannote_ai import infer_pyannote_ai
+    from batchalign.inference.pyannote_ai import infer_pyannote_ai
 
-        completed = infer_pyannote_ai(audio, sample_rate_hz, num_speakers)
-        if completed.warning:
-            L.warning("pyannoteAI warning: %s", completed.warning)
-        evidence: SpeakerEvidence = PyannoteAISpeakerEvidence(
+    completed = infer_pyannote_ai(audio, sample_rate_hz, num_speakers)
+    if completed.warning:
+        L.warning("pyannoteAI warning: %s", completed.warning)
+    return SpeakerResponse(
+        evidence=PyannoteAISpeakerEvidence(
             job_id=completed.job_id,
             output=completed.output,
             warning=completed.warning,
         )
-    elif engine == "nemo":
-        segments = infer_nemo_speaker_prepared_audio(
-            audio,
-            sample_rate_hz,
-            num_speakers,
-            device_policy=device_policy,
+    )
+
+
+def infer_local_pyannote_prepared_audio(
+    audio: np.ndarray,
+    sample_rate_hz: int,
+    num_speakers: NumSpeakers | None,
+    *,
+    pipeline: LoadedPyannotePipeline,
+) -> SpeakerResponse:
+    """Diarize one prepared-audio item on the pipeline the speaker task loaded.
+
+    ``num_speakers`` of ``None`` lets local pyannote estimate the count.
+    """
+
+    return SpeakerResponse(
+        evidence=LocalPyannoteSpeakerEvidence(
+            segments=infer_pyannote_speaker_prepared_audio(
+                audio, sample_rate_hz, num_speakers, pipeline=pipeline
+            )
         )
-        evidence = NemoSpeakerEvidence(segments=segments)
-    elif engine == "pyannote":
-        segments = infer_pyannote_speaker_prepared_audio(
-            audio, sample_rate_hz, num_speakers
-        )
-        evidence = LocalPyannoteSpeakerEvidence(segments=segments)
-    else:
-        raise ValueError(f"unsupported speaker engine: {engine}")
-    return SpeakerResponse(evidence=evidence)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -116,18 +110,10 @@ class LocalPyannoteSpeakerEvidence(BaseModel):
     segments: list[SpeakerSegment]
 
 
-class NemoSpeakerEvidence(BaseModel):
-    """Segments emitted by the local NeMo runtime."""
-
-    kind: Literal["nemo"] = "nemo"
-    segments: list[SpeakerSegment]
-
-
 SpeakerEvidence: TypeAlias = Annotated[
-    PyannoteAISpeakerEvidence | LocalPyannoteSpeakerEvidence | NemoSpeakerEvidence,
+    PyannoteAISpeakerEvidence | LocalPyannoteSpeakerEvidence,
     Field(discriminator="kind"),
 ]
-SpeakerEngine: TypeAlias = Literal["pyannote_ai", "pyannote", "nemo"]
 
 
 class SpeakerResponse(BaseModel):
@@ -136,245 +122,12 @@ class SpeakerResponse(BaseModel):
     evidence: SpeakerEvidence
 
 
-# ---------------------------------------------------------------------------
-# RTTM parsing
-# ---------------------------------------------------------------------------
-
-# RTTM (Rich Transcription Time Marked) field indices.
-# Standard format: TYPE FILE CHANNEL TBEG TDUR <NA> <NA> SPEAKER <NA> <NA>
-_RTTM_FIELD_COUNT = 10
-_RTTM_TBEG = 3
-_RTTM_TDUR = 4
-_RTTM_SPEAKER = 7
-
-
-def _parse_rttm_line(line: str) -> SpeakerSegment:
-    """Parse a single RTTM line into a SpeakerSegment."""
-    fields = line.split()
-    if len(fields) < _RTTM_FIELD_COUNT:
-        raise ValueError(
-            f"RTTM line has {len(fields)} fields, expected {_RTTM_FIELD_COUNT}: {line!r}"
-        )
-    start_ms = int(float(fields[_RTTM_TBEG]) * 1000)
-    dur_ms = int(float(fields[_RTTM_TDUR]) * 1000)
-    speaker_label = fields[_RTTM_SPEAKER]
-    # Extract trailing numeric suffix: "speaker_0" -> "0"
-    speaker_id = speaker_label.split("_")[-1] if "_" in speaker_label else speaker_label
-    return SpeakerSegment(
-        start_ms=start_ms,
-        end_ms=start_ms + dur_ms,
-        speaker=f"SPEAKER_{speaker_id}",
-    )
-
-
-# ---------------------------------------------------------------------------
-# NeMo speaker diarization load/infer
-# ---------------------------------------------------------------------------
-
-
-def _conv_scale_weights(
-    self: torch.nn.Module,  # NeMo MSDD module (dynamic attributes)
-    ms_avg_embs_perm: torch.Tensor,
-    ms_emb_seq_single: torch.Tensor,
-) -> torch.Tensor:
-    """CNN scale weight computation for NeMo MSDD.
-
-    This is a monkey-patch for NeMo's MSDD_module.conv_scale_weights.
-    The ``self`` parameter is an MSDD_module instance with dynamic attributes
-    (conv, conv_bn, conv_repeat, batch_size, etc.) that mypy cannot see.
-    """
-    import torch
-    import torch.nn.functional as F
-
-    ms_cnn_input_seq = torch.cat([ms_avg_embs_perm, ms_emb_seq_single], dim=2)
-    ms_cnn_input_seq = ms_cnn_input_seq.unsqueeze(2).flatten(0, 1)
-
-    # All attribute accesses below: nn.Module.__getattr__ returns
-    # Tensor | Module, but at runtime these are MSDD dynamic attributes.
-    conv_out = self.conv_forward(
-        ms_cnn_input_seq,
-        conv_module=self.conv[0],
-        bn_module=self.conv_bn[0],
-        first_layer=True,
-    )
-    for conv_idx in range(1, self.conv_repeat + 1):
-        conv_out = self.conv_forward(
-            conv_input=conv_out,
-            conv_module=self.conv[conv_idx],
-            bn_module=self.conv_bn[conv_idx],
-            first_layer=False,
-        )
-
-    lin_input_seq = conv_out.reshape(
-        self.batch_size, self.length, self.cnn_output_ch * self.emb_dim
-    )
-    hidden_seq = self.conv_to_linear(lin_input_seq)
-    hidden_seq = self.dropout(F.leaky_relu(hidden_seq))
-    scale_weights = self.softmax(self.linear_to_weights(hidden_seq))
-    scale_weights = scale_weights.unsqueeze(3).expand(-1, -1, -1, self.num_spks)
-    return scale_weights
-
-
-def _resolve_speaker_config() -> str:
-    """Return path to the NeMo speaker diarization config.yaml."""
-    import os
-
-    return os.path.join(os.path.dirname(__file__), "speaker_config.yaml")
-
-
-@contextmanager
-def _temporary_conv_scale_weights_override(msdd_module: object):
-    """Apply the NeMo MSDD override only for one narrow execution window."""
-
-    had_original = hasattr(msdd_module, "conv_scale_weights")
-    original = getattr(msdd_module, "conv_scale_weights", None)
-    msdd_module.conv_scale_weights = _conv_scale_weights
-    try:
-        yield
-    finally:
-        if had_original:
-            msdd_module.conv_scale_weights = original
-        else:
-            delattr(msdd_module, "conv_scale_weights")
-
-
-def _device_for_speaker_runtime(device_policy=None) -> str:
-    """Resolve the concrete runtime device for diarization backends.
-
-    MPS is excluded HERE UNCONDITIONALLY, even under the global
-    ``BATCHALIGN_ALLOW_MPS`` opt-in: Pyannote produces wrong timestamps
-    on MPS (pyannote/pyannote-audio#1337, closed wontfix) and NeMo is
-    CUDA-only. That is a correctness bug, not a stability risk, so no
-    amount of bravery unlocks it. The opt-in is stripped from the policy
-    before delegating to the shared ``resolve_inference_device``.
-    """
-    from dataclasses import replace
-
-    from batchalign.device import DevicePolicy, resolve_inference_device
-
-    resolved = device_policy or DevicePolicy.from_environ()
-    device_policy = replace(resolved, allow_mps=False)
-
-    return resolve_inference_device(device_policy).type
-
-
-def _write_prepared_audio_wav(
-    audio: np.ndarray,
-    sample_rate_hz: int,
-    output_path: str,
-) -> None:
-    """Write mono prepared PCM to a narrow worker-local WAV artifact."""
-
-    mono = np.asarray(audio, dtype=np.float32)
-    clipped = np.clip(mono, -1.0, 1.0)
-    pcm16 = (clipped * np.iinfo(np.int16).max).astype("<i2")
-    with wave.open(output_path, "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate_hz)
-        handle.writeframes(pcm16.tobytes())
-
-
-def _infer_nemo_speaker_from_audio_file(
-    audio_path: str,
-    num_speakers: NumSpeakers | None,
-    *,
-    device_policy=None,
-) -> list[SpeakerSegment]:
-    """Run NeMo diarization from a concrete audio file path.
-
-    Oracle mode is DERIVED here, not read from the YAML: a provided count
-    turns it on (NeMo takes the manifest count verbatim), an absent one turns
-    it off (clustering estimates, bounded by the config's
-    ``max_num_speakers``). The YAML value is a placeholder this override
-    always replaces, so the request is the single owner of the decision.
-    """
-    import copy
-    import json
-    import os
-    import tempfile
-
-    from nemo.collections.asr.models.msdd_models import NeuralDiarizer
-    from nemo.collections.asr.modules.msdd_diarizer import MSDD_module
-    from omegaconf import OmegaConf
-    from pydub import AudioSegment
-
-    base_config = OmegaConf.load(_resolve_speaker_config())
-    config = copy.deepcopy(base_config)
-
-    with tempfile.TemporaryDirectory() as workdir:
-        sound = AudioSegment.from_file(audio_path).set_channels(1)
-        mono_path = os.path.join(workdir, "mono_file.wav")
-        sound.export(mono_path, format="wav")
-
-        meta = {
-            "audio_filepath": mono_path,
-            "offset": 0,
-            "duration": None,
-            "label": "infer",
-            "text": "-",
-            "rttm_filepath": None,
-            "uem_filepath": None,
-            "num_speakers": num_speakers,
-        }
-        manifest_path = os.path.join(workdir, "input_manifest.json")
-        with open(manifest_path, "w", encoding="utf-8") as fp:
-            json.dump(meta, fp)
-            fp.write("\n")
-        config.diarizer.manifest_filepath = manifest_path
-        config.diarizer.out_dir = workdir
-        config.diarizer.clustering.parameters.oracle_num_speakers = (
-            num_speakers is not None
-        )
-        config.device = _device_for_speaker_runtime(device_policy)
-
-        with _temporary_conv_scale_weights_override(MSDD_module):
-            msdd_model = NeuralDiarizer(cfg=config)
-            msdd_model.diarize()
-
-        segments: list[SpeakerSegment] = []
-        with open(
-            os.path.join(workdir, "pred_rttms", "mono_file.rttm"), encoding="utf-8"
-        ) as f:
-            for line in f:
-                segments.append(_parse_rttm_line(line))
-        return segments
-
-
-def infer_nemo_speaker_prepared_audio(
-    audio: np.ndarray,
-    sample_rate_hz: int,
-    num_speakers: NumSpeakers | None = None,
-    *,
-    device_policy=None,
-) -> list[SpeakerSegment]:
-    """Run NeMo diarization on Rust-prepared mono PCM audio.
-
-    ``None`` means "not specified" and NeMo now estimates the count (ruled by
-    the operator, 2026-08-21, superseding the earlier refusal): oracle mode is
-    derived per run from whether a count was provided, so a specified count is
-    still forced exactly. This CHANGES output for unspecified-count NeMo runs
-    relative to the era when the config's static ``oracle_num_speakers: True``
-    made "unspecified" undefined.
-    """
-
-    import os
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as workdir:
-        wav_path = os.path.join(workdir, "prepared_audio.wav")
-        _write_prepared_audio_wav(audio, sample_rate_hz, wav_path)
-        return _infer_nemo_speaker_from_audio_file(
-            wav_path,
-            num_speakers,
-            device_policy=device_policy,
-        )
-
-
 def infer_pyannote_speaker_prepared_audio(
     audio: np.ndarray,
     sample_rate_hz: int,
-    num_speakers: NumSpeakers | None = None,
+    num_speakers: NumSpeakers | None,
+    *,
+    pipeline: LoadedPyannotePipeline,
 ) -> list[SpeakerSegment]:
     """Run Pyannote diarization on Rust-prepared mono PCM audio.
 
@@ -384,7 +137,7 @@ def infer_pyannote_speaker_prepared_audio(
     import torch
 
     waveform = torch.from_numpy(np.asarray(audio, dtype=np.float32)).unsqueeze(0)
-    pipe = _get_pyannote_pipeline()
+    pipe: Any = pipeline.pipeline
     result = pipe(
         {"waveform": waveform, "sample_rate": sample_rate_hz}, num_speakers=num_speakers
     )

@@ -1,10 +1,10 @@
 """Qwen3-ASR worker provider for Cantonese.
 
-New-style provider: ``load`` is called once at worker startup,
-``infer_*`` is called per request. Mirrors the
-``_funaudio_asr`` / ``_tencent_asr`` module shape so the worker
-bootstrap dispatch in ``batchalign/worker/_model_loading/asr.py``
-can swap engines uniformly.
+The ASR load builds a :class:`QwenAsr` around the ready recognizer and records
+it in the worker's load registry; a request transcribes through that object.
+Mirrors the ``_funaudio_asr`` / ``_tencent_asr`` module shape so the ASR load
+in ``batchalign/worker/_model_loading/asr.py`` treats every provider alike.
+Nothing is held at module level.
 """
 
 from __future__ import annotations
@@ -12,27 +12,24 @@ from __future__ import annotations
 import logging
 import os
 import signal
+from dataclasses import dataclass
 from typing import NoReturn
 
 from batchalign.inference._domain_types import LanguageCode
 from batchalign.inference.asr import AsrBatchItem, MonologueAsrResponse
-from batchalign.worker._progress import emit_download_event
-from batchalign.worker._types import (
-    BatchInferRequest,
-    BatchInferResponse,
-)
-from batchalign.worker._types_v2 import QwenRecognitionV2
+from batchalign.worker._progress import Phase, emit_phase_event
+from batchalign.worker._types_v2 import PhaseEdgeV2, QwenRecognitionV2
 
 from ._asr_types import admit_provider_monologues
-from ._common import EngineOverrides, ProviderNotLoaded, answer_asr_batch
-from ._qwen_common import QwenRecognizerConfig, ReadyQwenRecognizer
+from ._common import EngineOverrides
+from ._qwen_common import QwenRecognizerConfig, QwenSnapshots, ReadyQwenRecognizer
 
 L = logging.getLogger("batchalign.hk.qwen_asr")
 
 
-# Wall-clock timeout for ``QwenRecognizerConfig.load()``, the call that
-# resolves into ``Qwen3ASRModel.from_pretrained(...)`` in the
-# ``qwen-asr`` package. That call is a single blocking import-and-load
+# Wall-clock timeout for ``QwenRecognizerConfig.load()``, a single
+# blocking import-and-load (then through the ``qwen-asr`` package's
+# ``Qwen3ASRModel.from_pretrained``, now ``transformers``' native one)
 # with no upstream progress callbacks; on 2026-05-27 it was observed to
 # hang for 70+ minutes at 0% CPU with no Qwen model ever appearing in
 # the HF cache (the worker had loaded the Whisper-large-v2 FA model and
@@ -40,9 +37,11 @@ L = logging.getLogger("batchalign.hk.qwen_asr")
 # below converts that silent hang into a typed TimeoutError so the
 # worker exits, the daemon marks the job failed, and the operator sees
 # a useful error in the daemon log instead of staring at a 0% CPU
-# process for hours. Default is generous (20 min) to accommodate first-
-# time model download on slow networks; configurable via env var for
-# debugging or for tighter CI budgets.
+# process for hours. The 20-minute default was sized for a first-time
+# download, which no longer happens inside this call: the snapshots are
+# resolved before it, under ``download_liveness``. It remains the bound on
+# the load from disk; configurable via env var for debugging or for
+# tighter CI budgets.
 _QWEN_LOAD_TIMEOUT_SECONDS: int = int(
     os.environ.get("BATCHALIGN_QWEN_LOAD_TIMEOUT_SECONDS", "1200")
 )
@@ -53,7 +52,7 @@ def _raise_qwen_load_timeout(_signum: int, _frame: object) -> NoReturn:
 
     Raises a typed ``TimeoutError`` that propagates out of ``load()``
     naturally: Python signal handlers run between bytecodes, so
-    ``Qwen3ASRModel.from_pretrained``'s pure-Python sections will
+    ``from_pretrained``'s pure-Python sections will
     surface the exception promptly. C-extension blocks (libtorch,
     HF Hub native) only surface it when they return to Python; if a
     hang IS deep inside C code, the worker may not interrupt cleanly
@@ -61,21 +60,30 @@ def _raise_qwen_load_timeout(_signum: int, _frame: object) -> NoReturn:
     """
     raise TimeoutError(
         f"Qwen3-ASR model load timed out after "
-        f"{_QWEN_LOAD_TIMEOUT_SECONDS} second(s). The qwen-asr package's "
-        f"``Qwen3ASRModel.from_pretrained`` call did not complete in the "
-        f"allotted window: this matches the silent-hang failure mode "
-        f"observed during the 2026-05-27 v2 Cantonese ASR benchmark "
-        f"sweep. The worker is exiting; the daemon will mark the job "
-        f"failed and the operator can investigate the qwen-asr package "
-        f"integration. Override via BATCHALIGN_QWEN_LOAD_TIMEOUT_SECONDS."
+        f"{_QWEN_LOAD_TIMEOUT_SECONDS} second(s): loading the resolved "
+        f"snapshots did not complete in the allotted window, the "
+        f"silent-hang failure mode first observed during the 2026-05-27 "
+        f"v2 Cantonese ASR benchmark sweep. The worker is exiting; the "
+        f"daemon will mark the job failed. Override via "
+        f"BATCHALIGN_QWEN_LOAD_TIMEOUT_SECONDS."
     )
 
 
-# ---------------------------------------------------------------------------
-# Module-level state
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class QwenAsr:
+    """The Qwen3-ASR recognizer one ASR load built."""
 
-_recognizer: ReadyQwenRecognizer | None = None
+    recognizer: ReadyQwenRecognizer
+
+    def transcribe(self, item: AsrBatchItem) -> MonologueAsrResponse:
+        """Transcribe one provider media item into the shared monologue payload."""
+        payload, _timed_words = self.recognizer.transcribe(
+            item.audio_path, decode_budget_seconds=item.decode_budget_seconds
+        )
+        # Qwen3-ASR performs no speaker separation, so its payload says so and
+        # the admission carries that through; the downstream diarization stage
+        # attributes speakers when one is requested.
+        return admit_provider_monologues(payload, item.lang)
 
 
 # ---------------------------------------------------------------------------
@@ -88,17 +96,18 @@ def load_qwen_asr(
     engine_overrides: EngineOverrides | None,
     *,
     recognition: QwenRecognitionV2,
-    model_path: str | None = None,
-    aligner_path: str | None = None,
-) -> None:
-    """Initialize the Qwen3-ASR recognizer (called once at worker startup).
+    snapshots: QwenSnapshots,
+) -> QwenAsr:
+    """Initialize the Qwen3-ASR recognizer for one ASR load.
+
+    ``snapshots`` are the two models the worker bootstrap already resolved
+    (and, if needed, downloaded under ``download_liveness``) at the revisions
+    the control plane pinned. The ``qwen_model`` override is consumed
+    upstream: the control plane resolves it into the ASR member, so this
+    function never reads it, and the id it logs is the snapshot's own.
 
     Recognized ``engine_overrides`` keys:
 
-    - ``qwen_model``: HuggingFace model id of the Qwen3-ASR
-      checkpoint, in the ``-hf`` spelling the native ``transformers``
-      module targets. Default ``"Qwen/Qwen3-ASR-1.7B-hf"``;
-      ``"Qwen/Qwen3-ASR-0.6B-hf"`` is the smaller faster alternative.
     - ``qwen_device``: torch device string (``"cpu"``, ``"cuda"``, ``"mps"``).
       Default ``"cpu"`` (Apple Silicon fleet has no CUDA, and MPS is
       unusable for this model: measured 2026-08-20 to be SIGKILLed on
@@ -108,47 +117,30 @@ def load_qwen_asr(
       explicitly supplies no context, matching the default. The exact
       value remains in the submitted job options; it does not relabel language.
 
-    Eager-loads the model at the end of bootstrap so the first
-    inference request sees a warm cache. The worker bootstrap
-    already selected this engine; requests will come.
+    Loads the model inside the ASR load, so the first inference request
+    sees a warm model.
     """
-    global _recognizer
-
-    model_id = "Qwen/Qwen3-ASR-1.7B-hf"
     device = "cpu"
-    if engine_overrides:
-        if "qwen_model" in engine_overrides:
-            model_id = str(engine_overrides["qwen_model"])
-        if "qwen_device" in engine_overrides:
-            device = str(engine_overrides["qwen_device"])
+    if engine_overrides and "qwen_device" in engine_overrides:
+        device = str(engine_overrides["qwen_device"])
 
-    # ``model_path`` / ``aligner_path`` are snapshots the worker already
-    # materialized at the revisions the control plane pinned. The ids stay for
-    # the checkpoint check and the log line; the paths are what actually load,
-    # so a hub repository that moved cannot change what this worker runs.
+    model_id = snapshots.asr.model_id
     config = QwenRecognizerConfig(
         lang=lang,
-        model_id=model_id,
         device=device,
-        model_path=model_path,
-        aligner_path=aligner_path,
         context_override=(engine_overrides or {}).get("qwen_context"),
         # Decided by the control plane for this language and parsed at the
         # worker boundary (`_model_loading.asr.qwen_recognition`).
         recognition=recognition,
     )
 
-    # Surface the model-load event to every UI channel per the
-    # time-transparency rule in talkbank-tools/AGENTS.md §11. The
-    # ``from_pretrained`` call can take minutes (first-time HF Hub
-    # download) and an operator watching the daemon log or dashboard
-    # needs to see "loading Qwen3-ASR…" rather than silent dead air.
-    emit_download_event(
-        stage="downloading_qwen_asr",
-        user_message=(
-            f"Loading Qwen3-ASR model {model_id} ({device}); "
-            f"first-run download may take several minutes…"
-        ),
+    # Name the model being loaded on every UI channel, per the
+    # time-transparency rule in talkbank-tools/AGENTS.md §11. This is a load
+    # from disk, never a download (see ``QwenSnapshots``), so it says so.
+    emit_phase_event(
+        Phase.LOADING_QWEN_ASR,
+        PhaseEdgeV2.BEGIN,
+        f"Loading Qwen3-ASR model {model_id} ({device})…",
     )
 
     # Bracket the loading transition with a SIGALRM-based timeout. See
@@ -159,56 +151,24 @@ def load_qwen_asr(
     old_handler = signal.signal(signal.SIGALRM, _raise_qwen_load_timeout)
     signal.alarm(_QWEN_LOAD_TIMEOUT_SECONDS)
     try:
-        recognizer = config.load()
+        recognizer = config.load(snapshots)
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
-    emit_download_event(
-        stage="downloading_qwen_asr_complete",
-        user_message=f"Qwen3-ASR model loaded ({model_id}).",
+    emit_phase_event(
+        Phase.LOADING_QWEN_ASR,
+        PhaseEdgeV2.COMPLETE,
+        f"Qwen3-ASR model loaded ({model_id}).",
     )
 
-    _recognizer = recognizer
     L.info(
         "Qwen3-ASR recognizer initialized: lang=%s, model=%s, device=%s",
         lang,
         model_id,
         device,
     )
+    return QwenAsr(recognizer)
 
 
-# ---------------------------------------------------------------------------
-# Infer
-# ---------------------------------------------------------------------------
-
-
-def infer_qwen_asr(req: BatchInferRequest) -> BatchInferResponse:
-    """Batch-mode handler: kept for symmetry with the other HK ASR
-    providers even though the V2 worker path uses ``infer_qwen_asr_v2``."""
-    transcribe = (
-        ProviderNotLoaded("Qwen3-ASR recognizer not loaded")
-        if _recognizer is None
-        else _transcribe_to_monologues
-    )
-    return answer_asr_batch("qwen_asr", req.items, transcribe)
-
-
-def _transcribe_to_monologues(item: AsrBatchItem) -> MonologueAsrResponse:
-    """Run Qwen3-ASR for one batch item; return the shared monologue payload."""
-    if _recognizer is None:
-        raise RuntimeError("Qwen3-ASR recognizer not initialized")
-
-    payload, _timed_words = _recognizer.transcribe(
-        item.audio_path, decode_budget_seconds=item.decode_budget_seconds
-    )
-
-    # Qwen3-ASR performs no speaker separation, so its payload says so and the
-    # admission carries that through; the downstream diarization stage
-    # attributes speakers when one is requested.
-    return admit_provider_monologues(payload, item.lang)
-
-
-def infer_qwen_asr_v2(item: AsrBatchItem) -> MonologueAsrResponse:
-    """V2 worker entry point, one item, returns typed payload directly."""
-    return _transcribe_to_monologues(item)
+__all__ = ["QwenAsr", "load_qwen_asr"]

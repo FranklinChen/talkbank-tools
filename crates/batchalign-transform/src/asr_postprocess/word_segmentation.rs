@@ -23,7 +23,7 @@
 //! would otherwise move timings onto characters they do not belong to.
 
 use super::prepare::is_cjk_ideograph;
-use super::{AdmittedInterval, AsrWord, MonologueWords, WordKind, WordTiming};
+use super::{AdmittedInterval, AsrWord, MonologueWords, WordTiming};
 
 /// One run of consecutive one-character Han words inside one monologue.
 #[derive(Debug)]
@@ -84,20 +84,7 @@ pub enum SegmentationRefusal {
 
 /// A regular word that is exactly one Han character.
 fn single_han(word: &AsrWord) -> bool {
-    if word.kind != WordKind::Regular {
-        return false;
-    }
-    let mut chars = word.text.as_str().chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if is_cjk_ideograph(c))
-}
-
-/// A character's admitted, non-empty span, if it has one. Its bounds were
-/// admitted when the words were prepared, so a refusal here cannot arise; a
-/// character without a whole span contributes no time to its word.
-fn timed_span(word: &AsrWord) -> Option<AdmittedInterval> {
-    WordTiming::from_millis(word.start_ms, word.end_ms)
-        .ok()?
-        .interval()
+    word.sole_char().is_some_and(is_cjk_ideograph)
 }
 
 impl PlannedSegmentation {
@@ -184,7 +171,7 @@ impl SegmentationPlan {
                     let span = old
                         .by_ref()
                         .take(token.chars().count())
-                        .filter_map(|character| timed_span(&character))
+                        .filter_map(|character| character.timed_interval())
                         .reduce(AdmittedInterval::covering);
                     let (start_ms, end_ms) = span.map_or((None, None), |span| {
                         WordTiming::from_admitted(span).into_optional_millis()

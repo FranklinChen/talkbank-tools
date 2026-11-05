@@ -24,22 +24,40 @@ from batchalign.inference.asr import (
 )
 from batchalign.inference.speaker import (
     LocalPyannoteSpeakerEvidence,
-    NemoSpeakerEvidence,
     PyannoteAISpeakerEvidence,
     SpeakerResponse,
     SpeakerSegment,
 )
 from batchalign.inference.types import Wave2VecWordAlignment
-from batchalign.tests._asr_model_pins import request_models, worker_loaded
-from batchalign.worker._asr_v2 import AsrExecutionHostV2
-from batchalign.worker._execute_v2 import WorkerExecutionHostV2, execute_request_v2
-from batchalign.worker._fa_v2 import ForcedAlignmentExecutionHostV2
-from batchalign.worker._speaker_v2 import SpeakerExecutionHostV2
-from batchalign.worker._text_v2 import TextExecutionHostV2
+from batchalign.tests._asr_model_pins import request_models
+from batchalign.tests._loaded_hosts import (
+    asr_loads,
+    diarization,
+    fa_loads,
+    loads,
+    local_asr,
+    morphosyntax,
+    prepare_fa_fixture,
+    provider_asr,
+    whisper_fa,
+    word_fa,
+)
+from batchalign.worker._execute_v2 import execute_on_loads
+from batchalign.worker._loads import (
+    COREF_LOAD,
+    MORPHOSYNTAX_LOAD,
+    TRANSLATE_LOAD,
+    UTSEG_LOAD,
+    LoadedCoref,
+    LoadedTranslate,
+    LoadedUtseg,
+    diarization_load,
+)
 from batchalign.worker._types import (
     BatchInferResponse,
     InferResponse,
     ItemProduced,
+    TaskLoadRegistry,
     WorkerJSONValue,
 )
 from batchalign.worker._types_v2 import (
@@ -53,6 +71,7 @@ from batchalign.worker._types_v2 import (
     ExecuteRequestV2,
     ExecuteSuccessV2,
     FaBackendV2,
+    FaCandidateV2,
     FaTextModeV2,
     ForcedAlignmentRequestV2,
     IndexedWordTimingResultV2,
@@ -177,8 +196,9 @@ def _separates_speakers(backend: AsrBackendV2) -> bool:
     return backend is AsrBackendV2.HK_TENCENT
 
 
-def _provider_asr_host(backend: AsrBackendV2) -> AsrExecutionHostV2:
-    """Build one provider-ASR host that marks which backend was selected."""
+def _provider_asr_loads(backend: AsrBackendV2) -> TaskLoadRegistry:
+    """A worker whose ASR load built the ``backend`` provider, its runner
+    marking which backend ran."""
 
     def _response(label: str, media_path: str) -> MonologueAsrResponse:
         return MonologueAsrResponse(
@@ -199,21 +219,16 @@ def _provider_asr_host(backend: AsrBackendV2) -> AsrExecutionHostV2:
             ],
         )
 
-    if backend is AsrBackendV2.HK_TENCENT:
-        return AsrExecutionHostV2(
-            hk_tencent_runner=lambda item: _response("tencent", item.audio_path)
-        )
-    if backend is AsrBackendV2.HK_ALIYUN:
-        return AsrExecutionHostV2(
-            hk_aliyun_runner=lambda item: _response("aliyun", item.audio_path)
-        )
-    if backend is AsrBackendV2.HK_FUNAUDIO:
-        return AsrExecutionHostV2(
-            hk_funaudio_runner=lambda item: _response("funaudio", item.audio_path)
-        )
-    if backend is AsrBackendV2.HK_QWEN:
-        return AsrExecutionHostV2(
-            hk_qwen_runner=lambda item: _response("qwen", item.audio_path)
+    labels = {
+        AsrBackendV2.HK_TENCENT: "tencent",
+        AsrBackendV2.HK_ALIYUN: "aliyun",
+        AsrBackendV2.HK_FUNAUDIO: "funaudio",
+        AsrBackendV2.HK_QWEN: "qwen",
+    }
+    if backend in labels:
+        label = labels[backend]
+        return asr_loads(
+            provider_asr(backend, lambda item: _response(label, item.audio_path))
         )
     raise AssertionError(f"unexpected provider ASR backend {backend!s}")
 
@@ -244,50 +259,59 @@ def _make_fa_request(
         byte_len=payload_path.stat().st_size,
     )
     audio_attachment = _make_prepared_audio_attachment(tmp_path, f"fa-{backend.value}")
-    return ExecuteRequestV2(
-        request_id=f"req-fa-{backend.value}",
-        task=InferenceTaskV2.FORCED_ALIGNMENT,
-        payload=ForcedAlignmentRequestV2(
-            backend=backend,
-            payload_ref_id=payload_attachment.id,
-            audio_ref_id=audio_attachment.id,
-            text_mode=text_mode,
-        ),
-        attachments=[payload_attachment, audio_attachment],
+    return prepare_fa_fixture(
+        ExecuteRequestV2(
+            request_id=f"req-fa-{backend.value}",
+            task=InferenceTaskV2.FORCED_ALIGNMENT,
+            payload=ForcedAlignmentRequestV2(
+                phase=FaCandidateV2(),
+                backend=backend,
+                payload_ref_id=payload_attachment.id,
+                audio_ref_id=audio_attachment.id,
+                text_mode=text_mode,
+            ),
+            attachments=[payload_attachment, audio_attachment],
+        )
     )
 
 
-def _fa_host(backend: FaBackendV2) -> ForcedAlignmentExecutionHostV2:
-    """Build one FA host that exposes which backend/result shape was selected."""
+def _fa_loads(backend: FaBackendV2) -> TaskLoadRegistry:
+    """A worker whose FA load built ``backend``, its runner exposing which
+    backend and result shape ran."""
 
     if backend is FaBackendV2.WHISPER:
-        return ForcedAlignmentExecutionHostV2(
-            whisper_runner=lambda audio, text: [
-                (text.split()[0], 0.1 if audio.shape == (4,) else 0.0),
-                (text.split()[-1], 0.25),
-            ]
+        return fa_loads(
+            whisper_fa(
+                lambda audio, text: [
+                    (text.split()[0], 0.1 if audio.shape == (4,) else 0.0),
+                    (text.split()[-1], 0.25),
+                ]
+            )
         )
     if backend is FaBackendV2.WAVE2VEC:
-        return ForcedAlignmentExecutionHostV2(
-            wave2vec_runner=lambda audio, words: [
-                Wave2VecWordAlignment(words[0], (100, 180), 0.8),
-                Wave2VecWordAlignment(
-                    words[1], (240, 320 if audio.shape == (4,) else 0), 0.9
-                ),
-            ]
+        return fa_loads(
+            word_fa(
+                lambda audio, words: [
+                    Wave2VecWordAlignment(words[0], (100, 180), 0.8),
+                    Wave2VecWordAlignment(
+                        words[1], (240, 320 if audio.shape == (4,) else 0), 0.9
+                    ),
+                ]
+            )
         )
     if backend is FaBackendV2.WAV2VEC_CANTO:
-        return ForcedAlignmentExecutionHostV2(
-            canto_runner=lambda audio, payload, request: [
-                Wave2VecWordAlignment(
-                    payload.words[0],
-                    (50, 120 if request.text_mode is FaTextModeV2.CHAR_JOINED else 0),
-                    None,
-                ),
-                Wave2VecWordAlignment(
-                    payload.words[1], (130, 220 if audio.shape == (4,) else 0), None
-                ),
-            ]
+        # The Cantonese host takes the words alone, like Wave2Vec: it never
+        # read anything else of the request.
+        return fa_loads(
+            word_fa(
+                lambda audio, words: [
+                    Wave2VecWordAlignment(words[0], (50, 120), None),
+                    Wave2VecWordAlignment(
+                        words[1], (130, 220 if audio.shape == (4,) else 0), None
+                    ),
+                ],
+                FaBackendV2.WAV2VEC_CANTO,
+            )
         )
     raise AssertionError(f"unexpected FA backend {backend!s}")
 
@@ -312,63 +336,45 @@ def _make_speaker_request(
     )
 
 
-def _speaker_host(backend: SpeakerBackendV2) -> SpeakerExecutionHostV2:
-    """Build one speaker host that marks which backend was selected."""
+def _speaker_loads(backend: SpeakerBackendV2) -> TaskLoadRegistry:
+    """A worker whose speaker load for ``backend`` completed, its runner
+    marking which backend ran."""
 
-    segment = SpeakerSegment(start_ms=0, end_ms=1000, speaker=backend.value)
+    def _pyannote_ai(
+        audio: np.ndarray, sample_rate_hz: int, num_speakers: int | None
+    ) -> SpeakerResponse:
+        return SpeakerResponse(
+            evidence=PyannoteAISpeakerEvidence(
+                job_id="job-matrix",
+                output={
+                    "exclusiveDiarization": [
+                        {
+                            "start": 0.0,
+                            "end": 1.0,
+                            "speaker": f"pyannote_ai-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}",
+                        }
+                    ]
+                },
+            )
+        )
 
-    if backend is SpeakerBackendV2.PYANNOTE_AI:
-        return SpeakerExecutionHostV2(
-            pyannote_ai_prepared_audio_runner=lambda audio, sample_rate_hz, num_speakers: (
-                SpeakerResponse(
-                    evidence=PyannoteAISpeakerEvidence(
-                        job_id="job-matrix",
-                        output={
-                            "exclusiveDiarization": [
-                                {
-                                    "start": 0.0,
-                                    "end": 1.0,
-                                    "speaker": f"pyannote_ai-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}",
-                                }
-                            ]
-                        },
+    def _pyannote(
+        audio: np.ndarray, sample_rate_hz: int, num_speakers: int | None
+    ) -> SpeakerResponse:
+        return SpeakerResponse(
+            evidence=LocalPyannoteSpeakerEvidence(
+                segments=[
+                    SpeakerSegment(
+                        start_ms=0,
+                        end_ms=1000,
+                        speaker=f"pyannote-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}",
                     )
-                )
+                ]
             )
         )
-    if backend is SpeakerBackendV2.PYANNOTE:
-        return SpeakerExecutionHostV2(
-            pyannote_prepared_audio_runner=lambda audio, sample_rate_hz, num_speakers: (
-                SpeakerResponse(
-                    evidence=LocalPyannoteSpeakerEvidence(
-                        segments=[
-                            segment.model_copy(
-                                update={
-                                    "speaker": f"pyannote-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}"
-                                }
-                            )
-                        ]
-                    )
-                )
-            )
-        )
-    if backend is SpeakerBackendV2.NEMO:
-        return SpeakerExecutionHostV2(
-            nemo_prepared_audio_runner=lambda audio, sample_rate_hz, num_speakers: (
-                SpeakerResponse(
-                    evidence=NemoSpeakerEvidence(
-                        segments=[
-                            segment.model_copy(
-                                update={
-                                    "speaker": f"nemo-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}"
-                                }
-                            )
-                        ]
-                    )
-                )
-            )
-        )
-    raise AssertionError(f"unexpected speaker backend {backend!s}")
+
+    runner = _pyannote_ai if backend is SpeakerBackendV2.PYANNOTE_AI else _pyannote
+    return loads((diarization_load(backend), diarization(runner, backend)))
 
 
 def _make_text_request(tmp_path: Path, task_name: TextTaskName) -> ExecuteRequestV2:
@@ -447,19 +453,19 @@ def _make_text_request(tmp_path: Path, task_name: TextTaskName) -> ExecuteReques
     )
 
 
-def _text_host_with_results(
+def _text_loads_with_results(
     task_name: TextTaskName, results: list[InferResponse]
-) -> TextExecutionHostV2:
-    """Build one text host that returns the supplied batch-infer result list."""
+) -> TaskLoadRegistry:
+    """A worker whose text load returns the supplied batch-infer result list."""
 
     response = BatchInferResponse(results=results)
     if task_name == "morphosyntax":
-        return TextExecutionHostV2(morphosyntax_runner=lambda request: response)
+        return loads((MORPHOSYNTAX_LOAD, morphosyntax(lambda request: response)))
     if task_name == "utseg":
-        return TextExecutionHostV2(utseg_runner=lambda request: response)
+        return loads((UTSEG_LOAD, LoadedUtseg(runner=lambda request: response)))
     if task_name == "translate":
-        return TextExecutionHostV2(translate_runner=lambda request: response)
-    return TextExecutionHostV2(coref_runner=lambda request: response)
+        return loads((TRANSLATE_LOAD, LoadedTranslate(runner=lambda request: response)))
+    return loads((COREF_LOAD, LoadedCoref(runner=lambda request: response)))
 
 
 def _assert_error_response(
@@ -491,14 +497,7 @@ def test_routes_provider_asr_backend_matrix(
     """Provider ASR backends should route to the matching host runner."""
 
     request = _make_asr_request(tmp_path, backend, "provider_media")
-    # The backend varies per parameter case, so this one records its load
-    # identity inline rather than through the decorator the fixed-backend
-    # tests use.
-    with worker_loaded(backend):
-        response = execute_request_v2(
-            request=request,
-            host=WorkerExecutionHostV2(asr=_provider_asr_host(backend)),
-        )
+    response = execute_on_loads(request, _provider_asr_loads(backend))
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, MonologueAsrResultV2)
@@ -544,10 +543,7 @@ def test_routes_forced_alignment_backend_matrix(
     """FA backends should route to the matching host and result shape."""
 
     request = _make_fa_request(tmp_path, backend, text_mode)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(forced_alignment=_fa_host(backend)),
-    )
+    response = execute_on_loads(request, _fa_loads(backend))
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     if backend is FaBackendV2.WHISPER:
@@ -569,7 +565,6 @@ def test_routes_forced_alignment_backend_matrix(
     [
         SpeakerBackendV2.PYANNOTE_AI,
         SpeakerBackendV2.PYANNOTE,
-        SpeakerBackendV2.NEMO,
     ],
     ids=lambda backend: backend.value,
 )
@@ -579,10 +574,7 @@ def test_routes_speaker_backend_matrix(
     """Speaker backends should route to the matching host runner."""
 
     request = _make_speaker_request(tmp_path, backend)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(speaker=_speaker_host(backend)),
-    )
+    response = execute_on_loads(request, _speaker_loads(backend))
 
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, SpeakerResultV2)
@@ -648,13 +640,26 @@ def test_rejects_invalid_asr_backend_input_pairs(
     expected_code: ProtocolErrorCodeV2,
     message_fragment: str,
 ) -> None:
-    """Invalid ASR backend/input pairs should fail with typed protocol errors."""
+    """Invalid ASR backend/input pairs should fail with typed protocol errors.
 
-    request = _make_asr_request(tmp_path, backend, input_kind)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(asr=AsrExecutionHostV2()),
+    The worker has the request's own backend loaded (Rev.AI never loads, so a
+    Tencent host stands in for it), so what is refused is the pair itself,
+    not an absent load.
+    """
+
+    def _must_not_run(*_args: object) -> object:
+        raise AssertionError("an invalid backend/input pair must not reach the model")
+
+    host = (
+        local_asr(_must_not_run)
+        if backend is AsrBackendV2.LOCAL_WHISPER
+        else provider_asr(
+            AsrBackendV2.HK_TENCENT if backend is AsrBackendV2.REVAI else backend,
+            _must_not_run,
+        )
     )
+    request = _make_asr_request(tmp_path, backend, input_kind)
+    response = execute_on_loads(request, asr_loads(host))
     _assert_error_response(response, expected_code, message_fragment)
 
 
@@ -669,12 +674,7 @@ def test_text_execute_v2_rejects_result_count_mismatch(
     """Text-task V2 execution should reject host result-count drift."""
 
     request = _make_text_request(tmp_path, task_name)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(
-            text=_text_host_with_results(task_name, []),
-        ),
-    )
+    response = execute_on_loads(request, _text_loads_with_results(task_name, []))
 
     _assert_error_response(response, ProtocolErrorCodeV2.RUNTIME_FAILURE, "expected 1")
 
@@ -754,13 +754,11 @@ def test_text_execute_v2_accepts_valid_result_shapes(
     """Text-task V2 execution should accept valid provider-shaped host output."""
 
     request = _make_text_request(tmp_path, task_name)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(
-            text=_text_host_with_results(
-                task_name,
-                [InferResponse.timed(lambda: ItemProduced(result=good_result))],
-            ),
+    response = execute_on_loads(
+        request,
+        _text_loads_with_results(
+            task_name,
+            [InferResponse.timed(lambda: ItemProduced(result=good_result))],
         ),
     )
 
@@ -935,13 +933,11 @@ def test_text_execute_v2_fails_only_the_item_that_does_not_parse(
     """
 
     request = _make_text_request(tmp_path, task_name)
-    response = execute_request_v2(
-        request=request,
-        host=WorkerExecutionHostV2(
-            text=_text_host_with_results(
-                task_name,
-                [InferResponse.timed(lambda: ItemProduced(result=bad_item))],
-            ),
+    response = execute_on_loads(
+        request,
+        _text_loads_with_results(
+            task_name,
+            [InferResponse.timed(lambda: ItemProduced(result=bad_item))],
         ),
     )
 

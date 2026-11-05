@@ -32,7 +32,9 @@ fn phase_index(stage: FileProgressStage) -> Option<usize> {
         | FileProgressStage::RecoveringUtteranceTiming
         | FileProgressStage::RecoveringTimingFallback => Some(1),
         // Phase 2: Align
-        FileProgressStage::Aligning | FileProgressStage::ApplyingResults => Some(2),
+        FileProgressStage::PreparingAlignment
+        | FileProgressStage::Aligning
+        | FileProgressStage::ApplyingResults => Some(2),
         // Phase 3: Analyze
         FileProgressStage::AnalyzingMorphosyntax
         | FileProgressStage::SegmentingUtterances
@@ -50,7 +52,10 @@ fn phase_index(stage: FileProgressStage) -> Option<usize> {
         // No phase mapping for generic/retry/waiting
         FileProgressStage::Processing
         | FileProgressStage::RetryScheduled
-        | FileProgressStage::WaitingForWorker => None,
+        | FileProgressStage::WaitingForWorker
+        | FileProgressStage::WaitingForHostMemory
+        | FileProgressStage::PreparingWorker
+        | FileProgressStage::DownloadingModel => None,
     }
 }
 

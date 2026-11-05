@@ -1432,16 +1432,24 @@ impl std::fmt::Display for UntimedCauseRecord {
         use crate::types::traces::RefusedWindowTrace;
         match self {
             Self::WindowRefused { window } => {
-                let cause = match window {
-                    RefusedWindowTrace::OverBudget { .. } => "longer than the alignment budget",
-                    RefusedWindowTrace::Empty { .. } => "empty",
-                    RefusedWindowTrace::Inverted { .. } => "inverted",
-                    RefusedWindowTrace::PastRecording { .. } => "past the end of the recording",
+                let cause: std::borrow::Cow<'_, str> = match window {
+                    RefusedWindowTrace::Resource { constraint, .. } => {
+                        constraint.to_string().into()
+                    }
+                    RefusedWindowTrace::OverBudget { .. } => {
+                        "longer than the alignment budget".into()
+                    }
+                    RefusedWindowTrace::Empty { .. } => "empty".into(),
+                    RefusedWindowTrace::Inverted { .. } => "inverted".into(),
+                    RefusedWindowTrace::PastRecording { .. } => {
+                        "past the end of the recording".into()
+                    }
                     RefusedWindowTrace::AnchorGap { .. } => {
                         "over budget, with a gap between recovered anchors longer than the budget"
+                            .into()
                     }
                     RefusedWindowTrace::AnchorsUnusable { .. } => {
-                        "over budget, with no usable recovered anchor to split at"
+                        "over budget, with no usable recovered anchor to split at".into()
                     }
                 };
                 write!(
@@ -2572,7 +2580,7 @@ mod tests {
             "status": "running",
             "command": "morphotag",
             "lang": "per-file",
-            "options": {"command": "morphotag", "retokenize": false, "skipmultilang": false, "merge_abbrev": false},
+            "options": {"command": "morphotag", "retokenize": false, "skipmultilang": false},
             "total_files": 2,
             "completed_files": 0,
             "submitted_at": "2026-01-15T10:00:00.000Z",

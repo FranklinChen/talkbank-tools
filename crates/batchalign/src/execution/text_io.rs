@@ -66,7 +66,6 @@ pub(crate) async fn write_text_results(
     host: &DispatchHostContext,
     plan: &planning::JobPlan,
     results: TextBatchFileResults,
-    should_merge_abbrev: bool,
     missing_artifact_label: &str,
 ) {
     let sink = host.sink().clone();
@@ -88,39 +87,19 @@ pub(crate) async fn write_text_results(
         let stamp = file_result.stamp;
         match file_result.result {
             Ok(output_chat) => {
-                // Merged (when asked) and then located against the merged
-                // document, the one written below. The abbreviation merge is
-                // a step INSIDE the gate, so the bytes written are bytes a
-                // gate judged; done once here rather than per artifact,
-                // because the answer cannot differ between a file's
-                // artifacts.
+                // Located against the document written below; done once
+                // here rather than per artifact, because the answer cannot
+                // differ between a file's artifacts.
                 let crate::morphosyntax::report::FinishedMorphosyntax {
                     document: finished,
                     shortfalls,
                     exclusions,
-                } = match output_chat.finish(
-                    crate::pipeline::post_validate::MergeAbbreviations::from_option(
-                        should_merge_abbrev,
-                    ),
-                ) {
+                } = match output_chat.finish() {
                     Ok(finished) => finished,
-                    // POLICY, stated here because the refusal hands back
-                    // `refused.unmerged`, an admissible output this seam
-                    // deliberately declines to write: a merge that breaks its
-                    // own gate is a defect in the transform, and shipping
-                    // past it would leave nobody looking at it. The failure
-                    // names the merge, so the operator is not told their
-                    // command's output was invalid.
-                    Err(crate::morphosyntax::report::FinishRefused::Merge(refused)) => {
-                        lifecycle
-                            .fail(&refused.to_string(), FailureCategory::Validation)
-                            .await;
-                        continue;
-                    }
                     // A record that cannot name its utterance is an internal
                     // fault: the file fails rather than reporting a position
                     // nobody can find, classified as every such fault is.
-                    Err(crate::morphosyntax::report::FinishRefused::Location(error)) => {
+                    Err(error) => {
                         let error = crate::error::ServerError::from(error);
                         lifecycle
                             .fail(
@@ -303,7 +282,6 @@ mod reporting_tests {
                 &host,
                 &plan,
                 vec![TextBatchFileResult::ok("job-file.cha", output)],
-                false,
                 "morphotag",
             )
             .await;

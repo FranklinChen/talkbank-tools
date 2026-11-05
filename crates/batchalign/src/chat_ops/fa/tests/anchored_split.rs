@@ -48,7 +48,7 @@ fn group_after_utr(starts_ms: &[u64], recording_ms: u64) -> Grouping {
     let mut utr = inject_spaced(&mut chat, &tokens_at(starts_ms));
     assert_eq!(utr.injected(), 1, "UTR placed the utterance");
     let anchors = utr.take_anchors();
-    group_utterances(&chat, BUDGET_MS, &test_recording(recording_ms), &anchors)
+    group_with_declared_window_limit(&chat, BUDGET_MS, &test_recording(recording_ms), &anchors)
 }
 
 /// Dense anchors, 3 s apart over 34 s: the utterance becomes one anchored
@@ -158,7 +158,7 @@ fn without_anchors_an_over_budget_utterance_is_refused_as_before() {
     let mut chat = parse_chat(&untimed_twelve_words());
     let starts: Vec<u64> = (0..12).map(|i| i * 3_000).collect();
     let _ = inject_spaced(&mut chat, &tokens_at(&starts));
-    let grouped = group_utterances(
+    let grouped = group_with_declared_window_limit(
         &chat,
         BUDGET_MS,
         &test_recording(60_000),
@@ -218,8 +218,13 @@ fn an_anchored_group_injects_exactly_as_a_single_group() {
     let mut anchored_chat = parse_chat(text);
     let mut single_chat = parse_chat(text);
 
-    let anchored =
-        group_utterances(&anchored_chat, BUDGET_MS, &test_recording(40_000), &anchors).groups;
+    let anchored = group_with_declared_window_limit(
+        &anchored_chat,
+        BUDGET_MS,
+        &test_recording(40_000),
+        &anchors,
+    )
+    .groups;
     assert!(matches!(anchored[0].span(), GroupSpan::Anchored(_)));
     let single = vec![FaGroup::test_fixture(
         TimeSpan::new(0, 40_000),

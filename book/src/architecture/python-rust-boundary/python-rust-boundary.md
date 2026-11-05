@@ -1,7 +1,7 @@
 # Python-Rust Boundary
 
 **Status:** Current
-**Last updated:** 2026-09-16 04:34 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 The talkbank-tools workspace has two architectural layers: the **CHAT
 core** (entirely Rust, no Python) and the **Batchalign runtime** (Rust
@@ -309,7 +309,7 @@ calls the Python ML model, and returns raw results:
 |---|---|---|---|
 | `execute_asr_request_v2` | ASR | PCM audio bytes | Run Whisper / Cantonese provider |
 | `execute_forced_alignment_request_v2` | FA | PCM audio + word JSON | Run Whisper / Wave2Vec FA |
-| `execute_speaker_request_v2` | Speaker | PCM audio bytes | Run pyannote / NeMo |
+| `execute_speaker_request_v2` | Speaker | PCM audio bytes | Run local pyannote / pyannoteAI |
 | `execute_opensmile_request_v2` | OpenSMILE | PCM audio bytes | Extract acoustic features |
 | `execute_avqi_request_v2` | AVQI | Paired audio bytes | Calculate voice quality |
 | `normalize_*_result` (`worker_text_results.rs`) | Text tasks | n/a | Parse each host item into its tagged V2 result; an item that does not parse becomes that item's failure |

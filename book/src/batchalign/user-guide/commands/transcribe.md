@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:58 EST
+**Last updated:** 2026-11-05 19:37 EST
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -85,8 +85,7 @@ configuration.
 The local `--speaker-engine pyannote` alternative uses the public, ungated
 TalkBank-pinned `talkbank/dia-fork` pipeline plus its pinned segmentation and
 embedding dependencies, downloaded anonymously on first use. It runs
-inference locally and does not use the pyannoteAI API key. `--speaker-engine
-nemo` is a second local alternative that avoids the paragraph below entirely.
+inference locally and does not use the pyannoteAI API key.
 
 **`--speaker-engine pyannote` also fetches one UNPINNED, currently GATED
 artifact: a PLDA calibration model.** `pyannote.audio`'s pipeline class loads
@@ -261,8 +260,11 @@ flowchart TD
 
     postprocess --> speaker_apply{Dedicated speaker\nsegments present?}
     speaker_apply -->|Yes| project["Project segments onto timed ASR words\nby greatest summed overlap\nSplit chunks at speaker changes"]
-    speaker_apply -->|No| utseg_check{"with_utseg?\ndefault: true"}
-    project --> utseg_check
+    speaker_apply -->|No| abbrev_check{"--merge-abbrev?\ndefault: off"}
+    project --> abbrev_check
+    abbrev_check -->|Yes| merge_abbrev["merge_abbreviations on the recognized words\nletters of one speaker spelling a known abbreviation\nbecome one word timed by the union of the letters"]
+    abbrev_check -->|No| utseg_check{"with_utseg?\ndefault: true"}
+    merge_abbrev --> utseg_check
 
     utseg_check -->|Yes| run_utseg[process_utseg_with_evidence\nBERT-based re-segmentation]
     utseg_check -->|No| mor_check{"with_morphosyntax?\ndefault: false"}
@@ -271,13 +273,10 @@ flowchart TD
     utseg_check -->|No| build_chat
     build_chat --> mor_check
     mor_check -->|Yes| run_mor[process_morphosyntax\nPOS + lemma + depparse]
-    mor_check -->|No| merge_check
+    mor_check -->|No| output[Serialize → .cha output]
 
-    run_mor --> merge_check{--merge-abbrev?}
-    merge_check -->|Yes| merge[merge_abbreviations]
-    merge_check -->|No| output
+    run_mor --> output
 
-    merge --> output[Serialize → .cha output]
     output --> done([Output .cha file])
 ```
 
@@ -356,13 +355,41 @@ acceptable CHAT segmentation.
 | `--asr-engine NAME` | `rev` | ASR engine; see the table below. `--help` prints the same list, generated from the engines that exist, so neither can go stale. |
 | `--asr-engine-custom NAME` |: | **Deprecated alias for `--asr-engine`**, still honoured so existing scripts keep working. Hidden from `--help`. |
 | `--num-speakers N` | `2` | Speaker count passed to Rev.AI and to the dedicated diarizer. With `--diarization enabled` it must be 2 or more: a count of 1 is refused at submission, not obeyed. NOT a worker count; see `--workers`. No short flag, deliberately: see below. |
-| `--auto-speakers` | off | Let the speaker engine infer the count instead. Accepted wherever the engines the run involves take it: Rev.AI's own diarization, and every dedicated `--speaker-engine` (pyannoteAI, pyannote, nemo), whatever the `--asr-engine`. Refused, by name, only with `--asr-engine tencent` and no `--diarization enabled`: Tencent's integrated diarization must be given the count, and it is the run's one speaker engine then. With a dedicated diarizer, Tencent is asked for no separation of its own and the diarizer infers the count. Conflicts with `--num-speakers`. |
+| `--auto-speakers` | off | Let the speaker engine infer the count instead. Accepted wherever the engines the run involves take it: Rev.AI's own diarization, and every dedicated `--speaker-engine` (pyannoteAI, pyannote), whatever the `--asr-engine`. Refused, by name, only with `--asr-engine tencent` and no `--diarization enabled`: Tencent's integrated diarization must be given the count, and it is the run's one speaker engine then. With a dedicated diarizer, Tencent is asked for no separation of its own and the diarizer infers the count. Conflicts with `--num-speakers`. |
 | `--diarization {auto,enabled,disabled}` | `auto` | Dedicated speaker diarization stage (`auto` = disabled) |
-| `--speaker-engine {pyannote-ai,pyannote,nemo}` | `pyannote-ai` when enabled | Paid pyannoteAI Precision-2 cloud diarization, or an explicit local engine |
+| `--speaker-engine {pyannote-ai,pyannote}` | `pyannote-ai` when enabled | Paid pyannoteAI Precision-2 cloud diarization, or an explicit local engine |
 | `--wor` / `--nowor` | `--nowor` | Include or suppress the `%wor` word-timing tier |
-| `--merge-abbrev` | off | Merge abbreviations in the output |
+| `--merge-abbrev` / `--no-merge-abbrev` | off | Merge single letters the recognizer emitted for an abbreviation (`F B I`) into one word (`FBI`), timed from the first letter's start to the last letter's end. See [Merging spelled-out abbreviations](#merging-spelled-out-abbreviations---merge-abbrev). Transcribe is the only command with this option. |
 | `--utseg-fallback-stanza` | off | Opt in to the legacy Stanza constituency-parser fallback for utterance segmentation when no TalkBank BERT model is configured for `--lang`. Default refuses substitution. See [utseg → Language support](utseg.md#language-support). |
 
+
+### Merging spelled-out abbreviations (`--merge-abbrev`)
+
+Recognizers often write an abbreviation as separate letters: `the F B I
+said`. With `--merge-abbrev`, transcribe collapses such a run into one word
+(`the FBI said`) when the letters spell an entry of Batchalign's abbreviation
+list. The merge runs on the recognizer's own words, after speakers are
+assigned and before the transcript is built, so:
+
+- **The merged word's timing is the truth.** Its interval runs from the first
+  letter's start to the last letter's end (the union of the letters'
+  intervals), and that is what its `%wor` bullet says.
+- **Letters of different speakers are never merged.** A speaker change ends a
+  run of letters; so does any word that is not a single letter.
+- **Nothing is invented for an untimed letter.** If any letter of a run that
+  spells an abbreviation has no timing (or a zero-width span, which locates
+  nothing), the letters are kept as recognized rather than merged into a word
+  whose span nobody observed.
+- **Matching ignores case; the word keeps it.** `f b i` matches `FBI` and is
+  written `fbi`; `P h D` is written `PhD`.
+
+The output's `@Comment` provenance stamp carries `merge_abbrev=true` when the
+merge ran, so a reader can tell a merged transcript from one written as
+recognized.
+
+Other commands do not have this option. They work on transcripts that already
+exist, where a merge after the fact can give a merged word no truthful timing
+and would rewrite words other tiers are aligned to.
 
 ### Why `--num-speakers` has no short flag
 
@@ -387,8 +414,8 @@ nowhere in the file, so a reader seeing four speakers cannot tell an
 over-diarized run from a session that really had four.
 
 An UNDER-count is not absorbed either. The count is passed to Rev.AI and to
-the dedicated diarizer, and the local `pyannote` and `nemo` engines produce
-exactly the number they are given, so a count below the real number of
+the dedicated diarizer, and the local `pyannote` engine produces
+exactly the number it is given, so a count below the real number of
 voices merges voices together. (An earlier version of this page said the
 pipeline took `max(num_speakers, detected)`; no such step exists.) To have
 the count inferred, pass `--auto-speakers`: Rev.AI's own diarization and

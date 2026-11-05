@@ -74,6 +74,11 @@ Shell scripts must pass default-severity shellcheck. Preserve release gates.
 
 ## Task references
 
+For every CLI-affecting change, update the book's
+[`CLIARE readiness and compatibility record`](book/src/batchalign/developer/cliare-compliance.md)
+as a required development-review step. Preserve its recorded legacy CLI
+pathways; measurement findings do not authorize removing compatibility.
+
 | Task | Read |
 | --- | --- |
 | Dependencies, crate ownership and morphology | [Architecture](docs/agent-reference/architecture.md) |

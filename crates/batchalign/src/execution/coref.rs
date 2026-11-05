@@ -37,7 +37,6 @@ pub(crate) async fn dispatch_coref_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     gateway: &dyn WorkerGateway,
-    should_merge_abbrev: bool,
 ) -> Result<(), crate::error::ServerError> {
     let plan = planning::build_job_plan(job).map_err(|error| {
         crate::error::ServerError::Validation(format!("Coref planning failed: {error}"))
@@ -67,7 +66,7 @@ pub(crate) async fn dispatch_coref_job(
     )
     .await;
 
-    write_text_results(job, host, &plan, results, should_merge_abbrev, "Coref").await;
+    write_text_results(job, host, &plan, results, "Coref").await;
     Ok(())
 }
 
@@ -189,7 +188,6 @@ mod tests {
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Coref(CorefOptions {
                     common: CommonOptions::default(),
-                    merge_abbrev: false.into(),
                 }),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,
@@ -244,7 +242,7 @@ mod tests {
         let gateway = FakeCorefGateway::default();
         let job = coref_snapshot(temp.path());
 
-        dispatch_coref_job(&job, &host, &gateway, false)
+        dispatch_coref_job(&job, &host, &gateway)
             .await
             .expect("a per-file coref job must dispatch");
 
@@ -262,7 +260,7 @@ mod tests {
         let gateway = FakeCorefGateway::default();
         let job = coref_snapshot(temp.path());
 
-        dispatch_coref_job(&job, &host, &gateway, false)
+        dispatch_coref_job(&job, &host, &gateway)
             .await
             .expect("coref dispatch");
 
@@ -278,7 +276,7 @@ mod tests {
         let gateway = FakeCorefGateway::default();
         let job = coref_snapshot(temp.path());
 
-        dispatch_coref_job(&job, &host, &gateway, false)
+        dispatch_coref_job(&job, &host, &gateway)
             .await
             .expect("coref dispatch");
 

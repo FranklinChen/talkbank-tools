@@ -44,7 +44,8 @@ mod discovery;
 mod dispatch;
 mod eviction;
 mod execute_v2;
-pub(crate) use execute_v2::ensure_task_params;
+mod fa_capacity;
+mod fa_preparation;
 pub(super) mod gpu_slot;
 mod idle_eviction;
 pub(crate) mod job_tracker;
@@ -59,11 +60,23 @@ pub(crate) mod shared_gpu;
 mod shutdown;
 mod spawn_runtime;
 pub mod status;
+mod task_load;
+pub(crate) use dispatch::dispatch_prepared;
+pub(crate) use fa_preparation::FaProbeCompletion;
+pub use fa_preparation::{
+    BoundFaPreparation, DispatchPreparation, FaPreparationCompletion, FaPreparationExchange,
+    ReadyRequest,
+};
 
 pub use checkout::CheckedOutWorker;
 pub(crate) use model_plan::GpuRoute;
 pub use model_plan::{GpuModelPlan, GpuRouteRefusal, GpuTask, PlanMismatch};
 pub use status::{WorkerSummaryEntry, WorkerTransport};
+pub(crate) use task_load::TaskLoads;
+pub use task_load::{
+    AdmittedLoad, ConfirmedLoad, LoadAdmission, LoadPreparation, Loaded, ModelHosting, RunPermit,
+    TaskLoad,
+};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -74,7 +87,7 @@ use crate::api::ReleasedCommand;
 use crate::api::{PositiveSeconds, WorkerLanguage};
 use crate::host_facts::PerProfile;
 use crate::options::CommandOptions;
-use crate::types::engines::{EngineOverrides, FaEngineName, SelectableEngine};
+use crate::types::engines::EngineOverrides;
 use crate::types::worker_v2::TaskTimeoutOverrides;
 use crate::worker::{WorkerBootstrapMode, WorkerCapabilities, WorkerProfile, WorkerTarget};
 use batchalign_types::worker::InferTask;
@@ -177,13 +190,8 @@ impl EngineSelection {
     /// ([`Self::task_keys`]). GPU workers are not keyed here: a GPU worker
     /// hosts every task of its profile, so its identity is its job's whole
     /// model plan ([`Self::for_job_plan`]).
-    pub(super) fn derive(
-        task: InferTask,
-        selected: EngineOverrides,
-        target: WorkerTarget,
-        mode: WorkerBootstrapMode,
-    ) -> Self {
-        Self::preloaded(Self::task_keys(task, selected), target, mode)
+    pub(super) fn derive(task: InferTask, selected: EngineOverrides) -> Self {
+        Self::from_overrides(Self::task_keys(task, selected))
     }
 
     /// The identity of a worker serving a job's GPU model plan.
@@ -191,38 +199,26 @@ impl EngineSelection {
     /// A profile worker hosts every task of its profile, so its identity is
     /// the plan's whole engine set; a task-mode worker hosts one task, so its
     /// identity stays that task's own keys.
-    pub(super) fn for_job_plan(
-        plan: EngineOverrides,
-        target: WorkerTarget,
-        mode: WorkerBootstrapMode,
-    ) -> Self {
+    pub(super) fn for_job_plan(plan: EngineOverrides, target: WorkerTarget) -> Self {
         let keys = match target {
             WorkerTarget::Profile(_) => plan,
             WorkerTarget::InferTask(task) => Self::task_keys(task, plan),
         };
-        Self::preloaded(keys, target, mode)
+        Self::from_overrides(keys)
     }
 
-    /// Fill `keys` for what `target` preloads under `mode`, then normalize.
-    /// A lazy worker preloads nothing, so its identity is the keys alone.
-    fn preloaded(keys: EngineOverrides, target: WorkerTarget, mode: WorkerBootstrapMode) -> Self {
-        let filled = match mode {
-            WorkerBootstrapMode::LazyProfile => keys,
-            WorkerBootstrapMode::Profile | WorkerBootstrapMode::Task => {
-                Self::fill_for_preloaded_tasks(target, keys)
-            }
-        };
-        Self::from_overrides(filled)
-    }
-
-    /// The keys a task's worker is identified by: the engines that task's
-    /// loader reads from its overrides, and nothing else.
+    /// The keys a task's load reads from its overrides, and nothing else:
+    /// a worker's identity for the task, and the overrides its
+    /// `ensure_task` carries ([`TaskLoad`]).
     ///
     /// ASR reads `asr` and the extras (`qwen_model`, `funaudio_model`,
-    /// `whisper_cpu_dtype`, ...); FA reads `fa`; translate reads `translate`.
-    /// Every other task has one implementation and reads nothing, so nothing
-    /// enters its key. Listed rather than wildcarded so a new task decides.
-    fn task_keys(task: InferTask, selected: EngineOverrides) -> EngineOverrides {
+    /// `whisper_cpu_dtype`, ...); FA reads `fa`; translate reads `translate`;
+    /// speaker reads `speaker` (local pyannote) and `speaker_embedding` (the
+    /// embedding model), which never enter a GPU worker's key (the plan's
+    /// identity carries no speaker model) and so reach the worker only in the
+    /// speaker task's `ensure_task`. Every other task has one implementation
+    /// and reads nothing. Listed rather than wildcarded so a new task decides.
+    pub(super) fn task_keys(task: InferTask, selected: EngineOverrides) -> EngineOverrides {
         match task {
             InferTask::Asr => EngineOverrides {
                 asr: selected.asr,
@@ -237,33 +233,18 @@ impl EngineSelection {
                 translate: selected.translate,
                 ..EngineOverrides::default()
             },
+            InferTask::Speaker => EngineOverrides {
+                speaker: selected.speaker,
+                speaker_embedding: selected.speaker_embedding,
+                ..EngineOverrides::default()
+            },
             InferTask::Morphosyntax
             | InferTask::Utseg
             | InferTask::Coref
             | InferTask::Opensmile
             | InferTask::Avqi
-            | InferTask::Speaker
             | InferTask::WordSegmentation => EngineOverrides::default(),
         }
-    }
-
-    /// Name an engine for every task the target's bootstrap will PRELOAD,
-    /// beyond what the command or request itself named.
-    ///
-    /// The Python bootstrap REFUSES a preloaded task with no named engine
-    /// rather than defaulting (`resolve_fa_engine`). Until 2026-08-21 only
-    /// the command route filled this in, so an eager-mode V2 ASR request
-    /// spawned a profile worker that preloaded FA with no `fa` override and
-    /// died at bootstrap ("no 'fa' engine in overrides"); both routes now
-    /// share [`Self::derive`].
-    fn fill_for_preloaded_tasks(
-        target: WorkerTarget,
-        mut overrides: EngineOverrides,
-    ) -> EngineOverrides {
-        if target.preloaded_tasks().contains(&InferTask::Fa) {
-            overrides.fa.get_or_insert(FaEngineName::DEFAULT);
-        }
-        overrides
     }
 
     /// Parse the JSON held by an externally managed registry entry.
@@ -448,12 +429,8 @@ impl WorkerKey {
     ) -> Self {
         let target = WorkerTarget::for_inference_with_mode(requirement, bootstrap_mode);
         let task = requirement.task();
-        let engine_selection = EngineSelection::derive(
-            task,
-            EngineSelection::overrides_for_command(options),
-            target,
-            bootstrap_mode,
-        );
+        let engine_selection =
+            EngineSelection::derive(task, EngineSelection::overrides_for_command(options));
         Self {
             target,
             language,
@@ -520,8 +497,9 @@ pub struct PoolConfig {
     pub python_path: String,
     /// Interval between health checks.
     pub health_check_interval_s: PositiveSeconds,
-    /// Longest wait for a worker to become ready.
-    pub ready_timeout_s: PositiveSeconds,
+    /// How long a starting worker may go without advancing
+    /// (`worker_startup_stall_s`), copied to each worker.
+    pub startup_stall: crate::worker::LoadingStall,
     /// Use test-echo mode for all workers (no ML models).
     pub test_echo: bool,
     /// Maximum workers per `(profile, lang)` key, indexed by the
@@ -551,9 +529,10 @@ pub struct PoolConfig {
     /// The operator's transport-ceiling overrides for audio and analysis
     /// tasks; each absent one leaves the built-in ceiling.
     pub task_timeouts: TaskTimeoutOverrides,
-    /// Timeout for on-demand model loading via `ensure_task`. `None`: the
-    /// built-in default (120s).
-    pub ensure_task_timeout: Option<PositiveSeconds>,
+    /// Stall window for on-demand model loading via `ensure_task`: how long
+    /// the load may go without advancing progress (`ensure_task_stall_s`),
+    /// resolved once at the configuration boundary.
+    pub ensure_task_stall: crate::worker::LoadingStall,
     /// Path to the worker registry file. `None`: the ambient default
     /// (`BATCHALIGN_STATE_DIR`, else `~/.batchalign3/workers.json`).
     pub worker_registry_path: Option<std::path::PathBuf>,
@@ -565,9 +544,6 @@ pub struct PoolConfig {
     /// shared GPU worker process.
     pub test_delay_ms: u64,
 }
-
-/// Built-in default for `ensure_task` timeout (seconds).
-const DEFAULT_ENSURE_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<120>();
 
 /// Built-in default for `checkout_wait_report_interval` (seconds).
 ///
@@ -582,7 +558,7 @@ impl PoolConfig {
         Self {
             python_path: resolve_python_executable(),
             health_check_interval_s: PositiveSeconds::literal::<30>(),
-            ready_timeout_s: PositiveSeconds::literal::<300>(),
+            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             test_echo: false,
             max_workers_per_key: DEFAULT_MAX_WORKERS_PER_KEY,
             max_total_workers: DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS,
@@ -590,7 +566,7 @@ impl PoolConfig {
             verbose: 0,
             runtime,
             task_timeouts: TaskTimeoutOverrides::NONE,
-            ensure_task_timeout: None,
+            ensure_task_stall: crate::worker::LoadingStall::DEFAULT_ENSURE_TASK,
             worker_registry_path: None,
             test_delay_ms: 0,
         }
@@ -612,15 +588,6 @@ impl PoolConfig {
     /// `PoolConfig::for_tests()`.
     pub fn effective_max_total_workers(&self) -> usize {
         self.max_total_workers
-    }
-
-    /// Resolved `ensure_task` timeout: the configured one, else the
-    /// built-in default (120s).
-    pub fn effective_ensure_task_timeout(&self) -> PositiveSeconds {
-        match self.ensure_task_timeout {
-            Some(seconds) => seconds,
-            None => DEFAULT_ENSURE_TASK_TIMEOUT,
-        }
     }
 
     /// Resolved checkout wait report interval: the configured one, else the
@@ -1176,11 +1143,14 @@ impl WorkerPool {
     /// Production code uses `runner::execution::run_server_job_attempt`
     /// to set the scope; this is the integration-test entry point.
     #[doc(hidden)]
-    pub async fn dispatch_under_job_for_test<Fut, T>(job_id: crate::api::JobId, fut: Fut) -> T
+    pub fn dispatch_under_job_for_test<Fut, T>(
+        job_id: crate::api::JobId,
+        fut: Fut,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = T>>>
     where
         Fut: std::future::Future<Output = T>,
     {
-        job_tracker::CURRENT_JOB_ID.scope(job_id, fut).await
+        Box::pin(job_tracker::CURRENT_JOB_ID.scope(job_id, fut))
     }
 
     /// Detach and terminate in one step; for callers with no cancellation to
@@ -1397,7 +1367,10 @@ impl WorkerPool {
                 // returns its worker without re-resolving models or
                 // re-serializing spawn overrides on every dispatch.
                 let config = self.worker_config(key)?;
-                let mut handle = self.spawn_runtime.spawn_worker(config).await?;
+                let mut handle = self
+                    .spawn_runtime
+                    .spawn_worker(config, idle_eviction::IdleWorkers(self.groups.clone()))
+                    .await?;
                 self.admit_worker_runtime(&handle)?;
                 if self.first_admitted_capabilities.get().is_none() {
                     match self.detect_capabilities_from_worker(key, &mut handle).await {

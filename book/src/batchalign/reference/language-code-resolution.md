@@ -1,7 +1,7 @@
 # Language Code Resolution
 
 **Status:** Current
-**Last updated:** 2026-10-21 14:20 EDT
+**Last updated:** 2026-11-05 19:37 EST
 
 This page documents how batchalign3 maps language codes to models, Stanza
 pipelines, and processing behavior.
@@ -429,7 +429,7 @@ maintain our own validation tables.
 - **No pre-validation in batchalign3**: language is passed through directly
 - Both have online documentation of supported languages but no programmatic query
 
-#### NeMo / Pyannote (speaker diarization)
+#### Pyannote / pyannoteAI (speaker diarization)
 
 - **Language-independent**: diarization works on any language
 - No validation needed
