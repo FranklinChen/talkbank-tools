@@ -167,9 +167,17 @@ impl ExecuteFailureRead {
     /// is a refusal of the client's input: the request the server built was
     /// refused (`WorkerProtocol`), a model could not load (`WorkerBootstrap`),
     /// the task failed while running (bounded retries with the local or remote
-    /// category selected by `locality`), the provider's quota is exhausted, or
-    /// Hugging Face refused this machine.
-    pub(crate) fn into_server_error(self, locality: ModelLocality) -> crate::error::ServerError {
+    /// category selected by `locality`), the provider refused to bill the
+    /// account, or Hugging Face refused this machine.
+    ///
+    /// `billed` is the product the request was sent as, which an account
+    /// refusal names. Every caller states it, `NotNamed` included, so a
+    /// request billed per product cannot lose that name to a default.
+    pub(crate) fn into_server_error(
+        self,
+        locality: ModelLocality,
+        billed: crate::error::BilledProduct,
+    ) -> crate::error::ServerError {
         use crate::error::ServerError;
         use crate::worker::error::{WorkerAfterError, WorkerError};
         match self.code {
@@ -212,9 +220,9 @@ impl ExecuteFailureRead {
                     ServerError::Worker(WorkerError::WorkerResponse(self.message))
                 }
             },
-            ProtocolErrorCodeV2::ProviderQuotaExhausted => {
-                ServerError::ProviderQuotaExhausted(self.message)
-            }
+            ProtocolErrorCodeV2::ProviderQuotaExhausted => ServerError::ProviderBillingRefused(
+                crate::error::ProviderBillingRefusal::new(billed, self.message),
+            ),
             ProtocolErrorCodeV2::ModelAccessDenied => ServerError::ModelAccessDenied(self.message),
             ProtocolErrorCodeV2::ModelOutputInvalid => {
                 ServerError::ModelOutputInvalid(self.message)
@@ -317,7 +325,9 @@ mod tests {
                 NonNegativeSeconds::ZERO,
             );
             let read = require_success_result(&failed, "utseg").expect_err("a failure");
-            let ServerError::Worker(error) = read.into_server_error(ModelLocality::Local) else {
+            let ServerError::Worker(error) =
+                read.into_server_error(ModelLocality::Local, crate::error::BilledProduct::NotNamed)
+            else {
                 panic!("a worker failure for {code:?}");
             };
             match &error {

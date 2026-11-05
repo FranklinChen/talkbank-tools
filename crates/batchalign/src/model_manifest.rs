@@ -39,16 +39,17 @@
 //! rather than keeping a second copy of them, and reports for each one whether
 //! upstream still matches, has moved, or could not be checked.
 
-use batchalign_transform::translate::WritingSystem;
-
-use batchalign_types::iso639_part1::{Iso639Part1, Iso639Part1Lookup};
-
 use crate::api::LanguageCode3;
 use crate::types::engines::{AsrEngineName, FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT};
 use crate::types::worker_v2::{
     AsrBackendV2, AsrModelIdentityV2, AsrRequestedModelsV2, HubCommitV2, LoadedModelV2, ModelIdV2,
     ObservedRevisionV2, ProviderParameterV2, RequestedModelV2, RequestedRevisionV2, RevisionTagV2,
 };
+
+mod tencent;
+
+pub(crate) use tencent::{TENCENT_ENGINE_INI_KEY, TencentEngineUnavailable};
+pub use tencent::{TencentEngine, TencentEngineRefusal, TencentEngineSetting};
 
 // ---------------------------------------------------------------------------
 // The manifest entries
@@ -184,44 +185,6 @@ const REV_PROVIDER: ManifestEntry = ManifestEntry {
     id: REV_PROVIDER_ID,
     revision: ManifestRevision::ProviderParameter(REV_PROVIDER_PARAMETER),
 };
-
-/// A language-admitted Tencent model, before lowering to the provider wire.
-/// Cantonese and the general Chinese model are separate choices: changing
-/// one cannot rename the other through a shared Chinese-model constant.
-enum TencentModelType {
-    Cantonese,
-    ChineseLarge,
-    IsoLanguage(Iso639Part1),
-}
-
-impl TencentModelType {
-    fn for_language(lang: &LanguageCode3) -> Result<Self, ModelPlanError> {
-        if lang.as_ref() == "yue" {
-            return Ok(Self::Cantonese);
-        }
-        if WritingSystem::of_language_code(lang.as_ref()) == WritingSystem::Han {
-            return Ok(Self::ChineseLarge);
-        }
-        match lang.to_iso_639_1() {
-            Iso639Part1Lookup::Paired(code) => Ok(Self::IsoLanguage(code)),
-            Iso639Part1Lookup::NoTwoLetterCode => {
-                Err(ModelPlanError::TencentLanguageHasNoModelType { lang: lang.clone() })
-            }
-        }
-    }
-
-    fn into_parameter(self) -> Result<ProviderParameterV2, ModelPlanError> {
-        match self {
-            Self::Cantonese => Ok(const { ProviderParameterV2::from_static("16k_yue") }),
-            Self::ChineseLarge => Ok(const { ProviderParameterV2::from_static("16k_zh_large") }),
-            Self::IsoLanguage(code) => ProviderParameterV2::try_from(format!("16k_{code}"))
-                .map_err(|error| ModelPlanError::MalformedManifestEntry {
-                    id: "tencent",
-                    detail: error.to_string(),
-                }),
-        }
-    }
-}
 
 /// The engine-override key the pinned models travel to the worker under.
 ///
@@ -373,19 +336,13 @@ pub(crate) enum ModelPlanError {
         /// The language asked for, or a note that none was resolved.
         language: String,
     },
-    /// Tencent has no model type for a language with no ISO 639-1 code.
+    /// The account's Tencent engine setting cannot serve this job.
     ///
-    /// Previously this produced `16k_<iso3>`, a model type Tencent does not
-    /// define, and the failure surfaced as a provider error mid-job.
-    #[error(
-        "the Tencent ASR engine has no model for language {lang}: its model types are named by \
-         ISO 639-1 code and ISO 639-1 assigns {lang} none. Use a Chinese variety, a language \
-         with a two-letter code, or another ASR engine."
-    )]
-    TencentLanguageHasNoModelType {
-        /// The language that has no two-letter code.
-        lang: LanguageCode3,
-    },
+    /// Refused at PLAN time, before any upload or paid request: no engine
+    /// chosen, an engine BA3 cannot use, or one that does not recognize the
+    /// job's language ([`TencentEngineSetting::engine_for`]).
+    #[error(transparent)]
+    TencentEngine(#[from] TencentEngineUnavailable),
     /// The weights on disk came from a different repository commit than the one
     /// this build pins.
     ///
@@ -470,73 +427,105 @@ fn floating(key: &'static str, id: &str) -> Result<RequestedModelV2, ModelPlanEr
 }
 
 // ---------------------------------------------------------------------------
-// Tencent's engine model type
-// ---------------------------------------------------------------------------
-
-/// The `EngineModelType` Tencent is asked for.
-///
-/// Chosen in Rust for EVERY language, through the one ISO 639-3 to 639-1
-/// conversion and the one Han-script table. Cantonese has its own provider
-/// model; the other Chinese varieties retain the general Chinese model.
-/// The Python derivation this replaces
-/// used pycountry with its own five-code Chinese list that OMITTED Mandarin, so
-/// a `cmn` job asked Tencent for `16k_cmn`, and any language without a
-/// two-letter code asked for `16k_<iso3>`; neither is a model type Tencent
-/// defines.
-///
-/// The admitted selection owns the provider parameter used for dispatch and
-/// manifest/cache identity, so the Cantonese route cannot retain an old
-/// general-Chinese cache namespace while asking the provider for Cantonese.
-pub(crate) fn tencent_engine_model_type(
-    lang: &LanguageCode3,
-) -> Result<ProviderParameterV2, ModelPlanError> {
-    TencentModelType::for_language(lang)?.into_parameter()
-}
-
-// ---------------------------------------------------------------------------
 // The resolver
 // ---------------------------------------------------------------------------
+
+/// The models one ASR request pins, with the product it is billed as.
+///
+/// The two are decided together, in [`resolve_asr_models`], because the
+/// engine that chooses the models also decides the bill: a Tencent plan names
+/// the engine the account chose, and an account refusal for that request
+/// names the same engine and its tier. Carrying the product beside the models
+/// means nothing downstream parses it back out of the request's wire text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PinnedAsrPlan {
+    models: AsrRequestedModelsV2,
+    billed: crate::error::BilledProduct,
+}
+
+impl PinnedAsrPlan {
+    /// A plan billed by account alone.
+    fn unbilled(models: AsrRequestedModelsV2) -> Self {
+        Self {
+            models,
+            billed: crate::error::BilledProduct::NotNamed,
+        }
+    }
+
+    /// A plan billed by account alone, for tests of what consumes one.
+    #[cfg(test)]
+    pub(crate) fn for_test(models: AsrRequestedModelsV2) -> Self {
+        Self::unbilled(models)
+    }
+
+    /// The models the request pins.
+    pub(crate) fn models(&self) -> &AsrRequestedModelsV2 {
+        &self.models
+    }
+
+    /// The product the request is billed as.
+    pub(crate) fn billed(&self) -> &crate::error::BilledProduct {
+        &self.billed
+    }
+
+    /// The models alone, for a caller that keys or ships them.
+    pub(crate) fn into_models(self) -> AsrRequestedModelsV2 {
+        self.models
+    }
+}
 
 /// Resolve the models one ASR request will load.
 ///
 /// `lang` is `None` for an auto-detect job. `extras` is the user's
 /// `--engine-overrides`, from which each engine reads only its own key.
+/// `tencent` is the account's Tencent engine choice, read once by the server
+/// that owns the worker runtime ([`crate::worker::handle::WorkerRuntimeConfig`]);
+/// only a Tencent plan reads it.
 pub(crate) fn resolve_asr_models(
     backend: AsrBackendV2,
     lang: Option<&LanguageCode3>,
     extras: &std::collections::BTreeMap<String, String>,
-) -> Result<AsrRequestedModelsV2, ModelPlanError> {
-    match backend {
+    tencent: &TencentEngineSetting,
+) -> Result<PinnedAsrPlan, ModelPlanError> {
+    let models = match backend {
         // Stock Whisper loads one checkpoint for every language.
-        AsrBackendV2::LocalWhisper => Ok(AsrRequestedModelsV2::Whisper {
+        AsrBackendV2::LocalWhisper => AsrRequestedModelsV2::Whisper {
             asr: WHISPER_LARGE_V3.admit()?,
-        }),
-        AsrBackendV2::WhisperHub => Ok(AsrRequestedModelsV2::Whisper {
+        },
+        AsrBackendV2::WhisperHub => AsrRequestedModelsV2::Whisper {
             asr: whisper_hub_model(lang, extras)?,
-        }),
-        AsrBackendV2::HkFunaudio => funaudio_models(extras),
-        AsrBackendV2::HkQwen => Ok(AsrRequestedModelsV2::Qwen {
+        },
+        AsrBackendV2::HkFunaudio => funaudio_models(extras)?,
+        AsrBackendV2::HkQwen => AsrRequestedModelsV2::Qwen {
             asr: qwen_model(extras)?,
             aligner: QWEN_ALIGNER.admit()?,
-        }),
+        },
+        // The engine is the account's choice, never derived from the
+        // language; the language only decides whether that engine can serve
+        // the job (see the `tencent` module for why).
         AsrBackendV2::HkTencent => {
             let lang = lang.ok_or(ModelPlanError::TencentNeedsResolvedLanguage)?;
-            Ok(AsrRequestedModelsV2::Tencent {
-                engine_model_type: RequestedModelV2 {
-                    id: const { ModelIdV2::from_static("tencent-asr") },
-                    revision: RequestedRevisionV2::ProviderParameter {
-                        parameter: tencent_engine_model_type(lang)?,
+            let engine = tencent.engine_for(lang)?;
+            return Ok(PinnedAsrPlan {
+                models: AsrRequestedModelsV2::Tencent {
+                    engine_model_type: RequestedModelV2 {
+                        id: const { ModelIdV2::from_static("tencent-asr") },
+                        revision: RequestedRevisionV2::ProviderParameter {
+                            parameter: engine.parameter(),
+                        },
                     },
                 },
-            })
+                billed: crate::error::BilledProduct::Tencent(engine),
+            });
         }
-        AsrBackendV2::HkAliyun => Ok(AsrRequestedModelsV2::Aliyun {
+        AsrBackendV2::HkAliyun => AsrRequestedModelsV2::Aliyun {
             service: ALIYUN_SERVICE.admit()?,
-        }),
-        AsrBackendV2::Revai => Ok(AsrRequestedModelsV2::Rev {
+        },
+        AsrBackendV2::Revai => AsrRequestedModelsV2::Rev {
             provider: REV_PROVIDER.admit()?,
-        }),
-    }
+        },
+    };
+    Ok(PinnedAsrPlan::unbilled(models))
 }
 
 /// The composition one timing-recovery engine runs, for keying its cache.
@@ -553,6 +542,7 @@ pub(crate) fn resolve_asr_models(
 pub(crate) fn utr_pinned_models(
     engine: &crate::options::UtrEngine,
     lang: &LanguageCode3,
+    tencent: &TencentEngineSetting,
 ) -> Result<AsrRequestedModelsV2, ModelPlanError> {
     let backend = match crate::transcribe::AsrBackend::from(engine) {
         crate::transcribe::AsrBackend::RustRevAi => AsrBackendV2::Revai,
@@ -562,7 +552,7 @@ pub(crate) fn utr_pinned_models(
         }
     };
     let extras = std::collections::BTreeMap::new();
-    resolve_asr_models(backend, Some(lang), &extras)
+    resolve_asr_models(backend, Some(lang), &extras, tencent).map(PinnedAsrPlan::into_models)
 }
 
 /// The identity the Rust-owned Rev.AI path reports.
@@ -805,6 +795,17 @@ mod tests {
         LanguageCode3::try_new(code).expect("test language code is valid")
     }
 
+    /// The models a plan pins; these tests examine the models, and the
+    /// billed product has its own tests where it is rendered.
+    fn resolve(
+        backend: AsrBackendV2,
+        lang: Option<&LanguageCode3>,
+        extras: &std::collections::BTreeMap<String, String>,
+        tencent: &TencentEngineSetting,
+    ) -> Result<AsrRequestedModelsV2, ModelPlanError> {
+        resolve_asr_models(backend, lang, extras, tencent).map(PinnedAsrPlan::into_models)
+    }
+
     /// Every manifest entry admits. A malformed revision in this file is a
     /// defect that must fail here rather than at dispatch on a live job.
     #[test]
@@ -813,8 +814,18 @@ mod tests {
         for backend in AsrBackendV2::ALL {
             let resolved = match backend {
                 // Tencent needs a language; covered by its own tests.
-                AsrBackendV2::HkTencent => resolve_asr_models(backend, Some(&lang("eng")), &none),
-                _ => resolve_asr_models(backend, Some(&lang("mal")), &none),
+                AsrBackendV2::HkTencent => resolve(
+                    backend,
+                    Some(&lang("eng")),
+                    &none,
+                    &TencentEngineSetting::LARGE_MODEL_2,
+                ),
+                _ => resolve(
+                    backend,
+                    Some(&lang("mal")),
+                    &none,
+                    &TencentEngineSetting::LARGE_MODEL_2,
+                ),
             };
             resolved.unwrap_or_else(|error| panic!("{backend:?} must resolve: {error}"));
         }
@@ -892,8 +903,13 @@ mod tests {
     #[test]
     fn the_rev_identity_is_admissible_and_observes_nothing() {
         let loaded = rev_loaded_identity();
-        let requested = resolve_asr_models(AsrBackendV2::Revai, None, &extras(&[]))
-            .expect("Rev resolves a pinned composition");
+        let requested = resolve(
+            AsrBackendV2::Revai,
+            None,
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("Rev resolves a pinned composition");
         loaded
             .admit(&requested, AsrBackendV2::Revai)
             .expect("the Rev identity must admit against its own plan");
@@ -906,70 +922,72 @@ mod tests {
         );
     }
 
-    /// Mandarin still asks for the general Chinese model, not an invented
-    /// `16k_cmn` or the distinct Cantonese model.
+    /// The account's engine is what Tencent is asked for, whatever the
+    /// language, provided the engine recognizes it: Cantonese and Mandarin
+    /// both go to `16k_zh_en_2.0` on the PolyU account. Until 2026-11-05 the
+    /// name was built from the language, so Cantonese went to `16k_yue`
+    /// whatever the account had bought.
     #[test]
-    fn non_cantonese_chinese_varieties_keep_the_general_model() {
-        for code in ["cmn", "zho", "wuu", "nan", "hak"] {
+    fn tencent_asks_for_the_engine_the_account_chose() {
+        for code in ["yue", "cmn", "zho", "eng"] {
+            let models = resolve(
+                AsrBackendV2::HkTencent,
+                Some(&lang(code)),
+                &extras(&[]),
+                &TencentEngineSetting::LARGE_MODEL_2,
+            )
+            .expect("16k_zh_en_2.0 recognizes this language");
+            let value = serde_json::to_value(&models).expect("the composition serializes");
             assert_eq!(
-                tencent_engine_model_type(&lang(code))
-                    .expect("a Chinese variety has a model type")
-                    .as_str(),
-                "16k_zh_large",
-                "{code} is a Chinese variety"
+                value["engine_model_type"]["revision"]["parameter"], "16k_zh_en_2.0",
+                "{code}"
             );
         }
     }
 
+    /// An account that has chosen no engine is refused at PLAN time, before
+    /// any upload or paid request, with the line to add.
     #[test]
-    fn cantonese_has_a_distinct_provider_model() {
-        assert!(matches!(
-            TencentModelType::for_language(&lang("yue")).expect("Cantonese model"),
-            TencentModelType::Cantonese
-        ));
+    fn tencent_refuses_an_account_that_chose_no_engine() {
+        let refusal = resolve(
+            AsrBackendV2::HkTencent,
+            Some(&lang("yue")),
+            &extras(&[]),
+            &TencentEngineSetting::Unset,
+        )
+        .expect_err("no engine chosen");
         assert_eq!(
-            tencent_engine_model_type(&lang("yue"))
-                .expect("Cantonese parameter")
-                .as_str(),
-            "16k_yue"
+            refusal,
+            ModelPlanError::TencentEngine(TencentEngineUnavailable::Unset)
+        );
+        assert!(
+            refusal.to_string().contains(TENCENT_ENGINE_INI_KEY),
+            "{refusal}"
         );
     }
 
-    /// A language with a two-letter code is unchanged from the Python
-    /// derivation, which is what makes this a safe substitution.
+    /// A language the account's engine does not recognize is refused by
+    /// name. The old rule asked for `16k_ja`, which Tencent serves only
+    /// without word timings.
     #[test]
-    fn languages_with_a_two_letter_code_keep_their_model_type() {
-        for (code, expected) in [
-            ("eng", "16k_en"),
-            ("fra", "16k_fr"),
-            ("jpn", "16k_ja"),
-            ("spa", "16k_es"),
-            ("kor", "16k_ko"),
-        ] {
-            assert_eq!(
-                tencent_engine_model_type(&lang(code))
-                    .expect("a two-letter language has a model type")
-                    .as_str(),
-                expected
-            );
-        }
-    }
-
-    /// A language with no two-letter code is refused at PLAN time, naming the
-    /// language. It used to become `16k_<iso3>`, a model type Tencent does not
-    /// define, and failed mid-job as a provider error.
-    #[test]
-    fn a_language_with_no_two_letter_code_is_refused_by_name() {
-        let refusal = tencent_engine_model_type(&lang("ceb"))
-            .expect_err("Cebuano has no ISO 639-1 code, so Tencent has no model for it");
+    fn tencent_refuses_a_language_its_engine_does_not_recognize() {
+        let refusal = resolve(
+            AsrBackendV2::HkTencent,
+            Some(&lang("jpn")),
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect_err("16k_zh_en_2.0 does not recognize Japanese");
         assert!(
             matches!(
                 refusal,
-                ModelPlanError::TencentLanguageHasNoModelType { .. }
+                ModelPlanError::TencentEngine(
+                    TencentEngineUnavailable::LanguageNotRecognized { .. }
+                )
             ),
             "{refusal:?}"
         );
-        assert!(refusal.to_string().contains("ceb"), "{refusal}");
+        assert!(refusal.to_string().contains("jpn"), "{refusal}");
     }
 
     /// An auto-detect job cannot choose a Tencent model, and says so instead of
@@ -977,7 +995,12 @@ mod tests {
     #[test]
     fn tencent_refuses_an_unresolved_language() {
         assert_eq!(
-            resolve_asr_models(AsrBackendV2::HkTencent, None, &extras(&[])),
+            resolve(
+                AsrBackendV2::HkTencent,
+                None,
+                &extras(&[]),
+                &TencentEngineSetting::LARGE_MODEL_2
+            ),
             Err(ModelPlanError::TencentNeedsResolvedLanguage)
         );
     }
@@ -987,15 +1010,21 @@ mod tests {
     /// and punctuation models it additionally loads.
     #[test]
     fn the_funaudio_checkpoint_decides_the_composition() {
-        let default = resolve_asr_models(AsrBackendV2::HkFunaudio, None, &extras(&[]))
-            .expect("the default resolves");
+        let default = resolve(
+            AsrBackendV2::HkFunaudio,
+            None,
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("the default resolves");
         assert!(matches!(default, AsrRequestedModelsV2::SenseVoice { .. }));
         assert!(default.is_fully_pinned());
 
-        let paraformer = resolve_asr_models(
+        let paraformer = resolve(
             AsrBackendV2::HkFunaudio,
             None,
             &extras(&[(FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT)]),
+            &TencentEngineSetting::LARGE_MODEL_2,
         )
         .expect("paraformer resolves");
         assert!(matches!(
@@ -1023,10 +1052,11 @@ mod tests {
     /// Its aligner stays pinned, because the engine always loads that one.
     #[test]
     fn an_unknown_checkpoint_is_floating_and_uncacheable() {
-        let resolved = resolve_asr_models(
+        let resolved = resolve(
             AsrBackendV2::HkQwen,
             None,
             &extras(&[("qwen_model", "someone/a-qwen-fine-tune")]),
+            &TencentEngineSetting::LARGE_MODEL_2,
         )
         .expect("an unknown Qwen checkpoint still resolves");
         assert!(
@@ -1047,9 +1077,13 @@ mod tests {
     #[test]
     fn known_qwen_checkpoints_are_pinned() {
         for id in ["Qwen/Qwen3-ASR-1.7B-hf", "Qwen/Qwen3-ASR-0.6B-hf"] {
-            let resolved =
-                resolve_asr_models(AsrBackendV2::HkQwen, None, &extras(&[("qwen_model", id)]))
-                    .expect("resolves");
+            let resolved = resolve(
+                AsrBackendV2::HkQwen,
+                None,
+                &extras(&[("qwen_model", id)]),
+                &TencentEngineSetting::LARGE_MODEL_2,
+            )
+            .expect("resolves");
             assert!(resolved.is_fully_pinned(), "{id} should be pinned");
         }
     }
@@ -1062,9 +1096,13 @@ mod tests {
     /// not exist rather than as "choose a model".
     #[test]
     fn whisper_hub_without_a_seeded_default_is_refused_with_the_remedy() {
-        let refusal =
-            resolve_asr_models(AsrBackendV2::WhisperHub, Some(&lang("eng")), &extras(&[]))
-                .expect_err("this build seeds no English whisper_hub fine-tune");
+        let refusal = resolve(
+            AsrBackendV2::WhisperHub,
+            Some(&lang("eng")),
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect_err("this build seeds no English whisper_hub fine-tune");
         assert!(
             matches!(refusal, ModelPlanError::WhisperHubHasNoDefaultModel { .. }),
             "{refusal:?}"
@@ -1078,10 +1116,11 @@ mod tests {
 
         // An explicit id is exactly the remedy the message names, and an id
         // this build does not pin is floating rather than refused.
-        let chosen = resolve_asr_models(
+        let chosen = resolve(
             AsrBackendV2::WhisperHub,
             Some(&lang("eng")),
             &extras(&[("model_id", "someone/a-whisper-fine-tune")]),
+            &TencentEngineSetting::LARGE_MODEL_2,
         )
         .expect("an explicit model_id resolves");
         assert!(!chosen.is_fully_pinned());
@@ -1090,8 +1129,13 @@ mod tests {
     /// Aliyun records its service, never the appkey that identifies an account.
     #[test]
     fn aliyun_records_a_service_not_a_credential() {
-        let resolved = resolve_asr_models(AsrBackendV2::HkAliyun, None, &extras(&[]))
-            .expect("aliyun resolves");
+        let resolved = resolve(
+            AsrBackendV2::HkAliyun,
+            None,
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("aliyun resolves");
         let AsrRequestedModelsV2::Aliyun { service } = &resolved else {
             panic!("expected an Aliyun composition");
         };
@@ -1107,8 +1151,13 @@ mod tests {
     /// the role field names and the revision payload names are all contract.
     #[test]
     fn the_pinned_composition_serializes_in_the_shape_python_parses() {
-        let sensevoice = resolve_asr_models(AsrBackendV2::HkFunaudio, None, &extras(&[]))
-            .expect("the default FunAudio composition resolves");
+        let sensevoice = resolve(
+            AsrBackendV2::HkFunaudio,
+            None,
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("the default FunAudio composition resolves");
         let value = serde_json::to_value(&sensevoice).expect("the composition serializes");
         assert_eq!(value["engine"], "sense_voice");
         assert_eq!(value["asr"]["id"], "FunAudioLLM/SenseVoiceSmall");
@@ -1121,10 +1170,11 @@ mod tests {
 
         // A ModelScope composition carries a TAG, and a cloud one a provider
         // parameter, so both non-commit revision kinds are pinned here too.
-        let paraformer = resolve_asr_models(
+        let paraformer = resolve(
             AsrBackendV2::HkFunaudio,
             None,
             &extras(&[(FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT)]),
+            &TencentEngineSetting::LARGE_MODEL_2,
         )
         .expect("the Paraformer composition resolves");
         let value = serde_json::to_value(&paraformer).expect("the composition serializes");
@@ -1133,8 +1183,13 @@ mod tests {
         assert_eq!(value["asr"]["revision"]["tag"], "v2.0.4");
         assert_eq!(value["punc"]["revision"]["tag"], "v2.0.4");
 
-        let tencent = resolve_asr_models(AsrBackendV2::HkTencent, Some(&lang("yue")), &extras(&[]))
-            .expect("Tencent resolves for Cantonese");
+        let tencent = resolve(
+            AsrBackendV2::HkTencent,
+            Some(&lang("yue")),
+            &extras(&[]),
+            &TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("Tencent resolves for Cantonese");
         let value = serde_json::to_value(&tencent).expect("the composition serializes");
         assert_eq!(value["engine"], "tencent");
         assert_eq!(
@@ -1143,14 +1198,15 @@ mod tests {
         );
         assert_eq!(
             value["engine_model_type"]["revision"]["parameter"],
-            "16k_yue"
+            "16k_zh_en_2.0"
         );
 
         // An unpinned member is a tagged variant with no payload, not a null.
-        let floating = resolve_asr_models(
+        let floating = resolve(
             AsrBackendV2::HkQwen,
             None,
             &extras(&[("qwen_model", "someone/a-qwen-fine-tune")]),
+            &TencentEngineSetting::LARGE_MODEL_2,
         )
         .expect("an unknown checkpoint still resolves");
         let value = serde_json::to_value(&floating).expect("the composition serializes");
@@ -1170,8 +1226,13 @@ mod tests {
                 AsrBackendV2::WhisperHub => lang("mal"),
                 _ => lang("eng"),
             };
-            let resolved = resolve_asr_models(backend, Some(&language), &none)
-                .expect("every backend resolves for a language it supports");
+            let resolved = resolve(
+                backend,
+                Some(&language),
+                &none,
+                &TencentEngineSetting::LARGE_MODEL_2,
+            )
+            .expect("every backend resolves for a language it supports");
             assert!(
                 resolved.shape().admits_backend(backend),
                 "{backend:?} resolved to a composition it cannot report"

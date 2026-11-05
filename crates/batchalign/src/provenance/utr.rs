@@ -3,12 +3,117 @@
 //! A provider failure is recorded before FA may continue. Successful earlier
 //! recovery and failed later attempts are independent evidence; neither erases
 //! the other. Only cancellation escapes as a stop rather than a shortfall.
+//!
+//! A pass that ran records its PRODUCER: the engine and the models every ASR
+//! response it used reported ([`UtrModels`]), which the align stamp writes as
+//! `utr=` and `utr_model=`. The models come from the responses themselves,
+//! fresh or replayed from the cache, never from the plan that asked for them,
+//! for the reason `AsrIdentity::asr_model` gives for transcribe's
+//! `asr_model=`: a stamp records what produced the timings, not what was
+//! requested.
 
 use crate::api::{OutputShortfallRecord, StampJoiner, StampSafeText, UtrPass};
 use crate::chat_ops::fa::utr::{UtrCancelled, UtrResult};
 use crate::error::ServerError;
 use crate::options::UtrEngine;
 use crate::scheduling::FailureCategory;
+use crate::types::worker_v2::AsrModelIdentityV2;
+
+/// What one timing-recovery pass did, as its caller records it.
+///
+/// Two states, so that "recovery ran" is a variant rather than a predicate
+/// over the result's evidence, and the models are present exactly when there
+/// were responses to report them.
+#[derive(Debug)]
+pub(crate) enum UtrPassOutcome {
+    /// No utterance lacked timing, so no recognition was asked for.
+    NothingUntimed(UtrResult),
+    /// Recognition ran and its tokens were matched to the transcript.
+    Recovered {
+        /// The matching result.
+        result: UtrResult,
+        /// The models the responses reported.
+        models: UtrModels,
+    },
+}
+
+impl UtrPassOutcome {
+    /// The matching result, whichever state produced it.
+    pub(crate) fn result_mut(&mut self) -> &mut UtrResult {
+        match self {
+            Self::NothingUntimed(result) | Self::Recovered { result, .. } => result,
+        }
+    }
+}
+
+/// The models the ASR responses of one recovery pass reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UtrModels {
+    /// Every response reported these models. Boxed: an identity is large and
+    /// the other states carry nothing.
+    Reported(Box<AsrModelIdentityV2>),
+    /// Some response reported none (a cached projection from before model
+    /// reporting), so the pass cannot name what produced all its timings.
+    Unreported,
+    /// Responses reported different models. A pinned plan admits every
+    /// response against one pin, so this can arise only from an unpinned
+    /// one; no single name would be true, so none is written.
+    Disagreeing,
+}
+
+impl UtrModels {
+    /// The models one response reported.
+    pub(crate) fn of(response: &crate::transcribe::AsrResponse) -> Self {
+        match &response.model {
+            Some(model) => Self::Reported(Box::new(model.clone())),
+            None => Self::Unreported,
+        }
+    }
+
+    /// These models together with one more response's, compared in place.
+    #[must_use]
+    pub(crate) fn and(self, response: &crate::transcribe::AsrResponse) -> Self {
+        match (self, response.model.as_ref()) {
+            (Self::Reported(seen), Some(next)) if *seen == *next => Self::Reported(seen),
+            (Self::Reported(_), Some(_)) => Self::Disagreeing,
+            (Self::Disagreeing, Some(_) | None) => Self::Disagreeing,
+            (Self::Unreported, Some(_) | None) | (Self::Reported(_), None) => Self::Unreported,
+        }
+    }
+
+    /// The `utr_model=` value, when the models can be named.
+    fn stamp_value(&self) -> Option<StampSafeText> {
+        match self {
+            Self::Reported(model) => Some(model.stamp_value()),
+            Self::Unreported | Self::Disagreeing => None,
+        }
+    }
+}
+
+/// The engine that recovered a file's timing and the models it reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UtrProducer {
+    engine: UtrEngine,
+    models: UtrModels,
+}
+
+impl UtrProducer {
+    /// The engine, written as `utr=`.
+    pub(crate) fn engine(&self) -> &UtrEngine {
+        &self.engine
+    }
+
+    /// The models, written as `utr_model=` when they can be named.
+    pub(crate) fn model_stamp(&self) -> Option<StampSafeText> {
+        self.models.stamp_value()
+    }
+
+    /// A producer as a recorded pass would leave it, for tests of the stamp.
+    #[cfg(test)]
+    pub(crate) fn for_test(engine: UtrEngine, models: UtrModels) -> Self {
+        Self { engine, models }
+    }
+}
 
 /// One file's report and its fallback permission have one owner. A pending
 /// fallback borrows this report, so it cannot be recorded on another file's
@@ -33,7 +138,7 @@ impl UtrRecovery {
 
     pub(crate) fn from_initial(
         engine: &UtrEngine,
-        result: Result<UtrResult, ServerError>,
+        result: Result<UtrPassOutcome, ServerError>,
     ) -> Result<Self, UtrCancelled> {
         let mut contribution = UtrContribution::NotRun;
         let fallback = contribution.record_initial(engine, result)?;
@@ -60,7 +165,10 @@ impl PendingUtrFallback<'_> {
         self.permit.engine()
     }
 
-    pub(crate) fn record(self, result: Result<UtrResult, ServerError>) -> Result<(), UtrCancelled> {
+    pub(crate) fn record(
+        self,
+        result: Result<UtrPassOutcome, ServerError>,
+    ) -> Result<(), UtrCancelled> {
         self.contribution.record_fallback(self.permit, result)
     }
 }
@@ -68,14 +176,14 @@ impl PendingUtrFallback<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UtrContribution {
     NotRun,
-    Ran(UtrEngine),
+    Ran(UtrProducer),
     Unavailable(UtrFailures),
 }
 
 /// Non-empty failure history; construction belongs to the observation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UtrFailures {
-    completed: Option<UtrEngine>,
+    completed: Option<UtrProducer>,
     first: UtrFailure,
     later: Vec<UtrFailure>,
 }
@@ -165,7 +273,7 @@ enum FallbackWithheld {
 impl std::fmt::Display for FallbackWithheld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::QuotaExhausted => "the provider quota is exhausted",
+            Self::QuotaExhausted => "the provider will not bill this account",
             Self::AccountRefused => "the provider refuses the account",
             Self::ModelAccessDenied => "this machine is refused the engine's model",
             Self::WorkerBootstrap => "the engine's worker cannot start",
@@ -214,10 +322,11 @@ fn fallback_after(category: FailureCategory) -> RecoveryNeed {
 }
 
 impl UtrContribution {
-    pub(crate) fn completed_engine(&self) -> Option<&UtrEngine> {
+    /// The pass that recovered timing, when one did.
+    pub(crate) fn completed(&self) -> Option<&UtrProducer> {
         match self {
             Self::NotRun => None,
-            Self::Ran(engine) => Some(engine),
+            Self::Ran(producer) => Some(producer),
             Self::Unavailable(failures) => failures.completed.as_ref(),
         }
     }
@@ -226,7 +335,7 @@ impl UtrContribution {
     fn record_initial(
         &mut self,
         engine: &UtrEngine,
-        result: Result<UtrResult, ServerError>,
+        result: Result<UtrPassOutcome, ServerError>,
     ) -> Result<UtrFallback, UtrCancelled> {
         Ok(match self.record(engine, UtrPass::Initial, result)? {
             RecoveryNeed::Satisfied => UtrFallback::Unavailable,
@@ -250,7 +359,7 @@ impl UtrContribution {
     fn record_fallback(
         &mut self,
         permit: UtrFallbackPermit,
-        result: Result<UtrResult, ServerError>,
+        result: Result<UtrPassOutcome, ServerError>,
     ) -> Result<(), UtrCancelled> {
         self.record(&permit.engine, UtrPass::Fallback, result)?;
         Ok(())
@@ -260,17 +369,28 @@ impl UtrContribution {
         &mut self,
         engine: &UtrEngine,
         pass: UtrPass,
-        result: Result<UtrResult, ServerError>,
+        result: Result<UtrPassOutcome, ServerError>,
     ) -> Result<RecoveryNeed, UtrCancelled> {
         match result {
-            Ok(result) => {
-                if result.ran() {
-                    match self {
-                        Self::Unavailable(failures) => failures.completed = Some(engine.clone()),
-                        _ => *self = Self::Ran(engine.clone()),
+            Ok(outcome) => {
+                let unmatched = match &outcome {
+                    UtrPassOutcome::NothingUntimed(result)
+                    | UtrPassOutcome::Recovered { result, .. } => result.unmatched(),
+                };
+                match outcome {
+                    UtrPassOutcome::NothingUntimed(_) => {}
+                    UtrPassOutcome::Recovered { models, .. } => {
+                        let producer = UtrProducer {
+                            engine: engine.clone(),
+                            models,
+                        };
+                        match self {
+                            Self::Unavailable(failures) => failures.completed = Some(producer),
+                            Self::NotRun | Self::Ran(_) => *self = Self::Ran(producer),
+                        }
                     }
                 }
-                Ok(if result.unmatched() > 0 {
+                Ok(if unmatched > 0 {
                     RecoveryNeed::Remaining
                 } else {
                     RecoveryNeed::Satisfied
@@ -288,9 +408,9 @@ impl UtrContribution {
                 };
                 match self {
                     Self::Unavailable(failures) => failures.later.push(failure),
-                    _ => {
+                    Self::NotRun | Self::Ran(_) => {
                         *self = Self::Unavailable(UtrFailures {
-                            completed: self.completed_engine().cloned(),
+                            completed: self.completed().cloned(),
                             first: failure,
                             later: Vec::new(),
                         });

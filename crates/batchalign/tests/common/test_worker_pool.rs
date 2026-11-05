@@ -97,8 +97,8 @@ impl ConfigKey {
             bootstrap_mode: config.runtime.bootstrap_mode,
             revai_api_key: config
                 .runtime
-                .revai_api_key
-                .as_ref()
+                .provider_accounts
+                .revai_api_key()
                 .map(|key| key.as_str().to_owned()),
             test_delay_ms: config.test_delay_ms,
             state_dir: config.runtime.state_dir.clone(),

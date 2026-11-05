@@ -40,7 +40,12 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
         BTreeMap::new(),
     );
     job.dispatch.num_speakers = NumSpeakers(2);
-    let plan = TranscribeDispatchPlan::from_job(&job, &test_policy()).expect("dispatch plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &job,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("dispatch plan");
     assert_eq!(
         plan.base_options.plan.asr().backend(),
         AsrBackend::RustRevAi
@@ -57,8 +62,12 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
         "engine_overrides": {"asr": "whisper"}
     }))
     .unwrap();
-    let whisper_plan = TranscribeDispatchPlan::from_job(&whisper, &test_policy())
-        .expect("an automatic count is not the recognizer's to refuse");
+    let whisper_plan = TranscribeDispatchPlan::from_job(
+        &whisper,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("an automatic count is not the recognizer's to refuse");
     assert_eq!(whisper_plan.base_options.expected_speakers(), None);
     let mut tencent = job.clone();
     tencent.dispatch.options = serde_json::from_value(serde_json::json!({
@@ -67,7 +76,11 @@ fn auto_speakers_http_contract_reaches_provider_and_speaker_boundary() {
     }))
     .unwrap();
     assert!(matches!(
-        TranscribeDispatchPlan::from_job(&tencent, &test_policy()),
+        TranscribeDispatchPlan::from_job(
+            &tencent,
+            &test_policy(),
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2
+        ),
         Err(DispatchPlanRefusal::SpeakerPolicy(
             crate::transcribe::SpeakerPlanError::AutoCountUnsupported { .. }
         ))
@@ -175,8 +188,12 @@ fn transcribe_plan_reads_runtime_flags_and_speaker_override() {
         runtime_state,
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -218,8 +235,12 @@ fn transcribe_s_plan_defaults_to_pyannote_ai_precision_2() {
         BTreeMap::new(),
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe_s plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe_s plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -265,9 +286,13 @@ fn transcribe_plan_propagates_an_unimplemented_engine_refusal() {
         BTreeMap::new(),
     );
 
-    let refusal = TranscribeDispatchPlan::from_job(&snapshot, &test_policy())
-        .err()
-        .expect("an unimplemented engine must refuse the plan, not drop it");
+    let refusal = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .err()
+    .expect("an unimplemented engine must refuse the plan, not drop it");
     assert!(
         matches!(refusal, DispatchPlanRefusal::Engine(_)),
         "the refusal must say it was the ENGINE, not unreadable options: {refusal:?}"
@@ -385,8 +410,12 @@ fn transcribe_plan_preserves_required_cache_policy() {
         BTreeMap::new(),
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies,
@@ -414,8 +443,12 @@ fn transcribe_plan_can_refresh_rev_without_refreshing_speaker_evidence() {
         BTreeMap::new(),
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies.rev_asr,
@@ -447,8 +480,12 @@ fn transcribe_plan_can_refresh_speaker_without_refreshing_rev_evidence() {
         BTreeMap::new(),
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe plan");
 
     assert_eq!(
         plan.base_options.cache_policies.rev_asr,
@@ -536,8 +573,12 @@ fn transcribe_s_plan_honors_explicit_local_pyannote_override() {
         BTreeMap::new(),
     );
 
-    let plan =
-        TranscribeDispatchPlan::from_job(&snapshot, &test_policy()).expect("transcribe_s plan");
+    let plan = TranscribeDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("transcribe_s plan");
 
     assert_eq!(
         plan.base_options.speakers.dedicated(),
@@ -561,7 +602,12 @@ fn benchmark_plan_builds_rust_owned_transcribe_options() {
         BTreeMap::new(),
     );
 
-    let plan = BenchmarkDispatchPlan::from_job(&snapshot, &test_policy()).expect("benchmark plan");
+    let plan = BenchmarkDispatchPlan::from_job(
+        &snapshot,
+        &test_policy(),
+        &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+    )
+    .expect("benchmark plan");
 
     assert!(matches!(
         plan.base_options.plan.asr().backend(),
@@ -593,7 +639,11 @@ fn benchmark_plan_refuses_anything_but_one_language() {
         );
         snapshot.dispatch.lang = crate::api::LanguageSpec::try_from(lang).expect("a spec");
         assert!(matches!(
-            BenchmarkDispatchPlan::from_job(&snapshot, &test_policy()),
+            BenchmarkDispatchPlan::from_job(
+                &snapshot,
+                &test_policy(),
+                &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2
+            ),
             Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(_))
         ));
     }

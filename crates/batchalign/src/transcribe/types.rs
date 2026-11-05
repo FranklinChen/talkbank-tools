@@ -480,6 +480,75 @@ pub(crate) struct SpeakerPlan {
     recognizer_diarization: ProviderDiarizationV2,
 }
 
+/// The run's recognizer, as the speaker plan needs it: its backend and
+/// whether it separates speakers itself.
+///
+/// Separation is a property of the backend and, for Tencent, of the engine
+/// the account chose (`16k_yue` labels no speakers, `16k_zh_en_2.0` does).
+/// Two constructors, one per vantage point: submission cannot see the
+/// server's account, the server's plan can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Recognizer {
+    backend: AsrBackend,
+    separation: RecognizerSeparation,
+}
+
+/// Whether a recognizer separates speakers itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecognizerSeparation {
+    /// It attributes words to speakers when given a count.
+    Separates,
+    /// It labels no speakers, so it is never asked to separate them.
+    LabelsNoSpeakers,
+}
+
+impl Recognizer {
+    /// As submission sees it: the backend alone. Tencent counts as
+    /// separating, since some of its engines do; the server's plan decides
+    /// for the account's engine.
+    pub(crate) fn submitted(backend: AsrBackend) -> Self {
+        Self {
+            backend,
+            separation: Self::backend_separation(backend),
+        }
+    }
+
+    /// As the server plans it, with the engine its Tencent account chose. An
+    /// account with no usable engine is refused when the models are
+    /// resolved, so its separation is the backend's here.
+    pub(crate) fn planned(
+        backend: AsrBackend,
+        tencent: &crate::model_manifest::TencentEngineSetting,
+    ) -> Self {
+        use crate::model_manifest::TencentEngineSetting as T;
+        let separation = match (backend, tencent) {
+            (AsrBackend::Worker(AsrWorkerMode::HkTencentV2), T::Chosen(engine)) => {
+                if engine.separates_speakers() {
+                    RecognizerSeparation::Separates
+                } else {
+                    RecognizerSeparation::LabelsNoSpeakers
+                }
+            }
+            (_, T::Chosen(_) | T::Unset | T::Unusable(_)) => Self::backend_separation(backend),
+        };
+        Self {
+            backend,
+            separation,
+        }
+    }
+
+    fn backend_separation(backend: AsrBackend) -> RecognizerSeparation {
+        match backend {
+            AsrBackend::Worker(mode) if mode.as_v2_backend().separates_speakers() => {
+                RecognizerSeparation::Separates
+            }
+            AsrBackend::Worker(_) | AsrBackend::RustRevAi | AsrBackend::RustWhisperRs => {
+                RecognizerSeparation::LabelsNoSpeakers
+            }
+        }
+    }
+}
+
 /// Refusal to admit a speaker count and separation as one plan.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpeakerPlanError {
@@ -524,22 +593,28 @@ impl SpeakerPlan {
     pub(crate) fn admit(
         count: SpeakerCount,
         separation: SpeakerSeparation,
-        recognizer: Option<AsrBackend>,
+        recognizer: Option<Recognizer>,
     ) -> Result<Self, SpeakerPlanError> {
         if let (SpeakerSeparation::Dedicated(_), SpeakerCount::Known(one)) = (separation, count)
             && one.get() == 1
         {
             return Err(SpeakerPlanError::SeparatingOneSpeaker);
         }
-        let recognizer_diarization = match recognizer {
+        let recognizer_diarization = match recognizer.map(|r| (r.backend, r.separation)) {
             // No worker request carries these: a replay runs no recognizer,
             // native Whisper labels no speakers, and Rev.AI's Rust client
             // reads the count itself through `SpeakerCount::known`, taking
             // either kind.
-            None | Some(AsrBackend::RustRevAi) | Some(AsrBackend::RustWhisperRs) => {
+            None | Some((AsrBackend::RustRevAi | AsrBackend::RustWhisperRs, _)) => {
                 ProviderDiarizationV2::NotRequested
             }
-            Some(AsrBackend::Worker(mode)) => {
+            // A worker recognizer that labels no speakers (Whisper, or a
+            // Tencent engine such as `16k_yue`) is never asked to separate
+            // them, so it needs no count either.
+            Some((AsrBackend::Worker(_), RecognizerSeparation::LabelsNoSpeakers)) => {
+                ProviderDiarizationV2::NotRequested
+            }
+            Some((AsrBackend::Worker(mode), RecognizerSeparation::Separates)) => {
                 let backend = mode.as_v2_backend();
                 match (separation, count) {
                     // A dedicated engine's labels replace the recognizer's,
@@ -556,15 +631,10 @@ impl SpeakerPlan {
                     }
                     // The recognizer is the run's one speaker engine, and its
                     // integrated diarization must be given the count.
-                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Auto)
-                        if backend.separates_speakers() =>
-                    {
+                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Auto) => {
                         return Err(SpeakerPlanError::AutoCountUnsupported {
                             engine: AsrBackend::Worker(mode).provenance_name(),
                         });
-                    }
-                    (SpeakerSeparation::RecognizerOnly, SpeakerCount::Auto) => {
-                        ProviderDiarizationV2::NotRequested
                     }
                 }
             }
@@ -1203,7 +1273,7 @@ mod speaker_plan_tests {
         let whisper = AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2);
         let dedicated = SpeakerSeparation::Dedicated(SpeakerBackendV2::Pyannote);
 
-        let plan = SpeakerPlan::admit(auto, dedicated, Some(whisper))
+        let plan = SpeakerPlan::admit(auto, dedicated, Some(Recognizer::submitted(whisper)))
             .expect("the dedicated diarizer infers the count");
         assert_eq!(plan.count().known(), None);
         assert_eq!(plan.dedicated(), Some(SpeakerBackendV2::Pyannote));
@@ -1212,18 +1282,30 @@ mod speaker_plan_tests {
             ProviderDiarizationV2::NotRequested
         );
         for separation in [SpeakerSeparation::RecognizerOnly, dedicated] {
-            SpeakerPlan::admit(auto, separation, Some(AsrBackend::RustRevAi))
-                .expect("Rev.AI infers the count");
+            SpeakerPlan::admit(
+                auto,
+                separation,
+                Some(Recognizer::submitted(AsrBackend::RustRevAi)),
+            )
+            .expect("Rev.AI infers the count");
         }
-        SpeakerPlan::admit(auto, SpeakerSeparation::RecognizerOnly, Some(whisper))
-            .expect("no engine in this run needs a count");
+        SpeakerPlan::admit(
+            auto,
+            SpeakerSeparation::RecognizerOnly,
+            Some(Recognizer::submitted(whisper)),
+        )
+        .expect("no engine in this run needs a count");
         SpeakerPlan::admit(auto, dedicated, None).expect("a replay runs no recognizer");
 
         let tencent = AsrBackend::Worker(AsrWorkerMode::HkTencentV2);
         // The three Tencent cases. Alone, Tencent's integrated diarization
         // must be given the count: refused by name, with the dedicated
         // diarizer named as the remedy.
-        match SpeakerPlan::admit(auto, SpeakerSeparation::RecognizerOnly, Some(tencent)) {
+        match SpeakerPlan::admit(
+            auto,
+            SpeakerSeparation::RecognizerOnly,
+            Some(Recognizer::submitted(tencent)),
+        ) {
             Err(SpeakerPlanError::AutoCountUnsupported { engine }) => {
                 assert_eq!(engine.as_str(), "tencent");
                 let message = SpeakerPlanError::AutoCountUnsupported { engine }.to_string();
@@ -1233,7 +1315,7 @@ mod speaker_plan_tests {
         }
         // With a dedicated diarizer, the diarizer infers the count and
         // Tencent is asked for no separation of its own.
-        let inferred = SpeakerPlan::admit(auto, dedicated, Some(tencent))
+        let inferred = SpeakerPlan::admit(auto, dedicated, Some(Recognizer::submitted(tencent)))
             .expect("the dedicated diarizer infers the count whatever the recognizer");
         assert_eq!(inferred.count(), SpeakerCount::Auto);
         assert_eq!(inferred.dedicated(), Some(SpeakerBackendV2::Pyannote));
@@ -1245,10 +1327,46 @@ mod speaker_plan_tests {
         // not asked of the recognizer.
         let two = SpeakerCount::admit(false, crate::api::NumSpeakers(2)).expect("two");
         assert_eq!(
-            SpeakerPlan::admit(two, dedicated, Some(tencent))
+            SpeakerPlan::admit(two, dedicated, Some(Recognizer::submitted(tencent)))
                 .expect("a known count with a dedicated diarizer")
                 .recognizer_diarization(),
             ProviderDiarizationV2::NotRequested
+        );
+    }
+
+    /// Whether a Tencent recognizer separates speakers is the account's
+    /// engine's property, decided when the server plans the job: on
+    /// `16k_yue`, which labels no speakers, a recognizer-only run asks for no
+    /// separation and needs no count, as a Whisper run does; on Large Model
+    /// 2.0 it separates into the count it is given. Submission, which cannot
+    /// see the account, counts Tencent as separating.
+    #[test]
+    fn a_tencent_recognizer_separates_speakers_only_on_an_engine_that_can() {
+        use crate::api::NumSpeakers;
+        use crate::model_manifest::{TencentEngine, TencentEngineSetting};
+        let tencent = AsrBackend::Worker(AsrWorkerMode::HkTencentV2);
+        let two = SpeakerCount::admit(false, NumSpeakers(2)).expect("two");
+        let auto = SpeakerCount::Auto;
+        let general =
+            Recognizer::planned(tencent, &TencentEngineSetting::Chosen(TencentEngine::Yue));
+        assert_eq!(
+            SpeakerPlan::admit(two, SpeakerSeparation::RecognizerOnly, Some(general))
+                .expect("a known count")
+                .recognizer_diarization(),
+            ProviderDiarizationV2::NotRequested
+        );
+        SpeakerPlan::admit(auto, SpeakerSeparation::RecognizerOnly, Some(general))
+            .expect("an engine that labels no speakers needs no count");
+        let large = Recognizer::planned(tencent, &TencentEngineSetting::LARGE_MODEL_2);
+        assert!(
+            SpeakerPlan::admit(two, SpeakerSeparation::RecognizerOnly, Some(large))
+                .expect("a known count")
+                .recognizer_diarization()
+                .is_requested()
+        );
+        assert_eq!(
+            Recognizer::submitted(tencent),
+            Recognizer::planned(tencent, &TencentEngineSetting::LARGE_MODEL_2)
         );
     }
 
@@ -1264,7 +1382,7 @@ mod speaker_plan_tests {
         let rev = SpeakerPlan::admit(
             three,
             SpeakerSeparation::RecognizerOnly,
-            Some(AsrBackend::RustRevAi),
+            Some(Recognizer::submitted(AsrBackend::RustRevAi)),
         )
         .expect("Rev.AI takes a count");
         assert_eq!(rev.count().known(), Some(NumSpeakers(3)));
@@ -1274,8 +1392,12 @@ mod speaker_plan_tests {
         );
 
         let tencent = AsrBackend::Worker(AsrWorkerMode::HkTencentV2);
-        let separated = SpeakerPlan::admit(three, SpeakerSeparation::RecognizerOnly, Some(tencent))
-            .expect("Tencent takes a count");
+        let separated = SpeakerPlan::admit(
+            three,
+            SpeakerSeparation::RecognizerOnly,
+            Some(Recognizer::submitted(tencent)),
+        )
+        .expect("Tencent takes a count");
         assert_eq!(
             separated.recognizer_diarization(),
             ProviderDiarizationV2::for_backend(AsrBackendV2::HkTencent, NumSpeakers(3))
@@ -1283,16 +1405,20 @@ mod speaker_plan_tests {
         assert!(separated.recognizer_diarization().is_requested());
         let one = SpeakerCount::admit(false, NumSpeakers(1)).expect("one");
         assert_eq!(
-            SpeakerPlan::admit(one, SpeakerSeparation::RecognizerOnly, Some(tencent))
-                .expect("one speaker is one track")
-                .recognizer_diarization(),
+            SpeakerPlan::admit(
+                one,
+                SpeakerSeparation::RecognizerOnly,
+                Some(Recognizer::submitted(tencent))
+            )
+            .expect("one speaker is one track")
+            .recognizer_diarization(),
             ProviderDiarizationV2::NotRequested
         );
         assert_eq!(
             SpeakerPlan::admit(
                 one,
                 SpeakerSeparation::Dedicated(SpeakerBackendV2::PyannoteAi),
-                Some(AsrBackend::RustRevAi)
+                Some(Recognizer::submitted(AsrBackend::RustRevAi))
             ),
             Err(SpeakerPlanError::SeparatingOneSpeaker)
         );

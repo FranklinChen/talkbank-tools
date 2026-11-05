@@ -279,12 +279,12 @@ def test_load_tencent_asr_stores_recognizer(monkeypatch) -> None:
     monkeypatch.setattr(tencent_asr, "TencentRecognizer", FakeRecognizer)
 
     tencent_asr.load_tencent_asr(
-        "yue", engine_model_type="16k_zh_large", config={"cfg": True}
+        "yue", engine_model_type="16k_zh_en_2.0", config={"cfg": True}
     )
 
     assert created == {
         "lang": "yue",
-        "engine_model_type": "16k_zh_large",
+        "engine_model_type": "16k_zh_en_2.0",
         "config": {"cfg": True},
     }
     assert tencent_asr._lang == "yue"

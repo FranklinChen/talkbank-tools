@@ -176,7 +176,7 @@ backends). Each engine carries its own model identity:
 |--------|-----------------|
 | `--utr-engine whisper` | `openai/whisper-large-v3` (stock Whisper), pinned to an exact hub commit |
 | `--utr-engine rev` | Rev.AI cloud API |
-| `--utr-engine tencent` | Tencent Cloud UTR backend (Chinese variants) |
+| `--utr-engine tencent` | Tencent Cloud UTR backend (the account's engine; Chinese varieties and English) |
 
 There is no per-language UTR-model resolver, `--utr-engine whisper`
 loads the same checkpoint regardless of `--lang`. See
@@ -300,7 +300,7 @@ flowchart TD
     lang["LanguageCode3\n(ISO 639-3)"] --> stanza["Stanza\n55-entry explicit table\nfallback: truncate + warn"]
     lang --> revai["Rev.AI\n~75 explicit entries\nfallback: auto-detect + warn"]
     lang --> whisper["Whisper\n100 decoder tokens (generated)\nrefused at submission without one"]
-    lang --> tencent["Tencent\nHan script: 16k_zh_large\nelse 16k_ plus ISO 639-1\nrefused when there is none"]
+    lang --> tencent["Tencent\nthe account's chosen engine\nrefused when it does not\nrecognize the language"]
     lang --> aliyun["Aliyun\nCantonese-only\n(yue)"]
     lang --> funasr["FunASR\nISO 639-3 passed through"]
     lang --> num["Number Expansion\n12 table languages\nothers: passthrough"]
@@ -399,18 +399,21 @@ maintain our own validation tables.
 #### Tencent (cloud ASR)
 
 - **No API endpoint** listing supported languages
-- The `EngineModelType` is chosen in RUST, at plan time, by
-  `model_manifest::tencent_engine_model_type`. Every Chinese variety takes
-  `16k_zh_large`, decided by `WritingSystem::of_language_code` (the same
-  Han-script table translation rendering uses); every other language takes
-  `16k_` plus its ISO 639-1 code, from the one conversion described above.
-- A language with **no** ISO 639-1 code is refused at plan time, by name,
-  because Tencent names its models by two-letter code and there is nothing
-  correct to send. `--lang auto` is refused for the same reason.
-- This replaced a Python derivation whose own five-code Chinese list omitted
-  Mandarin, so `cmn` asked for a `16k_cmn` model that Tencent does not define
-  and the job failed at the provider. Tencent was never Chinese-only: the
-  derivation always had a non-Chinese branch.
+- The `EngineModelType` is the engine the ACCOUNT chose
+  (`engine.tencent.model` in `~/.batchalign.ini`), read once when the server
+  builds its worker runtime and checked against BA3's closed list of Tencent
+  engines (`model_manifest::tencent`). The language only decides whether
+  that engine can serve the job: each engine carries the ISO 639-3 codes it
+  recognizes, and any other language is refused at plan time, by name.
+- No engine is ever chosen by BA3. Tencent bills each engine tier from its
+  own resource pack, so a default would be a purchase nobody made; an account
+  with no setting is refused with the line to add.
+- This replaced two derivations from the language. The first, in Python,
+  omitted Mandarin from its Chinese list, so `cmn` asked for a `16k_cmn` model
+  Tencent does not define. The second, in Rust, sent `16k_zh_large` (absent
+  from Tencent's current documentation) for Chinese and `16k_` plus the ISO
+  639-1 code otherwise, which named engines such as `16k_ja` that Tencent
+  serves only without word timings.
 
 #### Aliyun (cloud Cantonese ASR)
 
@@ -450,10 +453,10 @@ whenever we upgrade an engine dependency or discover new support/regressions.
 | `rus` | Russian | `ru` | `russian` | `ru` |, | |
 | `ara` | Arabic | `ar` | `arabic` | `ar` |, | RTL punctuation |
 | `tur` | Turkish | `tr` | `turkish` | `tr` |, | |
-| `zho` | Chinese | `cmn` | `chinese` | `zh` | `16k_zh_large` | Maps to cmn/zh depending on engine |
-| `cmn` | Mandarin | `cmn` | `chinese` | `zh` | `16k_zh_large` | UTSeg model available |
-| `yue` | Cantonese |, | `cantonese` | `zh` | `16k_zh_large` | Fine-tuned Whisper; Aliyun/CantoneseFA; UTSeg model |
-| `hak` | Hakka |, | `hakka` |, | `16k_zh_large` | Rev.AI unsupported; Stanza unsupported |
+| `zho` | Chinese | `cmn` | `chinese` | `zh` | account's engine | Maps to cmn/zh depending on engine |
+| `cmn` | Mandarin | `cmn` | `chinese` | `zh` | account's engine | UTSeg model available |
+| `yue` | Cantonese |, | `cantonese` | `zh` | account's engine | Fine-tuned Whisper; Aliyun/CantoneseFA; UTSeg model |
+| `hak` | Hakka |, | `hakka` |, | account's engine | Rev.AI unsupported; Stanza unsupported |
 | `pol` | Polish | `pl` | `polish` | `pl` |, | |
 | `ces` | Czech | `cs` | `czech` | `cs` |, | |
 | `ron` | Romanian | `ro` | `romanian` | `ro` |, | |

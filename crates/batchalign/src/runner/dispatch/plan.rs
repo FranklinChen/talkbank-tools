@@ -229,6 +229,7 @@ impl TranscribeDispatchPlan {
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
         host_policy: &HostExecutionPolicy,
+        tencent: &crate::model_manifest::TencentEngineSetting,
     ) -> Result<Self, DispatchPlanRefusal> {
         let overrides = resolve_cache_overrides(job)?;
         let cache_policies = TranscribeCachePolicies {
@@ -273,7 +274,12 @@ impl TranscribeDispatchPlan {
         let speakers = crate::transcribe::SpeakerPlan::admit(
             crate::transcribe::SpeakerCount::admit(auto_speakers, job.dispatch.num_speakers)?,
             crate::transcribe::SpeakerSeparation::from_request(diarize, speaker_engine),
-            Some(asr.backend()),
+            // Planned with the account's Tencent engine, which decides
+            // whether a Tencent recognizer separates speakers.
+            Some(crate::transcribe::Recognizer::planned(
+                asr.backend(),
+                tencent,
+            )),
         )?;
 
         let plan = crate::transcribe::types::AdmittedTranscribePlan::admit(
@@ -323,6 +329,7 @@ impl BenchmarkDispatchPlan {
     pub(crate) fn from_job(
         job: &RunnerJobSnapshot,
         host_policy: &HostExecutionPolicy,
+        tencent: &crate::model_manifest::TencentEngineSetting,
     ) -> Result<Self, DispatchPlanRefusal> {
         // Refused here, once, for the whole job. This used to be a check inside
         // each file's retry loop that failed the file and continued, so every
@@ -360,7 +367,12 @@ impl BenchmarkDispatchPlan {
         let speakers = crate::transcribe::SpeakerPlan::admit(
             crate::transcribe::SpeakerCount::admit(false, job.dispatch.num_speakers)?,
             crate::transcribe::SpeakerSeparation::RecognizerOnly,
-            Some(asr.backend()),
+            // Planned with the account's Tencent engine, which decides
+            // whether a Tencent recognizer separates speakers.
+            Some(crate::transcribe::Recognizer::planned(
+                asr.backend(),
+                tencent,
+            )),
         )?;
 
         Ok(Self {

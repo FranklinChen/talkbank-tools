@@ -102,7 +102,7 @@ class TestClaim2_Tencent_WordSegmented:
 
         rec = TencentRecognizer.__new__(TencentRecognizer)
         rec.lang_code = "yue"
-        rec.engine_model_type = "16k_zh_large"
+        rec.engine_model_type = "16k_zh_en_2.0"
 
         # Simulate Tencent returning multi-character segmented words
         result_detail = [

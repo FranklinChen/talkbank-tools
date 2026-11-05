@@ -311,6 +311,11 @@ class TencentRefusalStage(Enum):
         ),
         (
             TencentRefusalStage.SUBMISSION,
+            "ResourceNotFound.UserHasNotOpenedService",
+            ProtocolErrorCodeV2.PROVIDER_QUOTA_EXHAUSTED,
+        ),
+        (
+            TencentRefusalStage.SUBMISSION,
             "InternalError",
             ProtocolErrorCodeV2.RUNTIME_FAILURE,
         ),
@@ -357,7 +362,7 @@ def test_tencent_refusal_crosses_real_adapter_and_rust_bridge(
 
     recognizer = TencentRecognizer.__new__(TencentRecognizer)
     recognizer.lang_code = "yue"
-    recognizer.engine_model_type = "16k_zh_large"
+    recognizer.engine_model_type = "16k_zh_en_2.0"
     recognizer._poll_interval_s = 0.0
     recognizer._bucket_name = "test-bucket"
     recognizer._region = "ap-guangzhou"

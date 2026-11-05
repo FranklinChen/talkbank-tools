@@ -82,6 +82,7 @@ engine.tencent.id = YOUR_SECRET_ID
 engine.tencent.key = YOUR_SECRET_KEY
 engine.tencent.region = ap-guangzhou
 engine.tencent.bucket = YOUR_COS_BUCKET
+engine.tencent.model = 16k_zh_en_2.0
 
 # Aliyun NLS
 engine.aliyun.ak_id = YOUR_ACCESS_KEY_ID
@@ -93,7 +94,12 @@ Missing or empty credentials raise `ConfigError` with a clear message.
 
 ### Engine details
 
-**Tencent Cloud ASR.** Speaker diarization with configurable count.
+**Tencent Cloud ASR.** Runs on the engine the account names in
+`engine.tencent.model`, which must recognize Cantonese (`16k_zh_en_2.0`,
+`16k_zh_en_meeting`, `16k_zh_en`, `8k_zh_large`, `16k_yue`, `16k_zh-PY`); see
+[Credential Configuration](../../user-guide/cantonese-processing.md#tencent-cloud).
+Speaker diarization with configurable count, on the engines that separate
+speakers (not `16k_yue` or `16k_zh-PY`).
 Uploads audio to COS, submits ASR job, polls for results (10-min
 timeout). Returns pre-segmented words with per-word timestamps and
 speaker attribution. Automatic COS cleanup after job completes.

@@ -225,7 +225,11 @@ mod tests {
 
     /// The spawn override `name` a worker for `key` receives, parsed.
     fn spawn_override<T: serde::de::DeserializeOwned>(key: &WorkerKey, name: &str) -> T {
-        let json = super::super::lifecycle::spawn_engine_overrides(key).expect("spawn");
+        let json = super::super::lifecycle::spawn_engine_overrides(
+            key,
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("spawn");
         let map: std::collections::BTreeMap<String, String> =
             serde_json::from_str(&json).expect("spawn overrides are a JSON map");
         serde_json::from_str(map.get(name).expect("policy key")).expect("policy parses")
@@ -301,8 +305,11 @@ mod tests {
             spawn_override::<WhisperDecodeLanguageV2>(&english, WHISPER_DECODE_LANGUAGE_KEY),
             WhisperDecodeLanguageV2::for_language(&LanguageCode3::eng()).expect("English")
         );
-        let taiwanese =
-            super::super::lifecycle::spawn_engine_overrides(&preload_key("nan")).expect("spawn");
+        let taiwanese = super::super::lifecycle::spawn_engine_overrides(
+            &preload_key("nan"),
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("spawn");
         assert!(
             !taiwanese.contains(WHISPER_DECODE_LANGUAGE_KEY),
             "{taiwanese}"
@@ -333,7 +340,11 @@ mod tests {
                 Default::default(),
             ),
         ] {
-            let registered = super::super::lifecycle::spawn_engine_overrides(&key).expect("spawn");
+            let registered = super::super::lifecycle::spawn_engine_overrides(
+                &key,
+                &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+            )
+            .expect("spawn");
             let map: std::collections::BTreeMap<String, String> =
                 serde_json::from_str(&registered).expect("spawn overrides are a JSON map");
             written.extend(map.into_keys());

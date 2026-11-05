@@ -8,7 +8,16 @@ fn failure() -> ServerError {
     ))
 }
 
-fn partial_pass() -> UtrResult {
+/// A pass that matched one of two utterances, from responses that named no
+/// models (so the stamp writes `utr=` alone).
+fn partial_pass() -> UtrPassOutcome {
+    UtrPassOutcome::Recovered {
+        result: partial_result(),
+        models: UtrModels::Unreported,
+    }
+}
+
+fn partial_result() -> UtrResult {
     let parser = crate::chat_parser();
     let mut file = batchalign_transform::parse::parse_lenient(&parser,
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\taudio, audio\n*PAR:\thello .\n*PAR:\tgoodbye .\n@End\n").0;
@@ -55,7 +64,12 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
         serde_json::from_value::<Vec<OutputShortfallRecord>>(wire).unwrap(),
         shortfalls
     );
-    assert!(report.completed_engine().is_none());
+    assert!(
+        report
+            .completed()
+            .map(crate::provenance::UtrProducer::engine)
+            .is_none()
+    );
     insta::assert_snapshot!(report.unavailable_stamp().unwrap().as_str(), @"initial:rev:provider_transient+fallback:rev:provider_transient");
 
     let diagnostics = crate::api::FileOutputDiagnostics::of_findings(Vec::new(), shortfalls);
@@ -69,12 +83,19 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
     let mut fallback = earlier_success
         .record_initial(&UtrEngine::Whisper, Ok(partial_pass()))
         .unwrap();
-    assert!(earlier_success.completed_engine().is_some());
+    assert!(
+        earlier_success
+            .completed()
+            .map(crate::provenance::UtrProducer::engine)
+            .is_some()
+    );
     earlier_success
         .record_fallback(fallback.take().unwrap(), Err(failure()))
         .unwrap();
     assert_eq!(
-        earlier_success.completed_engine(),
+        earlier_success
+            .completed()
+            .map(crate::provenance::UtrProducer::engine),
         Some(&UtrEngine::Whisper)
     );
     assert_eq!(earlier_success.shortfalls().len(), 1);
@@ -86,7 +107,12 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
     later_success
         .record_fallback(fallback.take().unwrap(), Ok(partial_pass()))
         .unwrap();
-    assert_eq!(later_success.completed_engine(), Some(&UtrEngine::Whisper));
+    assert_eq!(
+        later_success
+            .completed()
+            .map(crate::provenance::UtrProducer::engine),
+        Some(&UtrEngine::Whisper)
+    );
     assert_eq!(
         later_success.shortfalls().len(),
         1,
@@ -122,7 +148,12 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
 fn omitted_no_work_and_cancelled_passes_are_not_provider_shortfalls() {
     let mut report = UtrContribution::NotRun;
     let mut no_work = report
-        .record_initial(&UtrEngine::RevAi, Ok(UtrResult::not_run_no_untimed(2)))
+        .record_initial(
+            &UtrEngine::RevAi,
+            Ok(UtrPassOutcome::NothingUntimed(
+                UtrResult::not_run_no_untimed(2),
+            )),
+        )
         .unwrap();
     assert!(no_work.take().is_none());
     assert_eq!(report, UtrContribution::NotRun);
@@ -165,7 +196,10 @@ fn an_engine_level_failure_withholds_the_same_engine_fallback() {
             message: "model weights could not be loaded".into(),
             worker: crate::worker::error::WorkerAfterError::Exits,
         }),
-        ServerError::ProviderQuotaExhausted("resource pack exhausted".into()),
+        ServerError::ProviderBillingRefused(crate::error::ProviderBillingRefusal::new(
+            crate::error::BilledProduct::NotNamed,
+            "resource pack exhausted".into(),
+        )),
     ];
     for error in withheld {
         let rendered = error.to_string();
@@ -223,5 +257,81 @@ fn an_account_refusal_withholds_and_a_failed_download_keeps_the_fallback() {
     assert!(
         fallback.take().is_some(),
         "a download that failed in transit may get through on the fallback"
+    );
+}
+
+/// A completed pass names the models its responses reported beside the
+/// engine, as transcribe's `asr_model=` does; a pass whose responses could
+/// not all name the same models writes `utr=` alone.
+#[test]
+fn the_align_stamp_names_the_models_the_recovery_responses_reported() {
+    let stamp_of = |models: UtrModels| {
+        let mut report = UtrContribution::NotRun;
+        report
+            .record_initial(
+                &UtrEngine::RevAi,
+                Ok(UtrPassOutcome::Recovered {
+                    result: partial_result(),
+                    models,
+                }),
+            )
+            .unwrap();
+        super::super::align_provenance(
+            &crate::api::LanguageCode3::eng(),
+            &crate::engine_reports::FaCacheNamespace::for_test("test-fa"),
+            &report,
+            false,
+            false,
+            crate::chat_ops::fa::MainBulletPolicy::DeriveFromWords,
+            crate::provenance::AlignTiming::Aligned,
+        )
+        .format()
+    };
+    let rev = crate::model_manifest::rev_loaded_identity();
+    let named = stamp_of(UtrModels::Reported(Box::new(rev.clone())));
+    assert!(
+        named.contains(&format!("utr=rev ; utr_model={}", rev.stamp_value())),
+        "{named}"
+    );
+    for unnamed in [UtrModels::Unreported, UtrModels::Disagreeing] {
+        let stamp = stamp_of(unnamed);
+        assert!(
+            stamp.contains("utr=rev ;") || stamp.contains("utr=rev |"),
+            "{stamp}"
+        );
+        assert!(!stamp.contains("utr_model="), "{stamp}");
+    }
+}
+
+/// The fold over a pass's responses: equal reports stay named, a different
+/// report makes the pass disagree, and a response with no report makes it
+/// unreported.
+#[test]
+fn the_models_of_a_pass_fold_over_its_responses() {
+    let response = |model| crate::transcribe::AsrResponse {
+        tokens: Vec::new(),
+        lang: crate::api::LanguageCode3::eng(),
+        seam_ambiguities: Vec::new(),
+        source_monologues: None,
+        model,
+    };
+    let rev = crate::model_manifest::rev_loaded_identity();
+    let whisper = crate::worker::asr_result_v2::test_fixtures::test_identity();
+    let reported = response(Some(rev.clone()));
+    assert_eq!(
+        UtrModels::of(&reported).and(&reported),
+        UtrModels::Reported(Box::new(rev))
+    );
+    assert_eq!(
+        UtrModels::of(&reported).and(&response(Some(whisper))),
+        UtrModels::Disagreeing
+    );
+    assert_eq!(
+        UtrModels::of(&reported).and(&response(None)),
+        UtrModels::Unreported
+    );
+    assert_eq!(
+        UtrModels::Disagreeing.and(&reported),
+        UtrModels::Disagreeing
     );
 }

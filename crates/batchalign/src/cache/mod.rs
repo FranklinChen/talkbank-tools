@@ -499,11 +499,24 @@ mod typed_cache_tests {
         namespace_for_language(engine, &lang)
     }
 
+    /// As [`namespace_for_account`], on an account that chose Large Model 2.0.
     fn namespace_for_language(
         engine: &UtrEngine,
         lang: &crate::api::LanguageCode3,
     ) -> UtrAsrCacheNamespace {
-        let models = crate::model_manifest::utr_pinned_models(engine, lang)
+        namespace_for_account(
+            engine,
+            lang,
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+        )
+    }
+
+    fn namespace_for_account(
+        engine: &UtrEngine,
+        lang: &crate::api::LanguageCode3,
+        tencent: &crate::model_manifest::TencentEngineSetting,
+    ) -> UtrAsrCacheNamespace {
+        let models = crate::model_manifest::utr_pinned_models(engine, lang, tencent)
             .expect("a UTR engine resolves a pinned composition");
         match UtrAsrCacheNamespace::for_pinned_plan(
             engine,
@@ -519,50 +532,53 @@ mod typed_cache_tests {
         }
     }
 
+    /// A row recognized by one Tencent engine is never replayed for another:
+    /// the namespace names the engine the account chose, so an account that
+    /// moves from `16k_yue` to `16k_zh_en_2.0` re-recognizes its recordings
+    /// rather than reusing the general engine's words.
     #[tokio::test]
-    async fn cantonese_tencent_does_not_reuse_general_chinese_recognition() {
+    async fn a_tencent_engine_change_does_not_reuse_the_old_engines_rows() {
+        use crate::model_manifest::{TencentEngine, TencentEngineSetting};
         let cache_dir = tempfile::tempdir().expect("temporary cache");
         let cache = super::UtteranceCache::sqlite(Some(cache_dir.path().to_owned()))
             .await
             .expect("cache");
-        let cantonese = namespace_for_language(
+        let cantonese = crate::api::LanguageCode3::try_from("yue").expect("Cantonese");
+        let general = namespace_for_account(
             &UtrEngine::HkTencent,
-            &crate::api::LanguageCode3::try_from("yue").expect("Cantonese"),
+            &cantonese,
+            &TencentEngineSetting::Chosen(TencentEngine::Yue),
         );
-        let mandarin = namespace_for_language(
+        let large = namespace_for_account(
             &UtrEngine::HkTencent,
-            &crate::api::LanguageCode3::try_from("cmn").expect("Mandarin"),
+            &cantonese,
+            &TencentEngineSetting::Chosen(TencentEngine::ZhEn2_0),
         );
         assert_eq!(
-            cantonese.namespace(),
+            general.namespace(),
             "utr-asr-v1:tencent_utr:tencent|engine_model_type=tencent-asr@16k_yue"
         );
         assert_eq!(
-            mandarin.namespace(),
-            "utr-asr-v1:tencent_utr:tencent|engine_model_type=tencent-asr@16k_zh_large"
+            large.namespace(),
+            "utr-asr-v1:tencent_utr:tencent|engine_model_type=tencent-asr@16k_zh_en_2.0"
         );
-        let retained = serde_json::json!({"retained_provider_response": "general Chinese"});
+        let retained = serde_json::json!({"retained_provider_response": "general Cantonese"});
         cache
-            .put(
-                "same-recording",
-                super::tasks::UTR_ASR,
-                &mandarin,
-                &retained,
-            )
+            .put("same-recording", super::tasks::UTR_ASR, &general, &retained)
             .await
-            .expect("retain earlier model response");
+            .expect("retain the general engine's response");
         assert_eq!(
             cache
-                .get("same-recording", super::tasks::UTR_ASR, &cantonese)
+                .get("same-recording", super::tasks::UTR_ASR, &large)
                 .await
-                .expect("Cantonese lookup"),
+                .expect("Large Model 2.0 lookup"),
             None
         );
         assert_eq!(
             cache
-                .get("same-recording", super::tasks::UTR_ASR, &mandarin)
+                .get("same-recording", super::tasks::UTR_ASR, &general)
                 .await
-                .expect("unchanged Mandarin lookup"),
+                .expect("unchanged general lookup"),
             Some(retained)
         );
     }

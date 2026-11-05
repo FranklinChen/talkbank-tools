@@ -251,9 +251,13 @@ mod tests {
             "example/whisper".to_owned(),
         )]);
         for backend in [AsrBackendV2::LocalWhisper, AsrBackendV2::WhisperHub] {
-            let models =
-                crate::model_manifest::resolve_asr_models(backend, Some(&language), &extras)
-                    .unwrap();
+            let models = crate::model_manifest::resolve_asr_models(
+                backend,
+                Some(&language),
+                &extras,
+                &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+            )
+            .unwrap();
             let result = build_asr_request_v2(
                 &store,
                 AsrBuildInputV2 {
@@ -265,7 +269,7 @@ mod tests {
                     ),
                     lang: &lang,
                     backend,
-                    models: &models,
+                    models: models.models(),
                     extras: &extras,
                     decode_budget: None,
                 },
@@ -298,6 +302,7 @@ mod tests {
                 backend,
                 Some(&crate::api::LanguageCode3::yue()),
                 &empty_extras,
+                &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
             )
             .expect("provider model plan");
             let request = build_asr_request_v2(
@@ -311,7 +316,7 @@ mod tests {
                     ),
                     lang: &lang,
                     backend,
-                    models: &models,
+                    models: models.models(),
                     extras: &empty_extras,
                     decode_budget: Some(DecodeBudgetSeconds::for_duration_ms(2_000)),
                 },

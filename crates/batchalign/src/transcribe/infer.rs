@@ -188,17 +188,18 @@ async fn infer_asr_via_worker_v2(
     // already holds the backend, the language and the overrides the manifest
     // reads, so deriving it once keeps one owner and stops two call sites from
     // pinning differently for the same job.
-    let models = crate::model_manifest::resolve_asr_models(
+    let plan = crate::model_manifest::resolve_asr_models(
         worker_mode.as_v2_backend(),
         params.lang.requested(),
         params.extras,
+        pool.tencent_engine(),
     )
     .map_err(|error| ServerError::Validation(error.to_string()))?;
     let request = build_asr_request_v2(
         artifacts.store(),
         AsrBuildInputV2 {
             ids: &PreparedAsrRequestIdsV2::fresh(),
-            models: &models,
+            models: plan.models(),
             audio_path: params.audio_path,
             diarization: params.diarization,
             lang: worker_lang,
@@ -223,13 +224,8 @@ async fn infer_asr_via_worker_v2(
     // The pin stays in scope across the dispatch on purpose: it is the half
     // this side is entitled to assert, and the admission inside the parse
     // compares it with the half the worker reported.
-    parse_asr_response_v2(
-        &response,
-        fallback_lang,
-        &models,
-        worker_mode.as_v2_backend(),
-    )
-    .map_err(ServerError::from)
+    parse_asr_response_v2(&response, fallback_lang, &plan, worker_mode.as_v2_backend())
+        .map_err(ServerError::from)
 }
 
 /// Call the live V2 Python worker path for dedicated speaker diarization on a
@@ -292,7 +288,9 @@ fn speaker_parse_failure_to_server_error(
     locality: crate::worker::execute_result_v2::ModelLocality,
 ) -> ServerError {
     match error {
-        SpeakerResultParseError::Protocol(failure) => failure.into_server_error(locality),
+        SpeakerResultParseError::Protocol(failure) => {
+            failure.into_server_error(locality, crate::error::BilledProduct::NotNamed)
+        }
         SpeakerResultParseError::UnexpectedPayload(message) => {
             ServerError::Worker(crate::worker::error::WorkerError::Protocol(format!(
                 "speaker V2 response was not a speaker result: {message}"

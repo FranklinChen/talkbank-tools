@@ -1,8 +1,16 @@
-//! HK ASR credential resolution for worker bootstrap.
+//! HK ASR provider accounts: read once, handed to workers.
 //!
-//! Rust owns legacy credential discovery for worker-launched HK providers and
-//! injects the resolved values into child env vars so Python stays on the
-//! provider SDK boundary instead of reopening `~/.batchalign.ini`.
+//! Rust owns credential discovery for worker-launched HK providers and injects
+//! the resolved values into child env vars so Python stays on the provider SDK
+//! boundary instead of reopening `~/.batchalign.ini`.
+//!
+//! The accounts are read ONCE, when the server builds its worker runtime
+//! ([`ProviderAccounts::from_env`]), and every worker spawn hands over keys
+//! from that one snapshot. A Tencent account is its keys and the engine it
+//! bought, read together, so a running server can never hold one account's
+//! keys beside another's engine; a configuration change takes effect on a
+//! server restart, as a new binary does. Until 2026-11-05 the keys were re-read
+//! at every spawn while the engine was fixed at start.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -26,7 +34,7 @@ const ENGINE_ALIYUN_AK_ID: &str = "engine.aliyun.ak_id";
 const ENGINE_ALIYUN_AK_SECRET: &str = "engine.aliyun.ak_secret";
 const ENGINE_ALIYUN_AK_APPKEY: &str = "engine.aliyun.ak_appkey";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TencentAsrCredentials {
     secret_id: String,
     secret_key: String,
@@ -45,7 +53,7 @@ impl TencentAsrCredentials {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct AliyunAsrCredentials {
     ak_id: String,
     ak_secret: String,
@@ -62,6 +70,99 @@ impl AliyunAsrCredentials {
             ),
             (BATCHALIGN_ALIYUN_AK_APPKEY.to_string(), self.appkey.clone()),
         ])
+    }
+}
+
+/// The HK ASR provider accounts this server runs as, read once.
+///
+/// `Debug` names which accounts are configured and the Tencent engine, never a
+/// secret: it sits in [`crate::worker::handle::WorkerRuntimeConfig`], whose
+/// `Debug` may reach a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderAccounts {
+    revai: Option<crate::revai::RevAiApiKey>,
+    tencent: Option<TencentAsrCredentials>,
+    tencent_engine: crate::model_manifest::TencentEngineSetting,
+    aliyun: Option<AliyunAsrCredentials>,
+}
+
+impl std::fmt::Debug for ProviderAccounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderAccounts")
+            .field("revai", &self.revai.as_ref().map(|_| "configured"))
+            .field("tencent", &self.tencent.as_ref().map(|_| "configured"))
+            .field("tencent_engine", &self.tencent_engine)
+            .field("aliyun", &self.aliyun.as_ref().map(|_| "configured"))
+            .finish()
+    }
+}
+
+impl ProviderAccounts {
+    /// Read the accounts from this process's environment and
+    /// `~/.batchalign.ini`, once.
+    pub(crate) fn from_env() -> Self {
+        Self::read(&HkAsrCredentialSources::from_env())
+    }
+
+    /// Read the accounts from explicit sources, the file read once so the
+    /// three accounts describe one state of it.
+    pub(crate) fn read(sources: &HkAsrCredentialSources) -> Self {
+        let section = sources.read_legacy_ini_asr_section();
+        let section = section.as_ref();
+        Self {
+            // Rev.AI's key has its own reader (`revai::credentials`), shared
+            // with the Rust Rev.AI client.
+            revai: crate::revai::load_revai_api_key().ok(),
+            tencent: sources.load_tencent(section),
+            tencent_engine: HkAsrCredentialSources::tencent_engine_setting(section),
+            aliyun: sources.load_aliyun(section),
+        }
+    }
+
+    /// No provider account: what a test or an offline replay runs as, which
+    /// reads no credentials from the machine running it.
+    pub fn none() -> Self {
+        Self {
+            revai: None,
+            tencent: None,
+            tencent_engine: crate::model_manifest::TencentEngineSetting::Unset,
+            aliyun: None,
+        }
+    }
+
+    /// The Rev.AI key, handed to every worker.
+    pub fn revai_api_key(&self) -> Option<&crate::revai::RevAiApiKey> {
+        self.revai.as_ref()
+    }
+
+    /// No account but this Rev.AI key, for tests of what hands it over.
+    #[cfg(test)]
+    pub(crate) fn with_revai_api_key(key: Option<crate::revai::RevAiApiKey>) -> Self {
+        Self {
+            revai: key,
+            ..Self::none()
+        }
+    }
+
+    /// The Tencent engine the account chose.
+    pub(crate) fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
+        &self.tencent_engine
+    }
+
+    /// Worker env vars for the selected ASR engine, when its account is
+    /// configured.
+    pub(crate) fn worker_envs(&self, asr_override: Option<&str>) -> BTreeMap<String, String> {
+        match asr_override {
+            Some("tencent") => self
+                .tencent
+                .as_ref()
+                .map_or_else(BTreeMap::new, TencentAsrCredentials::as_env),
+            Some("aliyun") => self
+                .aliyun
+                .as_ref()
+                .map_or_else(BTreeMap::new, AliyunAsrCredentials::as_env),
+            _ => BTreeMap::new(),
+        }
     }
 }
 
@@ -120,24 +221,33 @@ impl HkAsrCredentialSources {
         }
     }
 
-    /// Return worker env vars for the requested ASR override, if Rust can
-    /// resolve a complete credential set from env or the legacy ini file.
-    pub(crate) fn provider_envs_for_asr_override(
-        &self,
-        asr_override: Option<&str>,
-    ) -> BTreeMap<String, String> {
-        match asr_override {
-            Some("tencent") => self
-                .load_tencent()
-                .map_or_else(BTreeMap::new, |creds| creds.as_env()),
-            Some("aliyun") => self
-                .load_aliyun()
-                .map_or_else(BTreeMap::new, |creds| creds.as_env()),
-            _ => BTreeMap::new(),
-        }
+    /// The account's Tencent engine choice, `engine.tencent.model` in the
+    /// `[asr]` section of `~/.batchalign.ini`, beside the account's keys.
+    ///
+    /// Read from the file only, with no environment override: the keys have
+    /// one because the variables are also how Rust hands them to a Python
+    /// worker, while the engine reaches the worker as a pinned model in its
+    /// spawn arguments and so needs no variable.
+    fn tencent_engine_setting(
+        section: Option<&BTreeMap<String, String>>,
+    ) -> crate::model_manifest::TencentEngineSetting {
+        crate::model_manifest::TencentEngineSetting::admit(
+            section
+                .and_then(|section| section.get(crate::model_manifest::TENCENT_ENGINE_INI_KEY))
+                .map(String::as_str),
+        )
     }
 
-    fn load_tencent(&self) -> Option<TencentAsrCredentials> {
+    /// The Tencent engine alone, for a reader that needs no keys (the
+    /// evidence-cache inspection), so no secret is loaded into it.
+    pub(crate) fn read_tencent_engine(&self) -> crate::model_manifest::TencentEngineSetting {
+        Self::tencent_engine_setting(self.read_legacy_ini_asr_section().as_ref())
+    }
+
+    fn load_tencent(
+        &self,
+        section: Option<&BTreeMap<String, String>>,
+    ) -> Option<TencentAsrCredentials> {
         complete_tencent(
             self.tencent_id.as_deref(),
             self.tencent_key.as_deref(),
@@ -145,7 +255,7 @@ impl HkAsrCredentialSources {
             self.tencent_bucket.as_deref(),
         )
         .or_else(|| {
-            let section = self.read_legacy_ini_asr_section()?;
+            let section = section?;
             complete_tencent(
                 section.get(ENGINE_TENCENT_ID).map(String::as_str),
                 section.get(ENGINE_TENCENT_KEY).map(String::as_str),
@@ -155,14 +265,17 @@ impl HkAsrCredentialSources {
         })
     }
 
-    fn load_aliyun(&self) -> Option<AliyunAsrCredentials> {
+    fn load_aliyun(
+        &self,
+        section: Option<&BTreeMap<String, String>>,
+    ) -> Option<AliyunAsrCredentials> {
         complete_aliyun(
             self.aliyun_ak_id.as_deref(),
             self.aliyun_ak_secret.as_deref(),
             self.aliyun_ak_appkey.as_deref(),
         )
         .or_else(|| {
-            let section = self.read_legacy_ini_asr_section()?;
+            let section = section?;
             complete_aliyun(
                 section.get(ENGINE_ALIYUN_AK_ID).map(String::as_str),
                 section.get(ENGINE_ALIYUN_AK_SECRET).map(String::as_str),
@@ -252,7 +365,7 @@ mod tests {
     use super::{
         BATCHALIGN_ALIYUN_AK_APPKEY, BATCHALIGN_ALIYUN_AK_ID, BATCHALIGN_ALIYUN_AK_SECRET,
         BATCHALIGN_TENCENT_BUCKET, BATCHALIGN_TENCENT_ID, BATCHALIGN_TENCENT_KEY,
-        BATCHALIGN_TENCENT_REGION, HkAsrCredentialSources,
+        BATCHALIGN_TENCENT_REGION, HkAsrCredentialSources, ProviderAccounts,
     };
 
     #[test]
@@ -268,7 +381,7 @@ mod tests {
             Some("/tmp/unused-home"),
         );
 
-        let envs = sources.provider_envs_for_asr_override(Some("tencent"));
+        let envs = ProviderAccounts::read(&sources).worker_envs(Some("tencent"));
 
         assert_eq!(
             envs.get(BATCHALIGN_TENCENT_ID).map(String::as_str),
@@ -285,6 +398,63 @@ mod tests {
         assert_eq!(
             envs.get(BATCHALIGN_TENCENT_BUCKET).map(String::as_str),
             Some("env-bucket")
+        );
+    }
+
+    /// The snapshot's `Debug` says which accounts are configured, never a
+    /// secret: it lives in the worker runtime, whose `Debug` can reach a log.
+    #[test]
+    fn provider_accounts_debug_never_prints_a_secret() {
+        let accounts = ProviderAccounts::read(&HkAsrCredentialSources::from_sources(
+            Some("SECRET_ID"),
+            Some("SECRET_KEY"),
+            Some("ap-guangzhou"),
+            Some("SECRET_BUCKET"),
+            Some("ALIYUN_ID"),
+            Some("ALIYUN_SECRET"),
+            Some("ALIYUN_APP"),
+            Some("/tmp/unused-home"),
+        ));
+        let rendered = format!("{accounts:?}");
+        for secret in ["SECRET", "ALIYUN"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        assert!(rendered.contains("configured"), "{rendered}");
+    }
+
+    /// The engine is read from the `[asr]` section beside the keys; a file
+    /// without the line is `Unset`, never a default engine.
+    #[test]
+    fn the_tencent_engine_is_read_from_the_asr_section() {
+        use crate::model_manifest::{TencentEngine, TencentEngineSetting};
+        let tempdir = tempfile::tempdir().unwrap();
+        let home = tempdir.path().to_str().unwrap();
+        let sources = || {
+            HkAsrCredentialSources::from_sources(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(home),
+            )
+        };
+        std::fs::write(
+            tempdir.path().join(".batchalign.ini"),
+            "[asr]\nengine.tencent.id = id\n",
+        )
+        .unwrap();
+        assert_eq!(sources().read_tencent_engine(), TencentEngineSetting::Unset);
+        std::fs::write(
+            tempdir.path().join(".batchalign.ini"),
+            "[other]\nengine.tencent.model = 16k_yue\n[asr]\nengine.tencent.model = 16k_zh_en_2.0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sources().read_tencent_engine(),
+            TencentEngineSetting::Chosen(TencentEngine::ZhEn2_0)
         );
     }
 
@@ -307,7 +477,7 @@ mod tests {
             tempdir.path().to_str(),
         );
 
-        let envs = sources.provider_envs_for_asr_override(Some("aliyun"));
+        let envs = ProviderAccounts::read(&sources).worker_envs(Some("aliyun"));
 
         assert_eq!(
             envs.get(BATCHALIGN_ALIYUN_AK_ID).map(String::as_str),
@@ -342,8 +512,8 @@ mod tests {
             tempdir.path().to_str(),
         );
 
-        let envs = sources.provider_envs_for_asr_override(Some("tencent"));
-        let empty_envs = sources.provider_envs_for_asr_override(Some("whisper"));
+        let envs = ProviderAccounts::read(&sources).worker_envs(Some("tencent"));
+        let empty_envs = ProviderAccounts::read(&sources).worker_envs(Some("whisper"));
 
         assert_eq!(
             envs.get(BATCHALIGN_TENCENT_ID).map(String::as_str),

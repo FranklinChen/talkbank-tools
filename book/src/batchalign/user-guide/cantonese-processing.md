@@ -79,7 +79,7 @@ needing UTR fails validation unless another engine is named:
 |---|---|---|
 | `rev` (default) | no | Rev.AI has no `yue` model. |
 | `whisper` | yes | Local, no credentials. |
-| `tencent` | yes | Cloud, needs CAM credentials. Chinese variants only. |
+| `tencent` | yes | Cloud, needs CAM credentials and `engine.tencent.model`. Chinese varieties and English, as the chosen engine recognizes. |
 
 The error names the engines that would work, so there is nothing to
 guess. If none does, `--no-utr` skips the pass and alignment proceeds
@@ -98,7 +98,47 @@ engine.tencent.id = <secret-id>
 engine.tencent.key = <secret-key>
 engine.tencent.region = ap-guangzhou
 engine.tencent.bucket = <cos-bucket-name>
+engine.tencent.model = 16k_zh_en_2.0
 ```
+
+`engine.tencent.model` names the Tencent recognition engine the account has
+bought. Tencent bills its engines in three tiers (General, Large Model 1.0,
+Large Model 2.0) from separate resource packs, so an engine the account has
+not bought is refused with "resource pack exhausted" even when another pack
+has quota. BA3 therefore never picks an engine itself: a Tencent job on an
+account with no `engine.tencent.model` is refused before anything is
+uploaded, with a message naming the line to add. The setting is read when the
+BA3 server starts; restart the server after changing it.
+
+The engines BA3 can use, with the languages BA3 sends to each (from Tencent's
+recording-recognition documentation, read 2026-11-05):
+
+| Engine | Tier | Languages | Separates speakers |
+|---|---|---|---|
+| `16k_zh_en_2.0` | Large Model 2.0 | Mandarin (`zho`, `cmn`), English, Cantonese, Wu, Min Nan, Hakka | yes |
+| `16k_zh_en_meeting` | Large Model 2.0 | the same, for multi-party conversation | yes |
+| `16k_zh_en` | Large Model 1.0 | the same as `16k_zh_en_2.0` | yes |
+| `8k_zh_large` | Large Model 1.0 | the same less English; telephone audio | yes |
+| `16k_en_large` | Large Model 1.0 | English | no |
+| `16k_zh`, `8k_zh` | General | Mandarin | yes |
+| `16k_en`, `8k_en` | General | English | `16k_en` only |
+| `16k_yue` | General | Cantonese | no |
+| `16k_zh-PY` | General | Mandarin, English, Cantonese | no |
+| `16k_zh-TW` | General | Mandarin (traditional characters) | no |
+
+A job whose language the chosen engine does not recognize is refused by name.
+An engine that does not separate speakers is never asked to, as Whisper is
+not: run a dedicated `--speaker-engine` with it when you need speakers. Aligned files record
+the engine in their stamp as `utr_model=` (for example
+`tencent-asr@16k_zh_en_2.0`), and transcribed files as `asr_model=`.
+Tencent's other engines (`16k_ja`, `16k_fr`, `16k_multi_lang` and the rest)
+return no word timings, which BA3 needs, so naming one is refused with that
+reason.
+
+When Tencent refuses to bill a request (`FailedOperation.UserHasNoAmount`,
+or `ResourceNotFound.UserHasNotOpenedService` for an account without speech
+recognition activated), the job's error names the engine and its tier, which
+is the pack the account holder has to buy or restore.
 
 ### Aliyun NLS
 

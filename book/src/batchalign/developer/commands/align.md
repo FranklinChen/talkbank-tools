@@ -267,10 +267,13 @@ recovery model no longer silently reuses rows produced by the previous one.
 The `[fc-ba3 align | ...]` stamp records `fa=` (the reported FA engine),
 `main_bullets=` (`derive`, `keep` or `exact`, always written) and, when a
 timing-recovery pass actually ran (the pre-pass or the retry fallback),
-`utr=` with the recovery engine's name (`rev`, `whisper`, `tencent`). A file
-whose utterances were all timed, so that no pass ran, records no `utr=`. The
-record is a `UtrContribution` on `AlignAudioTask`, updated from each pass's
-`UtrResult::ran()`.
+`utr=` with the recovery engine's name (`rev`, `whisper`, `tencent`) and
+`utr_model=` with the models its ASR responses reported. A file whose
+utterances were all timed, so that no pass ran, records neither. The record is
+a `UtrContribution` on `AlignAudioTask`, updated from each pass's
+`UtrPassOutcome`: `NothingUntimed` records nothing, `Recovered` records a
+`UtrProducer` (engine and `UtrModels`, folded over every window's response in
+a partial pass).
 
 Cache implementation: `crates/batchalign/src/cache/` (hot: moka,
 cold: SQLite). Bypass with global `--override-media-cache`.

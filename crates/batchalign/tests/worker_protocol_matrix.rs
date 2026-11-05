@@ -901,7 +901,7 @@ fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> Execut
                         batchalign::types::worker_v2::RequestedRevisionV2::ProviderParameter {
                             parameter:
                                 batchalign::types::worker_v2::ProviderParameterV2::from_static(
-                                    "16k_zh_large",
+                                    "16k_zh_en_2.0",
                                 ),
                         },
                 },

@@ -20,7 +20,7 @@ only path to coherent transcription.
 | `whisper_rs` | whisper.cpp in-process (Rust-native) | Local transcription with no Python worker. |
 | `whisperx`, `whisper_oai` | Nothing: **not implemented** | Never. Both are accepted names with no implementation and are refused at submission. |
 | **`whisper_hub`** | **HF community fine-tune by model_id** | **Languages where both Rev.AI and stock Whisper fail.** |
-| `tencent`, `aliyun`, `funaudio` | Cantonese providers | Chinese variants only. |
+| `tencent`, `aliyun`, `funaudio` | Cantonese providers | Chinese varieties (Tencent: also English, with an engine that recognizes it). |
 
 ## Quick start
 

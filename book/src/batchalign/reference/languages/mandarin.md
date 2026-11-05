@@ -35,8 +35,8 @@ incorrect. Every engine works for Mandarin; none of them is language-gated.
 
 Tencent was the one real gap, and it was a defect rather than a missing
 engine: a Mandarin job asked Tencent for a model named `16k_cmn`, which
-Tencent does not define. Every Han-script variety now asks for
-`16k_zh_large`, the model Tencent does define. See
+Tencent does not define. A Tencent job now asks for the engine the account
+has chosen, which must recognize Mandarin. See
 [Tencent (cloud ASR)](../language-code-resolution.md#tencent-cloud-asr).
 
 ```bash

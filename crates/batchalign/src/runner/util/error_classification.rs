@@ -272,7 +272,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
             AsrProviderDisposition::Terminal => FailureCategory::ProviderTerminal,
             AsrProviderDisposition::AccountRefused => FailureCategory::ProviderAccountRefused,
         },
-        ServerError::ProviderQuotaExhausted(_) => FailureCategory::ProviderQuotaExhausted,
+        ServerError::ProviderBillingRefused(_) => FailureCategory::ProviderQuotaExhausted,
         ServerError::ModelOutputInvalid(_) => FailureCategory::ModelOutputInvalid,
         // A worker running models other than the pinned ones recurs for every
         // request it serves, exactly as a runtime-code identity mismatch does

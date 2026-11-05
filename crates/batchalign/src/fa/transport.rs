@@ -658,7 +658,10 @@ impl From<FaUnitFailure> for ServerError {
                 .into_report()
                 .in_context(format_args!("FA request {request} (group {group})"))
                 // Every forced-alignment engine runs on this machine.
-                .into_server_error(crate::worker::execute_result_v2::ModelLocality::Local),
+                .into_server_error(
+                    crate::worker::execute_result_v2::ModelLocality::Local,
+                    crate::error::BilledProduct::NotNamed,
+                ),
             FaUnitFailure::Evidence { .. } | FaUnitFailure::Response { .. } => ServerError::Worker(
                 crate::worker::error::WorkerError::Protocol(failure.to_string()),
             ),

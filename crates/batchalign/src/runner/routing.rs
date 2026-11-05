@@ -90,7 +90,15 @@ pub(super) async fn dispatch_job_with_execution_context(
     // align job an FA-only worker beside the one its UTR requests needed. A
     // refused plan also fails the job before a model is loaded for it.
     let runner_dispatch_kind = command_runner_dispatch_kind(command);
-    let Some(family) = FamilyPlan::build(&job, host, runner_dispatch_kind, all_chat).await else {
+    let Some(family) = FamilyPlan::build(
+        &job,
+        host,
+        runner_dispatch_kind,
+        all_chat,
+        pool.tencent_engine(),
+    )
+    .await
+    else {
         return Ok(());
     };
 
@@ -506,6 +514,7 @@ impl FamilyPlan {
         host: &DispatchHostContext,
         kind: RunnerDispatchKind,
         all_chat: bool,
+        tencent: &crate::model_manifest::TencentEngineSetting,
     ) -> Option<Self> {
         Some(match kind {
             RunnerDispatchKind::NativeAudioExport => {
@@ -521,10 +530,16 @@ impl FamilyPlan {
                 return None;
             }
             RunnerDispatchKind::TranscribeAudioInfer => Self::JobLevel(JobLevelFamily::Transcribe(
-                plan_or_fail_files(job, host, TranscribeDispatchPlan::from_job).await?,
+                plan_or_fail_files(job, host, |job, policy| {
+                    TranscribeDispatchPlan::from_job(job, policy, tencent)
+                })
+                .await?,
             )),
             RunnerDispatchKind::BenchmarkAudioInfer => Self::JobLevel(JobLevelFamily::Benchmark(
-                plan_or_fail_files(job, host, BenchmarkDispatchPlan::from_job).await?,
+                plan_or_fail_files(job, host, |job, policy| {
+                    BenchmarkDispatchPlan::from_job(job, policy, tencent)
+                })
+                .await?,
             )),
             RunnerDispatchKind::MediaAnalysisV2 => Self::JobLevel(JobLevelFamily::MediaAnalysis(
                 plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await?,

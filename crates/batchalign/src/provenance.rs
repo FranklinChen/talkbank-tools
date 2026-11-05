@@ -94,7 +94,9 @@ use batchalign_transform::parse::parse_strict;
 use batchalign_transform::serialize::to_chat_string;
 
 mod utr;
-pub(crate) use utr::{UtrContribution, UtrRecovery};
+#[cfg(test)]
+pub(crate) use utr::UtrProducer;
+pub(crate) use utr::{UtrContribution, UtrModels, UtrPassOutcome, UtrRecovery};
 
 // ---------------------------------------------------------------------------
 // Shared literals
@@ -206,6 +208,10 @@ enum StampField {
     Timing,
     UdRepairs,
     Utr,
+    /// The models the timing-recovery engine's responses reported, written
+    /// beside `utr=` when every response named the same ones; the counterpart
+    /// of transcribe's `asr_model=`.
+    UtrModel,
     UtrUnavailable,
     Wor,
     WordSeg,
@@ -229,6 +235,7 @@ impl StampField {
             Self::Timing => "timing",
             Self::UdRepairs => "ud_repairs",
             Self::Utr => "utr",
+            Self::UtrModel => "utr_model",
             Self::UtrUnavailable => "utr_unavailable",
             Self::Wor => "wor",
             Self::WordSeg => "word_seg",
@@ -1235,9 +1242,17 @@ pub(crate) fn align_provenance(
             StampFieldValue(StampSafeText::from_static("refreshed_from_wor")),
         ),
     };
-    let comment = match utr.completed_engine() {
+    let comment = match utr.completed() {
         None => comment,
-        Some(engine) => comment.field(StampField::Utr, StampFieldValue::from(engine.stamp_name())),
+        Some(producer) => comment
+            .field(
+                StampField::Utr,
+                StampFieldValue::from(producer.engine().stamp_name()),
+            )
+            .field_if_some(
+                StampField::UtrModel,
+                producer.model_stamp().map(StampFieldValue::from),
+            ),
     };
     comment
         .field_if_some(
@@ -2864,7 +2879,10 @@ mod tests {
         let ran = align_provenance(
             &LanguageCode3::eng(),
             &fa,
-            &UtrContribution::Ran(UtrEngine::Whisper),
+            &UtrContribution::Ran(super::utr::UtrProducer::for_test(
+                UtrEngine::Whisper,
+                UtrModels::Unreported,
+            )),
             false,
             false,
             derive,
@@ -2879,9 +2897,13 @@ mod tests {
             "{ran}"
         );
 
-        let recovery =
-            UtrRecovery::from_initial(&UtrEngine::RevAi, Ok(UtrResult::not_run_no_untimed(3)))
-                .unwrap();
+        let recovery = UtrRecovery::from_initial(
+            &UtrEngine::RevAi,
+            Ok(UtrPassOutcome::NothingUntimed(
+                UtrResult::not_run_no_untimed(3),
+            )),
+        )
+        .unwrap();
         let contribution = recovery.contribution();
         assert_eq!(*contribution, UtrContribution::NotRun);
         let not_run = align_provenance(

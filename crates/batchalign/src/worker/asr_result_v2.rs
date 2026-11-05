@@ -7,9 +7,8 @@
 use crate::api::LanguageCode3;
 use crate::transcribe::{AsrResponse, AsrToken};
 use crate::types::worker_v2::{
-    AsrBackendV2, AsrElementKindV2, AsrElementTimingV2, AsrIdentityMismatchV2,
-    AsrRequestedModelsV2, ExecuteResponseV2, SpeakerAttributionV2, TaskResultV2,
-    WhisperChunkResultV2,
+    AsrBackendV2, AsrElementKindV2, AsrElementTimingV2, AsrIdentityMismatchV2, ExecuteResponseV2,
+    SpeakerAttributionV2, TaskResultV2, WhisperChunkResultV2,
 };
 use crate::worker::chunk_spans::MonotoneChunkSpans;
 use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
@@ -37,6 +36,9 @@ pub enum AsrResponseAdmissionError {
         failure: ExecuteFailureRead,
         /// The backend the request named.
         backend: AsrBackendV2,
+        /// The product the pinned plan was billed as, which a billing
+        /// refusal names.
+        billed: crate::error::BilledProduct,
     },
     /// The response could not be lowered into the established ASR domain.
     #[error("{0}")]
@@ -62,8 +64,13 @@ impl From<AsrResponseAdmissionError> for crate::error::ServerError {
     /// `Validation`, which the dashboard reports as "Input Refused".
     fn from(error: AsrResponseAdmissionError) -> Self {
         match error {
-            AsrResponseAdmissionError::Failure { failure, backend } => failure.into_server_error(
+            AsrResponseAdmissionError::Failure {
+                failure,
+                backend,
+                billed,
+            } => failure.into_server_error(
                 crate::worker::execute_result_v2::ModelLocality::of_asr(backend),
+                billed,
             ),
             AsrResponseAdmissionError::Lowering(message) => {
                 Self::Worker(crate::worker::error::WorkerError::Protocol(format!(
@@ -98,23 +105,28 @@ impl From<AsrResponseAdmissionError> for crate::error::ServerError {
 /// the strength of a check no server-side code had made. Taking `pinned` as a
 /// parameter rather than reading it back off the response is the point: the
 /// requested half must come from the plan, never from the answer.
-pub fn parse_asr_response_v2(
+pub(crate) fn parse_asr_response_v2(
     response: &ExecuteResponseV2,
     fallback_lang: Option<&LanguageCode3>,
-    pinned: &AsrRequestedModelsV2,
+    pinned: &crate::model_manifest::PinnedAsrPlan,
     backend: AsrBackendV2,
 ) -> Result<AsrResponse, AsrResponseAdmissionError> {
-    let result = require_success_result(response, "ASR")
-        .map_err(|failure| AsrResponseAdmissionError::Failure { failure, backend })?;
+    let result = require_success_result(response, "ASR").map_err(|failure| {
+        AsrResponseAdmissionError::Failure {
+            failure,
+            backend,
+            billed: pinned.billed().clone(),
+        }
+    })?;
 
     match result {
         TaskResultV2::WhisperChunkResult(result) => {
-            result.model.admit(pinned, backend)?;
+            result.model.admit(pinned.models(), backend)?;
             whisper_chunk_result_to_asr_response(result, fallback_lang)
                 .map_err(AsrResponseAdmissionError::Lowering)
         }
         TaskResultV2::MonologueAsrResult(result) => {
-            result.model.admit(pinned, backend)?;
+            result.model.admit(pinned.models(), backend)?;
             Ok(AsrResponse {
                 seam_ambiguities: Vec::new(),
                 lang: resolve_worker_lang(&result.lang, fallback_lang)
@@ -376,8 +388,8 @@ fn resolve_worker_lang(
 /// run a windowed response through this lowering and on to CHAT.
 #[cfg(test)]
 pub(crate) mod test_fixtures {
-    use super::AsrRequestedModelsV2;
     use crate::api::{LanguageCode3, NonNegativeSeconds};
+    use crate::types::worker_v2::AsrRequestedModelsV2;
     use crate::types::worker_v2::{
         AsrModelIdentityV2, ExecuteResponseV2, HubCommitV2, LoadedModelV2, ModelIdV2,
         ObservedRevisionV2, RequestedModelV2, RequestedRevisionV2, TaskResultV2,
@@ -414,15 +426,15 @@ pub(crate) mod test_fixtures {
     }
 
     /// The pin [`test_identity`] answers: the same model at the same commit.
-    pub(crate) fn test_requested() -> AsrRequestedModelsV2 {
-        AsrRequestedModelsV2::Whisper {
+    pub(crate) fn test_requested() -> crate::model_manifest::PinnedAsrPlan {
+        crate::model_manifest::PinnedAsrPlan::for_test(AsrRequestedModelsV2::Whisper {
             asr: RequestedModelV2 {
                 id: whisper_id(),
                 revision: RequestedRevisionV2::Commit {
                     commit: commit(PINNED),
                 },
             },
-        }
+        })
     }
 
     /// Independent decodes of overlapping sample windows.
@@ -843,19 +855,37 @@ mod provider_failure_tests {
             AsrBackendV2::HkTencent,
             Some(&LanguageCode3::try_new("yue").unwrap()),
             &std::collections::BTreeMap::new(),
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
         )
         .unwrap();
         let error = parse_asr_response_v2(&received, None, &models, AsrBackendV2::HkTencent)
             .expect_err("the provider returned no result");
         let mapped = ServerError::from(error);
-        assert!(matches!(mapped, ServerError::ProviderQuotaExhausted(_)));
+        assert!(matches!(mapped, ServerError::ProviderBillingRefused(_)));
+        // The refusal names the engine and the tier the account must buy,
+        // not only the provider's "resource pack exhausted".
+        let rendered = mapped.to_string();
+        assert!(
+            rendered.contains("16k_zh_en_2.0 (Large Model 2.0)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Large Model 2.0 resource pack"),
+            "{rendered}"
+        );
         assert_eq!(
             crate::runner::util::classify_server_error(&mapped),
             FailureCategory::ProviderQuotaExhausted
         );
         let mut recovery = UtrRecovery::from_initial(&UtrEngine::HkTencent, Err(mapped)).unwrap();
         assert!(recovery.fallback().is_none(), "no same-engine retry permit");
-        assert!(recovery.contribution().completed_engine().is_none());
+        assert!(
+            recovery
+                .contribution()
+                .completed()
+                .map(crate::provenance::UtrProducer::engine)
+                .is_none()
+        );
         let shortfalls = recovery.contribution().shortfalls();
         assert!(matches!(
             shortfalls.as_slice(),
@@ -907,6 +937,7 @@ mod provider_failure_tests {
             AsrBackendV2::HkTencent,
             Some(&LanguageCode3::try_new("yue").unwrap()),
             &std::collections::BTreeMap::new(),
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
         )
         .unwrap();
         let lowering = parse_asr_response_v2(&wrong_task, None, &models, AsrBackendV2::HkTencent)
@@ -948,6 +979,7 @@ mod provider_failure_tests {
             AsrBackendV2::HkTencent,
             Some(&LanguageCode3::try_new("yue").unwrap()),
             &std::collections::BTreeMap::new(),
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
         )
         .unwrap();
         let error = parse_asr_response_v2(&response, None, &models, AsrBackendV2::HkTencent)

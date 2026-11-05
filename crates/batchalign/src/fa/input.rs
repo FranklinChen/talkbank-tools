@@ -359,11 +359,12 @@ impl ActiveFaDocument {
     /// This transition is unavailable on the preserved-source payload.
     pub(crate) async fn recover_timing(
         &mut self,
-        run: impl AsyncFnOnce(&mut ChatFile) -> Result<crate::chat_ops::fa::utr::UtrResult, ServerError>,
-    ) -> Result<crate::chat_ops::fa::utr::UtrResult, ServerError> {
-        let mut result = run(&mut self.file).await?;
-        self.anchors.superseded_by(result.take_anchors());
-        Ok(result)
+        run: impl AsyncFnOnce(&mut ChatFile) -> Result<crate::provenance::UtrPassOutcome, ServerError>,
+    ) -> Result<crate::provenance::UtrPassOutcome, ServerError> {
+        let mut outcome = run(&mut self.file).await?;
+        self.anchors
+            .superseded_by(outcome.result_mut().take_anchors());
+        Ok(outcome)
     }
 }
 

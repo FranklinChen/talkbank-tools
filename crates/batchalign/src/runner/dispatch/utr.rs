@@ -22,6 +22,7 @@ use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
 use crate::media::probe::AudioDuration;
 use crate::options::UtrEngine;
 use crate::params::CachePolicy;
+use crate::provenance::{UtrModels, UtrPassOutcome};
 use crate::runner::debug_dumper::DebugDumper;
 use crate::types::worker_v2::DecodeBudgetSeconds;
 use batchalign_types::interval::AdmittedInterval;
@@ -131,14 +132,14 @@ pub(in crate::runner) async fn run_utr_pass(
     chat_file: &mut crate::chat_ops::ChatFile,
     context: UtrPassContext<'_>,
     progress: Option<&super::super::util::ProgressSender>,
-) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
+) -> Result<UtrPassOutcome, crate::error::ServerError> {
     let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(chat_file);
     let total_utts = timed + untimed;
 
     if untimed == 0 {
         info!(context.filename, "UTR pass: no untimed utterances");
-        return Ok(crate::chat_ops::fa::utr::UtrResult::not_run_no_untimed(
-            timed,
+        return Ok(UtrPassOutcome::NothingUntimed(
+            crate::chat_ops::fa::utr::UtrResult::not_run_no_untimed(timed),
         ));
     }
 
@@ -228,6 +229,9 @@ pub(in crate::runner) async fn run_utr_pass(
             );
 
             let mut all_tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken> = Vec::new();
+            // The models every window's response reported, folded as each
+            // arrives; `None` only before the first.
+            let mut models: Option<UtrModels> = None;
             let total_windows = windows.len() as i64;
 
             for (window_idx, window) in windows.iter().enumerate() {
@@ -307,6 +311,10 @@ pub(in crate::runner) async fn run_utr_pass(
                 // The segment handed to the engine is the window itself, already
                 // inside the recording: the second conversion (`FaWindow::over`)
                 // and its unreachable skip arm are gone.
+                models = Some(match models {
+                    None => UtrModels::of(&seg_response),
+                    Some(seen) => seen.and(&seg_response),
+                });
                 let converted = asr_response_to_utr_tokens(&seg_response, window, &utr_engine_id);
                 converted.warn_if_lossy(&context);
                 all_tokens.extend(converted.tokens);
@@ -353,7 +361,13 @@ pub(in crate::runner) async fn run_utr_pass(
                     .dumper
                     .dump_utr_output(context.filename, &text, &utr_result);
             }
-            return Ok(utr_result);
+            return Ok(UtrPassOutcome::Recovered {
+                result: utr_result,
+                // The windows are non-empty here, so the fold saw a response;
+                // were it not to, no response reported models, which is what
+                // `Unreported` says.
+                models: models.unwrap_or(UtrModels::Unreported),
+            });
         }
     }
 
@@ -374,7 +388,7 @@ pub(in crate::runner) async fn run_utr_pass(
 async fn run_utr_pass_full(
     chat_file: &mut crate::chat_ops::ChatFile,
     context: UtrPassContext<'_>,
-) -> Result<crate::chat_ops::fa::utr::UtrResult, crate::error::ServerError> {
+) -> Result<UtrPassOutcome, crate::error::ServerError> {
     let cache_key = crate::chat_ops::fa::utr_asr_cache_key(
         context.audio_identity,
         context.engine,
@@ -471,7 +485,10 @@ async fn run_utr_pass_full(
             .dumper
             .dump_utr_output(context.filename, &text, &utr_result);
     }
-    Ok(utr_result)
+    Ok(UtrPassOutcome::Recovered {
+        result: utr_result,
+        models: UtrModels::of(&asr_response),
+    })
 }
 
 /// Fetch one UTR ASR response from the selected backend and map it into the
@@ -675,7 +692,11 @@ impl UtrAsrInferred {
 /// named the safe direction is to recompute, never to reuse rows that may have
 /// come from other weights.
 fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility {
-    let models = match crate::model_manifest::utr_pinned_models(context.engine, context.lang) {
+    let models = match crate::model_manifest::utr_pinned_models(
+        context.engine,
+        context.lang,
+        context.services.pipeline.pool.tencent_engine(),
+    ) {
         Ok(models) => models,
         Err(error) => {
             warn!(
@@ -1233,7 +1254,12 @@ mod utr_evidence_cache_tests {
             crate::provenance::UtrRecovery::from_initial(&UtrEngine::RevAi, recovered).unwrap();
         assert!(recovery.fallback().is_some());
         let report = recovery.contribution();
-        assert!(report.completed_engine().is_none());
+        assert!(
+            report
+                .completed()
+                .map(crate::provenance::UtrProducer::engine)
+                .is_none()
+        );
         assert!(matches!(
             &report.shortfalls()[..],
             [crate::api::OutputShortfallRecord::UtrUnavailable {
@@ -1409,8 +1435,12 @@ mod utr_evidence_cache_tests {
     /// the no-cache path while claiming to test the cache.
     fn test_eligibility(engine: &UtrEngine) -> UtrAsrCacheEligibility {
         let lang = crate::api::LanguageCode3::eng();
-        let models = crate::model_manifest::utr_pinned_models(engine, &lang)
-            .expect("a UTR engine resolves a pinned composition");
+        let models = crate::model_manifest::utr_pinned_models(
+            engine,
+            &lang,
+            &crate::model_manifest::TencentEngineSetting::LARGE_MODEL_2,
+        )
+        .expect("a UTR engine resolves a pinned composition");
         let eligibility = UtrAsrCacheNamespace::for_pinned_plan(
             engine,
             &models,

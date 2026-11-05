@@ -15,7 +15,7 @@ def _make_recognizer(lang: str = "yue") -> TencentRecognizer:
     rec.lang_code = lang
     # Carried in by the control plane now; these tests exercise the projection
     # helpers, which read only `lang_code`.
-    rec.engine_model_type = "16k_zh_large"
+    rec.engine_model_type = "16k_zh_en_2.0"
     return rec
 
 

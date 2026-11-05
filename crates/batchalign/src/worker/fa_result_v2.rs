@@ -284,7 +284,7 @@ mod tests {
         let category = classify_server_error(
             &failure
                 .into_report()
-                .into_server_error(ModelLocality::Local),
+                .into_server_error(ModelLocality::Local, crate::error::BilledProduct::NotNamed),
         );
         assert_eq!(category, FailureCategory::ModelOutputInvalid);
         assert_eq!(

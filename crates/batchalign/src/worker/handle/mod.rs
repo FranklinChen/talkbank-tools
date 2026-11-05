@@ -14,6 +14,11 @@ mod progress_preamble;
 mod protocol;
 pub mod spawn;
 
+/// The account snapshot [`WorkerRuntimeConfig::provider_accounts`] holds and
+/// the engine setting inside it, re-exported so the runtime's public fields
+/// are nameable.
+pub use crate::model_manifest::{TencentEngine, TencentEngineRefusal, TencentEngineSetting};
+pub use crate::worker::provider_credentials::ProviderAccounts;
 pub(crate) use config::WorkerLaunch;
 pub use config::{WorkerConfig, WorkerRuntimeConfig};
 pub use spawn::spawn_tcp_daemon;
@@ -512,7 +517,10 @@ mod tests {
             ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
             verbose: 0,
             runtime: WorkerRuntimeConfig {
-                revai_api_key: crate::revai::RevAiApiKey::parse("  injected-key  "),
+                provider_accounts:
+                    crate::worker::provider_credentials::ProviderAccounts::with_revai_api_key(
+                        crate::revai::RevAiApiKey::parse("  injected-key  "),
+                    ),
                 ..WorkerRuntimeConfig::for_tests()
             },
             ..WorkerConfig::for_tests()
@@ -526,32 +534,32 @@ mod tests {
 
     #[test]
     fn worker_provider_envs_only_inject_selected_hk_asr_backend() {
-        let envs = super::spawn::worker_provider_envs(
-            &WorkerConfig {
-                python_path: "python3".to_string(),
-                profile: WorkerProfile::Gpu,
-                lang: WorkerLanguage::from(LanguageCode3::yue()),
-                num_speakers: NumSpeakers(1),
-                engine_overrides: r#"{"asr":"tencent"}"#.to_string(),
-                test_echo: false,
-                ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
-                verbose: 0,
-                runtime: WorkerRuntimeConfig {
-                    ..WorkerRuntimeConfig::for_tests()
-                },
-                ..WorkerConfig::for_tests()
+        let envs = super::spawn::worker_provider_envs(&WorkerConfig {
+            python_path: "python3".to_string(),
+            profile: WorkerProfile::Gpu,
+            lang: WorkerLanguage::from(LanguageCode3::yue()),
+            num_speakers: NumSpeakers(1),
+            engine_overrides: r#"{"asr":"tencent"}"#.to_string(),
+            test_echo: false,
+            ready_timeout_s: crate::api::PositiveSeconds::literal::<300>(),
+            verbose: 0,
+            runtime: WorkerRuntimeConfig {
+                provider_accounts: crate::worker::provider_credentials::ProviderAccounts::read(
+                    &HkAsrCredentialSources::from_sources(
+                        Some("id"),
+                        Some("key"),
+                        Some("ap-guangzhou"),
+                        Some("bucket"),
+                        None,
+                        None,
+                        None,
+                        Some("/tmp/unused-home"),
+                    ),
+                ),
+                ..WorkerRuntimeConfig::for_tests()
             },
-            &HkAsrCredentialSources::from_sources(
-                Some("id"),
-                Some("key"),
-                Some("ap-guangzhou"),
-                Some("bucket"),
-                None,
-                None,
-                None,
-                Some("/tmp/unused-home"),
-            ),
-        )
+            ..WorkerConfig::for_tests()
+        })
         .into_iter()
         .collect::<BTreeMap<_, _>>();
 

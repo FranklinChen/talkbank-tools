@@ -5,6 +5,47 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- The provider accounts (the Rev.AI key, Tencent's keys and engine, Aliyun's
+  keys) are read once, when the server starts, into one snapshot that every
+  worker spawn hands keys from. The keys used to be re-read from `~/.batchalign.ini` at
+  every spawn while the engine was fixed at start, so a running server could
+  hold one account's keys beside another's engine. A change to the file takes
+  effect on a server restart.
+- An aligned file's stamp names the models its timing recovery used:
+  `utr_model=` beside `utr=`, written as transcribe's `asr_model=` is (for a
+  Tencent account, the engine it chose, such as `tencent-asr@16k_zh_en_2.0`).
+  The names come from what the recognition responses reported, fresh or
+  replayed from the cache, never from the request; a pass whose responses did
+  not all name the same models (a replayed older cache row names none) writes
+  `utr=` alone. A recovery pass now reports `NothingUntimed` or `Recovered`
+  with its models, so "recovery ran" is no longer inferred from its evidence.
+- Whether a Tencent recognizer separates speakers is decided by the account's
+  engine when the job is planned: an engine that cannot (`16k_yue`,
+  `16k_zh-PY`, `16k_zh-TW`, `16k_en_large`, `8k_en`) is asked for no
+  separation and needs no count, as Whisper is. It used to be sent
+  `SpeakerDiarization = 1`, which its documentation does not accept.
+- Tencent recognition uses the engine the account names in
+  `engine.tencent.model` (the `[asr]` section of `~/.batchalign.ini`, beside
+  the Tencent keys), read when the server starts and checked against a closed
+  list of Tencent's engines with each one's billing tier and languages.
+  BA3 no longer builds the engine name from the language: it sent `16k_yue`
+  for Cantonese, `16k_zh_large` (no longer in Tencent's documentation) for
+  other Chinese, and `16k_` plus the two-letter code otherwise, naming
+  engines such as `16k_ja` that Tencent serves only without word timings.
+  Tencent bills each tier from its own resource pack, so BA3 picks no default:
+  a Tencent job on an account without the setting is refused before upload,
+  naming the line to add, as is a language the chosen engine does not
+  recognize. Submission's two Chinese-only lists are gone: it asks the same
+  list whether any Tencent engine recognizes the language, so English is
+  admitted for an account whose engine (such as `16k_zh_en_2.0`) recognizes
+  it. A billing refusal (`FailedOperation.UserHasNoAmount`, and now
+  also `ResourceNotFound.UserHasNotOpenedService`) names the engine and the
+  tier the account holder has to buy or restore. The engine is part of the
+  recognition-cache identity, so changing it never replays another engine's
+  words.
+  **Action needed:** an account that uses Tencent must add
+  `engine.tencent.model` and restart its BA3 server.
+
 - `--no-server` beside `--server` (or a `BATCHALIGN_SERVER` environment
   variable) is refused, naming both. The named server used to win and
   `--no-server` was silently ignored, so a user who set the variable once and

@@ -200,7 +200,10 @@ async fn inspect_utr_response(
         .ok_or_else(|| CliError::InvalidArgument("audio path is not UTF-8".into()))?;
     let identity =
         crate::chat_ops::fa::AudioIdentity::from_metadata(path_text, modified, metadata.len());
-    let models = crate::model_manifest::utr_pinned_models(engine, language)
+    // Read from the account's settings the way the server reads them, so the
+    // namespace inspected is the one this account's runs write under.
+    let tencent = crate::model_manifest::TencentEngineSetting::from_account();
+    let models = crate::model_manifest::utr_pinned_models(engine, language, &tencent)
         .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
     let crate::cache::UtrAsrCacheEligibility::Pinned(namespace) =
         crate::cache::UtrAsrCacheNamespace::for_pinned_plan(
@@ -567,8 +570,12 @@ mod tests {
             metadata.len(),
         );
         let engine = crate::options::UtrEngine::RevAi;
-        let models =
-            crate::model_manifest::utr_pinned_models(&engine, &LanguageCode3::eng()).unwrap();
+        let models = crate::model_manifest::utr_pinned_models(
+            &engine,
+            &LanguageCode3::eng(),
+            &crate::model_manifest::TencentEngineSetting::Unset,
+        )
+        .unwrap();
         let crate::cache::UtrAsrCacheEligibility::Pinned(namespace) =
             crate::cache::UtrAsrCacheNamespace::for_pinned_plan(
                 &engine,

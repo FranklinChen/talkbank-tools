@@ -331,7 +331,9 @@ impl From<ExecuteFailureRead> for DispatchFailure {
     fn from(failure: ExecuteFailureRead) -> Self {
         // openSMILE and AVQI execute locally. The protocol code still owns
         // download, memory, access and request failures independently of that.
-        Self::Runtime(failure.into_server_error(ModelLocality::Local))
+        Self::Runtime(
+            failure.into_server_error(ModelLocality::Local, crate::error::BilledProduct::NotNamed),
+        )
     }
 }
 

@@ -68,10 +68,11 @@ Whisper UTR decodes in the transcript's resolved language, Cantonese
 included, with the transcription task. That fixes what Whisper is asked to
 recognize; it does not guarantee recognition or alignment accuracy.
 
-Tencent UTR requests `16k_yue` for Cantonese (`yue`). Mandarin and the other
-Chinese varieties retain `16k_zh_large`. The selected provider parameter is
-also part of the recognition-cache identity: an earlier general-Chinese
-response cannot satisfy a Cantonese request. This is recognition used to
+Tencent UTR requests the engine the account names in `engine.tencent.model`
+(see [Credential Configuration](../cantonese-processing.md#tencent-cloud)),
+whatever the language, and refuses a language that engine does not recognize.
+The engine is also part of the recognition-cache identity: a response from
+one engine never satisfies a request to another. This is recognition used to
 locate untimed speech; the separately selected forced aligner still places
 the supplied transcript's words. The Tencent account needs the applicable
 speech-recognition service and recording-recognition entitlement; a speaker-
@@ -552,7 +553,7 @@ the same cached alignment evidence.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--media-dir PATH` | alongside `.cha` | Directory to search for audio files matching the `@Media` header stem |
-| `--utr-engine {rev,whisper,tencent}` | `rev` | UTR backend; `--help` lists the accepted values. `rev` needs Rev.AI credentials and has no Cantonese support; `whisper` is local; `tencent` covers Chinese variants. A rejection names the engines that would work for the file's language. |
+| `--utr-engine {rev,whisper,tencent}` | `rev` | UTR backend; `--help` lists the accepted values. `rev` needs Rev.AI credentials and has no Cantonese support; `whisper` is local; `tencent` uses the account's chosen Tencent engine (`engine.tencent.model`), which covers Chinese varieties and, for some engines, English. A rejection names the engines that would work for the file's language. |
 | `--utr-engine-custom NAME` |: | **Deprecated alias for `--utr-engine`**, still honoured, hidden from `--help`. |
 | `--utr` / `--no-utr` | enabled | Enable or skip the UTR pre-pass entirely |
 | `--utr-strategy {auto,global,two-pass}` | `auto` | Overlap strategy: `auto` currently always returns `GlobalUtr` (the language/content-aware gate was disabled 2026-03-30; see §"UTR strategy selection" above). `two-pass` is the only way to reach `TwoPassOverlapUtr` today. |

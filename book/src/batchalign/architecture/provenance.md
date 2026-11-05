@@ -349,7 +349,7 @@ then keep that text. Each stage now names its own engine:
 | utseg | `engine=` | The inference sources behind the predictions it applied (`UtsegEngineIdentities`): a boundary model as `model_id@revision`, or `stanza-constituency`; distinct names joined with `+` in text order (`EngineNames`), for example `stanza-constituency+talkbank/CHATUtterance-en@764ec3f762c2e24df2def8df98b5fe34940085c6`. A boundary model is ALWAYS written with its revision: it is loaded from a pinned snapshot whose commit is read off the directory on disk, so the revision is a required part of its identity and the id-only form has no representation to render. A source that names nothing contributes no name, and a file with no named source gets no stamp and a recorded `SourceNotNamed`: there is no `unobserved-worker` or `@unrecorded-revision` placeholder. |
 | translate | `engine=` | The engine each `translated` item named (`AdmittedTranslation`), distinct names joined with `+` in text order. No stamp when nothing was translated. |
 | coref | `engine=` | The engine the `resolved` result named (`ResolvedCoref`). No stamp when nothing was resolved. |
-| align | `fa=`, `utr=` | `fa=` is `FaCacheNamespace`, the FA engine the worker reported (also the FA cache namespace). `utr=` names the timing-recovery engine when a recovery pass ran (`UtrContribution`). |
+| align | `fa=`, `utr=`, `utr_model=` | `fa=` is `FaCacheNamespace`, the FA engine the worker reported (also the FA cache namespace). `utr=` names the timing-recovery engine when a recovery pass ran (`UtrContribution::Ran`, holding a `UtrProducer`). `utr_model=` names the models every ASR response of that pass reported (`UtrModels::Reported`), rendered as transcribe's `asr_model=` is (`AsrModelIdentityV2::stamp_value`); it is omitted when some response reported none (a replayed legacy row, `Unreported`) or the responses disagreed (`Disagreeing`), because no single name would then be true. |
 | transcribe | `asr=`, `asr_model=` | Direct backend enum matching, plus `asr_model=` naming every model the run LOADED, each at the revision it was observed at (`AsrModelIdentityV2::stamp_value`, carried on the ASR response). The primary model is written `<id>@<revision>`, and each auxiliary is appended as `+<role>:<id>@<revision>`, so a Qwen run records its forced aligner beside its recognizer and a Paraformer run records its voice-activity and punctuation models. Where a hub exposed no revision the id is written alone. Every engine records one now, including a default SenseVoice run, which previously recorded nothing because it selected no checkpoint through an override key. A replayed legacy projection reports no models and so still records no `asr_model`. |
 
 ### Capability reports: task support plus the FA identity
@@ -412,7 +412,25 @@ what produced it; those files are stamped on the next run over them.
 
 ## Unavailable timing recovery
 
-An align stamp's `utr=` field names only a completed timing-recovery pass.
+An align stamp's `utr=` field names only a completed timing-recovery pass,
+and `utr_model=` beside it the models that pass's responses reported. A pass
+reports its outcome as a `UtrPassOutcome`: `NothingUntimed` (no recognition was
+asked for, so nothing is recorded) or `Recovered { result, models }`. "Recovery
+ran" is therefore a variant chosen where the pass returns, not a predicate over
+its evidence, and the models exist exactly when there were responses to report
+them. The models come from the responses (fresh, or replayed from the cache,
+whose rows keep the identity), never from the plan that requested them.
+
+```mermaid
+flowchart LR
+    pass["run_utr_pass"] -->|no untimed utterance| nothing["UtrPassOutcome::NothingUntimed"]
+    pass -->|responses matched| recovered["UtrPassOutcome::Recovered\n(result, UtrModels)"]
+    recovered --> record["UtrContribution::record"]
+    nothing --> record
+    record --> ran["Ran(UtrProducer)"]
+    ran --> stamp["utr=engine ; utr_model=models"]
+```
+
 An attempted pass that fails is different from deliberate omission or an
 already-timed input. Its `utr_unavailable=` field records
 `initial:<engine>:<failure_category>` and/or

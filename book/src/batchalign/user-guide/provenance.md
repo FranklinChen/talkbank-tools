@@ -173,7 +173,7 @@ name.
 ### align
 
 ```text
-[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; main_bullets=derive ; utr=rev | ...]
+[fc-ba3 align | fa=whisper-fa-large-v2 ; lang=eng ; main_bullets=derive ; utr=rev ; utr_model=revai@asynchronous-transcript-v1 | ...]
 ```
 
 | Key | Meaning |
@@ -182,6 +182,7 @@ name.
 | `lang` | Language code |
 | `main_bullets` | `derive` (utterance bullets recomputed from aligned words, the default), `keep` (the input's bullets kept exactly) or `exact` (as `keep`, and utterances without a bullet kept without one); see `align --main-bullets`. Always written |
 | `utr` | Timing recovery engine (`rev`, `whisper`, `tencent`), present only if a recovery pass ran |
+| `utr_model` | The models the recovery engine reported, written as transcribe's `asr_model` is (for Tencent, the engine the account chose, such as `tencent-asr@16k_zh_en_2.0`). Present when a recovery pass ran and every response named the same models; absent when a replayed older cache row named none |
 | `wor` | Present if %wor tier was written |
 | `incremental` | Present if `--before` incremental mode was used |
 

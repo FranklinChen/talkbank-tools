@@ -174,7 +174,7 @@ impl JobSubmission {
                     options.diarize,
                     options.common.engine_overrides.speaker,
                 ),
-                Some(recognizer),
+                Some(crate::transcribe::Recognizer::submitted(recognizer)),
             )
             .map_err(|error| ValidationError(error.to_string()))?;
         }
@@ -505,14 +505,16 @@ impl JobSubmission {
 
         // Check HK ASR engine language constraints
         if let Some(engine) = &asr_engine {
-            let chinese_codes = ["zho", "yue", "wuu", "nan", "hak", "cmn"];
             match engine {
-                AsrEngineName::HkTencent if !chinese_codes.contains(&lang.as_ref()) => {
+                // Submission cannot see which engine the account chose, so
+                // it asks the catalog whether ANY Tencent engine recognizes
+                // the language; the account's engine is checked at plan time.
+                AsrEngineName::HkTencent
+                    if !crate::model_manifest::TencentEngine::some_engine_recognizes(lang) =>
+                {
                     return Err(ValidationError(format!(
-                        "Language '{}' is not supported by Tencent ASR (Chinese variants only: {}). \
-                         Use --asr-engine whisper or --asr-engine rev instead.",
-                        lang,
-                        chinese_codes.join(", ")
+                        "Language '{lang}' is not recognized by any Tencent engine. \
+                         Use --asr-engine whisper or --asr-engine rev instead."
                     )));
                 }
                 AsrEngineName::HkAliyun if lang.as_ref() != "yue" => {
@@ -882,9 +884,6 @@ fn fa_language_refusal(
     ))
 }
 
-/// The Chinese variants Tencent UTR covers.
-const TENCENT_UTR_LANGUAGES: [&str; 6] = ["zho", "yue", "wuu", "nan", "hak", "cmn"];
-
 /// Whether one UTR engine can handle one language.
 ///
 /// THE owner of that question. It was previously inlined into the validation
@@ -893,7 +892,9 @@ const TENCENT_UTR_LANGUAGES: [&str; 6] = ["zho", "yue", "wuu", "nan", "hak", "cm
 fn utr_engine_supports_language(engine: &UtrEngine, lang: &LanguageCode3) -> bool {
     match engine {
         UtrEngine::RevAi => LanguageTable::RevAi.admits(lang),
-        UtrEngine::HkTencent => TENCENT_UTR_LANGUAGES.contains(&lang.as_ref()),
+        // Any Tencent engine: which one the account chose is checked when the
+        // job is planned, against the same catalog.
+        UtrEngine::HkTencent => crate::model_manifest::TencentEngine::some_engine_recognizes(lang),
         // Timing recovery runs stock Whisper's decoder, so it asks the same
         // table ASR admission does.
         UtrEngine::Whisper => LanguageTable::WhisperTokens.admits(lang),
@@ -1502,8 +1503,8 @@ mod tests {
             panic!("transcribe")
         };
         options.asr_engine = AsrEngineName::HkTencent;
-        // Tencent recognizes Chinese variants only; the speaker admission is
-        // what this test is about, so the language is one it serves.
+        // The speaker admission is what this test is about, so the language
+        // is one Tencent's engines recognize.
         submission.lang = LanguageSpec::Resolved(LanguageCode3::yue());
         submission
             .validate()

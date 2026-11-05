@@ -420,10 +420,14 @@ property: a bootstrap-class failure cannot reach the retry loop's
 `continue` branch, so a deterministic failure stops at the first
 attempt instead of echoing through three.
 
-`ProviderQuotaExhausted` is outside it too: the provider account's quota or
-resource pack is used up (`ServerError::ProviderQuotaExhausted`, from the
-worker protocol code of the same name), so no retry succeeds until an account
-holder restores it. `ProviderAccountRefused` is outside it for the same
+`ProviderQuotaExhausted` is outside it too: the provider will not bill the
+account for the request, because its quota or resource pack is used up or it
+has not activated the service (`ServerError::ProviderBillingRefused`, from the
+worker protocol code `provider_quota_exhausted`, which carries both causes), so
+no retry succeeds until an account holder acts. The error carries a
+`ProviderBillingRefusal` whose `BilledProduct` comes from the request's
+`PinnedAsrPlan`, so a Tencent refusal names the engine and the tier whose pack
+the account needs. `ProviderAccountRefused` is outside it for the same
 reason: the provider refuses the account itself (Rev.AI's 401, 402 or 403
 on a submission: the key, the account's permission, its credit). The same
 status on a job's status or transcript request is a terminal failure of that
@@ -443,7 +447,7 @@ row there:
 
 | Category | Fallback | Why |
 |----------|----------|-----|
-| `provider_quota_exhausted` | withheld | No request succeeds until an account holder restores the quota. |
+| `provider_quota_exhausted` | withheld | No request succeeds until an account holder restores the quota or activates the service. |
 | `provider_account_refused` | withheld | The fallback is sent from the same refused account. |
 | `model_access_denied` | withheld | The fallback asks this machine for the same refused model. |
 | `worker_bootstrap` | withheld | The engine's worker cannot start (a model that will not load, a runtime or model identity mismatch), and the fallback goes to that same worker key. A download that failed in transit is not this category: it is `provider_transient`. |

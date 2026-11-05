@@ -41,7 +41,7 @@
         "id": "tencent-asr",
         "requested": {
           "kind": "provider_parameter",
-          "parameter": "16k_zh_large"
+          "parameter": "16k_zh_en_2.0"
         },
         "observed": {
           "kind": "not_exposed"

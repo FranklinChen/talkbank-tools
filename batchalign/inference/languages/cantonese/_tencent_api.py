@@ -26,6 +26,21 @@ _MAX_POLL_SECONDS = 600  # 10-minute safety timeout for ASR task polling
 L = logging.getLogger("batchalign.hk.tencent")
 
 
+# Tencent's error codes for an account that cannot be billed for a request:
+# its resource pack for the engine's tier is used up, or it has not activated
+# speech recognition at all (an account that bought another Tencent service,
+# such as speaker recognition, gets the second).
+_ACCOUNT_REFUSALS: dict[str, str] = {
+    "FailedOperation.UserHasNoAmount": (
+        "Tencent ASR resource pack exhausted (FailedOperation.UserHasNoAmount)."
+    ),
+    "ResourceNotFound.UserHasNotOpenedService": (
+        "Tencent speech recognition is not activated for this account "
+        "(ResourceNotFound.UserHasNotOpenedService)."
+    ),
+}
+
+
 class TencentRecognizer:
     """Thin wrapper around Tencent ASR transport plus Rust-owned projection."""
 
@@ -172,11 +187,14 @@ class TencentRecognizer:
                     )
                 time.sleep(self._poll_interval_s)
         except TencentCloudSDKException as error:
-            if error.get_code() == "FailedOperation.UserHasNoAmount":
+            # Both codes need an account holder, never a retry. The Rust side
+            # names the engine and the tier the account must buy; this message
+            # says only which refusal Tencent gave.
+            account_refusal = _ACCOUNT_REFUSALS.get(error.get_code())
+            if account_refusal is not None:
                 raise ProviderQuotaExhaustedError(
-                    "Tencent ASR resource pack exhausted. Restore the account's "
-                    "ASR quota/resource pack before retrying; repeating this "
-                    f"request cannot fix it. Provider detail: {error}"
+                    f"{account_refusal} An account holder must act before "
+                    f"retrying. Provider detail: {error}"
                 ) from error
             raise
         finally:

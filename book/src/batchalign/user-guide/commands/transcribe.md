@@ -397,7 +397,11 @@ plan, not to the recognizer, so a local or cloud `--asr-engine` that labels
 no speakers is no reason to refuse it; before 2026-11-03 every non-Rev
 recognizer was. The one refusal left is `--asr-engine tencent` with no
 dedicated diarizer, since Tencent's integrated diarization must be given the
-count. With `--diarization enabled`, Tencent is asked for no separation of
+count. Tencent separates speakers only on some engines: when the account's
+chosen engine (`engine.tencent.model`) cannot (`16k_yue`, `16k_zh-PY`,
+`16k_zh-TW`, `16k_en_large`, `8k_en`), it is asked for no separation and needs
+no count, as a Whisper run is; use a dedicated `--speaker-engine` for
+speakers. With `--diarization enabled`, Tencent is asked for no separation of
 its own (the dedicated engine's labels replace the recognizer's anyway) and
 the dedicated engine infers the count.
 
@@ -445,7 +449,7 @@ generated from the engine set itself, as is the one `--help` prints.
 | `whisperx` | **Not implemented.** Accepted as a name and refused at submission; nothing here runs WhisperX. |
 | `whisper_oai` | **Not implemented.** Accepted as a name (`whisper-oai` is the historical spelling) and refused at submission; nothing here calls the OpenAI Whisper API. |
 | `whisper_rs` | Rust-native whisper.cpp, run in process. |
-| `tencent` | Tencent Cloud ASR. |
+| `tencent` | Tencent Cloud ASR, on the engine the account names in `engine.tencent.model` (see [Cantonese Engines](../cantonese-processing.md#tencent-cloud)). |
 | `aliyun` | Aliyun ASR. |
 | `funaudio` | FunASR / SenseVoice. Local, no credentials, no network. |
 | `qwen` | Qwen3-ASR. Local. |

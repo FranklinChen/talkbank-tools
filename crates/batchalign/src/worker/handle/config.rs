@@ -3,7 +3,6 @@
 use crate::api::{LanguageCode3, MemoryMb, NumSpeakers, WorkerLanguage};
 use crate::config::ServerConfig;
 use crate::host_facts::{HostSnapshot, RuntimeHost};
-use crate::revai::{RevAiApiKey, load_revai_api_key};
 use crate::worker::python::resolve_python_executable;
 use crate::worker::{InferTask, WorkerBootstrapMode, WorkerProfile, WorkerTarget};
 
@@ -19,8 +18,6 @@ pub struct WorkerRuntimeConfig {
     /// to the speaker stage (Pyannote wrong-timestamps, upstream
     /// wontfix).
     pub allow_mps: bool,
-    /// Optional Rev.AI key already resolved by the Rust control plane.
-    pub revai_api_key: Option<RevAiApiKey>,
     /// Maximum concurrent requests served inside one GPU worker process
     /// when it serves concurrently; see `worker::serving::WorkerServing`.
     pub gpu_thread_pool_size: u32,
@@ -52,6 +49,11 @@ pub struct WorkerRuntimeConfig {
     /// PID of the current Rust server process when it owns spawned TCP daemons.
     /// `None` means there is no owning server process to record.
     pub server_process_id: Option<u32>,
+    /// The HK ASR provider accounts (keys and the Tencent engine), read once
+    /// with the runtime and fixed for its lifetime, so every worker is handed
+    /// the same keys and every Tencent plan the server resolves (a worker's
+    /// spawn pin, a request's pin, a cache namespace) names the same engine.
+    pub provider_accounts: crate::worker::provider_credentials::ProviderAccounts,
 }
 
 impl WorkerRuntimeConfig {
@@ -62,21 +64,27 @@ impl WorkerRuntimeConfig {
     /// tier alone let a caller pair a declared test tier with live readings
     /// (every test pool did), or a live tier with declared ones.
     pub fn local(host: &HostSnapshot) -> Self {
-        Self::launch(host.runtime_host(), load_revai_api_key().ok())
+        let provider_accounts = crate::worker::provider_credentials::ProviderAccounts::from_env();
+        log_tencent_engine(provider_accounts.tencent_engine());
+        Self::launch(host.runtime_host(), provider_accounts)
     }
 
     /// A test launch on the declared test host
-    /// ([`HostSnapshot::for_tests`]), with no Rev.AI key: a test reads no
-    /// credentials from the machine running it.
+    /// ([`HostSnapshot::for_tests`]), with no Rev.AI key and no provider
+    /// account: a test reads no credentials or account settings from the
+    /// machine running it, and one that plans Tencent names its engine.
     pub fn for_tests() -> Self {
         Self::launch(
             HostSnapshot::for_tests(&ServerConfig::default()).runtime_host(),
-            None,
+            crate::worker::provider_credentials::ProviderAccounts::none(),
         )
     }
 
     /// The shared body of [`Self::local`] and [`Self::for_tests`].
-    fn launch(host: RuntimeHost, revai_api_key: Option<RevAiApiKey>) -> Self {
+    fn launch(
+        host: RuntimeHost,
+        provider_accounts: crate::worker::provider_credentials::ProviderAccounts,
+    ) -> Self {
         // `gpu_thread_pool_size` is the in-process default for callers that
         // have not consulted the host-facts pipeline (`EffectiveConfig`
         // overrides it in production). `4` matches the pre-migration static
@@ -85,13 +93,13 @@ impl WorkerRuntimeConfig {
         Self {
             force_cpu: false,
             allow_mps: false,
-            revai_api_key,
             gpu_thread_pool_size: LEGACY_DEFAULT_GPU_THREAD_POOL_SIZE,
             host,
             bootstrap_mode: WorkerBootstrapMode::Profile,
             server_instance_id: None,
             server_process_id: None,
             state_dir: None,
+            provider_accounts,
         }
     }
 
@@ -109,6 +117,21 @@ impl WorkerRuntimeConfig {
     pub fn with_state_dir(mut self, state_dir: std::path::PathBuf) -> Self {
         self.state_dir = Some(state_dir);
         self
+    }
+}
+
+/// Say once, when the runtime is built, which Tencent engine this server
+/// will use, so an operator reading the server log sees the account's choice,
+/// or that a Tencent job will be refused, before any job runs.
+fn log_tencent_engine(setting: &crate::model_manifest::TencentEngineSetting) {
+    use crate::model_manifest::TencentEngineSetting as S;
+    match setting {
+        S::Unset => tracing::debug!("no Tencent engine chosen; Tencent jobs will be refused"),
+        S::Chosen(engine) => tracing::info!(%engine, "Tencent engine chosen by this account"),
+        S::Unusable(refusal) => tracing::warn!(
+            %refusal,
+            "the Tencent engine in ~/.batchalign.ini cannot be used; Tencent jobs will be refused"
+        ),
     }
 }
 
@@ -336,7 +359,7 @@ mod tests {
             crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default());
         let runtime = WorkerRuntimeConfig::for_tests();
         assert_eq!(runtime.host, host.runtime_host());
-        assert_eq!(runtime.revai_api_key, None);
+        assert_eq!(runtime.provider_accounts.revai_api_key(), None);
     }
 
     #[test]

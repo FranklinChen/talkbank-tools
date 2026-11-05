@@ -1013,6 +1013,13 @@ pub struct PoolMetrics {
 }
 
 impl WorkerPool {
+    /// The Tencent engine this server's account chose, which every Tencent
+    /// plan the server resolves reads, so a request's pin and the pin its
+    /// worker was spawned with cannot name different engines.
+    pub(crate) fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
+        self.config.runtime.provider_accounts.tencent_engine()
+    }
+
     /// Test-only artificial per-response delay configured for this pool.
     ///
     /// Exposed so the test-echo dispatch path (which bypasses workers

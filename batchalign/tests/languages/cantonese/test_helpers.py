@@ -86,7 +86,7 @@ class TestHKHelpers:
     def test_tencent_monologues_and_timed_words(self) -> None:
         recognizer = TencentRecognizer.__new__(TencentRecognizer)
         recognizer.lang_code = "yue"
-        recognizer.engine_model_type = "16k_zh_large"
+        recognizer.engine_model_type = "16k_zh_en_2.0"
 
         result_detail = [
             SimpleNamespace(

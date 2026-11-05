@@ -19,7 +19,7 @@
         "id": "tencent-asr",
         "revision": {
           "kind": "provider_parameter",
-          "parameter": "16k_zh_large"
+          "parameter": "16k_zh_en_2.0"
         }
       }
     }

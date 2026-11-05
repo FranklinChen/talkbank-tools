@@ -42,7 +42,9 @@ impl TextResultRefusal {
     /// breach.
     pub(crate) fn into_server_error(self, locality: ModelLocality) -> ServerError {
         match self {
-            Self::Failed(failure) => failure.into_server_error(locality),
+            Self::Failed(failure) => {
+                failure.into_server_error(locality, crate::error::BilledProduct::NotNamed)
+            }
             wrong @ Self::WrongResult { .. } => {
                 ServerError::Worker(WorkerError::Protocol(wrong.to_string()))
             }

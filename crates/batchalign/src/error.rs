@@ -1115,17 +1115,19 @@ pub enum ServerError {
     #[error("ASR worker model identity disagrees with the plan: {0}")]
     AsrModelIdentity(#[from] crate::types::worker_v2::AsrIdentityMismatchV2),
 
-    /// A provider refused the request because the account's quota or resource
-    /// pack is exhausted (worker protocol `ProviderQuotaExhausted`, such as
-    /// Tencent's `FailedOperation.UserHasNoAmount`).
+    /// A provider refused to bill this account for the request: its quota or
+    /// resource pack is exhausted, or it has not activated the service
+    /// (worker protocol `ProviderQuotaExhausted`, which carries both, such as
+    /// Tencent's `FailedOperation.UserHasNoAmount` and
+    /// `ResourceNotFound.UserHasNotOpenedService`).
     ///
-    /// Its own variant, not a terminal [`Self::AsrProvider`]: it is the one
-    /// provider failure that no request can get past until an account holder
-    /// restores the quota, so it withholds the same-engine UTR fallback and
-    /// has its own category (`provider_quota_exhausted`). It is neither bad
-    /// input nor a transient fault.
-    #[error("provider quota exhausted: {0}")]
-    ProviderQuotaExhausted(String),
+    /// Its own variant, not a terminal [`Self::AsrProvider`]: no request can
+    /// get past it until an account holder acts, so it withholds the
+    /// same-engine UTR fallback and has its own category
+    /// (`provider_quota_exhausted`, the wire name kept for both causes). It
+    /// is neither bad input nor a transient fault.
+    #[error("{0}")]
+    ProviderBillingRefused(ProviderBillingRefusal),
 
     /// Model inference returned inadmissible generated evidence, not bad input.
     #[error("model output rejected: {0}")]
@@ -1143,6 +1145,63 @@ pub enum ServerError {
     /// same logic that a stop needs to interrupt.
     #[error("execute_v2 retry cancelled by job cancellation")]
     Cancelled,
+}
+
+/// A provider's refusal to bill this account for a request: an exhausted
+/// quota or resource pack, or a service the account has not activated.
+///
+/// Carries the product the request was billed as, so the message can name
+/// what the account holder must buy. That was the missing fact for two weeks
+/// in October 2026: the account showed "resource pack exhausted" while BA3
+/// asked for one Tencent engine and the account had bought another tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderBillingRefusal {
+    billed: BilledProduct,
+    provider_detail: String,
+}
+
+impl ProviderBillingRefusal {
+    /// The refusal a worker reported, for the product the request named.
+    pub(crate) fn new(billed: BilledProduct, provider_detail: String) -> Self {
+        Self {
+            billed,
+            provider_detail,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderBillingRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const NO_RETRY: &str = "Retrying cannot help.";
+        match &self.billed {
+            BilledProduct::NotNamed => {
+                write!(f, "provider refused this account: {}", self.provider_detail)
+            }
+            // Compact on purpose: a per-file failure record keeps 500
+            // characters, and both the remedy and Tencent's own detail (with
+            // its request ID, which Tencent support asks for) must survive.
+            BilledProduct::Tencent(engine) => write!(
+                f,
+                "Tencent refused engine {engine} for this account. {remedy} {NO_RETRY} \
+                 Provider detail: {detail}",
+                remedy = engine.billing_remedy(),
+                detail = self.provider_detail
+            ),
+        }
+    }
+}
+
+/// The separately billed product a request was sent as, when it names one.
+///
+/// Decided where the plan is resolved ([`crate::model_manifest::PinnedAsrPlan`]),
+/// from the engine the plan chose, never parsed back out of the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BilledProduct {
+    /// The request named no separately billed product (a Rev.AI or
+    /// pyannoteAI request, for example, is billed by account alone).
+    NotNamed,
+    /// A Tencent engine, whose tier names the resource pack it draws on.
+    Tencent(crate::model_manifest::TencentEngine),
 }
 
 /// Why a producer's output could not be admitted.
@@ -1391,7 +1450,7 @@ impl ServerError {
             // caller's request was fine.
             Self::ModelAccessDenied(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ModelOutputInvalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::AsrProvider { .. } | Self::ProviderQuotaExhausted(_) => StatusCode::BAD_GATEWAY,
+            Self::AsrProvider { .. } | Self::ProviderBillingRefused(_) => StatusCode::BAD_GATEWAY,
             Self::AsrModelIdentity(_) => StatusCode::INTERNAL_SERVER_ERROR,
             // Internal cancellation signal from a background retry loop;
             // never returned as an HTTP response (see the variant's doc).

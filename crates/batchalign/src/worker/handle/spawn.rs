@@ -14,7 +14,6 @@ use tracing::info;
 use super::config::WorkerConfig;
 use super::protocol::TcpReadySignal;
 use crate::worker::error::WorkerError;
-use crate::worker::provider_credentials::HkAsrCredentialSources;
 use crate::worker::python::worker_command;
 use crate::worker::serving::WorkerServing;
 use crate::worker::target::task_name;
@@ -88,7 +87,7 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
             .arg(config.test_delay_ms.to_string());
     }
 
-    if let Some(api_key) = &config.runtime.revai_api_key {
+    if let Some(api_key) = config.runtime.provider_accounts.revai_api_key() {
         cmd.env("BATCHALIGN_REV_API_KEY", api_key.as_str());
     }
     // Hand the child its state directory explicitly, on the child's Command
@@ -96,7 +95,7 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     if let Some(state_dir) = &config.runtime.state_dir {
         cmd.env("BATCHALIGN_STATE_DIR", state_dir);
     }
-    for (key, value) in worker_provider_envs(config, &HkAsrCredentialSources::from_env()) {
+    for (key, value) in worker_provider_envs(config) {
         cmd.env(key, value);
     }
 
@@ -197,7 +196,7 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
             .arg(config.test_delay_ms.to_string());
     }
 
-    if let Some(api_key) = &config.runtime.revai_api_key {
+    if let Some(api_key) = config.runtime.provider_accounts.revai_api_key() {
         cmd.env("BATCHALIGN_REV_API_KEY", api_key.as_str());
     }
     // Same state-dir handoff as `build_worker_command`.
@@ -216,7 +215,7 @@ pub async fn spawn_tcp_daemon(config: &WorkerConfig, port: u16) -> Result<(u32, 
         crate::worker::registry::BUILD_IDENTITY_ENV,
         crate::build_hash(),
     );
-    for (key, value) in worker_provider_envs(config, &HkAsrCredentialSources::from_env()) {
+    for (key, value) in worker_provider_envs(config) {
         cmd.env(key, value);
     }
 
@@ -336,18 +335,18 @@ fn serving_args(config: &WorkerConfig) -> [String; 4] {
 /// Build environment variables for HK ASR provider credentials.
 ///
 /// Only injects credentials for the GPU profile (which handles ASR requests)
-/// and only for the selected ASR engine override (if any).
-pub(super) fn worker_provider_envs(
-    config: &WorkerConfig,
-    sources: &HkAsrCredentialSources,
-) -> Vec<(String, String)> {
+/// and only for the selected ASR engine override (if any), from the runtime's
+/// one snapshot of the provider accounts.
+pub(super) fn worker_provider_envs(config: &WorkerConfig) -> Vec<(String, String)> {
     // GPU profile includes ASR, inject provider credentials when the profile
     // handles ASR requests or the engine overrides select an HK ASR backend.
     if config.profile != WorkerProfile::Gpu {
         return Vec::new();
     }
-    sources
-        .provider_envs_for_asr_override(selected_asr_override(&config.engine_overrides).as_deref())
+    config
+        .runtime
+        .provider_accounts
+        .worker_envs(selected_asr_override(&config.engine_overrides).as_deref())
         .into_iter()
         .collect()
 }

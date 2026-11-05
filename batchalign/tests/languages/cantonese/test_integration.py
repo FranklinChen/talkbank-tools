@@ -253,7 +253,7 @@ class TestTencentASR:
             load_tencent_asr,
         )
 
-        load_tencent_asr("yue", engine_model_type="16k_zh_large")
+        load_tencent_asr("yue", engine_model_type="16k_zh_en_2.0")
         self._infer = infer_tencent_asr
 
     def test_produces_tokens(self) -> None:

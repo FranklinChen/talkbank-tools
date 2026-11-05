@@ -79,7 +79,12 @@ async fn request_context_preserves_partial_partition_output() {
         working
             .active_mut()
             .expect("active")
-            .recover_timing(async |chat| Ok(inject_spaced(chat, &tokens)))
+            .recover_timing(async |chat| {
+                Ok(crate::provenance::UtrPassOutcome::Recovered {
+                    result: inject_spaced(chat, &tokens),
+                    models: crate::provenance::UtrModels::Unreported,
+                })
+            })
             .await
             .expect("synthetic UTR anchors");
         let FaInputDocument::Active(active) = working.attempt() else {

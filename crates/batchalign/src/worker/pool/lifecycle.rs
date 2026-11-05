@@ -430,7 +430,10 @@ fn worker_config_for_key(
         task: key.target.task(),
         lang: key.language.clone(),
         num_speakers: NumSpeakers(1),
-        engine_overrides: spawn_engine_overrides(key)?,
+        engine_overrides: spawn_engine_overrides(
+            key,
+            pool_config.runtime.provider_accounts.tencent_engine(),
+        )?,
         test_echo: pool_config.test_echo,
         ready_timeout_s: pool_config.ready_timeout_s,
         verbose: pool_config.verbose,
@@ -446,8 +449,10 @@ fn worker_config_for_key(
 ///
 /// Each pin is injected HERE, at the one place a spawn argv is built, and
 /// deliberately NOT into the worker key. Both are pure functions of what the
-/// key already carries (the ASR backend, the language and the extras), so two
-/// equal keys always imply the same pins and the key needs no new component.
+/// key already carries (the ASR backend, the language and the extras) and of
+/// the account's Tencent engine, which the runtime reads once and holds fixed
+/// for the server's lifetime, so two equal keys in one server always imply the
+/// same pins and the key needs no new component.
 /// Putting them in the key instead would force the capability-probe path and
 /// the execute path to derive them identically, which would make
 /// `capability_key == execute_key` a coincidence that holds only while two code
@@ -461,7 +466,10 @@ fn worker_config_for_key(
 /// only if it loads the utseg task. The alternative, deciding here which tasks
 /// a target will load, would put a second copy of the target's task set in this
 /// function.
-pub(super) fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerError> {
+pub(super) fn spawn_engine_overrides(
+    key: &WorkerKey,
+    tencent: &crate::model_manifest::TencentEngineSetting,
+) -> Result<String, WorkerError> {
     let overrides = key.engine_selection.overrides();
     // Only a worker that will actually load an ASR engine needs an ASR pin.
     // `EngineSelection` has already dropped the engines with no Python loader,
@@ -490,9 +498,10 @@ pub(super) fn spawn_engine_overrides(key: &WorkerKey) -> Result<String, WorkerEr
             backend,
             key.language.as_resolved(),
             &overrides.extras,
+            tencent,
         )
         .map_err(|error| WorkerError::SpawnFailed(error.to_string()))?;
-        insert_spawn_json(&mut map, SpawnKey::PinnedAsrModels, &models)?;
+        insert_spawn_json(&mut map, SpawnKey::PinnedAsrModels, models.models())?;
         // Qwen loads only when named, which is exactly this branch, so every
         // Qwen worker receives the recognition policy for its language from
         // the same table that routes segmentation. The worker never decides it.
