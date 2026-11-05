@@ -40,7 +40,10 @@ only at external boundaries.
 
 ## Taiwanese transcription (`nan`)
 
-Select `--lang nan --asr-engine qwen` for Taiwanese (Minnan) recognition.
+Select `--lang nan --asr-engine qwen` for Taiwanese (Minnan) recognition, or
+`--lang nan --asr-engine tencent` with an account engine that recognizes Min
+Nan. [Taiwanese](languages/taiwanese.md) shows how to try both and what to
+check.
 The request and CHAT header retain `nan`. Qwen receives its documented
 `Chinese` recognition label without an injected context prompt.
 The recognizer uses approximately 30-second audio windows and retains its

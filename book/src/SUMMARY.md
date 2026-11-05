@@ -134,6 +134,7 @@
 - [Language Support Overview](batchalign/reference/languages/overview.md)
   - [Cantonese](batchalign/reference/languages/cantonese.md)
   - [Mandarin](batchalign/reference/languages/mandarin.md)
+  - [Taiwanese](batchalign/reference/languages/taiwanese.md)
   - [Japanese](batchalign/reference/languages/japanese.md)
   - [Hebrew](batchalign/reference/languages/hebrew.md)
   - [French](batchalign/reference/languages/french.md)

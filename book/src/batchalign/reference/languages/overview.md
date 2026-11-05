@@ -18,6 +18,7 @@ significant special treatment. This page indexes all language-specific behavior.
 |----------|------|---------------|----------------------|
 | **Cantonese** | `yue` | [Cantonese](cantonese.md) | 4 ASR engines, text normalization, PyCantonese word segmentation, jyutping FA |
 | **Mandarin** | `cmn`/`zho` | [Mandarin](mandarin.md) | Stanza neural word segmentation, Chinese number expansion |
+| **Taiwanese** | `nan` | [Taiwanese](taiwanese.md) | Transcription only: Qwen3 (local) or Tencent (cloud), Taiwan-standard script conversion, taibun word segmentation |
 | **Japanese** | `jpn` | [Japanese](japanese.md) | Stanza `combined` package, retokenize merge/split |
 | **Hebrew** | `heb` | [Hebrew](hebrew.md) | Fine-tuned Whisper, RTL punctuation, HebBinyan/HebExistential features |
 | **French** | `fra` | [French](french.md) | Native Stanza MWT + char-DP realign (BA2 elision/multi-clitic hacks removed) |
