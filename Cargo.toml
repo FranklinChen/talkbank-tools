@@ -17,7 +17,7 @@ members = [
 # released git tags under [workspace.dependencies].
 
 [workspace.package]
-version = "0.8.7"
+version = "0.8.8"
 edition = "2024"
 authors = ["Franklin Chen <franklinchen@franklinchen.com>"]
 license = "BSD-3-Clause"
@@ -119,7 +119,7 @@ thiserror = "^2.0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.54", features = ["full"] }
 tokio-util = "0.7"
-toml = "^1.1.8"
+toml = "^1.2.0"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.34"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }

@@ -3,7 +3,7 @@
 Fixes and behaviour changes, newest first. The book describes the current
 design; this file records how it changed.
 
-## Unreleased
+## 0.8.8 (November 5, 2026)
 
 - The provider accounts (the Rev.AI key, Tencent's keys and engine, Aliyun's
   keys) are read once, when the server starts, into one snapshot that every
