@@ -359,14 +359,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn routed_metadata_preparation_returns_a_bound_report_without_inference() {
+    async fn worker_roundtrip_routed_metadata_preparation_returns_a_bound_report_without_inference()
+    {
         use crate::api::{LanguageCode3, WorkerLanguage};
         use crate::types::engines::FaEngineName;
         use crate::worker::pool::{GpuModelPlan, GpuTask, PoolConfig, WorkerPool};
 
         let pool = WorkerPool::new(PoolConfig {
             test_echo: true,
-            python_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../.venv/bin/python").into(),
             ..PoolConfig::for_tests()
         });
         let request = candidate();

@@ -157,8 +157,9 @@ def test_asr_wire_keeps_unavailable_word_text_without_fabricating_a_timestamp(
 
 
 def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+    native_qwen: QwenFaHost,
+) -> None:
     from batchalign.inference import qwen_forced_alignment
     from batchalign.worker._handlers import _reported_engine
     from batchalign.worker._loads import FA_LOAD
@@ -177,7 +178,7 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
             / "test-fixtures/qwen_fa_admission_identity.json"
         ).read_text()
     )
-    host = QwenFaHost(_QwenLikeAligner(), resolve_qwen_language("yue"))
+    host = QwenFaHost(native_qwen.aligner, resolve_qwen_language("yue"))
     assert host.cache_identity.model_id == fixture["legacy"]
     assert host.cache_identity.wire_name == fixture["current"]
     assert fixture["legacy"] != fixture["current"]
@@ -185,6 +186,12 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
     monkeypatch.setattr(_state, "loads", loads)
     monkeypatch.setattr(
         qwen_forced_alignment, "load_qwen_fa", lambda *_args, **_kwargs: host
+    )
+    from batchalign.tests._snapshots import fake_resolve_transformers
+
+    monkeypatch.setattr(
+        "batchalign.worker._model_loading.forced_alignment.resolve_transformers",
+        fake_resolve_transformers,
     )
     # Nothing has loaded: the report names no FA engine rather than guessing.
     assert _reported_engine(InferTask.FA) is None

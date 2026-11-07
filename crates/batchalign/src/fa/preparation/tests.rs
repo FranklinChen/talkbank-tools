@@ -33,7 +33,8 @@ fn params() -> FaParams {
 }
 
 #[tokio::test]
-async fn retained_preparation_survives_removal_of_the_original_media_until_dispatch() {
+async fn worker_roundtrip_retained_preparation_survives_removal_of_the_original_media_until_dispatch()
+ {
     let directory = tempfile::tempdir().unwrap();
     let audio_path = directory.path().join("sample.wav");
     crate::media::probe::fixtures::write_pcm_wav(&audio_path, 1);
@@ -57,7 +58,6 @@ async fn retained_preparation_survives_removal_of_the_original_media_until_dispa
     .groups;
     let pool = WorkerPool::new(PoolConfig {
         test_echo: true,
-        python_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../.venv/bin/python").into(),
         ..PoolConfig::for_tests()
     });
     let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))
@@ -324,7 +324,8 @@ async fn an_empty_decode_keeps_its_measurement_without_loading_a_model_or_failin
 }
 
 #[tokio::test]
-async fn shared_contexts_reuse_native_preparation_and_execute_one_owner_for_two_answer_ranges() {
+async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_one_owner_for_two_answer_ranges()
+ {
     let directory = tempfile::tempdir().unwrap();
     let audio_path = directory.path().join("shared.wav");
     crate::media::probe::fixtures::write_pcm_wav(&audio_path, 1);
@@ -337,7 +338,6 @@ async fn shared_contexts_reuse_native_preparation_and_execute_one_owner_for_two_
     let params = params();
     let pool = WorkerPool::new(PoolConfig {
         test_echo: true,
-        python_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../.venv/bin/python").into(),
         ..PoolConfig::for_tests()
     });
     let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))

@@ -839,6 +839,19 @@ rules:
   The Rust jobs build the PyO3 library, so they install a supported Python
   and bind `PYO3_PYTHON` to the setup action's output. Never rely on what
   the runner image happens to contain; it changes without notice.
+- **A worker roundtrip requires the worker environment.** Library controls
+  whose names start with `worker_roundtrip_` run in the existing worker
+  integration target after the environment/extension is qualified. The bare
+  Rust target excludes that group; the mandatory worker target runs it.
+  No test is ignored or removed. Use the resolved `PoolConfig::for_tests`
+  interpreter instead of a checkout-local `.venv` path.
+- **A loaded-host fixture includes the actual interface it claims.** Cache
+  identity and resource controls share a complete, synthetic Qwen model and
+  processor, with admitted stand-in snapshots instead of Hub downloads.
+  Positive convolution controls scope execution and projection to the
+  source-qualified slow CPU kernels. This does not disable memory admission
+  or qualify automatically selected oneDNN/NNPACK routes; unsupported layouts
+  keep their separate explicit-refusal control.
 - **A failure-path test provokes its failure with input the program must
   reject, never with something missing from the environment.** "Declare a
   language no model supports" passes only while no installed model supports
@@ -849,6 +862,22 @@ rules:
   (`frontend/e2e/job-wait.ts`), whose closed targets (`running`,
   `completed`, `failed`, `terminal`) report a job that ended the wrong way
   at once, with its failure detail, instead of timing out.
+
+The required split preserves the cross-language controls; it does not turn a
+missing worker environment into a passing test:
+
+```mermaid
+flowchart TD
+    tests["Existing Rust library controls"] --> ordinary["Other library controls"]
+    tests --> roundtrip["worker_roundtrip_ controls"]
+    ordinary --> rust_gate["Rust target with declared Rust prerequisites"]
+    roundtrip --> worker_environment["Qualified Python worker and current extension"]
+    worker_environment --> integration["Existing worker integration target"]
+    integration --> worker_suite["Worker integration suite"]
+    worker_suite --> library_roundtrips["Library worker roundtrips using that interpreter"]
+    rust_gate --> required["Both stages required by local gate and hosted CI"]
+    library_roundtrips --> required
+```
 
 ### What a green gate does not cover
 

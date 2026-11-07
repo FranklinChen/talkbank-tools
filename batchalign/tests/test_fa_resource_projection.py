@@ -144,9 +144,12 @@ def test_projection_supports_the_installed_mms_encoder_operations() -> None:
         encoder_num_layers=1,
     )
     model = wav2vec2_model(**parameters)
-    result = project_encoder_workspace(
-        model, AudioShape(samples=20 * MMS_FA.sample_rate), torch.device("cpu")
-    )
+    from batchalign.tests._native_fa import slow_cpu_convolutions
+
+    with slow_cpu_convolutions():
+        result = project_encoder_workspace(
+            model, AudioShape(samples=20 * MMS_FA.sample_rate), torch.device("cpu")
+        )
     assert result.encoded_frames > 0
     assert result.emission_classes == parameters["aux_num_out"]
     assert result.peak_workspace_bytes > 0

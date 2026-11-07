@@ -91,7 +91,8 @@ batchalign-test-rust:
 	@echo "==> Testing batchalign-transform (ML over chatter's generic transform)..."
 	cargo test -p batchalign-transform --lib -q
 	@echo "==> Testing imported batchalign..."
-	cargo test -p batchalign --lib -q
+	# Cross-language worker controls run below with the admitted worker environment.
+	cargo test -p batchalign --lib -q -- --skip worker_roundtrip_
 	@echo "==> Testing xtask (the audits and lint gates themselves)..."
 	cargo test -p xtask -q
 	@$(MAKE) batchalign-test-doc
@@ -159,6 +160,8 @@ batchalign-test-python-golden:
 batchalign-test-worker-integration:
 	@echo "==> Worker integration suite (real test-echo workers)..."
 	cargo test -p batchalign --test worker_integration_suite --locked
+	@echo "==> Library worker roundtrips (same qualified Python environment)..."
+	worker_test_python="$$(uv run --no-sync python -c 'import batchalign.worker, sys; print(sys.executable)')" && BATCHALIGN_PYTHON="$$worker_test_python" cargo test -p batchalign --lib --locked worker_roundtrip_
 
 batchalign-test-integration:
 	@echo "==> Running imported Batchalign CI hygiene..."

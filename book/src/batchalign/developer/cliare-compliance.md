@@ -96,6 +96,12 @@ This is the first BA3 measurement in this record: **80/100**, labelled
 | `issue.alternate_help_form_unavailable`, `help` | Optional compatibility advisory for `help --help`. Canonical direct command help remains available; this does not block alignment. |
 | `issue.invalid_flag_diagnostics_unknown`, `models train` | The same cited unknown-flag probe already has an explicit diagnostic and nonzero exit2 from the retained training CLI. No repeated parser or new test is needed to change this measurement classification. |
 
+A subsequent CI-fixture repair changes no CLI or runtime inference contract:
+worker-dependent library controls run with the required worker environment,
+and synthetic loaded hosts declare their complete interface and kernel route.
+The measured executable behavior remains applicable; the follow-up source still
+requires its own gate and hosted CI results.
+
 All four findings are dispositioned above. No finding establishes an alignment
 correctness defect; no legacy pathway was removed to improve the score. Full
 raw evidence and producer identities are retained with the release qualification.

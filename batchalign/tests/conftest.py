@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import os
 import platform
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from batchalign.inference.qwen_forced_alignment import LoadedQwenFaHost
 
 
 def _is_ci() -> bool:
@@ -423,3 +428,12 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     if _history_writer is not None:
         _history_writer.close()  # type: ignore[attr-defined]
         _history_writer = None
+
+
+@pytest.fixture
+def native_qwen() -> Iterator[LoadedQwenFaHost]:
+    """One complete synthetic loaded host shared by identity and shape controls."""
+    from batchalign.tests._native_fa import native_qwen_host, slow_cpu_convolutions
+
+    with slow_cpu_convolutions():
+        yield native_qwen_host()
