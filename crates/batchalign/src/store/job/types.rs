@@ -277,9 +277,8 @@ pub struct JobLastCancelInfo {
 /// Every restart (`Job::prepare_for_restart`) increments it, so a runner
 /// that began under an earlier generation can be recognized as STALE and
 /// barred from finalizing the job or force-failing files that now belong
-/// to the restarted run (2026-07-10 field failure: a stale runner
-/// finalized a restarted 345-file job as `failed` with 317 bogus
-/// "did not reach terminal status" file errors).
+/// to the restarted run. Completion admits this generation and its file
+/// cleanup in one registry transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunGeneration(u64);
 
@@ -300,19 +299,83 @@ impl std::fmt::Display for RunGeneration {
 }
 
 /// Outcome of a runner's attempt to claim exclusive execution of a job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum BeginRunnerOutcome {
     /// The claim succeeded; the runner owns the job at this generation,
     /// under the lease the claim took (the store persists exactly that one).
     Started {
-        /// The run generation the runner owns.
-        generation: RunGeneration,
+        /// Linear authority binding this run's generation and snapshot.
+        claim: RunnerClaim,
         /// The lease taken with the claim.
         lease: crate::scheduling::LeaseRecord,
     },
     /// Another runner still owns the job (e.g. a restarted job whose
     /// previous runner is mid-teardown). The caller must wait and retry.
     RunnerStillLive,
+    /// Cancellation arrived before a runner claimed the job. This owner
+    /// can close unfinished files but cannot enter admission or dispatch.
+    Stopped { completion: StoppedRun },
+    /// A delayed or competing task arrived after this job stopped. It owns
+    /// no claim, heartbeat, resources or release authority.
+    NotRunnable { status: JobStatus },
+}
+
+/// Exclusive authority for one run, minted together with its immutable input.
+///
+/// Not cloneable: completion consumes it. A restart can supersede the claim,
+/// but cannot give its cleanup authority over the restarted files.
+#[derive(Debug)]
+#[must_use = "a runner claim owns one attempt's completion"]
+pub(crate) struct RunnerClaim {
+    generation: RunGeneration,
+    snapshot: std::sync::Arc<RunnerJobSnapshot>,
+}
+
+/// Completion-only authority for cancellation accepted before dispatch.
+#[derive(Debug)]
+#[must_use = "stopped files still require terminal bookkeeping"]
+pub(crate) struct StoppedRun(RunnerClaim);
+
+impl StoppedRun {
+    pub(in crate::store) fn for_job(job: &Job) -> Self {
+        Self(RunnerClaim::for_job(job))
+    }
+
+    pub(in crate::store) fn into_claim(self) -> RunnerClaim {
+        self.0
+    }
+}
+
+impl RunnerClaim {
+    pub(in crate::store) fn for_job(job: &Job) -> Self {
+        Self {
+            generation: job.runtime.run_generation,
+            snapshot: std::sync::Arc::new(job.to_runner_snapshot()),
+        }
+    }
+
+    /// Immutable dispatch input bound to the claimed generation.
+    pub(crate) fn snapshot(&self) -> &std::sync::Arc<RunnerJobSnapshot> {
+        &self.snapshot
+    }
+
+    pub(in crate::store) fn generation(&self) -> RunGeneration {
+        self.generation
+    }
+}
+
+/// Result of consuming a run's completion authority.
+#[derive(Debug)]
+pub(crate) enum RunCompletion {
+    /// Restart or shutdown superseded this run; no old cleanup was applied.
+    Superseded,
+    /// Cleanup and final status were admitted together by the registry.
+    Finished {
+        /// Actual status, including a previously accepted stop.
+        status: JobStatus,
+        /// Aggregated failure reason for logging.
+        error: Option<String>,
+    },
 }
 
 /// In-memory runtime controls for one job.

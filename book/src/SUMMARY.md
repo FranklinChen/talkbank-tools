@@ -76,6 +76,7 @@
 - [Language Routing](architecture/language-and-multilingual/language-routing.md)
 - [CHAT Parsing (Rust)](batchalign/architecture/chat-parsing.md)
 - [Server Architecture](batchalign/architecture/server-architecture.md)
+- [Job State Machine](batchalign/architecture/job-state-machine.md)
 - [Dashboard Architecture](architecture/runtime/dashboard-architecture.md)
 - [Batchalign Workers](architecture/runtime/batchalign-workers.md)
 - [Cantonese and CJK, Architecture](architecture/language-and-multilingual/cantonese-and-cjk.md)

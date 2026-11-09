@@ -1,7 +1,7 @@
 # Job State Machine
 
 **Status:** Current
-**Last updated:** 2026-10-08 10:32 EDT
+**Last updated:** 2026-11-09 12:34 EST
 
 ## Overview
 
@@ -97,94 +97,30 @@ stateDiagram-v2
 | `Interrupted` | Yes | No | Server crash detected (transient, reconciled at startup) |
 | `WritebackFailed` | Yes | Yes | Remote results lost during copy-back |
 
-## Event-Driven Transitions (T096): implemented 2026-07-29
+## Status transition gate
 
-Delivered as `JobStatus::can_transition_to` + `StatusChange` + `Job::set_status`
-rather than as the `JobEvent` / `apply_event()` sketch below. Deviations from
-the original design, kept deliberately:
+`JobStatus::can_transition_to`, `StatusChange` and `Job::set_status` define
+which lifecycle transitions are legal. Timestamps, lease clearing and failure
+reasons remain owned by the corresponding `Job` method. A declined transition
+keeps the status already accepted by cancellation or shutdown.
 
-- The reason (`StatusChange`) is passed ALONGSIDE an explicit target status,
-  rather than the event carrying its payload and deriving the target. Callers
-  already knew their target; making them stop computing it was a larger change
-  than the bug required.
-- `set_status` returns `bool`, not `Result<(), InvalidTransition>`. A refusal
-  is usually an ordinary race (a user cancels while a runner is mid-flight),
-  not an error to propagate; it is logged at `debug!` inside the gate.
-- Bookkeeping (timestamps, lease clearing, failure reasons) stays in each
-  `Job::` method rather than moving into the dispatcher.
-
-The sketch is retained below for the record. **Do not implement it**: a second
-cause enum and a second validation point is exactly what this replaced.
-
-### Original design sketch (superseded)
-
-```rust
-/// All possible job lifecycle events.
-#[derive(Debug, Clone)]
-enum JobEvent {
-    Submitted,
-    WorkerAvailable,
-    MemoryGateRejected { retry_at: UnixTimestamp },
-    DispatchStarted { num_workers: u32 },
-    DispatchFailed { error: String },
-    AllFilesDone,
-    CancellationRequested,
-    FileTerminalError,
-    WritebackFailed { error: String },
-    ServerCrashDetected,
-    RecoveryRequeued,
-    RecoveryFailed,
-    RecoveryCompleted,
-}
-
-impl Job {
-    /// Apply a lifecycle event. Returns `Err` if the transition is invalid
-    /// from the current state.
-    fn apply_event(
-        &mut self,
-        event: JobEvent,
-        now: UnixTimestamp,
-    ) -> Result<(), InvalidTransition> {
-        // Single match on (current_status, event) → validate → update
-    }
-}
-```
-
-### Benefits
-
-- **Single validation point** for all transitions
-- **Explicit state machine** documented in code (match arms = transition table)
-- **Testable**: construct events, assert state changes, test invalid transitions
-- **Auditable**: `tracing::info!` on every `apply_event()` call
-
-### Implementation Plan
-
-1. Define `JobEvent` enum in `store/job/types.rs`
-2. Implement `apply_event()` on `Job` in `store/job/lifecycle.rs`
-3. Refactor all callers to construct events:
-   - `runner/execution.rs` → `WorkerAvailable`, `DispatchFailed`, `AllFilesDone`
-   - `routes/jobs.rs` → `CancellationRequested`
-   - Recovery code → `RecoveryRequeued` / `RecoveryFailed` / `RecoveryCompleted`
-4. Write transition tests (valid and invalid)
-5. Add `tracing::info!` for observability
-
-### Scope
-
-This is a 2-week focused refactor. It does NOT require full event sourcing
-(no event log table, no replay). Events are applied in-place on the mutable
-`Job` struct, same as today, the improvement is validation and single dispatch.
+Runner completion has a narrower owning boundary: the caller supplies its
+linear claim and dispatch outcome, never a proposed final job status. The
+registry admits the generation, closes unfinished files and derives the final
+status in one mutation. See [cancellation and completion](#what-a-cancel-stops).
 
 ## Runner Lifecycle
 
-Every job in `Queued` state must have exactly one active `job_task` runner.
-This invariant is maintained by two mechanisms:
+Every queued job must have a scheduled runner or a live attempt handing off
+to its replacement. Only one attempt may hold its exclusive execution claim.
+Submission and memory-gate requeue preserve that scheduling obligation:
 
 ### 1. Submit path
 
 `submit_job()` in `server_backend.rs` spawns `job_task` immediately after
 inserting the job:
 
-```rust
+```rust,ignore
 runtime.spawn_detached(job_task(job_id, host.clone()));
 ```
 
@@ -194,7 +130,7 @@ When the host-memory coordinator rejects a job, `run_hosted_job` returns
 `Ok(HostedJobRunOutcome::Requeued { retry_at })`. The `job_task` match arm
 catches this outcome and spawns a delayed replacement runner:
 
-```rust
+```rust,ignore
 Ok(HostedJobRunOutcome::Requeued { retry_at }) => {
     // Never negative: a deadline already past is a delay of zero.
     let delay = retry_at.saturating_duration_since(host.store.now());
@@ -205,9 +141,10 @@ Ok(HostedJobRunOutcome::Requeued { retry_at }) => {
 }
 ```
 
-The current `job_task` instance then exits normally: `lease_task.abort()` and
-`release_runner_claim()` run unconditionally at the bottom. The replacement
-task acquires the semaphore and memory gate fresh after the backoff.
+The attempt has already consumed its claim and stopped its owned heartbeat
+before returning `Requeued`. The replacement task must obtain a new claim
+before acquiring the semaphore and memory gate after the backoff. A delayed
+task for an already terminal job receives no dispatch authority.
 
 **Why this matters:** if `Requeued` were silently discarded (e.g., swallowed by
 `if let Err(e) = ...`), the job would remain `Queued` forever with
@@ -221,7 +158,7 @@ When the daemon starts, `bootstrap_local_server_backend` calls
 `store.queued_job_ids()` after `load_from_db()` and spawns `job_task` for each
 recovered `Queued` job:
 
-```rust
+```rust,ignore
 for job_id in queued_job_ids {
     runtime.spawn_detached(job_task(job_id, host.clone()));
 }
@@ -245,7 +182,7 @@ exactly one active `job_task` runner.
 `Pin<Box<dyn Future<Output=()> + Send + 'static>>` rather than `async fn`.
 This is required by the requeue self-spawn:
 
-```rust
+```rust,ignore
 tokio::spawn(async move {
     sleep(delay).await;
     job_task(job_id_retry, host_retry).await;  // recursive call
@@ -266,9 +203,9 @@ itself inside `tokio::spawn`. The explicit boxed return type breaks the cycle:
 | `types/status.rs` | `JobStatus`, `StatusChange`, `can_transition_to` (the table) |
 | `store/job/types.rs` | `Job` struct |
 | `store/job/lifecycle.rs` | `Job::set_status` (the gate) and the transition methods |
-| `runner/execution.rs` | Job dispatch (emits events) |
-| `routes/jobs.rs` | Cancel/restart (emits events) |
-| `store/queries/recovery.rs` | Crash recovery (emits events) |
+| `runner/execution.rs` | Claimed dispatch and consuming run completion |
+| `routes/jobs/lifecycle.rs` | Cancel/restart requests |
+| `store/queries/recovery.rs` | Crash recovery |
 
 ## Runner ownership, restart safety, and requeue (canonical invariants)
 
@@ -282,9 +219,9 @@ WAITS on that claim instead of running concurrently. The claim also
 establishes the queue lease, so the per-job heartbeat loop genuinely renews
 it (and doubles as a stall alarm: ERROR log when a live runner shows no
 file activity for 30 minutes). Every restart bumps the job's
-`RunGeneration`; `finalize_job` and the force-terminal sweep refuse to act
-from a stale generation, so a mid-teardown runner cannot clobber a
-restarted job (the failure mode was: restart re-queues files, the stale
+`RunGeneration`; completion consumes the `RunnerClaim` and admits its
+cleanup in the same registry mutation as its generation check. A superseded
+claim cannot sweep or finalize a restarted population (the failure mode was: restart re-queues files, the stale
 runner force-fails them as "did not reach terminal status" and finalizes
 the job `failed` over the healthy new run). Contract test:
 `tests/restart_handoff.rs`.
@@ -339,11 +276,45 @@ orphaned `Queued` jobs.
 
 ### What a cancel stops
 
-A cancel stops the job's in-flight file work, not only the files not yet
-started. Every file task a runner spawns runs inside a `FileTaskScope`
-(`runner/job_scope.rs`), established by `run_hosted_job` around command
-dispatch, because `tokio::spawn` does not inherit task-locals. The scope
-carries two facts into each task:
+A cancel stops job-slot and host-memory admission, command preparation and
+in-flight file work.
+`begin_runner` atomically mints a non-cloneable `RunnerClaim` with the run
+generation and its `Arc<RunnerJobSnapshot>` (including cancellation).
+`RunScope::for_run` consumes that claim; only the resulting scope can dispatch
+this attempt. Children inherit a cloneable `RunContext`, which grants
+cancellation and job registration but no dispatch or completion authority.
+
+Consuming `RunScope::execute` supervises admission through command dispatch,
+including capability probing and worker pre-scaling. Its heartbeat starts only
+after the claim exists and is stopped when execution ends. Cancellation wins
+before work is polled and drops pending admission, dispatch and worker startup.
+`EndedDispatch` returns the claim with completion, deferral or failure; it
+cannot be reused for another execution. Completion, failure and deferral each
+consume the unique claim. A task that never owned a claim cannot release one.
+
+If cancellation was accepted before claim creation, `StoppedRun` grants only
+file completion. It has no conversion into a dispatch scope. Other terminal
+jobs receive `NotRunnable`, with no heartbeat, admission or dispatch authority.
+
+Store completion consumes that claim. In one registry actor mutation, it checks
+the generation, closes unfinished files, derives the terminal status and
+produces persistence/notification effects. A superseded claim produces no file
+updates. There is no async gap between generation admission and cleanup in
+which a restart can replace the files. Cancellation closes unfinished files
+with category `cancelled`; unexplained unfinished work remains a system
+failure. Any failed file makes an otherwise active job failed, including partial
+success. Already accepted cancellation or shutdown keeps its status and time.
+`FinishingRun` retains exclusive ownership until the admitted persistence
+effects finish. Lease clearing is persisted before consuming the claim's
+release, so it cannot erase a replacement runner's lease. The next runner
+still has to admit the resulting status. File/attempt persistence and
+progress remain separate store operations, not a database transaction with
+the entire run. Host-memory polling is async: dropping the wait cannot leave a
+blocking retry loop behind. One already-started ledger transaction may finish;
+an unreceived plan drops its lease and cannot start a worker.
+
+Every child file task inherits the same scope, because `tokio::spawn` does not
+inherit task-locals. The scope carries two facts into each task:
 
 - the job id, re-established as the pool's `CURRENT_JOB_ID`, so every worker
   dispatch registers against the job;
@@ -354,6 +325,37 @@ carries two facts into each task:
   that point runs: no further inference, forced alignment, output write or
   debug dump belongs to a cancelled job. A checked-out worker dropped with a
   request in flight is discarded, not returned to the pool.
+
+```mermaid
+flowchart TD
+    begin["begin_runner: atomic claim and snapshot"] --> claim["RunnerClaim: one owner"]
+    claim --> scope["Consume into RunScope"]
+    scope --> admission["Await job slot and host-memory lease"]
+    admission --> probe["Probe capabilities"]
+    probe --> warmup["Pre-scale workers"]
+    warmup --> files["File tasks inherit RunContext"]
+    files --> ended["EndedDispatch: claim and outcome"]
+    scope -. "cancel during any wait" .-> stop["Drop admission, dispatch and pending startup"]
+    stop --> ended
+    ended --> finish["Consume claim in store completion"]
+    ended -->|deferred| defer["Consume claim before scheduling replacement"]
+    finish --> admit{"Current generation?"}
+    admit -->|yes| close["Atomic file cleanup and derived job status"]
+    admit -->|no| stale["Superseded: no file updates"]
+    close --> effects["Persist and notify admitted effects"]
+    effects --> release["Consume claim and release exclusive ownership"]
+    stale --> release
+    begin -->|cancelled before claim| stopped["StoppedRun: completion only"]
+    stopped --> finish
+    begin -->|other terminal job| none["NotRunnable: no execution owner"]
+```
+
+The model-free HTTP fixture in `tests/restart_handoff/live_probe.rs` drives a
+failed run through restart, advancing capability loading or worker pre-scaling,
+and cancellation. It admits the target boundary only while every file remains
+queued. The pre-scaling case previously left the runner and queued files open
+after cancellation; a file-only cancellation test could not detect that gap.
+The peer performs no recognition, downloads or model loading.
 
 `ServerBackend::cancel_job` detaches the job's registered workers from the
 tracker BEFORE publishing the cancel and terminates them after, because the
@@ -402,6 +404,12 @@ an audit row in the `cancellations` table tagged `source=signal,
 reason=server-cancel-all`. On the next server start, the recovery sequence
 above transitions any Interrupted job whose file work is not yet complete back
 to `Queued`.
+
+Shutdown also supersedes the current run generation while its old runner keeps
+teardown ownership until it returns. Its completion therefore releases the
+claim without turning resumable files into terminal cancellation errors. The
+shutdown token stops execution; the accepted `Interrupted` state determines
+recovery. A user cancellation still closes unfinished files permanently.
 
 This matters because a server bounce mid-job (deploy, OS restart, crash)
 would otherwise be indistinguishable from a user cancel in the local DB, and

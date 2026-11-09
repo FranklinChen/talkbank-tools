@@ -601,6 +601,7 @@ class WordSegmentation:
         """
         from batchalign.inference.qwen_timing import (
             ObservedWindowSpan,
+            RejectedWindowTiming,
             UnavailableWindowTiming,
         )
 
@@ -628,7 +629,7 @@ class WordSegmentation:
                 match constituent.timing:
                     case ObservedWindowSpan() as span:
                         observed.append(span)
-                    case UnavailableWindowTiming():
+                    case UnavailableWindowTiming() | RejectedWindowTiming():
                         break
                     case unreachable:
                         assert_never(unreachable)
@@ -824,7 +825,7 @@ class QwenFaHost:
 
         return QwenFaCacheIdentity(
             QWEN_FORCED_ALIGNER_MODEL_ID,
-            QwenFaAdmissionRevision.BOUNDED_UNIT_EVIDENCE_V1,
+            QwenFaAdmissionRevision.UNIT_DEFECTS_UNTIMED_V2,
         )
 
     def segment(self, words: list[str]) -> WordSegmentation:

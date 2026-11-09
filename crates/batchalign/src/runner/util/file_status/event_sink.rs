@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{DisplayPath, JobId, JobStatus, MachineTime};
+use crate::api::{JobId, MachineTime};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::{
     AttemptFinishRecord, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
@@ -93,9 +93,6 @@ pub(crate) trait RunnerEventSink: Send + Sync {
         filename: &str,
         change: crate::store::WorkerWaitChange,
     );
-    async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath>;
-    async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String>;
-    async fn bump_forced_terminal_errors(&self, count: usize);
     /// Fail the whole job, stamped now.
     async fn fail_job(&self, job_id: &JobId, error: &str);
     async fn mark_job_running(&self, job_id: &JobId);
@@ -103,16 +100,6 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: MachineTime);
     async fn bump_deferred_work_units(&self);
     async fn bump_memory_gate_aborts(&self);
-    /// Finalize the job and return its job-level failure reason (the aggregated
-    /// per-file errors), or `None` for a non-failed job, so the runner can log
-    /// the outcome at the right level.
-    async fn finalize_job(
-        &self,
-        job_id: &JobId,
-        expected_generation: crate::store::RunGeneration,
-        final_status: JobStatus,
-        completed_at: crate::store::EventTime,
-    ) -> Option<String>;
 }
 
 /// Store-backed implementation of the runner event sink.
@@ -276,20 +263,6 @@ impl RunnerEventSink for StoreRunnerEventSink {
             .await;
     }
 
-    async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath> {
-        self.store.unfinished_files(job_id).await
-    }
-
-    async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String> {
-        self.store.file_status_label(job_id, filename).await
-    }
-
-    async fn bump_forced_terminal_errors(&self, count: usize) {
-        self.store
-            .bump_counter(|c| c.forced_terminal_errors += count as i64)
-            .await;
-    }
-
     async fn fail_job(&self, job_id: &JobId, error: &str) {
         self.store
             .fail_job(job_id, error, self.store.event_time())
@@ -320,17 +293,5 @@ impl RunnerEventSink for StoreRunnerEventSink {
 
     async fn bump_memory_gate_aborts(&self) {
         self.store.bump_counter(|c| c.memory_gate_aborts += 1).await;
-    }
-
-    async fn finalize_job(
-        &self,
-        job_id: &JobId,
-        expected_generation: crate::store::RunGeneration,
-        final_status: JobStatus,
-        completed_at: crate::store::EventTime,
-    ) -> Option<String> {
-        self.store
-            .finalize_job(job_id, expected_generation, final_status, completed_at)
-            .await
     }
 }

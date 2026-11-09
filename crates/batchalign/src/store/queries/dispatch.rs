@@ -70,18 +70,18 @@ impl JobStore {
         self.registry.last_file_activity_at(job_id).await
     }
 
-    /// Return whether `generation` is still the job's current run generation.
-    pub(crate) async fn runner_generation_current(
-        &self,
-        job_id: &JobId,
-        generation: crate::store::RunGeneration,
-    ) -> bool {
-        self.registry
-            .runner_generation_current(job_id, generation)
-            .await
+    /// Consume a deferred run's authority before scheduling its replacement.
+    pub(crate) async fn release_run(&self, claim: crate::store::RunnerClaim) {
+        let job_id = claim.snapshot().identity.job_id.clone();
+        // Keep the owner while clearing its persisted lease. Releasing first
+        // could let a replacement persist a new lease that this write erases.
+        self.db_persist_lease(&job_id, None, LeaseWrite::Release)
+            .await;
+        self.registry.release_run(claim).await;
     }
 
-    /// Release the runner claim so a queued job may be re-dispatched later.
+    /// Release a test queue claim which does not mint a production run owner.
+    #[cfg(test)]
     pub(crate) async fn release_runner_claim(&self, job_id: &JobId) {
         if !self.registry.release_runner_claim(job_id).await {
             return;

@@ -27,8 +27,7 @@ pub(crate) use tracker::{
 };
 
 pub(crate) use supervision::{
-    UnfinishedFileCause, drain_supervised_file_tasks, force_terminal_file_states,
-    observing_file_waits, record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
-    spawn_supervised_file_task,
+    drain_supervised_file_tasks, observing_file_waits, record_file_cancelled_before_dispatch,
+    spawn_observed_progress_forwarder, spawn_supervised_file_task,
 };
 pub(crate) use tracker::set_file_progress;

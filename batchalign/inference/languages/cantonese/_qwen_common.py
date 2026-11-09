@@ -49,6 +49,7 @@ from batchalign.inference.qwen_timing import (
     RecordingChunkSpeech,
     RecordingPrefix,
     RecordingStart,
+    RejectedWindowTiming,
     SpokenWindowWords,
     UnavailableWindowTiming,
     WindowAlignment,
@@ -533,7 +534,7 @@ class ReadyQwenRecognizer:
                                     end_ms=int(span.end_s * 1000),
                                 )
                             )
-                        case UnavailableWindowTiming():
+                        case UnavailableWindowTiming() | RejectedWindowTiming():
                             elements.append(
                                 AsrElement(
                                     type="text", ts=None, end_ts=None, value=word.text

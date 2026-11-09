@@ -1,6 +1,6 @@
 //! File-level job-state mutations on [`JobStore`].
 
-use crate::api::{DisplayPath, JobId};
+use crate::api::JobId;
 use crate::scheduling::{AttemptOutcome, RetryDisposition, WorkUnitKind};
 
 use super::super::{
@@ -222,20 +222,11 @@ impl JobStore {
             self.notify_file_update(&update.job_id, update.file, update.completed_files);
         }
     }
-
-    /// Return the filenames of files that have not yet reached a terminal state.
-    pub(crate) async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath> {
-        self.registry.unfinished_files(job_id).await
-    }
-
-    /// Return the current file-status label for one file.
-    pub(crate) async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String> {
-        self.registry.file_status_label(job_id, filename).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::api::DisplayPath;
     use tokio::sync::broadcast;
 
     use crate::api::{ContentType, FileStatusKind, JobId, ReleasedCommand};

@@ -1079,22 +1079,32 @@ impl HostMemoryCoordinator {
     /// The coordinator may reduce the requested worker count when host pressure
     /// is high. The returned lease stays alive for the whole job so other local
     /// processes see the reservation and conservatively back off.
-    pub fn wait_for_job_execution_plan(
+    pub async fn wait_for_job_execution_plan(
         &self,
         command: ReleasedCommand,
         requested_workers: NumWorkers,
         label: &str,
         timeout: Duration,
         poll_interval: Duration,
-    ) -> Result<JobExecutionPlan, HostMemoryError> {
+    ) -> Result<JobExecutionPlan, QueuedLeaseFailure> {
         let wait = LeaseWait::bounded(timeout);
         let mut last_reason = String::from("no capacity decision yet");
         loop {
-            match self.try_plan_job_execution(command, requested_workers, label) {
+            let coordinator = self.clone();
+            let attempt_label = label.to_owned();
+            let attempt = crate::blocking::spawn_in_span(move || {
+                coordinator.try_plan_job_execution(command, requested_workers, &attempt_label)
+            })
+            .await
+            .map_err(QueuedLeaseFailure::AttemptDidNotFinish)?;
+            match attempt {
                 Ok(plan) => return Ok(plan),
                 Err(error) => match after_failed_attempt(error, label, &wait, &mut last_reason) {
-                    LeaseStep::Retry => std::thread::sleep(poll_interval),
-                    LeaseStep::Stop(error) => return Err(error),
+                    // Dropping the admission future stops polling. At most
+                    // one ledger transaction remains; it cannot start a
+                    // worker, and an unreceived plan releases its lease.
+                    LeaseStep::Retry => tokio::time::sleep(poll_interval).await,
+                    LeaseStep::Stop(error) => return Err(QueuedLeaseFailure::Refused(error)),
                 },
             }
         }

@@ -119,44 +119,6 @@ fn test_config() -> crate::config::ServerConfig {
     }
 }
 
-/// Exercise the real store boundary: stopping queued work is cancellation;
-/// an unexplained dispatch exit is still a system error. Neither is success.
-#[tokio::test]
-async fn unfinished_file_cleanup_preserves_the_jobs_exit_cause() {
-    for (cause, category, forced) in [
-        (
-            UnfinishedFileCause::Cancelled,
-            FailureCategory::Cancelled,
-            0,
-        ),
-        (
-            UnfinishedFileCause::UnexpectedExit,
-            FailureCategory::System,
-            1,
-        ),
-    ] {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = Arc::new(JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            Arc::new(crate::clock::SystemClock),
-        ));
-        let sink = StoreRunnerEventSink::wrap(store.clone());
-        let job_id = JobId::from("unfinished-job");
-        store.submit(make_job("unfinished-job")).await.unwrap();
-        assert_eq!(
-            force_terminal_file_states(sink.as_ref(), &job_id, cause).await,
-            forced
-        );
-        let detail = store.get_job_detail(&job_id).await.unwrap();
-        assert_eq!(detail.file_statuses.len(), 1);
-        let file = &detail.file_statuses[0];
-        assert_eq!(file.status, FileStatusKind::Error);
-        assert_eq!(file.error_category, Some(category));
-    }
-}
-
 fn make_job(id: &str) -> Job {
     let mut file_statuses = HashMap::new();
     file_statuses.insert(

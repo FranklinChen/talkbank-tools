@@ -580,6 +580,11 @@ mod tests {
                 vec!["a.cha".into()],
             );
             store.submit(job).await.expect("submit shutdown-recover");
+            let claim = crate::store::queries::tests::claim_runner(
+                &store,
+                &JobId::from("shutdown-recover"),
+            )
+            .await;
             store
                 .mark_job_running(&JobId::from("shutdown-recover"))
                 .await;
@@ -589,6 +594,13 @@ mod tests {
                 interrupted, 1,
                 "the running job should be interrupted at shutdown"
             );
+            assert!(matches!(
+                store
+                    .complete_run(claim, store.event_time())
+                    .await
+                    .expect("stopped runner cleanup"),
+                crate::store::RunCompletion::Superseded
+            ));
 
             let info = store
                 .get(&JobId::from("shutdown-recover"))

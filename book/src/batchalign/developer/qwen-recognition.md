@@ -177,10 +177,16 @@ aligner, whose standalone fold needs every unit's position.
 ## Replay compatibility
 
 The ready standalone FA host reports a `QwenFaCacheIdentity`: model ID plus
-`QwenFaAdmissionRevision.BOUNDED_UNIT_EVIDENCE_V1`. The wire name ends in
-`@bounded-unit-evidence-v1`. Both raw and derived FA cache envelopes are admitted
-against this name. Earlier model-only namespaces cannot authorize replay under
-the new timing rules; the cached rows no longer contain the unit evidence
+`QwenFaAdmissionRevision.UNIT_DEFECTS_UNTIMED_V2`. The wire name ends in
+`@unit-defects-untimed-v2`. Both raw and derived FA cache envelopes are admitted
+against this name. Under this revision a unit whose own span is unusable
+(non-finite, negative, reversed, or past its window's end) is admitted as
+`RejectedWindowTiming`: that unit is untimed with its defect kept and the
+unchanged report logged, and every other unit keeps its timing. Units that run
+backwards against each other still reject the window. The previous revision,
+`@bounded-unit-evidence-v1`, failed the whole window for one such unit, so its
+results cannot replay under this one. Earlier model-only namespaces cannot
+authorize replay under these timing rules either; the cached rows no longer contain the unit evidence
 needed to prove those rules retroactively. Existing cache bytes are retained.
 This changes replay compatibility without renaming the selected model.
 

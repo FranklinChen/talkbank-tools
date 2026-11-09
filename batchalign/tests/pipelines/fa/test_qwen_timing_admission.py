@@ -17,9 +17,9 @@ from batchalign.inference.languages.cantonese._qwen_common import (
 )
 from batchalign.inference.qwen_forced_alignment import (
     IndexedWindowUnit,
+    OutsideAudioWindow,
     PairedWindowAlignment,
     QwenFaHost,
-    QwenTimingInvalid,
     TimedChatWord,
     UntimedChatWord,
     UntimedReason,
@@ -34,6 +34,7 @@ from batchalign.inference.qwen_timing import (
     QwenRecordingOrderInvalid,
     RecordingChunkSpeech,
     RecordingStart,
+    RejectedWindowTiming,
     SpokenWindowWords,
     UnavailableWindowTiming,
     WindowAlignment,
@@ -51,16 +52,28 @@ def _speech(words, duration=1.0):
 
 
 @pytest.mark.parametrize("start,end", [(1.1, 1.2), (0.8, 1.01), (2.0, 3.0)])
-def test_the_asr_boundary_names_out_of_window_times_and_recording_location(start, end):
+def test_an_out_of_window_unit_is_untimed_and_its_neighbours_keep_their_timing(
+    start, end
+):
+    """An out-of-window unit retains its defect without rejecting the chunk;
+    neighbouring units keep their admitted timing."""
     recognizer = _ready_qwen(
-        _RecordingAligner([WindowAlignedWord("hello", start, end)])
+        _RecordingAligner(
+            [
+                WindowAlignedWord("hello", 0.1, 0.3),
+                WindowAlignedWord("world", start, end),
+            ]
+        )
     )
-    with pytest.raises(QwenTimingInvalid) as error:
-        recognizer._align_chunk(AudioChunk(np.zeros(SAMPLE_RATE), 180.0), "hello")
-    detail = str(error.value)
-    assert "recording window 180..181 s" in detail
-    assert "unit 1 'hello'" in detail
-    assert "outside its 0..1 s audio window" in detail
+    speech = recognizer._align_chunk(
+        AudioChunk(np.zeros(SAMPLE_RATE), 180.0), "hello world"
+    )
+    first, second = speech.words
+    assert isinstance(first.timing, ObservedRecordingSpan)
+    assert first.timing.start_s == pytest.approx(180.1)
+    assert isinstance(second.timing, RejectedWindowTiming)
+    assert isinstance(second.timing.defect, OutsideAudioWindow)
+    assert second.timing.defect.duration_s == pytest.approx(1.0)
 
 
 def test_an_exact_window_end_is_admitted_and_positionless_time_is_explicit():

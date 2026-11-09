@@ -335,6 +335,17 @@ mod tests {
     use crate::store::{FileStatus, auto_max_concurrent_from};
     use crate::ws::BROADCAST_CAPACITY;
 
+    pub(super) async fn claim_runner(store: &JobStore, id: &JobId) -> crate::store::RunnerClaim {
+        match store.begin_runner(id).await.expect("job exists") {
+            crate::store::BeginRunnerOutcome::Started { claim, .. } => claim,
+            crate::store::BeginRunnerOutcome::RunnerStillLive => panic!("test job already claimed"),
+            crate::store::BeginRunnerOutcome::Stopped { .. } => panic!("test job already stopped"),
+            crate::store::BeginRunnerOutcome::NotRunnable { status } => {
+                panic!("test job is not runnable: {status}")
+            }
+        }
+    }
+
     pub(super) fn test_config() -> crate::config::ServerConfig {
         crate::config::ServerConfig {
             max_concurrent_jobs: Some(2),
@@ -395,7 +406,7 @@ mod tests {
     /// this area asserts only the in-memory side, which is how the hole
     /// survived.
     #[tokio::test]
-    async fn a_refused_finalize_is_not_persisted() {
+    async fn cancelled_run_completion_persists_cancellation() {
         let (store, db, _dir) = test_store_with_db().await;
 
         let job_id = JobId::from("cancel-then-finalize");
@@ -407,21 +418,26 @@ mod tests {
             ))
             .await
             .expect("submit");
+        let claim = claim_runner(&store, &job_id).await;
         store.mark_job_running(&job_id).await;
+        store
+            .start_file_attempt(
+                &job_id,
+                "a.cha",
+                crate::scheduling::WorkUnitKind::FileProcess,
+                store.event_time(),
+            )
+            .await;
         store
             .cancel(&job_id, CancellationRequest::default())
             .await
             .expect("cancel a running job");
 
-        // The runner drains and reports success for work the user stopped.
+        // Completion derives cancellation; callers cannot supply success.
         store
-            .finalize_job(
-                &job_id,
-                crate::store::RunGeneration::FIRST,
-                JobStatus::Completed,
-                crate::store::EventTime::fixed(MachineTime::now()),
-            )
-            .await;
+            .complete_run(claim, crate::store::EventTime::fixed(MachineTime::now()))
+            .await
+            .expect("complete cancelled run");
 
         assert_eq!(
             store.job_status(&job_id).await,
@@ -438,6 +454,55 @@ mod tests {
             "the DATABASE must agree; a row written as a finished state is \
              never revisited by startup recovery"
         );
+        let attempts = db.load_attempts_for_job(&job_id).await.expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].outcome,
+            crate::scheduling::AttemptOutcome::Cancelled
+        );
+        assert_eq!(
+            attempts[0].failure_category,
+            Some(crate::scheduling::FailureCategory::Cancelled)
+        );
+
+        // A cancellation accepted before claim creation grants cleanup only.
+        let waiting = JobId::from("cancel-before-claim");
+        store
+            .submit(make_job(
+                waiting.as_ref(),
+                ReleasedCommand::Morphotag,
+                vec!["b.cha".into()],
+            ))
+            .await
+            .unwrap();
+        store
+            .cancel(&waiting, CancellationRequest::default())
+            .await
+            .unwrap();
+        let crate::store::BeginRunnerOutcome::Stopped { completion } =
+            store.begin_runner(&waiting).await.unwrap()
+        else {
+            panic!("a stopped job must not receive a dispatch claim");
+        };
+        store
+            .complete_stopped_run(completion, store.event_time())
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get(&waiting)
+                .await
+                .unwrap()
+                .file_statuses
+                .iter()
+                .all(|file| file.status.is_terminal())
+        );
+        assert!(matches!(
+            store.begin_runner(&waiting).await.unwrap(),
+            crate::store::BeginRunnerOutcome::NotRunnable {
+                status: JobStatus::Cancelled
+            }
+        ));
     }
 
     /// A file written with diagnostics is terminal written output end to
@@ -503,20 +568,13 @@ mod tests {
             )
             .await;
 
-        let completion = store
-            .completion_snapshot(&job_id)
-            .await
-            .expect("completion facts");
-        assert!(!completion.any_failed, "a diagnosed file is not a failure");
-        assert!(!completion.all_failed);
         store
-            .finalize_job(
-                &job_id,
-                crate::store::RunGeneration::FIRST,
-                JobStatus::Completed,
+            .complete_run(
+                claim_runner(&store, &job_id).await,
                 EventTime::fixed(crate::unix_time(4.0)),
             )
-            .await;
+            .await
+            .expect("complete diagnosed output");
 
         let info = store.get(&job_id).await.expect("job");
         assert_eq!(info.status, JobStatus::Completed);

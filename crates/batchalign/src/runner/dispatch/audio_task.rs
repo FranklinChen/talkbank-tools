@@ -347,28 +347,12 @@ mod tests {
             _change: crate::store::WorkerWaitChange,
         ) {
         }
-        async fn unfinished_files(&self, _job_id: &JobId) -> Vec<DisplayPath> {
-            Vec::new()
-        }
-        async fn file_status_label(&self, _job_id: &JobId, _filename: &str) -> Option<String> {
-            None
-        }
-        async fn bump_forced_terminal_errors(&self, _count: usize) {}
         async fn fail_job(&self, _job_id: &JobId, _error: &str) {}
         async fn mark_job_running(&self, _job_id: &JobId) {}
         async fn record_job_worker_count(&self, _job_id: &JobId, _worker_count: usize) {}
         async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: MachineTime) {}
         async fn bump_deferred_work_units(&self) {}
         async fn bump_memory_gate_aborts(&self) {}
-        async fn finalize_job(
-            &self,
-            _job_id: &JobId,
-            _expected_generation: crate::store::RunGeneration,
-            _final_status: crate::api::JobStatus,
-            _completed_at: crate::store::EventTime,
-        ) -> Option<String> {
-            None
-        }
     }
 
     struct FakeAudioTask {

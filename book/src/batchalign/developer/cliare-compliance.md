@@ -13,6 +13,17 @@ measurements of another tool or an earlier candidate.
 
 ## Required development process
 
+Job-control review includes admission before the first file: the consuming run
+scope now owns job-slot and host-memory waits as well as worker preparation.
+Cancellation during those waits closes unfinished files without waiting for
+capacity. Cancellation accepted before claim creation grants completion-only
+authority; a delayed task for another terminal job cannot acquire resources.
+Shutdown supersedes the old run so its cleanup preserves resumable work.
+These changes preserve CLI spellings, wire schemas and legacy pathways. The
+HTTP capacity-wait control and persistent shutdown/recovery control qualify
+those boundaries separately from current-candidate CLIARE measurement. See
+the [run ownership flow](../architecture/job-state-machine.md#what-a-cancel-stops).
+
 1. Identify the affected CLI contract and its owning types before implementation.
    Decode retained spellings at the boundary into the same typed command intent;
    do not duplicate runtime policy behind an alias.
@@ -114,7 +125,7 @@ remains follow-up unless an observed functional failure requires it.
 | Area | Source status | Qualification still required |
 | --- | --- | --- |
 | FA model preparation and memory waiting | Typed preparation and lease-owning execution are implemented; `preparing_alignment` distinguishes candidate work from final inference, alongside startup/download/wait progress. | Integrated managed execution and visible CLI progress for the final candidate. |
-| Cancellation and file completion | Cancellation causes and queued-file cancellation outcomes have explicit states. | Candidate command journeys showing terminal file outcomes and recovery. |
+| Cancellation and file completion | A linear `RunnerClaim` binds generation, snapshot and cancellation. Consuming `RunScope` supervises preparation, worker warmup and file dispatch; children inherit context without dispatch authority. Completion consumes the claim and admits generation, file cleanup and derived job status in one registry mutation. | Model-free HTTP failure/restart/cancel controls cover advancing capability loads and pre-scaling before any file starts. Whole-candidate CLI measurement and real-model qualification remain separate; no grammar or legacy route was removed. |
 | Resource-constrained alignment | Adaptive source-bound partitioning is integrated in full and incremental FA; exact unavailable constraints are retained in evidence schema 11. Cache-first preparation, unique input owners and retained-input fallback prevent repeated work. | Deterministic cache and seven-case partial-output parity controls pass; final candidate command journeys and managed-model qualification remain pending. |
 | UTR search admission | Development source consumes literal preparation into one retained graph survey and its row plan; representation rejection returns that surveyed owner. Execution consumes its plan. The execution work counter can no longer refuse at 64 million operations; preparation/representation work, storage and candidate limits remain. CPU search clears preceding ASR-window counts to show indeterminate recovery. Shared host-memory admission is unfinished; no new CLI switch or compatibility removal is implemented. | Existing correspondence oracles include complete common-pair recovery beyond the former execution cutoff. Qualify prepared-demand admission, cancellable waiting, resource refusals, long-input recovery and visible progress on the final candidate; retain direct-library and legacy CLI routes. |
 | Supplied-window recovery under `--main-bullets keep` / `exact` | One terminal exact-window attempt may fill missing positive word timing, without overwriting accepted primary slots. Normal cache identity and resource admission apply; optional `RequireCache` misses preserve primary partial output and never infer. Full/incremental share the consuming session. This explicitly revises the earlier output-only promise; legacy spellings remain accepted. | Source-slot, neighbour, preparation-ownership and cache-only boundary controls; final managed-model recovery and current-candidate measurement must be recorded before qualification. |

@@ -1,4 +1,4 @@
-//! The job scope a runner attempt hands to every file task it spawns.
+//! One runner attempt's cancellation scope, including worker preparation.
 //!
 //! `tokio::spawn` does not inherit task-locals, so a file task spawned by a
 //! command's dispatch loses whatever the runner established around it. Two
@@ -10,7 +10,12 @@
 //! - the job's cancellation token, which the supervisor races against the
 //!   task so a cancelled job's task is dropped wherever it is.
 //!
-//! See `runner::util::file_status::supervision` for how the scope is consumed.
+//! The runner consumes the scope to supervise the whole dispatch, before
+//! capability probing or pre-scaling can start. Child file/background work
+//! inherits the same scope. No preparation wait can outlive cancellation just
+//! because it occurs before the first file task.
+//!
+//! See `runner::util::file_status::supervision` for child task supervision.
 
 use std::future::Future;
 
@@ -24,13 +29,13 @@ use super::util::FileTaskOutcome;
 tokio::task_local! {
     /// The job whose file tasks are being spawned. Set once per runner attempt
     /// by `run_hosted_job` around command dispatch.
-    static FILE_TASK_SCOPE: FileTaskScope;
+    static RUN_SCOPE: RunContext;
 }
 
 /// Where a file task is being spawned from.
 pub(crate) enum SpawnScope {
     /// Inside a runner attempt: the task inherits the job's scope.
-    Job(FileTaskScope),
+    Job(RunContext),
     /// Outside any runner. Only tests of the supervision layer spawn here; in
     /// production it would be a dispatch path that bypassed `run_hosted_job`.
     Unscoped,
@@ -68,8 +73,8 @@ pub(crate) fn spawn_background(work: impl Future<Output = ()> + Send + 'static) 
     use tracing::Instrument;
 
     let span = tracing::Span::current();
-    match FileTaskScope::current() {
-        SpawnScope::Job(FileTaskScope {
+    match RunContext::current() {
+        SpawnScope::Job(RunContext {
             job_id,
             cancel_token,
         }) => {
@@ -98,40 +103,105 @@ pub(crate) fn spawn_background(work: impl Future<Output = ()> + Send + 'static) 
 /// every per-file spawn uses (the supervised file tasks, and the morphotag and
 /// utseg fan-outs, which run on their own `JoinSet`).
 pub(crate) fn current_file_span(filename: &DisplayPath, role: &'static str) -> tracing::Span {
-    FileTaskScope::current().file_span(filename, role)
+    RunContext::current().file_span(filename, role)
 }
 
-/// What every file task of one job attempt inherits from its runner.
-///
-/// Constructed only by the runner, from the job snapshot it is executing, so
-/// the job id and the cancellation token always belong to the same attempt.
+/// Shared cancellation context. Children inherit it, but cannot dispatch or
+/// finalize the run: only `RunScope` owns that claim.
 #[derive(Clone)]
-pub(crate) struct FileTaskScope {
+pub(crate) struct RunContext {
     job_id: JobId,
     cancel_token: CancellationToken,
 }
 
-impl FileTaskScope {
-    /// The scope of one runner attempt of `job_id`.
-    pub(crate) fn new(job_id: JobId, cancel_token: CancellationToken) -> Self {
-        Self {
-            job_id,
-            cancel_token,
-        }
+/// Linear authority to dispatch exactly once under the claimed input.
+pub(super) struct RunScope {
+    claim: crate::store::RunnerClaim,
+    context: RunContext,
+}
+
+/// Execution returns the claim with its outcome, never a second run scope.
+pub(super) struct EndedDispatch {
+    pub claim: crate::store::RunnerClaim,
+    pub outcome: Result<super::context::HostedJobRunOutcome, crate::error::ServerError>,
+}
+
+/// The claimed run owns its heartbeat, including abort on dropped execution.
+struct RunHeartbeat(tokio::task::JoinHandle<()>);
+
+impl Drop for RunHeartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl RunScope {
+    /// Bind identity and cancellation from the claimed snapshot, consuming the
+    /// only authority that could create another dispatch for this attempt.
+    pub(super) fn for_run(claim: crate::store::RunnerClaim) -> Self {
+        let job = claim.snapshot();
+        let context = RunContext {
+            job_id: job.identity.job_id.clone(),
+            cancel_token: job.cancel_token.clone(),
+        };
+        Self { claim, context }
     }
 
+    /// Cancellation wins before polling admission or dispatch. The heartbeat
+    /// is created only after the claim exists and ends before claim release.
+    pub(super) async fn execute(
+        self,
+        store: std::sync::Arc<crate::store::JobStore>,
+        execution: impl Future<
+            Output = Result<super::context::HostedJobRunOutcome, crate::error::ServerError>,
+        >,
+    ) -> EndedDispatch {
+        let Self { claim, context } = self;
+        let job_id = context.job_id.clone();
+        let cancelled = context.cancel_token.clone();
+        let heartbeat_job = job_id.clone();
+        let heartbeat = RunHeartbeat(tokio::spawn(async move {
+            const STALL_ALARM: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            loop {
+                tokio::time::sleep(crate::config::LEASE_HEARTBEAT).await;
+                if store.renew_job_lease(&heartbeat_job).await
+                    == crate::store::LeaseRenewalOutcome::Stop
+                {
+                    break;
+                }
+                if let Some(last_activity) = store.last_file_activity_at(&heartbeat_job).await {
+                    let idle = store.now().saturating_duration_since(last_activity);
+                    if idle > STALL_ALARM {
+                        tracing::error!(job_id = %heartbeat_job, idle_minutes = idle.as_secs() / 60,
+                            "job appears STALLED: no file activity while the runner is live");
+                    }
+                }
+            }
+        }));
+        let outcome = CURRENT_JOB_ID
+            .scope(
+                job_id,
+                RUN_SCOPE.scope(context, async move {
+                    tokio::select! {
+                        biased;
+                        () = cancelled.cancelled() => Ok(super::context::HostedJobRunOutcome::Completed),
+                        result = execution => result,
+                    }
+                }),
+            )
+            .await;
+        drop(heartbeat);
+        EndedDispatch { claim, outcome }
+    }
+}
+
+impl RunContext {
     /// The scope the caller is running in.
     pub(crate) fn current() -> SpawnScope {
-        match FILE_TASK_SCOPE.try_with(Self::clone) {
+        match RUN_SCOPE.try_with(Self::clone) {
             Ok(scope) => SpawnScope::Job(scope),
             Err(_) => SpawnScope::Unscoped,
         }
-    }
-
-    /// Run a command's dispatch inside this scope, so every file task it
-    /// spawns inherits the job's identity and cancellation.
-    pub(crate) async fn enclose<F: Future>(self, dispatch: F) -> F::Output {
-        FILE_TASK_SCOPE.scope(self, dispatch).await
     }
 
     /// The future a supervised file task actually runs: the command's own
@@ -141,20 +211,21 @@ impl FileTaskScope {
         self,
         future: crate::owned_future::OwnedFuture<'static, FileTaskOutcome>,
     ) -> FileTaskOutcome {
-        let Self {
-            job_id,
-            cancel_token,
-        } = self;
+        let job_id = self.job_id.clone();
+        let cancel_token = self.cancel_token.clone();
         CURRENT_JOB_ID
-            .scope(job_id, async move {
-                tokio::select! {
-                    // Cancellation first: a task spawned after the cancel
-                    // must not take even one step.
-                    biased;
-                    () = cancel_token.cancelled() => FileTaskOutcome::StoppedByCancellation,
-                    outcome = future => outcome,
-                }
-            })
+            .scope(
+                job_id,
+                RUN_SCOPE.scope(self, async move {
+                    tokio::select! {
+                        // Cancellation first: a task spawned after the cancel
+                        // must not take even one step.
+                        biased;
+                        () = cancel_token.cancelled() => FileTaskOutcome::StoppedByCancellation,
+                        outcome = future => outcome,
+                    }
+                }),
+            )
             .await
     }
 }

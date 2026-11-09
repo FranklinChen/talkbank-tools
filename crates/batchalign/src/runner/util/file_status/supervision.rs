@@ -7,7 +7,7 @@
 //!
 //! # A file task belongs to its job, and a cancelled job stops its tasks
 //!
-//! Every file task runs inside the `FileTaskScope` its runner established
+//! Every file task runs inside the `RunScope` its runner established
 //! around command dispatch. The scope carries two facts a spawned task would
 //! otherwise lose, because `tokio::spawn` does not inherit task-locals:
 //!
@@ -32,7 +32,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
 use crate::api::{DisplayPath, JobId};
-use crate::runner::job_scope::{FileTaskScope, SpawnScope};
+use crate::runner::job_scope::{RunContext, SpawnScope};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
 
 use super::tracker::set_file_progress;
@@ -68,7 +68,7 @@ pub(crate) fn spawn_supervised_file_task<F>(
 where
     F: Future<Output = FileTaskOutcome> + Send + 'static,
 {
-    let scope = FileTaskScope::current();
+    let scope = RunContext::current();
     // Heap-owned before it enters any wrapper (see `crate::owned_future`).
     let future: crate::owned_future::OwnedFuture<'static, FileTaskOutcome> = Box::pin(future);
     // Every event the task emits carries its file and job (see
@@ -314,61 +314,6 @@ impl crate::worker::pool::checkout_wait::PoolWaitObserver for ForwardedWaits {
         let _ = self
             .events
             .send(crate::store::WorkerWaitChange::Ended(wait));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// force_terminal_file_states: last-resort cleanup for leaked tasks
-// ---------------------------------------------------------------------------
-
-/// Why an ended runner has files without a terminal result. Cancellation is
-/// an expected exit, not evidence of a system failure in each queued file.
-#[derive(Clone, Copy)]
-pub(crate) enum UnfinishedFileCause {
-    /// The user stopped the job.
-    Cancelled,
-    /// Dispatch ended without accounting for all its work.
-    UnexpectedExit,
-}
-
-/// Fallback cleanup for any files that still failed to reach a terminal state.
-///
-/// The supervised file-task boundary should normally make this path a no-op.
-/// It remains as a last-resort guard against leaked tasks or other control-
-/// plane bugs.
-pub(crate) async fn force_terminal_file_states(
-    sink: &dyn RunnerEventSink,
-    job_id: &JobId,
-    cause: UnfinishedFileCause,
-) -> usize {
-    let unfinished: Vec<DisplayPath> = sink.unfinished_files(job_id).await;
-
-    if unfinished.is_empty() {
-        return 0;
-    }
-
-    let now = sink.now();
-    for filename in &unfinished {
-        if let UnfinishedFileCause::Cancelled = cause {
-            record_abnormal_file_task_exit(sink, job_id, filename, "File", FileTaskExit::Cancelled)
-                .await;
-            continue;
-        }
-        let last_status = sink
-            .file_status_label(job_id, filename)
-            .await
-            .unwrap_or_default();
-        let msg = format!("File did not reach terminal status (last status: {last_status})");
-        sink.mark_file_error(job_id, filename, &msg, FailureCategory::System, now)
-            .await;
-    }
-
-    match cause {
-        UnfinishedFileCause::Cancelled => 0,
-        UnfinishedFileCause::UnexpectedExit => {
-            sink.bump_forced_terminal_errors(unfinished.len()).await;
-            unfinished.len()
-        }
     }
 }
 

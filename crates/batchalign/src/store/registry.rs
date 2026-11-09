@@ -12,9 +12,7 @@ use batchalign_types::paths::ServerPath;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
-use crate::api::{
-    DisplayPath, FileStatusEntry, JobId, JobInfo, JobListItem, JobStatus, MachineTime, NodeId,
-};
+use crate::api::{FileStatusEntry, JobId, JobInfo, JobListItem, JobStatus, MachineTime, NodeId};
 use crate::error::ServerError;
 use crate::scheduling::LeaseRecord;
 
@@ -64,28 +62,42 @@ pub(crate) struct ClaimedQueuePoll {
     pub(crate) claimed_leases: Vec<ClaimedLeaseRecord>,
 }
 
-/// Minimal facts the runner needs when deciding a job's terminal outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct JobCompletionSnapshot {
-    /// Whether the job's cancellation token has been triggered.
-    pub cancelled: bool,
-    /// Whether every terminal file currently recorded is an error.
-    ///
-    /// Strict all-or-nothing test. Useful for diagnostics. The
-    /// `run_hosted_job` finalizer uses [`Self::any_failed`] for the
-    /// `Completed` vs `Failed` decision, see the 2026-05-11
-    /// regression in `runner/execution.rs`.
-    pub all_failed: bool,
-    /// Whether at least one terminal file currently recorded is an
-    /// error.
-    ///
-    /// This is the predicate that drives `JobStatus::Failed`
-    /// vs `Completed` for a job that has reached its terminal point.
-    /// The `JobStatus` enum docstring at `types/status.rs:27-31`
-    /// defines `Completed` as "all files processed successfully" and
-    /// `Failed` as "one or more files encountered an unrecoverable
-    /// error": `any_failed` is the boundary between those two states.
-    pub any_failed: bool,
+/// The dispatch's actual exit, distinct from the derived job status.
+pub(crate) enum RunExit {
+    Dispatched,
+    Failed(String),
+}
+
+/// Cleanup admitted by a run claim, ready for persistence and notification.
+pub(crate) struct ForcedFileUpdate {
+    pub update: FileUpdateProjection,
+    pub failure: FileFailureRecord,
+}
+
+/// Effects of the registry's atomic completion transition.
+pub(crate) struct FinishedRunProjection {
+    pub job_update: JobListItem,
+    pub files: Vec<ForcedFileUpdate>,
+    pub cleanup: CompletionCleanup,
+}
+
+/// Attempt bookkeeping admitted with the file cleanup, never inferred again
+/// from an error message or a possibly restarted job.
+pub(crate) enum CompletionCleanup {
+    Cancelled,
+    SystemFailures(usize),
+}
+
+/// Superseded claims cannot produce file updates or a terminal projection.
+pub(crate) enum RunFinishProjection {
+    Superseded,
+    Finished(Box<FinishedRunProjection>),
+}
+
+/// Admitted effects retain the old owner's claim until persistence ends.
+pub(crate) struct FinishingRun {
+    pub claim: crate::store::RunnerClaim,
+    pub projection: RunFinishProjection,
 }
 
 /// One file update projected into the WebSocket/dashboard shape.
@@ -503,56 +515,78 @@ impl JobRegistry {
         .flatten()
     }
 
-    /// Return the minimal facts needed to compute the final terminal status.
-    pub(crate) async fn completion_snapshot(
+    /// Consume a run's authority in one actor mutation. Generation admission,
+    /// unfinished-file cleanup and final status have no restart interleaving.
+    pub(crate) async fn complete_run(
         &self,
-        job_id: &JobId,
-    ) -> Option<JobCompletionSnapshot> {
-        self.project_job(job_id.clone(), |job| JobCompletionSnapshot {
-            cancelled: job.is_cancelled(),
-            all_failed: job.all_terminal_files_failed(),
-            any_failed: job.any_terminal_files_failed(),
-        })
-        .await
-    }
-
-    /// Finalize one job and return the summary row for live notifications.
-    ///
-    /// The returned `JobListItem` carries the job-level `error` (populated by
-    /// `to_list_item` from the reason `finalize` aggregated), so the caller can
-    /// both broadcast it and persist it without a separate read.
-    pub(crate) async fn finalize_job(
-        &self,
-        job_id: &JobId,
-        expected_generation: crate::store::RunGeneration,
-        final_status: JobStatus,
-        completed_at: MachineTime,
-    ) -> Option<JobListItem> {
-        self.update_job(job_id.clone(), move |job| {
-            // Stale-runner guard: a restart moves the job to a new run
-            // generation; a runner still finishing under the old one must
-            // not clobber the restarted job's state (2026-07-10 field
-            // failure: bogus `failed` over a healthy restarted run).
-            if job.runtime.run_generation != expected_generation {
-                tracing::warn!(
-                    job_id = %job.identity.job_id,
-                    stale = %expected_generation,
-                    current = %job.runtime.run_generation,
-                    "refusing finalization from a stale runner generation"
-                );
-                return None;
+        claim: crate::store::RunnerClaim,
+        exit: RunExit,
+        finished_at: crate::store::EventTime,
+    ) -> Option<FinishingRun> {
+        let job_id = claim.snapshot().identity.job_id.clone();
+        self.update_job(job_id, move |job| {
+            if job.runtime.run_generation != claim.generation() {
+                return FinishingRun { claim, projection: RunFinishProjection::Superseded };
             }
-            if !job.finalize(final_status, completed_at) {
-                tracing::debug!(
-                    job_id = %job.identity.job_id,
-                    status = %job.execution.status,
-                    "finalization declined; the job keeps the status it reached"
-                );
+            let cancelled = job.is_cancelled();
+            let files = job.execution.file_statuses.iter()
+                .filter(|(_, file)| !file.status().is_terminal())
+                .map(|(filename, file)| {
+                    let (message, category) = if cancelled {
+                        (
+                            "File stopped after job cancellation before recording a terminal file state".to_owned(),
+                            crate::scheduling::FailureCategory::Cancelled,
+                        )
+                    } else {
+                        (
+                            match &exit {
+                                RunExit::Dispatched => format!("File did not reach terminal status (last status: {})", file.status()),
+                                RunExit::Failed(message) => message.clone(),
+                            },
+                            crate::scheduling::FailureCategory::System,
+                        )
+                    };
+                    (filename.clone(), FileFailureRecord { message, category, finished_at })
+                })
+                .collect::<Vec<_>>();
+            let mut updates = Vec::with_capacity(files.len());
+            for (filename, failure) in files {
+                job.mark_file_error(&filename, &failure);
+                // This filename came from this same map and cannot disappear
+                // during the actor mutation.
+                if let Some(update) = Self::file_update_projection(job, &filename) {
+                    updates.push(ForcedFileUpdate { update, failure });
+                }
             }
-            Some(job.to_list_item())
-        })
-        .await
-        .flatten()
+            let status = if cancelled {
+                JobStatus::Cancelled
+            } else if job.any_terminal_files_failed() {
+                JobStatus::Failed
+            } else {
+                JobStatus::Completed
+            };
+            // Already accepted cancellation/shutdown retains its status/time.
+            match exit {
+                RunExit::Dispatched => { let _ = job.finalize(status, finished_at.instant()); }
+                RunExit::Failed(message) => {
+                    if cancelled {
+                        let _ = job.finalize(status, finished_at.instant());
+                    } else {
+                        let _ = job.fail(&message, finished_at.instant());
+                    }
+                }
+            }
+            let projection = RunFinishProjection::Finished(Box::new(FinishedRunProjection {
+                job_update: job.to_list_item(),
+                cleanup: if cancelled {
+                    CompletionCleanup::Cancelled
+                } else {
+                    CompletionCleanup::SystemFailures(updates.len())
+                },
+                files: updates,
+            }));
+            FinishingRun { claim, projection }
+        }).await
     }
 
     /// Claim exclusive runner ownership of one job.
@@ -560,8 +594,8 @@ impl JobRegistry {
     /// Exactly one live runner may own a job at a time; a second claim
     /// (e.g. a restarted runner arriving while the cancelled one is still
     /// tearing down) reports [`BeginRunnerOutcome::RunnerStillLive`] and
-    /// must wait. Returns the claimed run generation on success so every
-    /// later privileged mutation can be checked for staleness.
+    /// must wait. The successful claim owns its generation and snapshot;
+    /// completion consumes it before admitting cleanup.
     pub(crate) async fn begin_runner(
         &self,
         job_id: &JobId,
@@ -574,6 +608,21 @@ impl JobRegistry {
         self.update_job(job_id.clone(), move |job| {
             if job.runtime.runner_active {
                 BeginRunnerOutcome::RunnerStillLive
+            } else if job.execution.status == JobStatus::Cancelled
+                && job
+                    .execution
+                    .file_statuses
+                    .values()
+                    .any(|file| !file.status().is_terminal())
+            {
+                job.runtime.runner_active = true;
+                BeginRunnerOutcome::Stopped {
+                    completion: crate::store::StoppedRun::for_job(job),
+                }
+            } else if job.execution.status.is_terminal() {
+                BeginRunnerOutcome::NotRunnable {
+                    status: job.execution.status,
+                }
             } else {
                 job.runtime.runner_active = true;
                 // Establish the queue lease at claim time so the runner's
@@ -583,7 +632,7 @@ impl JobRegistry {
                 let lease = crate::scheduling::LeaseRecord::taken(node_id.clone(), now, lease_ttl);
                 job.schedule.lease = Some(lease.clone());
                 BeginRunnerOutcome::Started {
-                    generation: job.runtime.run_generation,
+                    claim: crate::store::RunnerClaim::for_job(job),
                     lease,
                 }
             }
@@ -605,19 +654,6 @@ impl JobRegistry {
         })
         .await
         .flatten()
-    }
-
-    /// Return whether `generation` is still the job's current run generation.
-    pub(crate) async fn runner_generation_current(
-        &self,
-        job_id: &JobId,
-        generation: crate::store::RunGeneration,
-    ) -> bool {
-        self.project_job(job_id.clone(), move |job| {
-            job.runtime.run_generation == generation
-        })
-        .await
-        .unwrap_or(false)
     }
 
     /// Project the download-facing detail view for one job.
@@ -733,7 +769,16 @@ impl JobRegistry {
         .await
     }
 
-    /// Release the local dispatch claim on one job.
+    /// Deferral consumes the same exclusive owner as completion/failure.
+    pub(crate) async fn release_run(&self, claim: crate::store::RunnerClaim) -> bool {
+        let job_id = claim.snapshot().identity.job_id.clone();
+        self.update_job(job_id, |job| job.release_local_dispatch_claim())
+            .await
+            .is_some()
+    }
+
+    /// Queue-lease controls exercise the legacy test-only claim operation.
+    #[cfg(test)]
     pub(crate) async fn release_runner_claim(&self, job_id: &JobId) -> bool {
         self.update_job(job_id.clone(), |job| job.release_local_dispatch_claim())
             .await
@@ -760,21 +805,6 @@ impl JobRegistry {
     pub(crate) async fn runner_snapshot(&self, job_id: &JobId) -> Option<RunnerJobSnapshot> {
         self.project_job(job_id.clone(), |job| job.to_runner_snapshot())
             .await
-    }
-
-    /// Return the filenames that still need work for one job.
-    pub(crate) async fn unfinished_files(&self, job_id: &JobId) -> Vec<DisplayPath> {
-        self.project_job(job_id.clone(), |job| job.unfinished_files())
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Return the current human-readable file status label for one file.
-    pub(crate) async fn file_status_label(&self, job_id: &JobId, filename: &str) -> Option<String> {
-        let filename = filename.to_string();
-        self.project_job(job_id.clone(), move |job| job.file_status_label(&filename))
-            .await
-            .flatten()
     }
 
     /// Mark one file as processing and return its file-update projection.

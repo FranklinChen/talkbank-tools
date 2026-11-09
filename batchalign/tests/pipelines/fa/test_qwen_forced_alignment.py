@@ -31,6 +31,7 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
     AudioChunk,
 )
 from batchalign.inference.qwen_forced_alignment import (
+    InvalidUnitSpan,
     PairedWindowAlignment,
     QwenAlignmentMismatch,
     QwenFaHost,
@@ -39,6 +40,7 @@ from batchalign.inference.qwen_forced_alignment import (
     QwenSegmentationNotDecomposable,
     QwenTimingInvalid,
     QwenUnitNotTimed,
+    SpanDefect,
     UntimedReason,
     WindowAlignedWord,
     resolve_qwen_language,
@@ -46,11 +48,12 @@ from batchalign.inference.qwen_forced_alignment import (
 from batchalign.inference.qwen_timing import (
     AudioWindow,
     ObservedRecordingSpan,
+    ObservedWindowSpan,
+    RejectedWindowTiming,
     UnavailableWindowTiming,
     WindowAlignment,
 )
 from batchalign.tests._qwen_recognition import SEGMENTATION_MODEL_POLICY
-from batchalign.worker._model_errors import ModelOutputInvalidError
 
 
 def _admit(units, words, duration_s=1.0):
@@ -413,18 +416,27 @@ def test_a_whole_string_analyser_is_refused_before_any_forward_pass() -> None:
 
 
 @pytest.mark.parametrize(
-    "start,end",
-    [(float("nan"), 1.0), (0.0, float("inf")), (-0.1, 0.5), (0.7, 0.2)],
+    "start,end,defect",
+    [
+        (float("nan"), 1.0, SpanDefect.NON_FINITE),
+        (0.0, float("inf"), SpanDefect.NON_FINITE),
+        (-0.1, 0.5, SpanDefect.NEGATIVE),
+        (0.7, 0.2, SpanDefect.REVERSED),
+    ],
 )
-def test_generated_invalid_spans_are_rejected_before_chat(
-    start: float, end: float
+def test_a_unit_with_an_invalid_span_is_untimed_keeping_its_defect(
+    start: float, end: float, defect: SpanDefect
 ) -> None:
-    with pytest.raises(QwenTimingInvalid) as refusal:
-        _admit(["hello"], [WindowAlignedWord("hello", start, end)])
-    assert isinstance(refusal.value, ModelOutputInvalidError)
-    assert "unit 1 'hello'" in str(refusal.value)
-    assert "generated timings" in str(refusal.value)
-    assert "CHAT input error" in str(refusal.value)
+    """One unit's unusable span untimes that unit; it never fails the window."""
+    alignment = _admit(
+        ["hello", "world"],
+        [WindowAlignedWord("hello", start, end), WindowAlignedWord("world", 0.8, 0.9)],
+    )
+    rejected = alignment.words[0].timing
+    assert isinstance(rejected, RejectedWindowTiming)
+    assert isinstance(rejected.defect, InvalidUnitSpan)
+    assert rejected.defect.defect is defect
+    assert isinstance(alignment.words[1].timing, ObservedWindowSpan)
 
 
 @pytest.mark.parametrize(

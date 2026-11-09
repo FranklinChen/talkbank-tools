@@ -425,10 +425,6 @@ mod tests {
             },
         ));
         assert!(job.any_terminal_files_failed(), "the error is a failure");
-        assert!(
-            !job.all_terminal_files_failed(),
-            "the diagnosed file is not"
-        );
 
         job.execution.status = crate::api::JobStatus::Failed;
         job.prepare_for_restart().expect("admitted restart");

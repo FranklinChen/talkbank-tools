@@ -12,12 +12,12 @@ import torch
 from batchalign.inference.qwen_forced_alignment import (
     PairedWindowAlignment,
     QwenForcedAligner,
-    QwenTimingInvalid,
     resolve_qwen_language,
 )
 from batchalign.inference.qwen_timing import (
     AudioWindow,
     ObservedWindowSpan,
+    RejectedWindowTiming,
     WindowAlignment,
 )
 
@@ -82,17 +82,17 @@ def native_report(end_class: int) -> PairedWindowAlignment:
 def test_native_trace_survives_warning_level_and_rejection(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """An out-of-window unit is untimed, and the unchanged report, native
+    trace included, is logged as the diagnostic for investigation."""
     with caplog.at_level(logging.WARNING):
         reported = native_report(14)
         assert reported.native_trace is not None
         assert reported.native_trace.timestamp_classes == (2, 14)
-        with pytest.raises(QwenTimingInvalid) as rejection:
-            WindowAlignment(reported, AudioWindow(1.0))
-    placed = rejection.value.in_recording_window(2.0, 1.0)
-    assert "recording window 2..3 s" in str(placed)
-    payload = json.loads(
-        str(placed).split("Qwen rejected alignment diagnostic: ", 1)[1]
-    )
+        admitted = WindowAlignment(reported, AudioWindow(1.0))
+    assert isinstance(admitted.words[0].timing, RejectedWindowTiming)
+    logged = [r.getMessage() for r in caplog.records if "untimed" in r.getMessage()]
+    assert len(logged) == 1
+    payload = json.loads(logged[0].split("Qwen rejected alignment diagnostic: ", 1)[1])
     assert payload["reported"]["native_trace"]["timestamp_classes"] == [2, 14]
     assert payload["reported"]["words"][0]["end_s"] == 1.12
     assert payload["window_duration_s"] == 1.0

@@ -1,7 +1,7 @@
 # Host Facts Pipeline
 
 **Status:** Current
-**Last updated:** 2026-05-19 22:51 EDT
+**Last updated:** 2026-11-09 13:01 EST
 
 The host-facts pipeline is the four-layer architecture that resolves
 operator overrides against detected host capabilities and warns when
@@ -119,7 +119,7 @@ host exactly once:
 | `serve start --foreground` | `HostSnapshot::read`, then hands it to `serve_with_runtime` |
 | direct CLI dispatch | `HostSnapshot::read`, then hands it to `DirectHost::new` |
 | `worker`, `replay`, daemon device flags, transcribe replay | `HostSnapshot::read` |
-| tests | `HostSnapshot::for_tests` (a declared 64 GB Apple Silicon host) |
+| tests | `HostSnapshot::for_tests` or `for_tests_in` (the same declared 16 GB host) |
 
 `HostSnapshot::read` is the only place host reading can fail: a host
 whose operating system will not report its memory is an error
@@ -145,10 +145,19 @@ made. The admission gates, spawn guard, ledger, pressure eviction, job
 planner and `/health` take memory and load through those readings rather
 than calling `read_system_memory` themselves.
 
+`HostSnapshot::for_tests` shares the test process's declared-host ledger.
+A fixture that must reach a particular concurrency boundary instead owns a
+temporary ledger through `HostSnapshot::for_tests_in`. Its app and worker pool
+consume views from that one snapshot. Other tests cannot spend its capacity;
+CPU/memory figures, admission policy and spawn gates remain the same. This
+keeps a two-worker warmup control from accidentally testing a one-worker file
+load when another test holds a reservation.
+
 ```mermaid
 flowchart LR
     read["HostSnapshot::read<br/>(live facts)"] --> snap["HostSnapshot<br/>tier, readings, ledger"]
     tests["HostSnapshot::for_tests<br/>(laptop_16gb)"] --> snap
+    isolated["HostSnapshot::for_tests_in<br/>(same host, fixture-owned ledger)"] --> snap
     snap -->|runtime_host| rh["RuntimeHost<br/>in WorkerRuntimeConfig"]
     snap -->|memory_coordinator| planner["job planner, /health"]
     rh --> gates["CPU and memory gates,<br/>spawn guard, eviction, ledger"]
@@ -211,7 +220,7 @@ sequenceDiagram
     CLI->>CLI: cfg.with_device_flags, HostSnapshot::read (fails on an unreadable host)
     CLI->>serve_with_runtime: cfg, host snapshot, pool_config, layout
     serve_with_runtime->>Validate: cfg + host.facts()
-    Validate-->>serve_with_runtime: warnings -> tracing::warn!; errors -> abort
+    Validate-->>serve_with_runtime: Log warnings, stop startup on errors
     serve_with_runtime->>DispatchHostContext: from_store (the JobStore holds the snapshot)
     DispatchHostContext-->>Workers: WorkerRuntimeConfig from host.effective() and host.tier()
 ```

@@ -22,9 +22,8 @@ pub(crate) use file_status::{
     ProgressUpdate, RunnerEventSink, StoreRunnerEventSink, TerminalRecorded, set_file_progress,
 };
 pub(crate) use file_status::{
-    UnfinishedFileCause, drain_supervised_file_tasks, force_terminal_file_states,
-    observing_file_waits, record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
-    spawn_supervised_file_task,
+    drain_supervised_file_tasks, observing_file_waits, record_file_cancelled_before_dispatch,
+    spawn_observed_progress_forwarder, spawn_supervised_file_task,
 };
 
 #[cfg(test)]

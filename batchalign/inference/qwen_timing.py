@@ -3,12 +3,20 @@
 Paired model reports are not timing evidence. These constructors are the only
 edges from reports to bounded spans, explicit absence, and recording placement.
 No ML library is imported here.
+
+A unit whose own span is unusable (non-finite, negative, reversed, or outside
+its audio window) is admitted as ``RejectedWindowTiming``: explicit absence
+that keeps the defect, so that unit is untimed and every other unit keeps its
+timing. One bad unit never fails the file. Units that run backwards against
+each other still reject the window, since that defect is not one unit's.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, assert_never
 
@@ -31,6 +39,9 @@ if TYPE_CHECKING:
     from batchalign.inference.qwen_punctuation import PunctuatedAlignment
 
 
+_LOG = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class AudioWindow:
     """The actual duration of the samples handed to the aligner, in seconds."""
@@ -48,16 +59,38 @@ class AudioWindow:
         return cls(len(samples) / sample_rate)
 
 
-def _admit_span(unit: IndexedWindowUnit, window: AudioWindow) -> None:
+@dataclass(frozen=True, slots=True)
+class SpanInWindow:
+    """The unit's own span is finite, ordered and inside its window."""
+
+
+type UnitSpanDefect = InvalidUnitSpan | OutsideAudioWindow
+type SpanVerdict = SpanInWindow | UnitSpanDefect
+
+
+def _judge_span(unit: IndexedWindowUnit, window: AudioWindow) -> SpanVerdict:
+    """The one rule for a unit's own span: in its window, or which defect."""
     word = unit.word
     if not math.isfinite(word.start_s) or not math.isfinite(word.end_s):
-        raise QwenTimingInvalid(InvalidUnitSpan(unit, SpanDefect.NON_FINITE))
+        return InvalidUnitSpan(unit, SpanDefect.NON_FINITE)
     if word.start_s < 0 or word.end_s < 0:
-        raise QwenTimingInvalid(InvalidUnitSpan(unit, SpanDefect.NEGATIVE))
+        return InvalidUnitSpan(unit, SpanDefect.NEGATIVE)
     if word.end_s < word.start_s:
-        raise QwenTimingInvalid(InvalidUnitSpan(unit, SpanDefect.REVERSED))
+        return InvalidUnitSpan(unit, SpanDefect.REVERSED)
     if word.end_s > window.duration_s:
-        raise QwenTimingInvalid(OutsideAudioWindow(unit, window.duration_s))
+        return OutsideAudioWindow(unit, window.duration_s)
+    return SpanInWindow()
+
+
+def _admit_span(unit: IndexedWindowUnit, window: AudioWindow) -> None:
+    """Guard for the timing constructors that claim a usable span."""
+    match _judge_span(unit, window):
+        case SpanInWindow():
+            pass
+        case InvalidUnitSpan() | OutsideAudioWindow() as defect:
+            raise QwenTimingInvalid(defect)
+        case unreachable:
+            assert_never(unreachable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +127,31 @@ class UnavailableWindowTiming:
             raise ValueError("unavailable timing requires a zero-width report")
 
 
-type WindowTiming = ObservedWindowSpan | UnavailableWindowTiming
+@dataclass(frozen=True, slots=True)
+class RejectedWindowTiming:
+    """A unit whose reported span is unusable: untimed, keeping the defect."""
+
+    defect: UnitSpanDefect
+
+    @property
+    def unit(self) -> IndexedWindowUnit:
+        return self.defect.unit
+
+
+type WindowTiming = ObservedWindowSpan | UnavailableWindowTiming | RejectedWindowTiming
+
+
+def _admit_timing(unit: IndexedWindowUnit, window: AudioWindow) -> WindowTiming:
+    """The one edge from a reported unit to its window timing."""
+    match _judge_span(unit, window):
+        case SpanInWindow():
+            if unit.word.start_s == unit.word.end_s:
+                return UnavailableWindowTiming(unit, window)
+            return ObservedWindowSpan(unit, window)
+        case InvalidUnitSpan() | OutsideAudioWindow() as defect:
+            return RejectedWindowTiming(defect)
+        case unreachable:
+            assert_never(unreachable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,31 +174,46 @@ class WindowAlignment:
             previous: ObservedWindowSpan | None = None
             for index, word in enumerate(reported.words):
                 unit = IndexedWindowUnit(index, word)
-                timing: WindowTiming
-                if word.start_s == word.end_s:
-                    timing = UnavailableWindowTiming(unit, window)
-                else:
-                    timing = ObservedWindowSpan(unit, window)
-                    if word.text.strip():
-                        if previous is not None:
-                            if timing.start_s < previous.start_s:
-                                raise QwenTimingInvalid(
-                                    BackwardsUnitSpan(
-                                        previous.unit, unit, TimingBoundary.START
-                                    )
+                timing = _admit_timing(unit, window)
+                if isinstance(timing, ObservedWindowSpan) and word.text.strip():
+                    if previous is not None:
+                        if timing.start_s < previous.start_s:
+                            raise QwenTimingInvalid(
+                                BackwardsUnitSpan(
+                                    previous.unit, unit, TimingBoundary.START
                                 )
-                            if timing.end_s < previous.end_s:
-                                raise QwenTimingInvalid(
-                                    BackwardsUnitSpan(
-                                        previous.unit, unit, TimingBoundary.END
-                                    )
+                            )
+                        if timing.end_s < previous.end_s:
+                            raise QwenTimingInvalid(
+                                BackwardsUnitSpan(
+                                    previous.unit, unit, TimingBoundary.END
                                 )
-                        previous = timing
+                            )
+                    previous = timing
                 admitted.append(AlignedWindowWord(word.text, timing))
         except QwenTimingInvalid as error:
             raise error.with_diagnostic(
                 RejectedAlignmentDiagnostic(reported, window.duration_s)
             ) from error
+        rejected = [
+            word.timing
+            for word in admitted
+            if isinstance(word.timing, RejectedWindowTiming)
+        ]
+        if rejected:
+            # Untimed units are evidence about the model, kept with the
+            # unchanged report whatever the log level elsewhere.
+            _LOG.warning(
+                "Qwen aligner reported unusable spans for %d of %d units; they are "
+                "untimed. First: %s. Qwen rejected alignment diagnostic: %s",
+                len(rejected),
+                len(admitted),
+                QwenTimingInvalid(rejected[0].defect),
+                json.dumps(
+                    asdict(RejectedAlignmentDiagnostic(reported, window.duration_s)),
+                    ensure_ascii=False,
+                ),
+            )
         object.__setattr__(self, "units", reported.units)
         object.__setattr__(self, "words", tuple(admitted))
         object.__setattr__(self, "window", window)
@@ -207,7 +279,7 @@ class ObservedRecordingSpan:
 @dataclass(frozen=True, slots=True)
 class RecordingWord:
     text: str
-    timing: ObservedRecordingSpan | UnavailableWindowTiming
+    timing: ObservedRecordingSpan | UnavailableWindowTiming | RejectedWindowTiming
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -232,8 +304,8 @@ class RecordingChunkSpeech:
                     words.append(
                         RecordingWord(word.text, ObservedRecordingSpan(span, window))
                     )
-                case UnavailableWindowTiming() as unavailable:
-                    words.append(RecordingWord(word.text, unavailable))
+                case UnavailableWindowTiming() | RejectedWindowTiming() as absent:
+                    words.append(RecordingWord(word.text, absent))
                 case unreachable:
                     assert_never(unreachable)
         object.__setattr__(self, "text", text)
@@ -305,6 +377,8 @@ class CompletedRecording:
 
 class QwenFaAdmissionRevision(Enum):
     BOUNDED_UNIT_EVIDENCE_V1 = "bounded-unit-evidence-v1"
+    UNIT_DEFECTS_UNTIMED_V2 = "unit-defects-untimed-v2"
+    """A unit with an unusable span is untimed instead of failing the file."""
 
 
 @dataclass(frozen=True, slots=True)

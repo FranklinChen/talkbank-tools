@@ -375,8 +375,13 @@ def test_load_wave2vec_fa_selects_expected_device(
             return _LoadedModel()
 
     torchaudio = ModuleType("torchaudio")
-    torchaudio.pipelines = SimpleNamespace(MMS_FA=_Bundle())
+    pipelines = ModuleType("torchaudio.pipelines")
+    pipelines.MMS_FA = _Bundle()
+    torchaudio.pipelines = pipelines
+    # The loader imports the submodule (`from torchaudio.pipelines import`),
+    # which resolves through sys.modules, not the parent attribute.
     monkeypatch.setitem(__import__("sys").modules, "torchaudio", torchaudio)
+    monkeypatch.setitem(__import__("sys").modules, "torchaudio.pipelines", pipelines)
     monkeypatch.setattr("torch.cuda.is_available", lambda: cuda_available)
     monkeypatch.setattr("torch.backends.mps.is_available", lambda: mps_available)
     monkeypatch.setattr(
@@ -459,8 +464,13 @@ def test_load_wave2vec_fa_forces_float32_on_mps(
             return model
 
     torchaudio = ModuleType("torchaudio")
-    torchaudio.pipelines = SimpleNamespace(MMS_FA=_Bundle())
+    pipelines = ModuleType("torchaudio.pipelines")
+    pipelines.MMS_FA = _Bundle()
+    torchaudio.pipelines = pipelines
+    # The loader imports the submodule (`from torchaudio.pipelines import`),
+    # which resolves through sys.modules, not the parent attribute.
     monkeypatch.setitem(__import__("sys").modules, "torchaudio", torchaudio)
+    monkeypatch.setitem(__import__("sys").modules, "torchaudio.pipelines", pipelines)
     monkeypatch.setattr("torch.cuda.is_available", lambda: cuda_available)
     monkeypatch.setattr("torch.backends.mps.is_available", lambda: mps_available)
     monkeypatch.setattr(

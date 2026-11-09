@@ -1,9 +1,11 @@
 //! Runner-owned job execution mutations on [`JobStore`].
 
-use crate::api::{JobId, JobStatus, MachineTime};
+use crate::api::{JobId, MachineTime};
 
 use super::super::JobStore;
-use super::super::registry::JobCompletionSnapshot;
+use super::super::registry::{CompletionCleanup, RunExit, RunFinishProjection};
+use crate::scheduling::{AttemptOutcome, RetryDisposition};
+use crate::store::{AttemptFinishRecord, PersistedFileUpdate, RunCompletion, RunnerClaim};
 
 impl JobStore {
     /// Re-queue a job after memory-gate rejection and persist the retry deadline.
@@ -65,43 +67,94 @@ impl JobStore {
         self.db_persist_job_status(job_id).await;
     }
 
-    /// Return the cancellation and aggregate file-outcome facts for one job.
-    pub(crate) async fn completion_snapshot(
+    /// A cancelled-before-claim task has completion authority only.
+    pub(crate) async fn complete_stopped_run(
         &self,
-        job_id: &JobId,
-    ) -> Option<JobCompletionSnapshot> {
-        self.registry.completion_snapshot(job_id).await
+        completion: crate::store::StoppedRun,
+        finished_at: crate::store::EventTime,
+    ) -> Result<RunCompletion, crate::error::ServerError> {
+        self.complete_run(completion.into_claim(), finished_at)
+            .await
     }
 
-    /// Finalize a job after all file tasks have stopped mutating its state.
-    ///
-    /// Returns the job-level failure reason (the per-file errors `Job::finalize`
-    /// aggregated) so the runner can log it at the right level; `None` for
-    /// non-failed jobs. The reason is also broadcast on the `JobListItem` and
-    /// persisted to the `jobs.db` `error` column; that column was hardcoded
-    /// `None` before the 2026-06 silent-failure fix, so jobs.db / the dashboard
-    /// showed "failed" with no cause.
-    pub(crate) async fn finalize_job(
+    /// Consume a run claim. Only the registry can admit cleanup, so callers
+    /// cannot pass a status inconsistent with the files or clean up a restart.
+    pub(crate) async fn complete_run(
         &self,
-        job_id: &JobId,
-        expected_generation: crate::store::RunGeneration,
-        final_status: JobStatus,
+        claim: RunnerClaim,
         finished_at: crate::store::EventTime,
-    ) -> Option<String> {
-        let completed_at = finished_at.instant();
-        let job_update = self
+    ) -> Result<RunCompletion, crate::error::ServerError> {
+        self.finish_run(claim, RunExit::Dispatched, finished_at)
+            .await
+    }
+
+    /// Dispatch failure still consumes the same generation-bound authority.
+    pub(crate) async fn fail_run(
+        &self,
+        claim: RunnerClaim,
+        message: String,
+        finished_at: crate::store::EventTime,
+    ) -> Result<RunCompletion, crate::error::ServerError> {
+        self.finish_run(claim, RunExit::Failed(message), finished_at)
+            .await
+    }
+
+    async fn finish_run(
+        &self,
+        claim: RunnerClaim,
+        exit: RunExit,
+        finished_at: crate::store::EventTime,
+    ) -> Result<RunCompletion, crate::error::ServerError> {
+        let job_id = claim.snapshot().identity.job_id.clone();
+        let completion = self
             .registry
-            .finalize_job(job_id, expected_generation, final_status, completed_at)
-            .await?;
-        let job_error = job_update.error.clone();
-        // The row is written from the job as it is: `finalize` declines to
-        // move a job that already reached a terminal state, and that job
-        // keeps its own status and completion time.
-        self.notify_job_item(job_update);
-
-        self.db_persist_job_status(job_id).await;
-
-        job_error
+            .complete_run(claim, exit, finished_at)
+            .await
+            .ok_or_else(|| crate::error::ServerError::JobNotInLocalStore(job_id.clone()))?;
+        let super::super::registry::FinishingRun { claim, projection } = completion;
+        let RunFinishProjection::Finished(completion) = projection else {
+            self.release_run(claim).await;
+            return Ok(RunCompletion::Superseded);
+        };
+        let (attempt_outcome, forced_errors) = match completion.cleanup {
+            CompletionCleanup::Cancelled => (AttemptOutcome::Cancelled, 0),
+            CompletionCleanup::SystemFailures(count) => (AttemptOutcome::Failed, count as i64),
+        };
+        for file in completion.files {
+            let update = file.update;
+            let filename = update.file.filename.clone();
+            self.notify_file_update(&job_id, update.file, update.completed_files);
+            self.db_update_file(
+                &job_id,
+                PersistedFileUpdate {
+                    filename: &filename,
+                    phase: &update.phase,
+                    content_type: None,
+                },
+            )
+            .await;
+            self.db_finish_attempt_for_file(
+                &job_id,
+                AttemptFinishRecord {
+                    filename: &filename,
+                    outcome: attempt_outcome,
+                    failure_category: Some(file.failure.category),
+                    disposition: RetryDisposition::TerminalFailure,
+                    finished_at: file.failure.finished_at,
+                },
+            )
+            .await;
+        }
+        self.bump_counter(|c| c.forced_terminal_errors += forced_errors)
+            .await;
+        let outcome = RunCompletion::Finished {
+            status: completion.job_update.status,
+            error: completion.job_update.error.clone(),
+        };
+        self.notify_job_item(completion.job_update);
+        self.db_persist_job_status(&job_id).await;
+        self.release_run(claim).await;
+        Ok(outcome)
     }
 }
 
@@ -110,7 +163,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use crate::api::{JobId, JobStatus, ReleasedCommand};
-    use crate::store::queries::tests::{make_job, test_config};
+    use crate::store::queries::tests::{claim_runner, make_job, test_config};
     use crate::ws::BROADCAST_CAPACITY;
 
     use super::*;
@@ -146,7 +199,7 @@ mod tests {
 
     /// Finalization recomputes completed file counts from terminal file state.
     #[tokio::test]
-    async fn finalize_job_recounts_terminal_files() {
+    async fn run_completion_accounts_for_success_and_unfinished_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
         let store = JobStore::for_tests(
             test_config(),
@@ -167,18 +220,54 @@ mod tests {
             };
         store.submit(job).await.unwrap();
 
+        let id = JobId::from("job-1");
+        let old_claim = claim_runner(&store, &id).await;
         store
-            .finalize_job(
-                &JobId::from("job-1"),
-                crate::store::RunGeneration::FIRST,
-                JobStatus::Completed,
+            .cancel(&id, crate::api::CancellationRequest::default())
+            .await
+            .unwrap();
+        store.restart(&id).await.unwrap();
+        assert!(matches!(
+            store
+                .complete_run(
+                    old_claim,
+                    crate::store::EventTime::fixed(crate::unix_time(499.0))
+                )
+                .await
+                .unwrap(),
+            crate::store::RunCompletion::Superseded
+        ));
+        let restarted = store.get(&id).await.unwrap();
+        assert_eq!(restarted.status, JobStatus::Queued);
+        assert!(
+            restarted
+                .file_statuses
+                .iter()
+                .all(|file| file.error.is_none())
+        );
+        store.release_runner_claim(&id).await;
+        store
+            .complete_run(
+                claim_runner(&store, &id).await,
                 crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
-            .await;
-
-        let info = store.get(&JobId::from("job-1")).await.unwrap();
-        assert_eq!(info.status, JobStatus::Completed);
-        assert_eq!(info.completed_files, 1);
+            .await
+            .expect("complete run");
+        let info = store.get(&id).await.unwrap();
+        assert_eq!(info.status, JobStatus::Failed);
+        assert_eq!(info.completed_files, 2);
+        assert_eq!(
+            info.file_statuses
+                .iter()
+                .filter(|file| file.status == crate::api::FileStatusKind::Done)
+                .count(),
+            1
+        );
+        assert!(
+            info.error
+                .as_deref()
+                .is_some_and(|reason| reason.contains("last status: queued"))
+        );
     }
 
     /// A job that fails because its files failed must surface WHY: the per-file
@@ -229,23 +318,21 @@ mod tests {
         store.mark_file_error(&job_id, "a.cha", &failure).await;
         store.mark_file_error(&job_id, "b.cha", &failure).await;
 
-        let failure_reason = store
-            .finalize_job(
-                &job_id,
-                crate::store::RunGeneration::FIRST,
-                JobStatus::Failed,
+        let completion = store
+            .complete_run(
+                claim_runner(&store, &job_id).await,
                 crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
-            .await;
-
-        // (0) finalize_job returns the aggregated reason so the runner can log
-        //     it (and to confirm the JobListItem projection carries the error,
-        //     which is where this return value is read from).
+            .await
+            .expect("complete failed run");
+        let crate::store::RunCompletion::Finished { status, error } = completion else {
+            panic!("claim must still own this job");
+        };
+        assert_eq!(status, JobStatus::Failed);
         assert!(
-            failure_reason
+            error
                 .as_deref()
-                .is_some_and(|reason| reason.contains("md5 mismatch")),
-            "finalize_job should return the failure reason, got: {failure_reason:?}"
+                .is_some_and(|reason| reason.contains("md5 mismatch"))
         );
 
         // (1) In-memory projection (the `/jobs` endpoint + dashboard source)

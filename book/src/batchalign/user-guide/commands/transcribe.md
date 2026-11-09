@@ -1,7 +1,7 @@
 # transcribe
 
 **Status:** Current
-**Last updated:** 2026-11-05 19:37 EST
+**Last updated:** 2026-11-09 08:51 EST
 
 Create a new CHAT transcript from audio files using automatic speech
 recognition (ASR). Produces `.cha` files alongside or in a separate output
@@ -35,6 +35,12 @@ naming the stage that was not applied and why: one stage's defect never
 discards the transcript. See
 [CHAT validation failures](../../developer/chat-validation-failures.md) and the
 [command contract](../../architecture/command-contracts.md).
+
+Cancellation also stops preparation before a file starts: capability probing
+and extra-worker startup belong to the same run as transcription. Cancelling
+during those waits closes the pending files as cancelled rather than leaving
+them queued under a live runner. Completed output remains available; review
+per-file results when deciding whether to restart unfinished work.
 
 ---
 

@@ -99,10 +99,20 @@ impl HostSnapshot {
     /// memory never meet the machine's real servers, or another test
     /// binary's.
     pub fn for_tests(config: &ServerConfig) -> Self {
+        Self::for_tests_in(
+            config,
+            private_test_ledger_path(PrivateLedger::DeclaredHost),
+        )
+    }
+
+    /// The same declared host with a fixture-owned ledger. Pass this snapshot
+    /// to both the app and its worker pool: unrelated test apps then cannot
+    /// consume the capacity required to reach a particular boundary.
+    pub fn for_tests_in(config: &ServerConfig, ledger_path: std::path::PathBuf) -> Self {
         let facts = super::test_helpers::laptop_16gb();
         let readings = HostReadings::Declared(DeclaredHost::from_facts(&facts));
         let ledger = HostMemoryRuntimeConfig::from_sources(
-            private_test_ledger_path(PrivateLedger::DeclaredHost),
+            ledger_path,
             config.resolved_memory_gate_mb(),
             config.max_concurrent_worker_startups,
         );

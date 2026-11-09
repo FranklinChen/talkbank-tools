@@ -36,30 +36,11 @@ impl Job {
         self.runtime.cancel_token.is_cancelled()
     }
 
-    /// Return whether every terminal file currently recorded is an error.
-    pub(crate) fn all_terminal_files_failed(&self) -> bool {
-        let terminal: Vec<FileStatusKind> = self
-            .execution
-            .file_statuses
-            .values()
-            .filter(|file_status| file_status.status().is_terminal())
-            .map(|file_status| file_status.status())
-            .collect();
-        !terminal.is_empty()
-            && terminal
-                .iter()
-                .all(|status| *status == FileStatusKind::Error)
-    }
-
     /// Return whether at least one terminal file currently recorded is
     /// an error.
     ///
-    /// Pairs with [`all_terminal_files_failed`]: that predicate is the
-    /// strict all-or-nothing test, this one is the partial-failure test.
-    /// The job-finalization logic in `runner/execution.rs` uses this
-    /// (the weaker predicate) to decide `JobStatus::Failed` so that a
-    /// job with even one terminal-error file is honestly surfaced to
-    /// dashboards and CLI rather than silently labelled `Completed`.
+    /// Used by registry completion after every unfinished file is closed.
+    /// Any failed file makes the job failed, including partial success.
     ///
     /// Per the `JobStatus` docs at `types/status.rs`: `Completed` means
     /// "all files processed successfully", `Failed` means "one or more
@@ -237,10 +218,12 @@ impl Job {
     /// Returns `true` if the transition fired; `false` if the job was already
     /// in a terminal state and could not be moved.
     pub(crate) fn interrupt_for_shutdown(&mut self, completed_at: MachineTime) -> bool {
-        self.runtime.cancel_token.cancel();
         if self.stop(super::Stop::Interrupted, completed_at) {
+            self.runtime.cancel_token.cancel();
+            self.runtime.run_generation = self.runtime.run_generation.next();
             self.clear_lease();
-            self.runtime.runner_active = false;
+            // The old run is still tearing down. It retains release authority
+            // but cannot turn interrupted files into terminal cancellation.
             true
         } else {
             false
@@ -468,7 +451,10 @@ mod tests {
             Some(now),
             "completed_at is populated to match recover_interrupted's existing convention"
         );
-        assert!(!job.runtime.runner_active, "runner claim is released");
+        assert!(
+            job.runtime.runner_active,
+            "the live runner retains teardown ownership"
+        );
     }
 
     /// A live stop leaves the job's whole status image as the shared
@@ -551,45 +537,6 @@ mod tests {
             job.any_terminal_files_failed(),
             "partial-failure must surface via any_terminal_files_failed()"
         );
-        assert!(
-            !job.all_terminal_files_failed(),
-            "all-failed semantics must remain narrow, one done file is enough \
-             for the all-failed predicate to be false"
-        );
-    }
-
-    /// Edge case: no terminal files yet (everything still queued or
-    /// processing). Both predicates must return false, neither
-    /// "all failed" nor "any failed" applies until there's at least
-    /// one terminal file to evaluate.
-    #[test]
-    fn any_and_all_terminal_files_failed_both_false_when_no_terminal_files() {
-        let job = three_file_job_fixture();
-        assert!(!job.all_terminal_files_failed());
-        assert!(!job.any_terminal_files_failed());
-    }
-
-    /// Edge case: every terminal file is an error. Both predicates
-    /// must return true: `any_failed` is the weaker condition and
-    /// must imply `all_failed` whenever all files are terminal-error.
-    #[test]
-    fn any_terminal_files_failed_true_when_all_files_error() {
-        let mut job = three_file_job_fixture();
-        let started = crate::unix_time(1_778_517_977.7);
-        let finished = crate::unix_time(1_778_518_056.4);
-        for filename in ["65-3.cha", "60home-3.cha", "65home-3.cha"] {
-            assert!(job.mark_file_processing(filename, started));
-            assert!(job.mark_file_error(
-                filename,
-                &FileFailureRecord {
-                    message: "worker error".into(),
-                    category: FailureCategory::ProviderTerminal,
-                    finished_at: crate::store::EventTime::fixed(finished),
-                },
-            ));
-        }
-        assert!(job.all_terminal_files_failed());
-        assert!(job.any_terminal_files_failed());
     }
 
     /// A job that fails with terminally-errored files that recorded NO message

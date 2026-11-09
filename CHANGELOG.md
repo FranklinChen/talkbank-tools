@@ -5,6 +5,24 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- Cancellation now owns job-slot and host-memory waits before worker preparation.
+  Completion, failure and deferral consume the run's claim; delayed terminal-job
+  tasks cannot start another run. Shutdown supersedes old cleanup so unfinished
+  files remain resumable instead of becoming user-cancellation errors.
+
+- Cancelling during worker preparation now stops the whole dispatch, including
+  extra-worker startup before any file starts. The run-owned cancellation scope
+  closes queued files and prevents the cancelled warmup from continuing into
+  transcription. Runner completion consumes its generation-bound claim; a restart
+  cannot interleave with the old run’s queued-file cleanup. Completed outputs
+  are preserved.
+
+- Qwen transcription and alignment no longer fail a whole file when the
+  aligner gives one character an unusable time (past the end of its audio,
+  reversed, negative or not a number). That character is left untimed, the
+  rest keep their timings, and the aligner's report is logged as a warning for
+  investigation. Cached Qwen alignments from earlier versions are not reused,
+  since they were admitted under the old rule.
 Alignment behavior in this candidate:
 
 - Valid supplied utterance windows can proceed beyond the former fixed duration

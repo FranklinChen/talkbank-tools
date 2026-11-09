@@ -221,22 +221,4 @@ impl Job {
         file_status.worker_waits.apply(change);
         true
     }
-
-    /// Return the filenames of files that have not yet reached a terminal state.
-    pub(crate) fn unfinished_files(&self) -> Vec<DisplayPath> {
-        self.execution
-            .file_statuses
-            .values()
-            .filter(|file_status| !file_status.status().is_terminal())
-            .map(|file_status| file_status.filename.clone())
-            .collect()
-    }
-
-    /// Return the current lifecycle label for one file.
-    pub(crate) fn file_status_label(&self, filename: &str) -> Option<String> {
-        self.execution
-            .file_statuses
-            .get(filename)
-            .map(|file_status| file_status.status().to_string())
-    }
 }

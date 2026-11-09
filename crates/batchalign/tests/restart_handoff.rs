@@ -29,6 +29,10 @@ use batchalign::worker::pool::PoolConfig;
 
 use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
+#[cfg(unix)]
+#[path = "restart_handoff/live_probe.rs"]
+mod live_probe;
+
 /// Per-response artificial worker delay. Long enough that the first
 /// runner is reliably mid-file when the cancel+restart lands; short
 /// enough to keep the whole test a few seconds.
