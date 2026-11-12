@@ -113,13 +113,7 @@ pub(crate) async fn dispatch_media_analysis_v2(
         ));
     }
 
-    let abnormal_exits = drain_supervised_file_tasks(
-        sink.as_ref(),
-        &job.identity.job_id,
-        &job.cancel_token,
-        tasks,
-    )
-    .await;
+    let abnormal_exits = drain_supervised_file_tasks(sink.as_ref(), &job.cancel_token, tasks).await;
     if abnormal_exits > 0 {
         warn!(
             job_id = %job.identity.job_id,
@@ -142,7 +136,7 @@ async fn process_one_media_analysis_file_v2(
     let correlation_id = &*job.identity.correlation_id;
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
-    let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
+    let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)

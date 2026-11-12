@@ -10,7 +10,7 @@ use talkbank_model::{UtteranceIdx, WordIdx};
 
 use super::FaWord;
 use super::coordinates::{FaWindow, FileMs};
-use super::grouping::SourceUtterance;
+use super::grouping::{Localization, SourceUtterance};
 use super::split::{AnchoredPiece, NonEmptyWords};
 use super::utr::AnchorLookup;
 use super::{FaGroup, GroupSpan, GroupUnit};
@@ -24,13 +24,30 @@ pub(crate) struct ResourceRequest {
     utterance: UtteranceIdx,
     words: NonEmptyWords,
     window: FaWindow,
+    source_window: FaWindow,
+    localization: Localization,
+    original_bullet: crate::types::traces::FaOriginalBulletTrace,
 }
 
 impl ResourceRequest {
+    pub(super) fn source_window_trace(&self) -> crate::types::traces::FaSourceWindowTrace {
+        super::grouping::source_window_trace(
+            self.utterance,
+            self.words.first_word(),
+            self.words.last_word(),
+            self.source_window,
+            self.localization,
+            self.original_bullet.clone(),
+        )
+    }
+
     pub(crate) fn from_recorded(source: SourceUtterance<'_>) -> Self {
         Self {
             utterance: source.utterance(),
             window: source.window(),
+            source_window: source.window(),
+            localization: source.localization(),
+            original_bullet: source.original_bullet().clone(),
             words: NonEmptyWords::from_recorded(source),
         }
     }
@@ -46,6 +63,9 @@ impl ResourceRequest {
             utterance: *split.utterance(),
             words: split.source_words(),
             window: split.window(),
+            source_window: split.window(),
+            localization: Localization::NotRecorded,
+            original_bullet: crate::types::traces::FaOriginalBulletTrace::NotRecorded,
         }
     }
 
@@ -83,6 +103,9 @@ impl ResourceRequest {
             utterance: self.utterance,
             words,
             window,
+            source_window: self.source_window,
+            localization: self.localization,
+            original_bullet: self.original_bullet.clone(),
         })
     }
 
@@ -100,11 +123,17 @@ impl ResourceRequest {
                 utterance: self.utterance,
                 words: before_words,
                 window: before_window,
+                source_window: self.source_window,
+                localization: self.localization,
+                original_bullet: self.original_bullet.clone(),
             },
             Self {
                 utterance: self.utterance,
                 words: after_words,
                 window: after_window,
+                source_window: self.source_window,
+                localization: self.localization,
+                original_bullet: self.original_bullet,
             },
         ))
     }
@@ -222,6 +251,173 @@ pub(crate) struct InvalidResourceCut;
 pub(crate) enum ResourcePlanError<E> {
     Probe(E),
     InvalidCut(InvalidResourceCut),
+}
+
+/// A refusal no further cut can avoid: the piece's words stay untimed with
+/// the constraint that refused them, whichever it is. A host-memory refusal
+/// here is a property of this piece (its words and window need more
+/// workspace than the host can ever give), so it is local like the others;
+/// whether the host can align anything of the file is [`FilePlan`]'s
+/// verdict, and a model that never fits refused the probe before planning.
+fn exhausted<P>(limited: LimitedRequest, remaining: Remaining) -> Step<P> {
+    Step {
+        part: PreparedResourcePart::Unavailable(limited.into()),
+        remaining,
+    }
+}
+
+/// The least demand of this file's pieces against what this host can ever
+/// offer, when the host admitted nothing of the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostTooSmall {
+    pub(crate) engine: crate::api::ReportedEngineName,
+    pub(crate) required_mb: u64,
+    pub(crate) reserve_mb: u64,
+    pub(crate) ceiling_mb: u64,
+}
+
+/// What the host admitted of some groups' pieces, decided where the pieces
+/// are made ([`prepare_group`]), never by re-reading groups afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostAdmission {
+    /// At least one request was planned, or a group kept timing it has.
+    Admitted,
+    /// Nothing was admitted. `least` is the least host-memory refusal among
+    /// the pieces, if host memory refused any.
+    NothingAdmitted { least: Option<HostTooSmall> },
+}
+
+impl HostAdmission {
+    /// Nothing seen yet.
+    const NOTHING: Self = Self::NothingAdmitted { least: None };
+
+    /// The admission of a resource split just built: admitted if any piece
+    /// is a request, otherwise its least host-memory refusal.
+    fn of_split(split: &ResourceSplit) -> Self {
+        split
+            .pieces()
+            .fold(Self::NOTHING, |admission, part| match part {
+                ResourcePart::Request(_) => Self::Admitted,
+                ResourcePart::Unavailable(piece) => admission.merge(Self::NothingAdmitted {
+                    least: HostTooSmall::of_constraint(piece.constraint()),
+                }),
+            })
+    }
+
+    /// Both admissions together: admitted if either was, otherwise the
+    /// lesser host-memory refusal.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Admitted, _) | (_, Self::Admitted) => Self::Admitted,
+            (Self::NothingAdmitted { least: a }, Self::NothingAdmitted { least: b }) => {
+                Self::NothingAdmitted {
+                    least: match (a, b) {
+                        (Some(a), Some(b)) => {
+                            Some(if b.required_mb < a.required_mb { b } else { a })
+                        }
+                        (one, None) | (None, one) => one,
+                    },
+                }
+            }
+        }
+    }
+}
+
+impl HostTooSmall {
+    /// The refusal a host-memory constraint states; `None` for any other.
+    fn of_constraint(constraint: &FaResourceConstraintV2) -> Option<Self> {
+        match constraint {
+            FaResourceConstraintV2::HostMemory {
+                engine,
+                required_mb,
+                reserve_mb,
+                ceiling_mb,
+            } => Some(Self {
+                engine: engine.clone(),
+                required_mb: *required_mb,
+                reserve_mb: *reserve_mb,
+                ceiling_mb: *ceiling_mb,
+            }),
+            FaResourceConstraintV2::EmptyDecodedAudio { .. }
+            | FaResourceConstraintV2::Model { .. } => None,
+        }
+    }
+}
+
+/// The groups one [`prepare_group`] call planned, with what the host
+/// admitted of them. Only `prepare_group` makes one, so a file's verdict
+/// is built from the producer's own account.
+pub(crate) struct PlannedGroups {
+    groups: Vec<FaGroup>,
+    admission: HostAdmission,
+}
+
+impl PlannedGroups {
+    /// A split's group, admitted as its pieces say.
+    fn from_split(split: ResourceSplit) -> Self {
+        let admission = HostAdmission::of_split(&split);
+        Self {
+            groups: vec![FaGroup::from_resource_split(split)],
+            admission,
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.groups.extend(other.groups);
+        let admission = std::mem::replace(&mut self.admission, HostAdmission::NOTHING);
+        self.admission = admission.merge(other.admission);
+    }
+}
+
+/// One file's groups as planning admits them, and the file's verdict.
+///
+/// A piece that host memory refuses at its smallest cut leaves only its own
+/// words untimed: the file is written with the rest aligned and that spot
+/// accounted for, as any other local refusal is. But when the host admitted
+/// nothing of the file (no group kept with timing, no request planned) and
+/// host memory refused some of it, there is nothing local about it: this
+/// engine cannot align this file on this host, and writing an untimed copy
+/// reported as diagnosed would present a refusal as an alignment. Then the
+/// file fails, with the least demand any of its pieces had.
+pub(crate) struct FilePlan {
+    groups: Vec<FaGroup>,
+    admission: HostAdmission,
+}
+
+impl Default for FilePlan {
+    fn default() -> Self {
+        Self {
+            groups: Vec::new(),
+            admission: HostAdmission::NOTHING,
+        }
+    }
+}
+
+impl FilePlan {
+    /// A group kept with timing it already has: the host need admit
+    /// nothing more for the file to carry alignment.
+    pub(crate) fn keep(&mut self, group: FaGroup) {
+        self.groups.push(group);
+        self.admission = HostAdmission::Admitted;
+    }
+
+    /// Groups [`prepare_group`] planned, with what the host admitted.
+    pub(crate) fn plan(&mut self, planned: PlannedGroups) {
+        self.groups.extend(planned.groups);
+        let admission = std::mem::replace(&mut self.admission, HostAdmission::NOTHING);
+        self.admission = admission.merge(planned.admission);
+    }
+
+    /// The file's groups, unless the host admitted none of it and host
+    /// memory refused some of it.
+    pub(crate) fn finish(self) -> Result<Vec<FaGroup>, HostTooSmall> {
+        match self.admission {
+            HostAdmission::Admitted | HostAdmission::NothingAdmitted { least: None } => {
+                Ok(self.groups)
+            }
+            HostAdmission::NothingAdmitted { least: Some(host) } => Err(host),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -441,22 +637,14 @@ async fn step<P: ResourceProbe>(
         Admission::Limited(limited) => limited,
     };
     match &limited.constraint {
-        FaResourceConstraintV2::EmptyDecodedAudio { .. } => {
-            return Ok(Step {
-                part: PreparedResourcePart::Unavailable(limited.into()),
-                remaining: Remaining::Done,
-            });
-        }
-        FaResourceConstraintV2::Model {
+        // No cut can help these: the audio is empty, the input is below the
+        // model's minimum, or the model cannot project this request.
+        FaResourceConstraintV2::EmptyDecodedAudio { .. }
+        | FaResourceConstraintV2::Model {
             cause:
                 crate::types::worker_v2::FaPreparationRefusalV2::InsufficientInput { .. }
                 | crate::types::worker_v2::FaPreparationRefusalV2::ProjectionUnavailable { .. },
-        } => {
-            return Ok(Step {
-                part: PreparedResourcePart::Unavailable(limited.into()),
-                remaining: Remaining::Done,
-            });
-        }
+        } => return Ok(exhausted(limited, Remaining::Done)),
         FaResourceConstraintV2::Model {
             cause: crate::types::worker_v2::FaPreparationRefusalV2::ModelConstraint { .. },
         }
@@ -464,10 +652,7 @@ async fn step<P: ResourceProbe>(
     }
     let inside = cuts.inside(&limited.request);
     let Some((last, before)) = inside.split_last() else {
-        return Ok(Step {
-            part: PreparedResourcePart::Unavailable(limited.into()),
-            remaining: Remaining::Done,
-        });
+        return Ok(exhausted(limited, Remaining::Done));
     };
     // Probe every proposed prefix with its actual words and window. In
     // particular, failure at one cut does not prove failure at another.
@@ -504,10 +689,7 @@ async fn step<P: ResourceProbe>(
             }
         }
     }
-    Ok(Step {
-        part: PreparedResourcePart::Unavailable(refused.into()),
-        remaining: Remaining::More(after),
-    })
+    Ok(exhausted(refused, Remaining::More(after)))
 }
 
 async fn plan_core<P: ResourceProbe>(
@@ -617,8 +799,11 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
     anchors: &super::AnchorIndex,
     probe: &mut P,
     mut retain: impl FnMut(GroupUnit<'_>, P::Prepared) + Send,
-) -> Result<Vec<FaGroup>, ResourcePlanError<P::Error>> {
-    let mut groups = Vec::new();
+) -> Result<PlannedGroups, ResourcePlanError<P::Error>> {
+    let mut planned = PlannedGroups {
+        groups: Vec::new(),
+        admission: HostAdmission::NOTHING,
+    };
     let GroupPlanningInput { group, following } = input;
     match group.span() {
         GroupSpan::Single(single) => match probe
@@ -628,7 +813,10 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
         {
             ResourceProbeOutcome::Prepared(prepared) => {
                 retain(single.request(), prepared);
-                groups.push(group);
+                planned.extend(PlannedGroups {
+                    groups: vec![group],
+                    admission: HostAdmission::Admitted,
+                });
             }
             ResourceProbeOutcome::Limited(_) => {
                 let mut sources = single.source_utterances().peekable();
@@ -644,7 +832,7 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
                         probe,
                     )
                     .await?;
-                    groups.push(FaGroup::from_resource_split(
+                    planned.extend(PlannedGroups::from_split(
                         prepared.finish(|piece, proof| retain(GroupUnit::from_piece(piece), proof)),
                     ));
                 }
@@ -659,7 +847,7 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
                 probe,
             )
             .await?;
-            groups.push(FaGroup::from_resource_split(
+            planned.extend(PlannedGroups::from_split(
                 prepared.finish(|piece, proof| retain(GroupUnit::from_piece(piece), proof)),
             ));
         }
@@ -671,12 +859,12 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
                 probe,
             )
             .await?;
-            groups.push(FaGroup::from_resource_split(
+            planned.extend(PlannedGroups::from_split(
                 prepared.finish(|piece, proof| retain(GroupUnit::from_piece(piece), proof)),
             ));
         }
     }
-    Ok(groups)
+    Ok(planned)
 }
 
 #[cfg(test)]

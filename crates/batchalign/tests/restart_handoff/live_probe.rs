@@ -38,6 +38,23 @@ struct CancelledProbe {
     outcome: Option<JobInfo>,
     spawns_before: String,
     spawns_after: String,
+    /// The peer's load counter after the cancel settled, then a stall window
+    /// later: equal only if the loading process stopped advancing.
+    ticks_settled: Option<u32>,
+    ticks_later: Option<u32>,
+}
+
+/// The peer's progress period (`time.sleep(0.05)` in `live_probe_worker.py`).
+const PEER_TICK: Duration = Duration::from_millis(50);
+
+/// What must happen to the peer's live load once the cancel has settled.
+#[derive(Clone, Copy, Debug)]
+enum LoadAfterCancel {
+    /// The cancelled job owned the load: its process must stop advancing.
+    Stops,
+    /// Another, uncancelled job owns the load: it must keep advancing, which
+    /// also proves the counter can see a live load at all.
+    Continues,
 }
 
 /// Cancellation boundaries before file dispatch; none runs inference.
@@ -53,6 +70,15 @@ impl LoadBoundary {
         match self {
             Self::Capability | Self::JobSlot => "live",
             Self::WorkerWarmup => "warmup",
+        }
+    }
+
+    fn load_after_cancel(self) -> LoadAfterCancel {
+        match self {
+            Self::Capability | Self::WorkerWarmup => LoadAfterCancel::Stops,
+            // The cancelled job only waited for the slot; the first job's
+            // capability load is not its own and is not cancelled.
+            Self::JobSlot => LoadAfterCancel::Continues,
         }
     }
 }
@@ -110,6 +136,7 @@ impl ProbeServer {
         };
         // test_echo stays false: echo routing bypasses the capability probe.
         let workers = batchalign::worker_setup::prepare_workers(
+            host.clone(),
             pool,
             batchalign::worker_setup::RegistryDiscovery::Ignore,
         )
@@ -117,7 +144,6 @@ impl ProbeServer {
         .expect("model-free worker pool");
         let (router, state) = batchalign::create_app_with_prepared_workers(
             config,
-            host,
             RuntimeLayout::from_state_dir(state_dir),
             batchalign::AppStorageOverrides {
                 jobs_dir: Some(root.path().join("jobs").display().to_string()),
@@ -153,6 +179,13 @@ impl ProbeServer {
 
     fn control(&self, name: &str) -> std::path::PathBuf {
         self.root.path().join("state").join(name)
+    }
+
+    /// The peer's load progress counter, absent until a load starts ticking.
+    fn load_ticks(&self) -> Option<u32> {
+        std::fs::read_to_string(self.control("load-ticks"))
+            .ok()
+            .map(|ticks| ticks.parse().expect("the peer writes a decimal tick count"))
     }
 
     async fn info(&self, id: &str) -> JobInfo {
@@ -237,10 +270,9 @@ impl FailedProbe {
             .expect("restart accepted");
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                let ticks = std::fs::read_to_string(self.server.control("load-ticks"));
                 // At least 1.2s of progress: beyond this fixture's 1s stall
                 // window, so the load is live rather than a silent timeout.
-                if ticks.is_ok_and(|t| t.parse::<u32>().is_ok_and(|n| n >= 25)) {
+                if self.server.load_ticks().is_some_and(|n| n >= 25) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -326,11 +358,18 @@ impl LoadingProbe {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let spawns_after =
             std::fs::read_to_string(self.server.control("spawns")).expect("spawn audit");
+        // After the settle wait above, which covers the kill's grace period:
+        // a live load advances several ticks in this window, a stopped one none.
+        let ticks_settled = self.server.load_ticks();
+        tokio::time::sleep(PEER_TICK * 6).await;
+        let ticks_later = self.server.load_ticks();
         CancelledProbe {
             server: self.server,
             outcome,
             spawns_before,
             spawns_after,
+            ticks_settled,
+            ticks_later,
         }
     }
 }
@@ -364,6 +403,8 @@ async fn check_cancellation(boundary: LoadBoundary) {
         outcome,
         spawns_before,
         spawns_after,
+        ticks_settled,
+        ticks_later,
     } = stopped;
     crate::common::cleanup_active_session(server.state, server.root, server.server, "live probe")
         .await;
@@ -375,4 +416,15 @@ async fn check_cancellation(boundary: LoadBoundary) {
         spawns_before, spawns_after,
         "a cancelled probe started another worker"
     );
+    match boundary.load_after_cancel() {
+        LoadAfterCancel::Stops => assert_eq!(
+            ticks_settled, ticks_later,
+            "the cancelled job's loading process kept running during {boundary:?}"
+        ),
+        LoadAfterCancel::Continues => assert_ne!(
+            ticks_settled, ticks_later,
+            "the uncancelled job's load stopped during {boundary:?}, so the \
+             tick counter cannot tell a live load from a stopped one"
+        ),
+    }
 }

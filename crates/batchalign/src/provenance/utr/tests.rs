@@ -10,10 +10,10 @@ fn failure() -> ServerError {
 
 /// A pass that matched one of two utterances, from responses that named no
 /// models (so the stamp writes `utr=` alone).
-fn partial_pass() -> UtrPassOutcome {
-    UtrPassOutcome::Recovered {
-        result: partial_result(),
-        models: UtrModels::Unreported,
+fn partial_pass() -> UtrPassReport {
+    UtrPassReport::Recovered {
+        unmatched: partial_result().unmatched(),
+        producer: UtrProducer::new(&UtrEngine::Whisper, UtrModels::Unreported),
     }
 }
 
@@ -148,19 +148,14 @@ fn utr_attempt_history_wire_and_stamp_are_independent_of_successful_timing() {
 fn omitted_no_work_and_cancelled_passes_are_not_provider_shortfalls() {
     let mut report = UtrContribution::NotRun;
     let mut no_work = report
-        .record_initial(
-            &UtrEngine::RevAi,
-            Ok(UtrPassOutcome::NothingUntimed(
-                UtrResult::not_run_no_untimed(2),
-            )),
-        )
+        .record_initial(&UtrEngine::RevAi, Ok(UtrPassReport::NothingUntimed))
         .unwrap();
     assert!(no_work.take().is_none());
     assert_eq!(report, UtrContribution::NotRun);
     assert!(report.shortfalls().is_empty());
     assert!(matches!(
         report.record_initial(&UtrEngine::RevAi, Err(ServerError::Cancelled)),
-        Err(UtrCancelled)
+        Err(UtrRecoveryStop::Cancelled)
     ));
     assert_eq!(report, UtrContribution::NotRun);
     assert!(report.unavailable_stamp().is_none());
@@ -182,6 +177,22 @@ fn omitted_no_work_and_cancelled_passes_are_not_provider_shortfalls() {
         report.unavailable_stamp().unwrap().as_str(),
         "initial:rev:provider_transient"
     );
+}
+
+#[test]
+fn failed_evidence_retention_stops_initial_recovery_without_a_shortfall() {
+    let cause = ServerError::Persistence("original recovery failure".into());
+    let error = ServerError::UtrEvidenceRetention(crate::error::UtrEvidenceRetentionFailure::new(
+        cause,
+        "evidence write failed".into(),
+    ));
+    let Err(UtrRecoveryStop::Failed(UtrRecoveryFailure::EvidenceRetention(failure))) =
+        UtrRecovery::from_initial(&UtrEngine::RevAi, Err(error))
+    else {
+        panic!("evidence retention failure must stop recovery")
+    };
+    assert!(failure.to_string().contains("original recovery failure"));
+    assert!(failure.to_string().contains("evidence write failed"));
 }
 
 /// RED FIRST: a denied model and a worker that cannot boot kept the
@@ -270,9 +281,9 @@ fn the_align_stamp_names_the_models_the_recovery_responses_reported() {
         report
             .record_initial(
                 &UtrEngine::RevAi,
-                Ok(UtrPassOutcome::Recovered {
-                    result: partial_result(),
-                    models,
+                Ok(UtrPassReport::Recovered {
+                    unmatched: partial_result().unmatched(),
+                    producer: UtrProducer::new(&UtrEngine::RevAi, models),
                 }),
             )
             .unwrap();

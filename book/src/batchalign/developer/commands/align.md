@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-11-05 14:17 EST
+**Last updated:** 2026-11-10 16:43 EST
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -88,7 +88,9 @@ After finalization, the same source owner measures the result against the
 source: `RequiredFaTiming::admit` returns `FaCompletion::Complete` when every
 required word retains a positive interval, or `FaCompletion::Partial` with an
 `UntimedAccount` naming each utterance with untimed words, the words, and the
-cause (`WindowRefused`, carrying the refused window grouping recorded;
+cause (`WindowRefused`, carrying the refused window grouping recorded, or a
+resource constraint the planner met at a piece's smallest cut, such as host
+memory with what the piece needed and what the host can ever offer;
 `NotPlaced`, a run grouping could place in no request; `LocalizationUnavailable`;
 `Removed`, carrying every `WordTimingRemovalTrace` the finalizer recorded for
 the utterance, each the closed `RemovalEffectTrace` that removed measured

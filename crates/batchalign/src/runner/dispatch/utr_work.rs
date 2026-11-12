@@ -1,4 +1,5 @@
-//! Owned UTR computation: only a completed candidate can replace its source.
+//! Owned UTR computation: recognition observes a private candidate and never
+//! replaces the source document.
 
 use batchalign_transform::dp_align::control::WorkControl;
 use std::sync::{
@@ -6,12 +7,167 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::chat_ops::ChatFile;
+use crate::chat_ops::fa::SourceBoundUtrInput;
 #[cfg(test)]
 use crate::chat_ops::fa::utr::AsrTimingToken;
-use crate::chat_ops::fa::utr::{PreparedUtrTokens, UtrCancelled, UtrResult, UtrStrategy};
+use crate::chat_ops::fa::utr::{PreparedUtrTokens, UtrCancelled, UtrObservation, UtrStrategy};
 use crate::error::ServerError;
+use crate::provenance::{UtrModels, UtrProducer, UtrRecognitionEvidence};
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
+
+/// Tokens and retained responses prepared together for one correspondence search.
+pub(crate) struct PreparedRecognition {
+    tokens: PreparedUtrTokens,
+    producer: UtrProducer,
+    inputs: UtrRecognitionEvidence,
+}
+
+/// A completed search and the recognition inputs it actually consumed.
+#[derive(Debug)]
+pub(crate) struct CompletedRecognition {
+    observation: UtrObservation,
+    producer: UtrProducer,
+    inputs: UtrRecognitionEvidence,
+}
+
+impl PreparedRecognition {
+    pub(super) fn full(recognition: super::full::FullRecognition<'_>) -> Result<Self, ServerError> {
+        let (conversion, context, route) = recognition.into_parts();
+        Self::prepare(
+            conversion,
+            Vec::new(),
+            context.engine,
+            context.lang,
+            RecognitionOrder::Provider,
+            route.into(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn full_for_test(
+        conversion: super::UtrTokenConversion,
+        engine: &crate::options::UtrEngine,
+        language: &crate::api::LanguageCode3,
+        route: super::UtrFullRoute,
+    ) -> Result<Self, ServerError> {
+        Self::prepare(
+            conversion,
+            Vec::new(),
+            engine,
+            language,
+            RecognitionOrder::Provider,
+            route.into(),
+        )
+    }
+
+    pub(super) fn partial(
+        completed: super::partial::CompletedPartialRecognition<'_>,
+    ) -> Result<Self, ServerError> {
+        let (first, remaining, context) = completed.into_parts();
+        Self::prepare(
+            first,
+            remaining,
+            context.engine,
+            context.lang,
+            RecognitionOrder::Timeline,
+            super::UtrRecognitionRoute::Partial,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn partial_for_test(
+        first: super::UtrTokenConversion,
+        remaining: Vec<super::UtrTokenConversion>,
+        engine: &crate::options::UtrEngine,
+        language: &crate::api::LanguageCode3,
+    ) -> Result<Self, ServerError> {
+        Self::prepare(
+            first,
+            remaining,
+            engine,
+            language,
+            RecognitionOrder::Timeline,
+            super::UtrRecognitionRoute::Partial,
+        )
+    }
+
+    fn prepare(
+        first: super::UtrTokenConversion,
+        remaining: Vec<super::UtrTokenConversion>,
+        engine: &crate::options::UtrEngine,
+        language: &crate::api::LanguageCode3,
+        order: RecognitionOrder,
+        route: super::UtrRecognitionRoute,
+    ) -> Result<Self, ServerError> {
+        let (mut tokens, first) = first.into_evidence();
+        let (models, remaining) = remaining.into_iter().fold(
+            (UtrModels::of(first.response()), Vec::new()),
+            |(models, mut windows), conversion| {
+                let (window_tokens, window) = conversion.into_evidence();
+                tokens.extend(window_tokens);
+                let models = models.and(window.response());
+                windows.push(window);
+                (models, windows)
+            },
+        );
+        if matches!(order, RecognitionOrder::Timeline) {
+            tokens.sort_by_key(|token| token.start_ms);
+        }
+        Ok(Self {
+            tokens: super::normalize_utr_tokens(tokens, language)?,
+            producer: UtrProducer::new(engine, models),
+            inputs: UtrRecognitionEvidence::Observed {
+                first: Box::new(first),
+                remaining,
+                route,
+            },
+        })
+    }
+
+    pub(super) fn tokens(&self) -> &PreparedUtrTokens {
+        &self.tokens
+    }
+
+    pub(crate) async fn run(
+        self,
+        source: &SourceBoundUtrInput<'_>,
+        strategy: Box<dyn UtrStrategy>,
+        progress: Option<&ProgressSender>,
+    ) -> Result<CompletedRecognition, ServerError> {
+        let observation = PendingUtr::new(source, strategy, self.tokens)
+            .run(progress)
+            .await?;
+        Ok(CompletedRecognition {
+            observation,
+            producer: self.producer,
+            inputs: self.inputs,
+        })
+    }
+}
+
+enum RecognitionOrder {
+    Provider,
+    Timeline,
+}
+
+impl CompletedRecognition {
+    pub(super) fn observation(&self) -> &UtrObservation {
+        &self.observation
+    }
+
+    pub(crate) fn into_parts(self) -> (UtrObservation, UtrProducer, UtrRecognitionEvidence) {
+        (self.observation, self.producer, self.inputs)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(observation: UtrObservation, producer: UtrProducer) -> Self {
+        Self {
+            observation,
+            producer,
+            inputs: UtrRecognitionEvidence::Synthetic,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Stop(Arc<AtomicBool>);
@@ -49,22 +205,17 @@ impl WorkControl for Stop {
     }
 }
 
-/// The mutable borrow prevents concurrent source edits while work is pending.
-/// The blocking worker receives a private candidate, never this borrowed source.
-pub(super) struct PendingUtr<'source> {
-    source: &'source mut ChatFile,
+/// The shared borrow prevents source edits while work is pending. The blocking
+/// worker receives a private candidate, never a document it can publish.
+pub(super) struct PendingUtr<'source, 'document> {
+    source: &'source SourceBoundUtrInput<'document>,
     strategy: Box<dyn UtrStrategy>,
     tokens: PreparedUtrTokens,
 }
 
-struct CompletedUtr {
-    candidate: ChatFile,
-    result: UtrResult,
-}
-
-impl<'source> PendingUtr<'source> {
+impl<'source, 'document> PendingUtr<'source, 'document> {
     pub(super) fn new(
-        source: &'source mut ChatFile,
+        source: &'source SourceBoundUtrInput<'document>,
         strategy: Box<dyn UtrStrategy>,
         tokens: PreparedUtrTokens,
     ) -> Self {
@@ -78,7 +229,7 @@ impl<'source> PendingUtr<'source> {
     pub(super) async fn run(
         self,
         progress: Option<&ProgressSender>,
-    ) -> Result<UtrResult, ServerError> {
+    ) -> Result<UtrObservation, ServerError> {
         // ASR-window counts describe completed provider work, not progress
         // through this CPU proof. Clear them at the consuming search boundary.
         if let Some(progress) = progress {
@@ -92,25 +243,25 @@ impl<'source> PendingUtr<'source> {
         // Dropping the awaiting future (job cancellation or task abort) stops
         // queued work at entry and started work at its next checkpoint.
         let _cancel_on_drop = CancelOnDrop(cancellation.clone());
-        let mut candidate = self.source.clone();
+        let candidate = crate::chat_ops::fa::utr::UtrCandidate::from_source(self.source);
         let task =
             tokio_util::task::AbortOnDropHandle::new(crate::blocking::spawn_in_span(move || {
                 let control = cancellation;
                 control.check()?;
-                let result =
-                    self.strategy
-                        .inject_controlled(&mut candidate, &self.tokens, &control)?;
+                let observation = crate::chat_ops::fa::utr::observe_controlled(
+                    self.strategy.as_ref(),
+                    candidate,
+                    self.tokens,
+                    &control,
+                )?;
                 control.check()?;
-                Ok::<_, UtrCancelled>(CompletedUtr { candidate, result })
+                Ok::<_, UtrCancelled>(observation)
             }));
         let completed = task
             .await
             .map_err(ServerError::UtrTask)?
             .map_err(|UtrCancelled| ServerError::Cancelled)?;
-        // No await between completion admission and installation. An abandoned
-        // future has no access to this transition; its candidate is discarded.
-        *self.source = completed.candidate;
-        Ok(completed.result)
+        Ok(completed)
     }
 }
 

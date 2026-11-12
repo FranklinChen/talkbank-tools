@@ -232,8 +232,19 @@ pub struct JobExecutionState {
     pub results: Vec<FileResultEntry>,
     /// Job-level error message for terminal failures.
     pub error: Option<String>,
-    /// Count of files that have reached a terminal status.
-    pub completed_files: i64,
+}
+
+impl JobExecutionState {
+    /// Files in a terminal phase. Derived, never stored: a stored counter
+    /// beside the phases it summarises could drift (a repeated terminal
+    /// write once counted a file twice) and needed resetting at every
+    /// transition that changes phases.
+    pub(crate) fn completed_files(&self) -> i64 {
+        self.file_statuses
+            .values()
+            .filter(|file| file.status().is_terminal())
+            .count() as i64
+    }
 }
 
 /// Scheduling and completion state for one job.
@@ -284,7 +295,7 @@ pub struct RunGeneration(u64);
 
 impl RunGeneration {
     /// Generation of a job's first run, before any restart.
-    pub(crate) const FIRST: Self = Self(0);
+    pub(in crate::store) const FIRST: Self = Self(0);
 
     /// The next generation (used by restart).
     pub(crate) fn next(self) -> Self {
@@ -295,6 +306,49 @@ impl RunGeneration {
 impl std::fmt::Display for RunGeneration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "g{}", self.0)
+    }
+}
+
+/// One run of one job: the identity every write from that run carries.
+///
+/// A job id alone cannot say whose write it is, because a restart reuses
+/// the id under a new [`RunGeneration`]; a generation alone names no job.
+/// The pair is minted only from a [`RunnerClaim`] (and, in tests, for a
+/// job's first run), so no caller can assemble a binding from a job id and
+/// a generation it picked. The store admits a write only while the bound
+/// generation is still the job's current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunBinding {
+    job_id: JobId,
+    generation: RunGeneration,
+}
+
+impl RunBinding {
+    /// The job this run belongs to.
+    pub(crate) fn job_id(&self) -> &JobId {
+        &self.job_id
+    }
+
+    /// Whether this run is still `job`'s current one. The only reading of
+    /// the generation: the store asks this, and nothing compares raw
+    /// generations.
+    pub(in crate::store) fn is_current_for(&self, job: &super::Job) -> bool {
+        job.runtime.run_generation == self.generation
+    }
+
+    /// The binding of a test job's first run, which has no claim to bind to.
+    #[cfg(test)]
+    pub(crate) fn first_run_of(job_id: JobId) -> Self {
+        Self {
+            job_id,
+            generation: RunGeneration::FIRST,
+        }
+    }
+}
+
+impl std::fmt::Display for RunBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.job_id, self.generation)
     }
 }
 
@@ -327,7 +381,7 @@ pub(crate) enum BeginRunnerOutcome {
 #[derive(Debug)]
 #[must_use = "a runner claim owns one attempt's completion"]
 pub(crate) struct RunnerClaim {
-    generation: RunGeneration,
+    run: RunBinding,
     snapshot: std::sync::Arc<RunnerJobSnapshot>,
 }
 
@@ -349,7 +403,10 @@ impl StoppedRun {
 impl RunnerClaim {
     pub(in crate::store) fn for_job(job: &Job) -> Self {
         Self {
-            generation: job.runtime.run_generation,
+            run: RunBinding {
+                job_id: job.identity.job_id.clone(),
+                generation: job.runtime.run_generation,
+            },
             snapshot: std::sync::Arc::new(job.to_runner_snapshot()),
         }
     }
@@ -359,8 +416,9 @@ impl RunnerClaim {
         &self.snapshot
     }
 
-    pub(in crate::store) fn generation(&self) -> RunGeneration {
-        self.generation
+    /// The identity every write of this run carries.
+    pub(crate) fn binding(&self) -> &RunBinding {
+        &self.run
     }
 }
 
@@ -387,8 +445,22 @@ pub struct JobRuntimeControl {
     /// releases its claim; restart does NOT clear it (the old runner is
     /// still alive during handoff).
     pub runner_active: bool,
-    /// Current run generation (bumped by every restart).
-    pub run_generation: RunGeneration,
+    /// Current run generation (bumped by every restart). Only the store
+    /// reads or advances it: everything outside names a run by the
+    /// [`RunBinding`] its claim carries.
+    pub(in crate::store) run_generation: RunGeneration,
+}
+
+impl JobRuntimeControl {
+    /// A job's runtime state when it enters this process, newly submitted
+    /// or recovered: not cancelled, no runner, its first run.
+    pub fn unclaimed() -> Self {
+        Self {
+            cancel_token: CancellationToken::new(),
+            runner_active: false,
+            run_generation: RunGeneration::FIRST,
+        }
+    }
 }
 
 /// One file that still requires runner work.
@@ -569,9 +641,6 @@ pub struct RunnerJobSnapshot {
     pub cancel_token: CancellationToken,
     /// Files that still need processing.
     pub pending_files: Vec<PendingJobFile>,
-    /// Run generation this snapshot belongs to; finalization is refused
-    /// when the job has since moved to a newer generation.
-    pub run_generation: RunGeneration,
 }
 
 /// Result of recovering a persisted interrupted/running job on startup.

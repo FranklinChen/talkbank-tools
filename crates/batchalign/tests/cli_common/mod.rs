@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use assert_cmd::cargo::cargo_bin_cmd;
+use batchalign::AppState;
 use batchalign::api::{JobInfo, JobStatus, MemoryMb, NumSpeakers};
 use batchalign::config::ServerConfig;
 use batchalign::host_facts::PerProfile;
@@ -30,7 +31,6 @@ use batchalign::options::{
 };
 use batchalign::worker::InferTask;
 use batchalign::worker::pool::PoolConfig;
-use batchalign::{AppState, create_app};
 
 use crate::live_deadline::{HarnessBudget, ProgressSnapshot, ServerTestDeadline, WaitSubject};
 
@@ -290,6 +290,33 @@ pub async fn start_live_server(
     python_path: &str,
     media_roots: Vec<batchalign_types::paths::ServerPath>,
 ) -> Result<LiveTestServer, String> {
+    start_live_server_on(
+        python_path,
+        media_roots,
+        batchalign::host_facts::test_helpers::laptop_16gb(),
+        LiveHeadroom::None,
+    )
+    .await
+}
+
+/// How much memory a live test server keeps free on its declared host.
+#[derive(Clone, Copy, Debug)]
+pub enum LiveHeadroom {
+    /// None: live models get everything the declared host offers, so a real
+    /// model run fits the default 16 GB laptop.
+    None,
+    /// BA3's own default for the host's tier: what a user's machine keeps.
+    ProductDefault,
+}
+
+/// [`start_live_server`] on a stated machine and headroom, owning its host,
+/// workers, state and cache.
+pub async fn start_live_server_on(
+    python_path: &str,
+    media_roots: Vec<batchalign_types::paths::ServerPath>,
+    host_facts: batchalign::host_facts::HostFacts,
+    headroom: LiveHeadroom,
+) -> Result<LiveTestServer, String> {
     let tmp = tempfile::TempDir::new().map_err(|error| format!("tempdir failed: {error}"))?;
     let jobs_dir = tmp.path().join("jobs");
     std::fs::create_dir_all(&jobs_dir).map_err(|error| format!("mkdir jobs failed: {error}"))?;
@@ -300,12 +327,33 @@ pub async fn start_live_server(
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
         media_roots,
-        memory_gate_mb: Some(MemoryMb(0)),
+        memory_gate_mb: match headroom {
+            LiveHeadroom::None => Some(MemoryMb(0)),
+            LiveHeadroom::ProductDefault => None,
+        },
         ..Default::default()
     };
+    let state_dir = tmp.path().join("state");
+    std::fs::create_dir_all(&state_dir).map_err(|error| format!("mkdir state failed: {error}"))?;
+    // One host for the app and its workers: a worker pool reading another
+    // declared machine would admit model memory the app never offered.
+    let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::declared_in(
+        &config,
+        host_facts,
+        tmp.path().join("host-memory.json"),
+    ));
+    let defaults = PoolConfig::for_tests();
     let pool_config = PoolConfig {
         python_path: python_path.into(),
         test_echo: false,
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig {
+            host: host.runtime_host(),
+            state_dir: Some(state_dir.clone()),
+            ..defaults.runtime.clone()
+        },
+        // A private registry, so this server adopts no worker that another
+        // test's server admitted under another host.
+        worker_registry_path: Some(tmp.path().join("workers.json")),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own startup; see `HarnessBudget::FixtureWorkerReady`.
@@ -314,16 +362,21 @@ pub async fn start_live_server(
         ),
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        ..PoolConfig::for_tests()
+        ..defaults
     };
-
-    let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(&config));
-    let (router, state) = create_app(
+    // The fixture owns its host, its workers and its cache: a cached result
+    // from another test's server would answer without the model memory this
+    // server's host is being tested for.
+    let (router, state) = batchalign::create_app_with_runtime(
         config,
         host,
         pool_config,
-        Some(jobs_dir.to_string_lossy().into()),
-        Some(db_dir),
+        batchalign::config::RuntimeLayout::from_state_dir(state_dir),
+        batchalign::AppStorageOverrides {
+            jobs_dir: Some(jobs_dir.to_string_lossy().into()),
+            db_dir: Some(db_dir),
+            cache_dir: Some(tmp.path().join("cache")),
+        },
         Some(batchalign::build_hash().into()),
         std::sync::Arc::new(batchalign::clock::SystemClock),
     )

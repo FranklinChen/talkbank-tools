@@ -16,10 +16,212 @@ use super::split::OverBudgetWindow;
 use super::split::{AnchoredSplit, NonEmptyWords, Pieces};
 use super::utr::{AnchorIndex, CorridorCeiling, CorridorFloor, SearchProvenance};
 use super::{FaWord, TimeSpan};
+use crate::error::AlignmentSourceBindingFailure;
+use crate::types::traces::FaOriginalBulletTrace;
 
 mod population;
 pub(crate) use population::SourceUtterance;
 use population::{GroupPopulation, RecordedUtterance};
+
+/// A working document and the source evidence captured from that same document.
+#[derive(Clone)]
+pub(crate) struct SourceBoundDocument {
+    file: ChatFile,
+    source: SourceCensus,
+    identity: SourceIdentity,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SourceIdentity(std::sync::Arc<SourceIdentityMarker>);
+
+#[derive(Debug)]
+struct SourceIdentityMarker;
+
+impl SourceIdentity {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(SourceIdentityMarker))
+    }
+
+    pub(crate) fn same_source(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+pub(crate) struct SourceBoundUtrInput<'source> {
+    file: &'source ChatFile,
+    identity: SourceIdentity,
+}
+
+impl SourceBoundUtrInput<'_> {
+    pub(crate) fn document(&self) -> &ChatFile {
+        self.file
+    }
+
+    pub(crate) fn identity(&self) -> &SourceIdentity {
+        &self.identity
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(file: &ChatFile) -> SourceBoundUtrInput<'_> {
+        SourceBoundUtrInput {
+            file,
+            identity: SourceIdentity::new(),
+        }
+    }
+}
+
+impl SourceBoundDocument {
+    pub(crate) fn capture(file: ChatFile) -> Self {
+        let source = SourceCensus::capture(&file);
+        Self {
+            file,
+            source,
+            identity: SourceIdentity::new(),
+        }
+    }
+
+    pub(crate) fn utr_input(&self) -> SourceBoundUtrInput<'_> {
+        SourceBoundUtrInput {
+            file: &self.file,
+            identity: self.identity.clone(),
+        }
+    }
+
+    pub(crate) fn group(
+        &self,
+        target: crate::types::engines::FaAggregationTarget,
+        recording: &Recording,
+        anchors: &AnchorIndex,
+    ) -> Result<Grouping, AlignmentSourceBindingFailure> {
+        let bound = self.source.bind(&self.file)?;
+        Ok(group_with_policy(
+            &self.file,
+            WindowPolicy::Aggregation(target),
+            recording,
+            anchors,
+            Some(bound),
+        ))
+    }
+
+    pub(crate) fn into_document(self) -> ChatFile {
+        self.file
+    }
+}
+
+impl std::ops::Deref for SourceBoundDocument {
+    type Target = ChatFile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl std::ops::DerefMut for SourceBoundDocument {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
+
+/// Original input identities and main bullets, captured before recovery.
+#[derive(Clone)]
+struct SourceCensus {
+    utterances: Vec<SourceRecord>,
+}
+
+#[derive(Clone)]
+struct SourceRecord {
+    speaker: talkbank_model::SpeakerCode,
+    location: talkbank_model::Location,
+    words: Vec<String>,
+    bullet: FaOriginalBulletTrace,
+}
+
+impl SourceCensus {
+    pub(crate) fn capture(chat: &ChatFile) -> Self {
+        let utterances = chat
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Utterance(utterance) => Some(utterance),
+                _ => None,
+            })
+            .map(|utterance| {
+                let mut words = Vec::new();
+                collect_fa_words(&utterance.main.content.content, &mut words);
+                let bullet = match utterance.main.content.bullet.as_ref() {
+                    None => FaOriginalBulletTrace::Absent,
+                    Some(talkbank_model::BulletState::Parsed(bullet)) => {
+                        FaOriginalBulletTrace::Parsed {
+                            start_ms: bullet.timing.start_ms,
+                            end_ms: bullet.timing.end_ms,
+                        }
+                    }
+                    Some(talkbank_model::BulletState::Unparsed { unparsed }) => {
+                        FaOriginalBulletTrace::Unparsed {
+                            source: unparsed.source().to_owned(),
+                        }
+                    }
+                };
+                SourceRecord {
+                    speaker: utterance.main.speaker.clone(),
+                    location: utterance.main.location,
+                    words,
+                    bullet,
+                }
+            })
+            .collect();
+        Self { utterances }
+    }
+
+    fn bind<'a>(
+        &'a self,
+        chat: &ChatFile,
+    ) -> Result<BoundSources<'a>, AlignmentSourceBindingFailure> {
+        let mut current = chat.lines.iter().filter_map(|line| match line {
+            Line::Utterance(utterance) => Some(utterance),
+            _ => None,
+        });
+        for (index, source) in self.utterances.iter().enumerate() {
+            let utterance_index = UtteranceIdx::new(index);
+            let utterance =
+                current
+                    .next()
+                    .ok_or(AlignmentSourceBindingFailure::MissingWorkingUtterance {
+                        utterance: utterance_index,
+                    })?;
+            let mut words = Vec::new();
+            collect_fa_words(&utterance.main.content.content, &mut words);
+            if source.speaker != utterance.main.speaker {
+                return Err(AlignmentSourceBindingFailure::SpeakerChanged {
+                    utterance: utterance_index,
+                });
+            }
+            if source.location != utterance.main.location {
+                return Err(AlignmentSourceBindingFailure::LocationChanged {
+                    utterance: utterance_index,
+                });
+            }
+            if source.words != words {
+                return Err(AlignmentSourceBindingFailure::WordsChanged {
+                    utterance: utterance_index,
+                });
+            }
+        }
+        if current.next().is_some() {
+            return Err(AlignmentSourceBindingFailure::UnexpectedWorkingUtterance {
+                utterance: UtteranceIdx::new(self.utterances.len()),
+            });
+        }
+        Ok(BoundSources(&self.utterances))
+    }
+}
+
+struct BoundSources<'a>(&'a [SourceRecord]);
+
+enum SourceObservation<'a> {
+    Recorded(&'a SourceRecord),
+    NotRecorded,
+}
 
 /// A group of utterances clustered for FA, and the audio it is aligned against.
 ///
@@ -33,7 +235,7 @@ use population::{GroupPopulation, RecordedUtterance};
 /// utterances: an anchored span's pieces own their words, so there is no
 /// second copy of the word list for the pieces to disagree with, and its
 /// single utterance is the split's own.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FaGroup {
     span: GroupSpan,
 }
@@ -188,6 +390,29 @@ impl<'g> Iterator for GroupWords<'g> {
 }
 
 impl FaGroup {
+    /// Source windows retained by grouping, before request padding or splits.
+    pub(crate) fn source_windows(&self) -> Option<Vec<crate::types::traces::FaSourceWindowTrace>> {
+        match &self.span {
+            GroupSpan::Single(single) => Some(
+                single
+                    .source_utterances()
+                    .map(|source| {
+                        source_window_trace(
+                            source.utterance(),
+                            source.first_word(),
+                            source.last_word(),
+                            source.window(),
+                            source.localization(),
+                            source.original_bullet().clone(),
+                        )
+                    })
+                    .collect(),
+            ),
+            GroupSpan::Resource(split) => Some(vec![split.source().source_window_trace()]),
+            GroupSpan::Anchored(_) => None,
+        }
+    }
+
     /// Actual candidate requests, including their complete borrowed context;
     /// an unavailable word population can never appear as an executable unit.
     #[cfg(test)]
@@ -427,6 +652,7 @@ pub fn group_utterances(
         WindowPolicy::Aggregation(target),
         recording,
         anchors,
+        None,
     )
 }
 
@@ -444,6 +670,7 @@ pub(crate) fn group_with_declared_window_limit(
         WindowPolicy::DeclaredCapacity(Ms(capacity_ms)),
         recording,
         anchors,
+        None,
     )
 }
 
@@ -469,6 +696,7 @@ fn group_with_policy(
     policy: WindowPolicy,
     recording: &Recording,
     anchors: &AnchorIndex,
+    source: Option<BoundSources<'_>>,
 ) -> Grouping {
     let total_audio_ms = recording.duration().get();
 
@@ -484,14 +712,27 @@ fn group_with_policy(
             Line::Utterance(utterance) => Some((line_idx, utterance)),
             _ => None,
         });
-    for (utt_idx, (line_idx, utt)) in utterances.enumerate() {
+    let originals: Box<dyn Iterator<Item = SourceObservation<'_>> + '_> = match source {
+        Some(bound) => Box::new(bound.0.iter().map(SourceObservation::Recorded)),
+        None => Box::new(std::iter::repeat_with(|| SourceObservation::NotRecorded)),
+    };
+    for ((utt_idx, (line_idx, utt)), original) in utterances.enumerate().zip(originals) {
         match RecordingPresence::of(utt) {
             RecordingPresence::InRecording => {}
             // Not speech in this recording: no window and no request.
             // Completion records the exclusion separately from refusals.
             RecordingPresence::NotInRecording(_) => continue,
         }
-        collect_fa_words(&utt.main.content.content, &mut extracted);
+        let original_bullet = match original {
+            SourceObservation::Recorded(source) => {
+                extracted.extend(source.words.iter().cloned());
+                source.bullet.clone()
+            }
+            SourceObservation::NotRecorded => {
+                collect_fa_words(&utt.main.content.content, &mut extracted);
+                FaOriginalBulletTrace::NotRecorded
+            }
+        };
         let label_bytes = LabelBytes::total(extracted.iter());
         let utterance = UtteranceIdx::new(utt_idx);
         // An utterance with no alignable word makes no request.
@@ -508,9 +749,14 @@ fn group_with_policy(
         ) else {
             continue;
         };
-        let Some(localized) =
-            LocalizedUtterance::from_source(utt, utterance, words, anchors, recording)
-        else {
+        let Some(localized) = LocalizedUtterance::from_source(
+            utt,
+            utterance,
+            words,
+            anchors,
+            recording,
+            original_bullet,
+        ) else {
             // Do not merge supported neighbours across an unsupported turn.
             if let Some(previous) = pending.take() {
                 groups.push(previous.finish(total_audio_ms));
@@ -562,14 +808,14 @@ fn group_with_policy(
                         groups.push(FaGroup {
                             span: GroupSpan::Single(SingleSpan {
                                 window: source.window(),
-                                population: GroupPopulation::one(source),
+                                population: GroupPopulation::one(*source),
                             }),
                         });
                         continue;
                     }
                     #[cfg(test)]
                     MergeSeparation::Oversized { over, source } => {
-                        let (utterance, words) = source.into_words();
+                        let (utterance, words) = (*source).into_words();
                         match AnchoredSplit::plan(over, utterance, words, anchors.lookup(utterance))
                         {
                             Ok(split) => {
@@ -675,15 +921,54 @@ struct LocalizedUtterance {
     span: TimeSpan,
     /// Where `span` came from, for the request evidence.
     localization: Localization,
+    original_bullet: FaOriginalBulletTrace,
 }
 
 /// How an utterance's span was localized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Localization {
-    /// The transcript supplied a bullet.
-    SuppliedBullet,
+pub(super) enum Localization {
+    /// The working document carried a bullet; its original source is unknown here.
+    CurrentBullet,
     /// Utterance timing recovery admitted a search window for its words.
     Searched(SearchProvenance),
+    /// A legacy or declared test geometry did not retain localization.
+    NotRecorded,
+}
+
+pub(super) fn source_window_trace(
+    utterance: UtteranceIdx,
+    first_word: WordIdx,
+    last_word: WordIdx,
+    window: FaWindow,
+    localization: Localization,
+    original_bullet: FaOriginalBulletTrace,
+) -> crate::types::traces::FaSourceWindowTrace {
+    use crate::types::traces::{FaSourceLocalizationTrace, FaSourceWindowTrace};
+
+    let localization = match localization {
+        Localization::CurrentBullet => FaSourceLocalizationTrace::WorkingBullet,
+        Localization::Searched(SearchProvenance::Candidates) => {
+            FaSourceLocalizationTrace::UtrCandidates
+        }
+        Localization::Searched(SearchProvenance::OrderCorridor { floor, ceiling }) => {
+            let floor: batchalign_transform::decisions::CorridorBound = floor.into();
+            let ceiling: batchalign_transform::decisions::CorridorBound = ceiling.into();
+            FaSourceLocalizationTrace::UtrOrderCorridor {
+                floor: floor.into(),
+                ceiling: ceiling.into(),
+            }
+        }
+        Localization::NotRecorded => FaSourceLocalizationTrace::NotRecorded,
+    };
+    FaSourceWindowTrace {
+        utterance: utterance.raw(),
+        first_word: first_word.raw(),
+        last_word: last_word.raw(),
+        start_ms: window.audio_start().get(),
+        end_ms: window.end().get(),
+        original_bullet,
+        localization,
+    }
 }
 
 /// The corridor's edges as the decision record carries them. The decisions
@@ -725,6 +1010,7 @@ impl LocalizedUtterance {
         words: NonEmptyWords,
         anchors: &AnchorIndex,
         recording: &Recording,
+        original_bullet: FaOriginalBulletTrace,
     ) -> Option<Self> {
         let (span, localization) = match source
             .main
@@ -735,7 +1021,7 @@ impl LocalizedUtterance {
         {
             Some(bullet) => (
                 TimeSpan::new(bullet.timing.start_ms, bullet.timing.end_ms),
-                Localization::SuppliedBullet,
+                Localization::CurrentBullet,
             ),
             None => {
                 let window = anchors.search_window(
@@ -754,6 +1040,7 @@ impl LocalizedUtterance {
             words,
             span,
             localization,
+            original_bullet,
         })
     }
 }
@@ -770,13 +1057,13 @@ enum MergeSeparation {
     OutsideRecording(WindowFault),
     /// Valid source window that exceeds a joining preference. Kept whole,
     /// without merge or padding capability, for actual resource admission.
-    Unmerged(RecordedUtterance),
+    Unmerged(Box<RecordedUtterance>),
     /// A real window inside the recording, longer than the engine budget:
     /// what an anchored split partitions.
     #[cfg(test)]
     Oversized {
         over: OverBudgetWindow,
-        source: RecordedUtterance,
+        source: Box<RecordedUtterance>,
     },
 }
 
@@ -818,18 +1105,24 @@ impl GroupWindow {
             FileMs::new(span.start_ms),
             FileMs::new(span.end_ms),
         )?;
-        let source = RecordedUtterance::new(localized.utterance, localized.words, window);
+        let source = RecordedUtterance::new(
+            localized.utterance,
+            localized.words,
+            window,
+            localized.localization,
+            localized.original_bullet,
+        );
         // Non-emptiness is already proven: `FaWindow::within` refused an empty
         // span above, through `WindowFault::Empty`.
         let budget = policy.target();
         if window.end().get() - window.audio_start().get() > budget.0 {
             return Err(match policy {
-                WindowPolicy::Aggregation(_) => MergeSeparation::Unmerged(source),
+                WindowPolicy::Aggregation(_) => MergeSeparation::Unmerged(Box::new(source)),
                 #[cfg(test)]
                 WindowPolicy::DeclaredCapacity(_) => MergeSeparation::Oversized {
                     over: OverBudgetWindow::exceeding(window, budget)
                         .expect("declared capacity is exceeded"),
-                    source,
+                    source: Box::new(source),
                 },
             });
         }

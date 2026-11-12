@@ -396,7 +396,7 @@ calling, and refuses an absent load there as `model_unavailable`.
 | --- | --- |
 | `ModelAccessDeniedError` | `model_access_denied` |
 | `ProviderQuotaExhaustedError` | `provider_quota_exhausted` |
-| `ModelOutputInvalidError` (including Qwen admission exceptions) | `model_output_invalid` |
+| `ModelOutputInvalidError` (including Qwen segmentation and placement refusals; Qwen timing defects are untimed, never raised) | `model_output_invalid` |
 | a download that failed in transit (`is_model_download_failure`) | `model_download_failed` |
 | `torch.OutOfMemoryError` (`is_device_out_of_memory`) | `device_out_of_memory` |
 | `UnsupportedLanguageError` | `unsupported_language` |

@@ -392,6 +392,10 @@ async fn multi_file_job_produces_per_file_results() {
         ..Default::default()
     };
     let pool_config = PoolConfig {
+        // The pool runs on the host this test app is built on.
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(
+            &batchalign::host_facts::HostSnapshot::for_tests(&config),
+        ),
         python_path: python,
         test_echo: true,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),

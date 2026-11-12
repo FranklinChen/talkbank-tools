@@ -198,7 +198,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         &primary_lang,
         langs.as_ref(),
         params.multilingual_policy,
-    )?
+    )
     .batch_items;
 
     if filtered_payloads.is_empty() {
@@ -381,14 +381,13 @@ impl<'source> ReusablePriorMorphology<'source> {
                 let Some((mor, gra)) = mor.zip(gra) else {
                     return Some(Ok(None));
                 };
-                Some(
+                Some(Ok(
                     batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
                         utterance,
                         languages.as_ref(),
                     )
-                    .map(|input| input.map(|input| Self { mor, gra, input }))
-                    .map_err(ServerError::from),
-                )
+                    .map(|input| Self { mor, gra, input }),
+                ))
             })
             .collect()
     }
@@ -401,8 +400,7 @@ impl<'source> ReusablePriorMorphology<'source> {
         let Some(input) = batchalign_transform::morphosyntax::MorphologyInput::from_utterance(
             destination,
             languages,
-        )?
-        else {
+        ) else {
             return Ok(None);
         };
         if !self.input.equivalent_to(&input) {
@@ -555,7 +553,6 @@ mod tests {
             languages.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items
         .into_iter()
         .map(|item| item.utt_ordinal())
@@ -732,7 +729,6 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::SkipNonPrimary,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items;
         // With ProcessAll, all utterances should be included
         let items_all = collect_payloads(
@@ -741,7 +737,6 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items;
 
         // SkipNonPrimary should produce fewer items than ProcessAll
@@ -769,7 +764,6 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items;
         // Both utterances should be included
         assert_eq!(items.len(), 2, "ProcessAll should include all utterances");
@@ -792,7 +786,6 @@ mod tests {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items;
         assert!(!items.is_empty());
         assert!(

@@ -23,7 +23,7 @@ fn attempt_with_options(words: &str, options: &str) -> (talkbank_model::ChatFile
     )
     .expect("complete named source admission");
     match read.attempt() {
-        FaInputDocument::Active(active) => (active.chat_file, active.admission),
+        FaInputDocument::Active(active) => (active.chat_file.into_document(), active.admission),
         FaInputDocument::Preserved => panic!("ordinary source must align"),
     }
 }
@@ -141,6 +141,7 @@ fn requested_untimed_words_count_what_their_requests_yielded() {
                     utterances: vec![talkbank_model::UtteranceIdx::new(0)],
                     words: Vec::new(),
                     word_ids: Vec::new(),
+                    source_windows: None,
                     span: FaGroupSpanTrace::Single {
                         source,
                         cache_key: "key".to_owned(),
@@ -454,7 +455,7 @@ fn attempt_with_diary(
     )
     .expect("a diary note is admitted");
     match read.attempt() {
-        FaInputDocument::Active(active) => (active.chat_file, active.admission),
+        FaInputDocument::Active(active) => (active.chat_file.into_document(), active.admission),
         FaInputDocument::Preserved => panic!("ordinary source must align"),
     }
 }
@@ -622,7 +623,7 @@ fn a_kept_diary_bullet_that_conflicts_with_aligned_timing_is_named() {
     let FaInputDocument::Active(active) = read.attempt() else {
         panic!("ordinary source must align");
     };
-    let (mut file, admission) = (active.chat_file, active.admission);
+    let (mut file, admission) = (active.chat_file.into_document(), active.admission);
     // The spoken utterance aligned across the note's given extent.
     time_words(&mut file, false);
     diary_utterance(&mut file).main.content.bullet =
@@ -732,7 +733,7 @@ fn attempt_lines(lines: &[&str]) -> (talkbank_model::ChatFile, FaAdmission) {
     )
     .expect("complete named source admission");
     match read.attempt() {
-        FaInputDocument::Active(active) => (active.chat_file, active.admission),
+        FaInputDocument::Active(active) => (active.chat_file.into_document(), active.admission),
         FaInputDocument::Preserved => panic!("ordinary source must align"),
     }
 }

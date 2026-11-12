@@ -292,17 +292,12 @@ impl DebugDumper {
         );
     }
 
-    /// Dump CHAT text and UtrResult after UTR injection.
-    pub(crate) fn dump_utr_output(&self, filename: &str, chat_text: &str, utr_result: &UtrResult) {
+    /// Dump the retained UTR observation without presenting a timing projection as output.
+    pub(crate) fn dump_utr_observation(&self, filename: &str, utr_result: &UtrResult) {
         let Some(dir) = self.ensure_dir() else {
             return;
         };
         let stem = Self::stem(filename);
-
-        let chat_path = dir.join(format!("{stem}_utr_output.cha"));
-        if let Err(e) = std::fs::write(&chat_path, chat_text) {
-            debug!(%e, "failed to write UTR debug CHAT output");
-        }
 
         let result_path = dir.join(format!("{stem}_utr_result.json"));
         match serde_json::to_string_pretty(utr_result) {
@@ -415,6 +410,92 @@ impl DebugDumper {
                 source,
             })?;
         info!(%filename, evidence = %path.display(), "FA evidence dumped");
+        Ok(FaEvidenceDumpOutcome::Written(path))
+    }
+
+    /// Retain the source-bound recognizer observations for every completed pass.
+    pub(crate) fn dump_utr_evidence(
+        &self,
+        filename: &str,
+        recovery: &[std::sync::Arc<crate::fa::RetainedUtrPass>],
+    ) -> Result<FaEvidenceDumpOutcome, FaEvidenceDumpError> {
+        let Some(dir) = self.dir.as_deref() else {
+            return Ok(FaEvidenceDumpOutcome::Disabled);
+        };
+        std::fs::create_dir_all(dir).map_err(|source| FaEvidenceDumpError::CreateDirectory {
+            path: dir.to_owned(),
+            source,
+        })?;
+        let path = dir.join(format!(
+            "{}_utr_evidence.json",
+            Self::evidence_stem(filename)
+        ));
+        #[derive(Serialize)]
+        struct UtrEvidence<'a> {
+            schema_version: u8,
+            completed_passes: Vec<&'a crate::fa::RetainedUtrPass>,
+        }
+        let evidence = UtrEvidence {
+            schema_version: 3,
+            completed_passes: recovery.iter().map(std::sync::Arc::as_ref).collect(),
+        };
+        let artifact = SerializedArtifact::json(&evidence)?;
+        artifact
+            .persist(&path)
+            .map_err(|source| FaEvidenceDumpError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(FaEvidenceDumpOutcome::Written(path))
+    }
+
+    /// Retain the abandoned partial attempt even if its full-file fallback fails.
+    pub(crate) fn dump_utr_failed_fallback(
+        &self,
+        filename: &str,
+        pass: crate::api::UtrPass,
+        engine: &crate::options::UtrEngine,
+        abandoned: &crate::runner::AbandonedPartialAttempt,
+        error: &crate::error::ServerError,
+    ) -> Result<FaEvidenceDumpOutcome, FaEvidenceDumpError> {
+        let Some(dir) = self.dir.as_deref() else {
+            return Ok(FaEvidenceDumpOutcome::Disabled);
+        };
+        std::fs::create_dir_all(dir).map_err(|source| FaEvidenceDumpError::CreateDirectory {
+            path: dir.to_owned(),
+            source,
+        })?;
+        let path = dir.join(format!(
+            "{}_utr_{}_failed_evidence.json",
+            Self::evidence_stem(filename),
+            pass.name()
+        ));
+        #[derive(Serialize)]
+        struct FailedUtrEvidence<'a> {
+            schema_version: u8,
+            pass: crate::api::UtrPass,
+            engine: &'a str,
+            abandoned_partial: &'a crate::runner::AbandonedPartialAttempt,
+            failure_category: &'a str,
+            failure: String,
+        }
+        use crate::options::EngineBackend;
+        let category = crate::runner::util::classify_server_error(error);
+        let evidence = FailedUtrEvidence {
+            schema_version: 1,
+            pass,
+            engine: engine.wire_name(),
+            abandoned_partial: abandoned,
+            failure_category: category.as_str(),
+            failure: error.to_string(),
+        };
+        let artifact = SerializedArtifact::json(&evidence)?;
+        artifact
+            .persist(&path)
+            .map_err(|source| FaEvidenceDumpError::Write {
+                path: path.clone(),
+                source,
+            })?;
         Ok(FaEvidenceDumpOutcome::Written(path))
     }
 
@@ -795,6 +876,7 @@ mod tests {
             gap_healing: "Heal".to_owned(),
             violations: Vec::new(),
             fallback_events: Vec::new(),
+            supplied_retries: Some(Vec::new()),
         };
 
         let outcome = dumper
@@ -844,6 +926,7 @@ mod tests {
             gap_healing: "Heal".to_owned(),
             violations: Vec::new(),
             fallback_events: Vec::new(),
+            supplied_retries: None,
         };
 
         let first = dumper
@@ -887,6 +970,7 @@ mod tests {
             gap_healing: "Heal".to_owned(),
             violations: Vec::new(),
             fallback_events: Vec::new(),
+            supplied_retries: Some(Vec::new()),
         };
 
         dumper
@@ -915,7 +999,7 @@ mod tests {
         let chat = "@UTF8\n@Begin\n@End";
         dumper.dump_utr_input("test.cha", chat);
         dumper.dump_utr_tokens("test.cha", &[]);
-        dumper.dump_utr_output("test.cha", chat, &UtrResult::not_run_no_untimed(0));
+        dumper.dump_utr_observation("test.cha", &UtrResult::not_run_no_untimed(0));
         dumper.dump_fa_output("test.cha", chat);
         dumper.dump_asr_response("test.wav", &serde_json::json!({"tokens": []}));
         dumper.dump_post_asr_chat("test.wav", chat);
@@ -954,7 +1038,7 @@ mod tests {
 
         dumper.dump_utr_input("sample.cha", chat);
         dumper.dump_utr_tokens("sample.cha", &tokens);
-        dumper.dump_utr_output("sample.cha", chat, &utr_result);
+        dumper.dump_utr_observation("sample.cha", &utr_result);
         dumper.dump_fa_output("sample.cha", chat);
         dumper.dump_asr_response(
             "sample.wav",
@@ -981,7 +1065,7 @@ mod tests {
         // Verify files exist
         assert!(dir.path().join("sample_utr_input.cha").exists());
         assert!(dir.path().join("sample_utr_tokens.json").exists());
-        assert!(dir.path().join("sample_utr_output.cha").exists());
+        assert!(!dir.path().join("sample_utr_output.cha").exists());
         assert!(dir.path().join("sample_utr_result.json").exists());
         assert!(dir.path().join("sample_fa_output.cha").exists());
         assert!(dir.path().join("sample_fa_group_0.json").exists());

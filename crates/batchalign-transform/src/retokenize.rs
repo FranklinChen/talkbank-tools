@@ -22,7 +22,7 @@ pub(crate) use parse_helpers::{
     try_parse_token_as_word,
 };
 use rebuild::{RetokenizeContext, rebuild_content};
-pub use runs::{RunsDisagree, WordRuns};
+pub use runs::WordRuns;
 
 /// Maps each CHAT word (by index) to one or more NLP token indices.
 ///

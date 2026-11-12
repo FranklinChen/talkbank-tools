@@ -52,6 +52,13 @@ fn merged_candidate_retains_each_source_window_and_its_words_before_padding() {
             ),
         ]
     );
+    let evidence = serde_json::to_value(group.source_windows().unwrap()).unwrap();
+    assert_eq!(evidence[0]["localization"]["kind"], "working_bullet");
+    assert_eq!(evidence[0]["start_ms"], 0);
+    assert_eq!(evidence[0]["end_ms"], 5_000);
+    assert_eq!(evidence[1]["localization"]["kind"], "working_bullet");
+    assert_eq!(evidence[1]["start_ms"], 5_000);
+    assert_eq!(evidence[1]["end_ms"], 10_000);
 }
 
 /// A recording of a stated length, for grouping tests.

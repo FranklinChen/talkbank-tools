@@ -39,9 +39,14 @@ from batchalign.inference.qwen_asr_profile import QwenAsrProfile
 from batchalign.inference.qwen_forced_alignment import (
     ForcedAligner,
     QwenForcedAligner,
-    QwenTimingInvalid,
 )
-from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.inference.qwen_punctuation import (
+    LexicalDrift,
+    NonlexicalUnit,
+    PunctuatedAlignment,
+    describe_punctuation_refusal,
+    restore_punctuation,
+)
 from batchalign.inference.qwen_timing import (
     AudioWindow,
     CompletedRecording,
@@ -49,10 +54,12 @@ from batchalign.inference.qwen_timing import (
     RecordingChunkSpeech,
     RecordingPrefix,
     RecordingStart,
-    RejectedWindowTiming,
+    RecordingWindow,
     SpokenWindowWords,
-    UnavailableWindowTiming,
+    UntimedRecognition,
+    UntimedWindowTiming,
     WindowAlignment,
+    log_placement_defects,
 )
 from batchalign.worker._types_v2 import QwenRecognitionV2, RecognitionPunctuationV2
 
@@ -63,7 +70,6 @@ from ._asr_types import (
     AsrElement,
     AsrGenerationPayload,
     AsrMonologue,
-    TimedWord,
     undiarized_speaker,
 )
 from ._qwen_chunking import (
@@ -305,6 +311,39 @@ class QwenRecognizerConfig:
         return ReadyQwenRecognizer(config=self, models=models)
 
 
+def _with_punctuation(
+    text: str, spoken: SpokenWindowWords, window: RecordingWindow
+) -> SpokenWindowWords | PunctuatedAlignment | UntimedRecognition:
+    """What a RESTORE window keeps, by what punctuation restoration found.
+
+    A nonlexical unit loses only punctuation: the units still spell the
+    recognized text, so they keep their timing. A spelling drift means the
+    aligner's units are not the recognized words, so the recognized text
+    stands untimed rather than being replaced by the aligner's spelling.
+    """
+    match restore_punctuation(text, spoken):
+        case PunctuatedAlignment() as punctuated:
+            return punctuated
+        case NonlexicalUnit() as refusal:
+            L.warning(
+                "Qwen punctuation not restored in %s: %s; the window keeps its "
+                "timed words without restored punctuation",
+                window.describe(),
+                describe_punctuation_refusal(refusal),
+            )
+            return spoken
+        case LexicalDrift() as refusal:
+            L.warning(
+                "Qwen alignment in %s does not spell the recognized text: %s; the "
+                "recognized text is kept without word timing",
+                window.describe(),
+                describe_punctuation_refusal(refusal),
+            )
+            return UntimedRecognition(spoken.window)
+        case unreachable:
+            assert_never(unreachable)
+
+
 @dataclass(frozen=True, slots=True)
 class ReadyQwenRecognizer:
     """Inference capability containing a validated profile and both models.
@@ -393,25 +432,29 @@ class ReadyQwenRecognizer:
         answers. The FA fold must keep every unit in position, which is why the
         filter cannot live in `align`.
         """
-        try:
-            paired = self.models.aligner.align(
-                chunk.samples, text, self.config.profile.alignment_language
-            )
-            alignment = WindowAlignment(paired, AudioWindow(chunk.seconds))
-        except QwenTimingInvalid as error:
-            raise error.in_recording_window(chunk.offset, chunk.seconds) from error
+        paired = self.models.aligner.align(
+            chunk.samples, text, self.config.profile.alignment_language
+        )
+        # Unusable timing becomes untimed words here, never a failed file;
+        # the recording window only names where the logged defect lies.
+        audio = AudioWindow(chunk.seconds)
+        alignment = WindowAlignment(paired, audio, RecordingWindow(chunk.offset, audio))
         spoken = SpokenWindowWords(alignment)
         # The validated transition carries text and time together. The caller
         # never zips a separate spelling list onto timestamp evidence.
-        speech: SpokenWindowWords | PunctuatedAlignment
+        speech: SpokenWindowWords | PunctuatedAlignment | UntimedRecognition
         match self.config.profile.punctuation:
             case RecognitionPunctuationV2.RESTORE:
-                speech = PunctuatedAlignment(text, spoken)
+                speech = _with_punctuation(
+                    text, spoken, RecordingWindow(chunk.offset, audio)
+                )
             case RecognitionPunctuationV2.DISCARD:
                 speech = spoken
             case unreachable:
                 assert_never(unreachable)
-        return RecordingChunkSpeech(text, chunk.offset, speech)
+        placed = RecordingChunkSpeech(text, chunk.offset, speech)
+        log_placement_defects(placed)
+        return placed
 
     def _run_model(
         self, source_path: str, decode_budget_seconds: float | None = None
@@ -481,9 +524,11 @@ class ReadyQwenRecognizer:
 
     def transcribe(
         self, source_path: str, decode_budget_seconds: float | None = None
-    ) -> tuple[AsrGenerationPayload, list[TimedWord]]:
-        """Run Qwen3-ASR on the audio file and return the shared
-        ``(monologues_payload, timed_words)`` tuple.
+    ) -> AsrGenerationPayload:
+        """Run Qwen3-ASR on the audio file and return its monologue payload.
+
+        Word timing travels only in the payload's elements, as recording
+        seconds; there is no second, separately rounded copy of it.
 
         ``decode_budget_seconds`` forwards to ``_run_model``: see its
         docstring. ``None`` (the default, and the only value reachable
@@ -513,7 +558,6 @@ class ReadyQwenRecognizer:
         segments = result.segments
 
         elements: list[AsrElement] = []
-        timed_words: list[TimedWord] = []
         for seg in segments:
             if seg.words:
                 for word in seg.words:
@@ -527,14 +571,7 @@ class ReadyQwenRecognizer:
                                     value=word.text,
                                 )
                             )
-                            timed_words.append(
-                                TimedWord(
-                                    word=word.text,
-                                    start_ms=int(span.start_s * 1000),
-                                    end_ms=int(span.end_s * 1000),
-                                )
-                            )
-                        case UnavailableWindowTiming() | RejectedWindowTiming():
+                        case UntimedWindowTiming():
                             elements.append(
                                 AsrElement(
                                     type="text", ts=None, end_ts=None, value=word.text
@@ -556,5 +593,4 @@ class ReadyQwenRecognizer:
         monologues: list[AsrMonologue] = [
             AsrMonologue(speaker=undiarized_speaker(), elements=elements)
         ]
-        payload: AsrGenerationPayload = AsrGenerationPayload(monologues=monologues)
-        return payload, timed_words
+        return AsrGenerationPayload(monologues=monologues)

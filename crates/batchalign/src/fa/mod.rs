@@ -34,9 +34,11 @@
 //!   REQUEST (dispatch unit), so a single group keys exactly as it always did
 //!   and each piece of an anchored group keys its own words and window.
 
+mod cache_storage;
 mod completion;
 pub(crate) use completion::DurableFaTimingCensus;
 mod input;
+pub(crate) use input::RetainedUtrPass;
 mod preparation;
 mod raw_evidence;
 mod supplied_retry;
@@ -57,7 +59,7 @@ use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::{
     BulletRepairPolicy, WordTiming, expand_bullets_for_edge_fillers, finalize_without_injection,
-    find_reusable_utterance_indices, group_utterances, projection_without_injection_with_touched,
+    find_reusable_utterance_indices, projection_without_injection_with_touched,
     refresh_reusable_alignment, refresh_reusable_utterances, rescue_narrow_bullets,
     strip_wor_from_monotonicity_stripped_utterances,
 };
@@ -128,6 +130,8 @@ impl FaAdmission {
                     timing_decisions: Vec::new(),
                     gap_healing,
                     fallback_events: Vec::new(),
+                    supplied_retries: None,
+                    recovery: Vec::new(),
                     // A pass-through reads nothing, and times nothing either,
                     // so the account this feeds never sees a removal.
                     recording: RecordingRead::NotRead,
@@ -328,11 +332,28 @@ impl AdmittedFaResult {
     /// Both leave together because a caller that wants the timeline still
     /// has to write the document, and handing out the timeline alone would
     /// leave the bytes with no route to disk.
+    #[cfg(test)]
     pub(crate) fn into_document_and_timeline(
         self,
     ) -> (AlignedOutput, crate::types::traces::FaTimelineTrace) {
-        let finalized = self.evidence.into_output();
-        (finalized.output, finalized.evidence.into_timeline_trace())
+        let (output, timeline, _) = self.into_document_timeline_and_recovery();
+        (output, timeline)
+    }
+
+    pub(crate) fn into_document_timeline_and_recovery(
+        self,
+    ) -> (
+        AlignedOutput,
+        crate::types::traces::FaTimelineTrace,
+        Vec<std::sync::Arc<RetainedUtrPass>>,
+    ) {
+        let mut finalized = self.evidence.into_output();
+        let recovery = std::mem::take(&mut finalized.evidence.recovery);
+        (
+            finalized.output,
+            finalized.evidence.into_timeline_trace(),
+            recovery,
+        )
     }
 }
 
@@ -622,6 +643,10 @@ impl<'a> FaCacheUnitAdmission<'a> {
 /// each entry point the attempt type it takes; tests still read a working
 /// document's attempt this way to reach an active input directly.
 #[cfg(test)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "test-only route avoids boxing active fixtures"
+)]
 pub(crate) enum FaInputDocument<'a> {
     /// A declared no-op; tests only ask whether the fixture is one.
     Preserved,
@@ -631,11 +656,11 @@ pub(crate) enum FaInputDocument<'a> {
 /// Active attempt: the producer's admission travels with its mutation target.
 /// There is no free constructor accepting unrelated model and parse evidence.
 pub(crate) struct ActiveFaInput<'a> {
-    chat_file: crate::chat_ops::ChatFile,
+    chat_file: crate::chat_ops::fa::SourceBoundDocument,
     admission: FaAdmission,
     /// The run's main-bullet policy, bound to the input's bullets at the same
-    /// parse, before the UTR pre-pass could write any (see
-    /// `chat_ops::fa::main_bullets`).
+    /// parse so recovery evidence cannot become an original-bullet authority
+    /// (see `chat_ops::fa::main_bullets`).
     main_bullets: crate::chat_ops::fa::MainBulletAuthority,
     /// Word anchors the UTR pre-pass observed on THIS model's words, or
     /// [`crate::chat_ops::fa::AnchorIndex::not_observed`] when it did not run.
@@ -644,6 +669,7 @@ pub(crate) struct ActiveFaInput<'a> {
     /// word was heard ending. Borrowed: every attempt at the file reads the
     /// same anchors.
     anchors: &'a crate::chat_ops::fa::AnchorIndex,
+    recovery: &'a [std::sync::Arc<input::RetainedUtrPass>],
 }
 
 /// Lower a kept-bullet failure to the error that fails this file.
@@ -652,7 +678,13 @@ pub(crate) struct ActiveFaInput<'a> {
 /// hold, or could not be attributed), so the file fails rather than being
 /// written with a moved bullet.
 pub(super) fn kept_bullets_failed(error: crate::chat_ops::fa::KeptBulletError) -> ServerError {
-    ServerError::Validation(error.to_string())
+    match error {
+        crate::chat_ops::fa::KeptBulletError::RetrySourceMissing { utterance } => {
+            crate::error::AlignmentSourceBindingFailure::MissingWorkingUtterance { utterance }
+                .into()
+        }
+        error => ServerError::Validation(error.to_string()),
+    }
 }
 
 /// One heap-owned alignment execution. Producers consume the active input
@@ -703,10 +735,11 @@ pub(crate) fn run_fa_from_ast<'run>(
 /// Grouping consumes this owner; downstream execution cannot substitute a
 /// separately selected projection or engine policy.
 struct FaGroupingInput<'a> {
-    chat_file: crate::chat_ops::ChatFile,
+    chat_file: crate::chat_ops::fa::SourceBoundDocument,
     admission: FaAdmission,
     projection: crate::chat_ops::fa::FaProjection,
     anchors: &'a crate::chat_ops::fa::AnchorIndex,
+    recovery: &'a [std::sync::Arc<input::RetainedUtrPass>],
     params: &'a FaParams,
     wor_tier: crate::params::WorTierPolicy,
     reusable_indices: std::collections::HashSet<usize>,
@@ -727,12 +760,9 @@ impl<'a> FaGroupingInput<'a> {
         self,
         recording: &crate::chat_ops::fa::coordinates::Recording,
     ) -> Result<GroupedFaCandidates<'a>, ServerError> {
-        let grouping = group_utterances(
-            &self.chat_file,
-            self.params.aggregation_target(),
-            recording,
-            self.anchors,
-        );
+        let grouping =
+            self.chat_file
+                .group(self.params.aggregation_target(), recording, self.anchors)?;
         self.admit(grouping, recording)
     }
 
@@ -799,15 +829,14 @@ impl<'a> CacheReplayGrouping<'a> {
             groups,
             decisions,
             windows_clamped,
-        } = group_utterances(
-            &self.input.chat_file,
+        } = self.input.chat_file.group(
             self.input.params.aggregation_target(),
             recording,
             self.input.anchors,
-        );
-        let mut planned = Vec::new();
+        )?;
+        let mut planned = crate::chat_ops::fa::resource_partition::FilePlan::default();
         for input in crate::chat_ops::fa::resource_partition::planning_queue(groups) {
-            planned.extend(
+            planned.plan(
                 crate::chat_ops::fa::resource_partition::prepare_group(
                     input,
                     self.input.anchors,
@@ -827,6 +856,14 @@ impl<'a> CacheReplayGrouping<'a> {
                 })?,
             );
         }
+        // A declared control may refuse pieces for host memory; a file it
+        // admitted nothing of is a control fixture's fault, not a host's.
+        let planned = planned.finish().map_err(|host| {
+            ServerError::Validation(format!(
+                "declared resource control reported host memory for {}",
+                host.engine
+            ))
+        })?;
         self.input.admit(
             Grouping {
                 groups: planned,
@@ -847,6 +884,7 @@ fn prepare_fa_grouping<'a>(
         admission,
         main_bullets,
         anchors,
+        recovery,
     } = active;
     // 1a′. Suppress %wor for Conversation Analysis transcripts.
     // CA transcripts (@Options: CA) use prosodic notation (⌈⌉⌊⌋, arrows,
@@ -935,6 +973,7 @@ fn prepare_fa_grouping<'a>(
         admission,
         projection,
         anchors,
+        recovery,
         params: fa_params,
         wor_tier,
         reusable_indices,
@@ -956,16 +995,18 @@ async fn run_grouped_fa_candidates(
         sources,
     } = grouped;
     let FaGroupingInput {
-        mut chat_file,
+        chat_file,
         admission,
         projection,
         anchors,
+        recovery,
         params: fa_params,
         wor_tier,
         reusable_indices,
         partially_reused_touched,
         rescue_decisions,
     } = input;
+    let mut chat_file = chat_file.into_document();
     let write_wor = wor_tier.should_write();
     let Grouping {
         groups,
@@ -1018,6 +1059,7 @@ async fn run_grouped_fa_candidates(
                 services.cache_namespace,
                 RecordingRead::Read,
             )
+            .with_recovery(recovery)
             .with_written_decisions(written),
         );
     }
@@ -1061,6 +1103,7 @@ async fn run_grouped_fa_candidates(
         population,
         chat_file: &chat_file,
         reusable_utterances: &reusable_indices,
+        recovery,
         progress,
         context: "forced alignment",
     })
@@ -1070,6 +1113,7 @@ async fn run_grouped_fa_candidates(
         evidence: group_evidence,
         mut fallback_events,
         retry,
+        recovery,
     } = resolved.inject(&mut chat_file, projection, write_wor)?;
     let fa_applied = applied
         // Utterances 1f refreshed from reusable `%wor` before grouping: their
@@ -1083,7 +1127,7 @@ async fn run_grouped_fa_candidates(
     //    version strips every start-time regression and clamps end times to
     //    the next utterance's start. Timing removal is now retained as a typed
     //    decision in both the optional CHAT projection and durable evidence.
-    let (finalized, retry_fallbacks) = retry
+    let (finalized, retry_fallbacks, supplied_retries) = retry
         .finalize(
             fa_applied,
             &mut chat_file,
@@ -1123,6 +1167,8 @@ async fn run_grouped_fa_candidates(
         timing_decisions,
         gap_healing: fa_params.gap_healing,
         fallback_events,
+        supplied_retries: Some(supplied_retries),
+        recovery,
         recording: RecordingRead::Read,
     })
 }
@@ -1189,11 +1235,13 @@ pub(crate) fn refresh_from_complete_wor(
     fa_params: &FaParams,
 ) -> Result<AdmittedFaResult, ServerError> {
     let ActiveFaInput {
-        mut chat_file,
+        chat_file,
         admission,
         main_bullets,
         anchors: _,
+        recovery: _,
     } = complete.input();
+    let mut chat_file = chat_file.into_document();
     info!("FA refresh route: reusing existing %wor timing, no recording read");
     let write_wor = if is_ca(&chat_file) {
         info!("@Options: CA detected: suppressing %wor generation");

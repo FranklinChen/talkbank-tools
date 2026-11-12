@@ -22,6 +22,8 @@ a conversion), so they stay tests.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -31,24 +33,31 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
     AudioChunk,
 )
 from batchalign.inference.qwen_forced_alignment import (
+    BackwardsUnitSpan,
+    IndexedWindowUnit,
     InvalidUnitSpan,
+    MissingUnitTime,
     PairedWindowAlignment,
     QwenAlignmentMismatch,
     QwenFaHost,
     QwenLanguageLabel,
     QwenSegmentationDrift,
     QwenSegmentationNotDecomposable,
-    QwenTimingInvalid,
-    QwenUnitNotTimed,
     SpanDefect,
+    TimeField,
+    UntimedChatWord,
     UntimedReason,
+    UntimedReportedUnit,
     WindowAlignedWord,
+    read_decoded_unit,
     resolve_qwen_language,
 )
 from batchalign.inference.qwen_timing import (
     AudioWindow,
+    DisorderedWindowTiming,
     ObservedRecordingSpan,
     ObservedWindowSpan,
+    QwenTimingInvalid,
     RejectedWindowTiming,
     UnavailableWindowTiming,
     WindowAlignment,
@@ -289,7 +298,9 @@ def test_a_word_with_no_alignable_characters_is_untimed_not_padded() -> None:
     host = QwenFaHost(aligner=_QwenLikeAligner(), language=resolve_qwen_language("eng"))
     fold = host.align_words(np.zeros(SAMPLE_RATE, dtype=np.float32), ["hello", "+//"])
     assert [row.interval_ms for row in fold.to_indexed_timings()] == [(0, 100), None]
-    assert fold.words[1].reason is UntimedReason.NO_ALIGNABLE_CHARACTERS
+    untimed = fold.words[1]
+    assert isinstance(untimed, UntimedChatWord)
+    assert untimed.reason is UntimedReason.NO_ALIGNABLE_CHARACTERS
 
 
 def test_a_decoded_unit_with_no_text_reads_as_blank_rather_than_raising() -> None:
@@ -301,21 +312,40 @@ def test_a_decoded_unit_with_no_text_reads_as_blank_rather_than_raising() -> Non
     unit into a `KeyError` in the middle of a chunk. The read is total again,
     and this pins it at the boundary rather than at one caller.
     """
-    assert WindowAlignedWord.from_decoded(
-        {"start_time": 0.1, "end_time": 0.4}
-    ) == WindowAlignedWord(text="", start_s=0.1, end_s=0.4)
+    assert read_decoded_unit({"start_time": 0.1, "end_time": 0.4}) == WindowAlignedWord(
+        text="", start_s=0.1, end_s=0.4
+    )
 
 
-def test_a_decoded_unit_with_no_times_is_refused_by_name() -> None:
-    """The times are NOT optional, and a missing one is named rather than raw.
-
-    A unit with no times cannot be dropped: the FA fold attributes units to
-    words by position, so dropping one shifts every later span onto the wrong
-    word. The old code's silent skip was only ever safe because the ASR caller
-    ignores position.
-    """
-    with pytest.raises(QwenUnitNotTimed, match="start_time"):
-        WindowAlignedWord.from_decoded({"text": "hello"})
+@pytest.mark.parametrize(
+    "decoded,field",
+    [
+        ({"text": "hello"}, TimeField.START),
+        ({"text": "hello", "start_time": 0.1}, TimeField.END),
+        ({"text": "hello", "start_time": "soon", "end_time": 0.4}, TimeField.START),
+        ({"text": "hello", "start_time": 0.1, "end_time": True}, TimeField.END),
+    ],
+)
+def test_a_decoded_unit_without_a_usable_time_keeps_its_position_untimed(
+    decoded: dict[str, object], field: TimeField
+) -> None:
+    """A missing or non-numeric time is neither dropped (the fold attributes
+    units to words by position) nor invented: the unit is untimed, the file
+    goes on, and its neighbours keep their timing."""
+    reported = read_decoded_unit(decoded)
+    assert isinstance(reported, UntimedReportedUnit)
+    assert (reported.text, reported.field) == ("hello", field)
+    alignment = WindowAlignment(
+        PairedWindowAlignment.of(
+            ["hello", "world"], [reported, WindowAlignedWord("world", 0.5, 0.6)]
+        ),
+        AudioWindow(1.0),
+    )
+    missing = alignment.words[0].timing
+    assert isinstance(missing, RejectedWindowTiming)
+    assert isinstance(missing.defect, MissingUnitTime)
+    assert missing.defect.index == 0
+    assert isinstance(alignment.words[1].timing, ObservedWindowSpan)
 
 
 class _BlankUnitAligner:
@@ -446,35 +476,82 @@ def test_a_unit_with_an_invalid_span_is_untimed_keeping_its_defect(
         ((0.1, 0.8), (0.5, 0.6), "end"),
     ],
 )
-def test_generated_backwards_sequences_identify_both_units(
+def test_a_backwards_pair_untimes_its_window_keeping_both_units(
     previous: tuple[float, float], current: tuple[float, float], boundary: str
 ) -> None:
-    with pytest.raises(QwenTimingInvalid) as refusal:
-        _admit(
-            ["hello", "world"],
-            [
-                WindowAlignedWord("hello", *previous),
-                WindowAlignedWord("world", *current),
-            ],
-        )
-    detail = str(refusal.value)
-    assert f"backwards {boundary}" in detail
-    assert "unit 2 'world'" in detail
-    assert "unit 1 'hello'" in detail
+    """The window's order is untrustworthy, so none of its spans is kept, and
+    nothing raises: the file keeps going."""
+    alignment = _admit(
+        ["hello", "world", "again"],
+        [
+            WindowAlignedWord("hello", *previous),
+            WindowAlignedWord("world", *current),
+            WindowAlignedWord("again", 0.9, 0.95),
+        ],
+    )
+    timings = [word.timing for word in alignment.words]
+    assert all(isinstance(timing, DisorderedWindowTiming) for timing in timings)
+    defect = timings[0].defect
+    assert isinstance(defect, BackwardsUnitSpan)
+    assert all(timing.defect == defect for timing in timings)
+    assert (defect.previous.index, defect.current.index) == (0, 1)
+    assert defect.boundary.value == boundary
 
 
-def test_direct_window_alignment_construction_cannot_bypass_admission() -> None:
+def test_a_unit_defect_keeps_its_own_reason_in_a_disordered_window() -> None:
+    alignment = _admit(
+        ["hello", "world", "late"],
+        [
+            WindowAlignedWord("hello", 0.7, 0.8),
+            WindowAlignedWord("world", 0.5, 0.6),
+            WindowAlignedWord("late", 0.9, 1.5),
+        ],
+    )
+    assert isinstance(alignment.words[0].timing, DisorderedWindowTiming)
+    assert isinstance(alignment.words[2].timing, RejectedWindowTiming)
+
+
+def test_a_span_constructor_cannot_be_built_from_an_unapproved_span() -> None:
+    """Admission never raises; the constructors that claim a usable span do."""
+    unit = IndexedWindowUnit(0, WindowAlignedWord("hello", 0.5, 1.5))
     with pytest.raises(QwenTimingInvalid):
-        WindowAlignment(
-            PairedWindowAlignment.of(
-                ["hello", "world"],
-                [
-                    WindowAlignedWord("hello", 0.7, 0.8),
-                    WindowAlignedWord("world", 0.5, 0.6),
-                ],
-            ),
-            AudioWindow(1.0),
+        ObservedWindowSpan(unit, AudioWindow(1.0))
+
+
+def test_the_fa_fold_leaves_a_disordered_window_untimed_without_failing() -> None:
+    host = QwenFaHost(
+        aligner=_RecordingAligner(
+            [WindowAlignedWord("hello", 0.7, 0.8), WindowAlignedWord("world", 0.5, 0.6)]
+        ),
+        language=resolve_qwen_language("eng"),
+    )
+    fold = host.align_words(np.zeros(SAMPLE_RATE, dtype=np.float32), ["hello", "world"])
+    assert [row.interval_ms for row in fold.to_indexed_timings()] == [None, None]
+    assert all(
+        isinstance(word, UntimedChatWord)
+        and word.reason is UntimedReason.ALIGNMENT_UNIT_UNAVAILABLE
+        for word in fold.words
+    )
+
+
+def test_asr_untimes_a_disordered_chunk_and_logs_its_recording_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recognizer = _ready_qwen(
+        _RecordingAligner(
+            [WindowAlignedWord("hello", 0.7, 0.8), WindowAlignedWord("world", 0.5, 0.6)]
         )
+    )
+    chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE), offset=180.0)
+    with caplog.at_level(logging.WARNING):
+        speech = recognizer._align_chunk(chunk, "hello world")
+    assert [word.text for word in speech.words] == ["hello", "world"]
+    assert all(isinstance(word.timing, DisorderedWindowTiming) for word in speech.words)
+    logged = " ".join(record.getMessage() for record in caplog.records)
+    assert "recording window 180..181 s" in logged
+    assert "relative to that window" in logged
+    assert "0.5..0.6" in logged
+    assert "the rest of the file keeps its timing" in logged
 
 
 def test_blank_and_zero_width_units_keep_their_fold_positions() -> None:
@@ -488,17 +565,3 @@ def test_blank_and_zero_width_units_keep_their_fold_positions() -> None:
     assert [word.text for word in alignment.words] == [word.text for word in words]
     assert isinstance(alignment.words[1].timing, UnavailableWindowTiming)
     assert isinstance(alignment.words[2].timing, UnavailableWindowTiming)
-
-
-def test_asr_timing_refusal_reports_the_recording_window() -> None:
-    recognizer = _ready_qwen(
-        _RecordingAligner(
-            [WindowAlignedWord("hello", 0.7, 0.8), WindowAlignedWord("world", 0.5, 0.6)]
-        )
-    )
-    chunk = AudioChunk(samples=np.zeros(SAMPLE_RATE), offset=180.0)
-    with pytest.raises(QwenTimingInvalid) as refusal:
-        recognizer._align_chunk(chunk, "hello world")
-    assert "recording window 180..181 s" in str(refusal.value)
-    assert "relative to that window" in str(refusal.value)
-    assert "0.5..0.6" in str(refusal.value)

@@ -594,8 +594,14 @@
             "type": "object"
           },
           {
-            "description": "Full request demand exceeds total usable physical host capacity.",
+            "description": "Full request demand exceeds the most this host can ever offer.",
             "properties": {
+              "ceiling_mb": {
+                "description": "The most this host can ever offer (its total RAM when read live,\nits declared available RAM when declared), independent of\ntransient memory pressure: the bound the request was judged\nagainst, the same one host-memory admission refuses against.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
               "engine": {
                 "description": "The loaded model that projected this request.",
                 "type": "string"
@@ -617,19 +623,13 @@
                 "format": "int64",
                 "minimum": 0,
                 "type": "integer"
-              },
-              "total_mb": {
-                "description": "Physical capacity, independent of transient memory pressure.",
-                "format": "int64",
-                "minimum": 0,
-                "type": "integer"
               }
             },
             "required": [
               "engine",
               "required_mb",
               "reserve_mb",
-              "total_mb",
+              "ceiling_mb",
               "kind"
             ],
             "type": "object"

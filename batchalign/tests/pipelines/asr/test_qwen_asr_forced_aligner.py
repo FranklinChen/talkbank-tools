@@ -95,20 +95,23 @@ def test_qwen_recognizer_transcribe_produces_word_timestamps() -> None:
         recognition=SEGMENTATION_MODEL_POLICY,
     )
     recognizer = config.load(snapshots)
-    _payload, timed_words = recognizer.transcribe(str(audio))
+    payload = recognizer.transcribe(str(audio))
+    timed = [
+        element
+        for monologue in payload["monologues"]
+        for element in monologue["elements"]
+        if element["ts"] is not None and element["end_ts"] is not None
+    ]
 
-    assert timed_words, (
+    assert timed, (
         "ReadyQwenRecognizer.transcribe returned zero timed words on real "
         "Cantonese audio. Either the aligner produced nothing or the audio "
         "is silent. Inspect the raw output before changing this assertion."
     )
-    for tw in timed_words:
-        start_ms = tw["start_ms"]
-        end_ms = tw["end_ms"]
-        assert start_ms >= 0, f"negative start_ms in TimedWord: {tw!r}"
-        assert end_ms >= start_ms, (
-            f"end_ms < start_ms in TimedWord: {tw!r}, aligner output "
-            f"violates timing monotonicity"
+    for element in timed:
+        assert element["ts"] >= 0, f"negative start in {element!r}"
+        assert element["end_ts"] > element["ts"], (
+            f"non-positive span in {element!r}: admission must untime it instead"
         )
 
     # Recording-relative, not window-relative. Under chunking the aligner
@@ -119,7 +122,7 @@ def test_qwen_recognizer_transcribe_produces_word_timestamps() -> None:
     import librosa
 
     duration = float(librosa.get_duration(path=str(audio)))
-    last_end_s = max(tw["end_ms"] for tw in timed_words) / 1000.0
+    last_end_s = max(element["end_ts"] for element in timed)
     if duration > 200.0:
         assert last_end_s > 180.0, (
             f"audio is {duration:.0f}s but no word ends after 180s "

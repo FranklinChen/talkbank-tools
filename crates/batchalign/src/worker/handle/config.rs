@@ -74,8 +74,14 @@ impl WorkerRuntimeConfig {
     /// account: a test reads no credentials or account settings from the
     /// machine running it, and one that plans Tencent names its engine.
     pub fn for_tests() -> Self {
+        Self::for_tests_on(&HostSnapshot::for_tests(&ServerConfig::default()))
+    }
+
+    /// A test launch on `host`, with no Rev.AI key and no provider account:
+    /// the runtime of a pool prepared on that host.
+    pub fn for_tests_on(host: &HostSnapshot) -> Self {
         Self::launch(
-            HostSnapshot::for_tests(&ServerConfig::default()).runtime_host(),
+            host.runtime_host(),
             crate::worker::provider_credentials::ProviderAccounts::none(),
         )
     }

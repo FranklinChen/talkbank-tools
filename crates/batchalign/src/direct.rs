@@ -60,13 +60,16 @@ impl DirectHost {
     /// taken there too.
     pub async fn new(
         config: ServerConfig,
-        host: Arc<crate::host_facts::HostSnapshot>,
         layout: RuntimeLayout,
         jobs_dir: Option<PathBuf>,
         cache_dir: Option<PathBuf>,
         workers: &PreparedWorkers,
         clock: Arc<dyn crate::clock::Clock>,
     ) -> Result<Self, ServerError> {
+        // The host first, before any directory or cache is touched: a
+        // configuration the workers cannot follow is refused with no side
+        // effect.
+        let host = workers.host_for(&config)?;
         let jobs_dir = jobs_dir.unwrap_or_else(|| layout.jobs_dir());
         tokio::fs::create_dir_all(&jobs_dir).await?;
 
@@ -294,6 +297,7 @@ mod tests {
 
         let config = ServerConfig::default();
         let workers = prepare_workers(
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             PoolConfig {
                 test_echo: true,
                 ..PoolConfig::for_tests()
@@ -304,7 +308,6 @@ mod tests {
         .expect("prepare workers");
         let host = DirectHost::new(
             config.clone(),
-            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -355,6 +358,7 @@ mod tests {
 
         let config = ServerConfig::default();
         let workers = prepare_workers(
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             PoolConfig {
                 test_echo: true,
                 ..PoolConfig::for_tests()
@@ -365,7 +369,6 @@ mod tests {
         .expect("prepare workers");
         let host = DirectHost::new(
             config.clone(),
-            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -413,6 +416,7 @@ mod tests {
 
         let config = ServerConfig::default();
         let workers = prepare_workers(
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             PoolConfig {
                 test_echo: true,
                 ..PoolConfig::for_tests()
@@ -423,7 +427,6 @@ mod tests {
         .expect("prepare workers");
         let host = DirectHost::new(
             config.clone(),
-            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),
@@ -467,6 +470,7 @@ mod tests {
 
         let config = ServerConfig::default();
         let workers = prepare_workers(
+            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             PoolConfig {
                 test_echo: true,
                 ..PoolConfig::for_tests()
@@ -477,7 +481,6 @@ mod tests {
         .expect("prepare workers");
         let host = DirectHost::new(
             config.clone(),
-            std::sync::Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
             layout,
             None,
             Some(tempdir.path().join("cache")),

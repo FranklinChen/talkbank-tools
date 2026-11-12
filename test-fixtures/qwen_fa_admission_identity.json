@@ -1,4 +1,4 @@
 {
   "legacy": "Qwen/Qwen3-ForcedAligner-0.6B-hf",
-  "current": "Qwen/Qwen3-ForcedAligner-0.6B-hf@unit-defects-untimed-v2"
+  "current": "Qwen/Qwen3-ForcedAligner-0.6B-hf@timing-defects-untimed-v3"
 }

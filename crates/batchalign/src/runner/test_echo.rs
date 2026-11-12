@@ -18,8 +18,6 @@ pub(super) async fn dispatch_test_echo_files(
     file_list: &[crate::store::PendingJobFile],
     test_delay_ms: u64,
 ) {
-    let job_id = &job.identity.job_id;
-
     for file in file_list {
         if job.cancel_token.is_cancelled() {
             break;
@@ -34,7 +32,7 @@ pub(super) async fn dispatch_test_echo_files(
         }
 
         let filename = file.filename.as_ref();
-        let lifecycle = FileRunTracker::new(sink, job_id, filename);
+        let lifecycle = FileRunTracker::new(sink, filename);
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
             .await;

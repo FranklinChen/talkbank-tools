@@ -13,8 +13,8 @@ struct ReadyRequests<'services, 'unit> {
 
 /// The following request is inaccessible until this outcome has been retained.
 struct CompletedDispatch<'services, 'unit> {
-    result: FaWorkerUnitResult<'unit>,
-    aliases: Vec<&'unit DispatchUnit<'unit>>,
+    result: FaWorkerReply<'unit>,
+    aliases: Vec<ReplyTicket<'unit>>,
     continuation: Box<ReadyRequests<'services, 'unit>>,
 }
 
@@ -29,12 +29,15 @@ impl<'services, 'unit> ReadyRequests<'services, 'unit> {
             self.services,
             &self.language,
             self.engine,
-            dispatch.unit,
+            dispatch.reply.unit(),
             dispatch.prepared,
         )
         .await?;
         Ok(Some(CompletedDispatch {
-            result,
+            result: FaWorkerReply {
+                reply: dispatch.reply,
+                result,
+            },
             aliases: dispatch.aliases,
             continuation: self,
         }))
@@ -51,7 +54,7 @@ impl<'services, 'unit> CompletedDispatch<'services, 'unit> {
         let aliases: Vec<_> = self
             .aliases
             .into_iter()
-            .map(|unit| self.result.share_with(unit))
+            .map(|reply| self.result.share_with(reply))
             .collect();
         sink.retain(self.result).await?;
         for alias in aliases {

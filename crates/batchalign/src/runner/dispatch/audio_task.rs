@@ -49,13 +49,13 @@ pub(crate) trait AudioFileTask {
     ) -> Result<FileOutput, ServerError>;
 
     /// Optional command-owned recovery step before the shell records a retry.
-    /// Unavailable analysis is an output shortfall; only cancellation may stop
-    /// recovery here, so a provider error cannot accidentally fail the file.
+    /// Unavailable analysis is an output shortfall. Cancellation or a typed
+    /// internal recovery fault stops the file; provider errors do not.
     async fn on_retryable_worker_failure(
         &mut self,
         _lifecycle: &FileRunTracker<'_>,
         _error: &ServerError,
-    ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
+    ) -> Result<(), crate::provenance::UtrRecoveryStop> {
         Ok(())
     }
 }
@@ -103,7 +103,7 @@ where
         // saturated pool (without a deadline); the file shows "waiting for a
         // worker" while one does.
         let (progress_tx, wait_observer, forwarder) =
-            spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
+            spawn_observed_progress_forwarder(sink.clone(), filename.to_string());
 
         let attempt = crate::worker::pool::checkout_wait::observing_pool_waits(
             wait_observer,
@@ -190,13 +190,23 @@ where
                     AfterFailure::Retry(grant) => {
                         // Timing recovery runs while the retry is granted and
                         // not yet spent, so a cancelled recovery ends the file.
-                        if let Err(crate::chat_ops::fa::utr::UtrCancelled) =
-                            task.on_retryable_worker_failure(lifecycle, &error).await
-                        {
-                            return grant
-                                .abandon("Timing recovery cancelled", FailureCategory::Cancelled)
-                                .await
-                                .into();
+                        match task.on_retryable_worker_failure(lifecycle, &error).await {
+                            Ok(()) => {}
+                            Err(crate::provenance::UtrRecoveryStop::Cancelled) => {
+                                return grant
+                                    .abandon(
+                                        "Timing recovery cancelled",
+                                        FailureCategory::Cancelled,
+                                    )
+                                    .await
+                                    .into();
+                            }
+                            Err(crate::provenance::UtrRecoveryStop::Failed(failure)) => {
+                                return grant
+                                    .abandon(&failure.to_string(), FailureCategory::System)
+                                    .await
+                                    .into();
+                            }
                         }
                         grant.wait().await
                     }
@@ -212,7 +222,7 @@ mod tests {
     mod utr_tests;
     use std::collections::BTreeMap;
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -220,140 +230,21 @@ mod tests {
 
     use super::*;
     use crate::api::{
-        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, MachineTime, NumSpeakers,
+        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
         ReleasedCommand,
     };
     use crate::options::{
         AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions, WorTierPolicy,
     };
     use crate::runner::dispatch::audio_output::ChatOutput;
-    use crate::scheduling::{AttemptOutcome, RetryDisposition};
+    use crate::scheduling::AttemptOutcome;
     use crate::store::{
         PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
     };
     use crate::worker::error::WorkerError;
     use batchalign_types::paths::{ClientPath, ServerPath};
 
-    #[derive(Default)]
-    struct RecordingState {
-        retries: usize,
-        done: usize,
-        diagnosed: Vec<crate::api::FileOutputDiagnostics>,
-        errors: usize,
-        started_attempts: usize,
-        finished_attempts: Vec<AttemptOutcome>,
-    }
-
-    struct RecordingSink {
-        state: Arc<Mutex<RecordingState>>,
-    }
-
-    impl RecordingSink {
-        fn new() -> (Arc<Self>, Arc<Mutex<RecordingState>>) {
-            let state = Arc::new(Mutex::new(RecordingState::default()));
-            (
-                Arc::new(Self {
-                    state: state.clone(),
-                }),
-                state,
-            )
-        }
-    }
-
-    #[async_trait]
-    impl RunnerEventSink for RecordingSink {
-        fn now(&self) -> crate::store::EventTime {
-            crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0))
-        }
-
-        async fn mark_file_processing(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _started_at: crate::store::EventTime,
-        ) {
-        }
-        async fn mark_file_done(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _finished_at: crate::store::EventTime,
-            completion: crate::store::FileCompletion,
-        ) {
-            let mut state = self.state.lock().unwrap();
-            match completion {
-                crate::store::FileCompletion::Diagnosed { diagnostics, .. } => {
-                    state.diagnosed.push(diagnostics);
-                }
-                crate::store::FileCompletion::Clean(_)
-                | crate::store::FileCompletion::WithoutResult => state.done += 1,
-            }
-        }
-        async fn mark_file_error(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _error: &str,
-            _category: FailureCategory,
-            _finished_at: crate::store::EventTime,
-        ) {
-            self.state.lock().unwrap().errors += 1;
-        }
-        async fn start_file_attempt(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _work_unit_kind: WorkUnitKind,
-            _started_at: crate::store::EventTime,
-        ) {
-            self.state.lock().unwrap().started_attempts += 1;
-        }
-        async fn finish_file_attempt(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            outcome: AttemptOutcome,
-            _failure_category: Option<FailureCategory>,
-            _disposition: RetryDisposition,
-            _finished_at: crate::store::EventTime,
-        ) {
-            self.state.lock().unwrap().finished_attempts.push(outcome);
-        }
-        async fn mark_file_retry_pending(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _retry_at: MachineTime,
-            _category: FailureCategory,
-            _message: &str,
-            _finished_at: crate::store::EventTime,
-        ) {
-            self.state.lock().unwrap().retries += 1;
-        }
-        async fn clear_file_retry_state(&self, _job_id: &JobId, _filename: &str) {}
-        async fn set_file_progress(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _stage: FileStage,
-            _current: Option<i64>,
-            _total: Option<i64>,
-        ) {
-        }
-        async fn set_file_worker_wait(
-            &self,
-            _job_id: &JobId,
-            _filename: &str,
-            _change: crate::store::WorkerWaitChange,
-        ) {
-        }
-        async fn fail_job(&self, _job_id: &JobId, _error: &str) {}
-        async fn mark_job_running(&self, _job_id: &JobId) {}
-        async fn record_job_worker_count(&self, _job_id: &JobId, _worker_count: usize) {}
-        async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: MachineTime) {}
-        async fn bump_deferred_work_units(&self) {}
-        async fn bump_memory_gate_aborts(&self) {}
-    }
+    use crate::runner::util::test_sink::RecordingSink;
 
     struct FakeAudioTask {
         attempts: Arc<AtomicUsize>,
@@ -399,7 +290,7 @@ mod tests {
             &mut self,
             _lifecycle: &FileRunTracker<'_>,
             _error: &ServerError,
-        ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
+        ) -> Result<(), crate::provenance::UtrRecoveryStop> {
             self.recoveries.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -407,7 +298,6 @@ mod tests {
 
     fn fake_job(tmp: &tempfile::TempDir) -> RunnerJobSnapshot {
         RunnerJobSnapshot {
-            run_generation: crate::store::RunGeneration::FIRST,
             identity: RunnerJobIdentity {
                 job_id: JobId::from("audio-shell"),
                 correlation_id: CorrelationId::from("corr-audio-shell"),
@@ -458,12 +348,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let job = fake_job(&tmp);
         let file = job.pending_files[0].clone();
-        let (sink_impl, state) = RecordingSink::new();
-        let lifecycle = FileRunTracker::new(
-            sink_impl.as_ref(),
-            &job.identity.job_id,
-            file.filename.as_ref(),
-        );
+        let sink_impl = Arc::new(RecordingSink::default());
+        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename.as_ref());
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
             .await;
@@ -489,12 +375,11 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded(_)));
-        let state = state.lock().unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(recoveries.load(Ordering::SeqCst), 1);
-        assert_eq!(state.retries, 1);
-        assert_eq!(state.done, 1);
-        assert_eq!(state.errors, 0);
+        assert_eq!(sink_impl.retries().len(), 1);
+        assert_eq!(sink_impl.done_files().len(), 1);
+        assert!(sink_impl.errors().is_empty());
         assert!(
             std::fs::read_to_string(tmp.path().join("requested/test.cha"))
                 .expect("written output")
@@ -561,12 +446,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let job = fake_job(&tmp);
         let file = job.pending_files[0].clone();
-        let (sink_impl, state) = RecordingSink::new();
-        let lifecycle = FileRunTracker::new(
-            sink_impl.as_ref(),
-            &job.identity.job_id,
-            file.filename.as_ref(),
-        );
+        let sink_impl = Arc::new(RecordingSink::default());
+        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename.as_ref());
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
             .await;
@@ -591,19 +472,21 @@ mod tests {
 
         assert!(matches!(outcome, FileTaskOutcome::TerminalStateRecorded(_)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "never retried");
-        let state = state.lock().unwrap();
-        assert_eq!((state.done, state.errors, state.retries), (0, 0, 0));
-        assert_eq!(state.diagnosed.len(), 1);
+        assert!(sink_impl.done_files().is_empty());
+        assert!(sink_impl.errors().is_empty());
+        assert!(sink_impl.retries().is_empty());
+        let diagnosed = sink_impl.diagnosed();
+        assert_eq!(diagnosed.len(), 1);
         assert!(
-            state.diagnosed[0]
+            diagnosed[0]
                 .first_findings()
                 .iter()
                 .any(|finding| finding.code.as_deref() == Some("E220")),
             "{:?}",
-            state.diagnosed[0]
+            diagnosed[0]
         );
         assert_eq!(
-            state.finished_attempts,
+            sink_impl.finished_attempts(),
             vec![AttemptOutcome::Succeeded],
             "the attempt produced and wrote its output"
         );

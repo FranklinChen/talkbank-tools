@@ -31,16 +31,19 @@ owner and its remaining artifacts.
 
 Only `CompletedDispatch::retain` can release the continuation. It consumes the
 canonical outcome into the result sink, followed by its shared timing aliases.
-The canonical result alone owns raw-cache evidence and fallback events. The
-sink writes eligible evidence, records the timing projection in the ledger,
-and publishes completion before another request starts. Whole-batch raw results
+The canonical result alone owns raw-cache evidence and fallback events. Each
+outcome carries its non-cloneable `ReplyTicket`, minted with its receiving slot
+by `UnitLedger::open`. The sink writes eligible evidence, consumes the ticket
+to complete that exact slot, and publishes completion before another request
+starts. It cannot select a different ledger or complete a ticket twice. Whole-batch raw results
 are no longer retained until the final model reply. Sink operations issue
 compact `Send` futures borrowing the sink exclusively.
 
-`UnitLedger::retaining` derives its initial completion and total from actual
-reused, cache-resolved and awaited slots. The sink's fields are private to its
-own module, so its caller cannot substitute independently supplied counters.
-Each successfully recorded outcome advances one slot. Shared input aliases
+Opening the ledger derives progress from its actual reused and awaited
+population. The sink holds a read-only progress view; completing a ticket is
+the only later increment. Cache hits consume their tickets before inference;
+no separately supplied completed/total counters can substitute for that owner.
+Each successfully delivered outcome advances one slot. Shared input aliases
 have distinct output slots but share one model execution. A completed alignment
 counter therefore measures resolved dispatch units, including reuse/cache and
 unaligned outcomes; it does not measure timed words or certify a written file.
@@ -52,10 +55,11 @@ flowchart TD
     bind_requests --> ready_requests["ReadyRequests owns actual remaining population"]
     ready_requests --> infer_request["Consume one prepared model request"]
     infer_request --> completed_dispatch["CompletedDispatch owns outcome and private continuation"]
-    resolved_ledger["Actual reuse, cache and awaited ledger slots"] --> result_sink["RetainUnitResults owns ledger borrow and derived progress"]
+    resolved_ledger["Ledger mints receiving slots, unique tickets and progress"] --> retained_inputs
+    resolved_ledger --> result_sink["RetainUnitResults holds read-only progress"]
     completed_dispatch --> retain_outcome["Consume canonical outcome and timing aliases"]
     result_sink --> retain_outcome
-    retain_outcome --> stored_result["Write eligible evidence; record slot; publish completion"]
+    retain_outcome --> stored_result["Write eligible evidence; consume ticket; publish completion"]
     stored_result --> continuation{"Remaining dispatches"}
     continuation -->|"yes: release continuation"| ready_requests
     continuation -->|"none"| inference_complete["CompletedFaInference releases the completed sink"]
@@ -84,13 +88,15 @@ windows.
 
 `FaApplied::then_impose` consumes primary injection and fits kept words once.
 `FaImposed` owns that proof across optional asynchronous recovery. The shared
-full/incremental `SuppliedRetrySession` borrows affected utterances exclusively;
+full/incremental `SuppliedRetrySession` borrows the document exclusively;
 the session issues one `PendingSuppliedRetry` for each source with missing
 positive word timing. Only missing AST slots receive writing capabilities.
 Retained neighbour bounds constrain new timings; accepted primary slots have
 no overwrite operation. `PendingSuppliedRetry::start` consumes the pending owner,
 transfers its preparation capability once, and returns `AwaitingSuppliedRetry`.
-That awaiting phase can accept a terminal answer but cannot start preparation. Canonical compound-word projection is shared with
+The consuming retry producer requires that awaiting owner; a source reference
+alone cannot request another pass. Complete output cannot release preparation,
+including with gap healing. Canonical compound-word projection is shared with
 primary injection, including excluded tokens and replaced originals.
 
 The preparation registry freezes primary execution owners separately from a
@@ -113,7 +119,7 @@ flowchart TD
     fit --> slots{"Missing positive timing in supplied scope?"}
     source --> slots
     slots -->|"none"| finish["Repair, order, write wor, verify kept bullets"]
-    slots -->|"missing only"| pending["PendingSuppliedRetry owns exclusive utterance borrow and missing slots"]
+    slots -->|"missing only"| pending["PendingSuppliedRetry owns missing slots and retained input claim<br/>session holds exclusive document borrow"]
     pending --> awaiting["Consume into AwaitingSuppliedRetry and transfer preparation once"]
     awaiting --> book{"Owned source/preparation capability"}
     book -->|"settled or refused"| unresolved["Terminal unresolved outcome"]
@@ -122,9 +128,10 @@ flowchart TD
     cache -->|"permitted miss"| admit["Exact window: prepare and acquire model/host lease"]
     cache -->|"hit"| answer["Terminal source answer"]
     admit --> answer
-    answer --> patch["Fill missing slots that fit retained neighbours"]
+    answer --> observed["Retain observation with next session<br/>consume each distinct missing target once"]
+    observed --> patch["After all needed attempts: fill only missing slots<br/>that fit retained neighbours"]
     patch --> finish
-    unresolved --> finish
+    unresolved --> observed
 ```
 
 The terminal result has no transition back to a retry. Durable timing-provenance
@@ -508,8 +515,15 @@ It returns the bound report paired with a physical feasible/limited outcome,
 or the original typed preparation refusal. It takes no request workspace lease
 and runs no aligner. A test-echo host instead reports its explicit model-free
 state. Physical planning and execution use the same `FaProjectedDemand`
-calculation. A contradictory task/payload packet is forwarded unchanged for
-native rejection; preparation cannot silently turn it into a valid FA request.
+calculation. Its refusal says what a smaller request could change
+(`FaCapacityRefusal`): `ModelNeverFits` (the model and worker baseline alone
+exceed the host) refuses the probe, and so the file, at once;
+`RequestTooLarge` returns the limited outcome, which the planner cuts, and
+whose smallest cut stays untimed with its numbers. The file fails for host
+memory only when the host admitted none of it (`FilePlan::finish`); see
+[memory safety](memory-safety.md). A contradictory task/payload packet is
+forwarded unchanged for native rejection; preparation cannot silently turn it
+into a valid FA request.
 
 Preparation reads the prepared audio descriptor and immutable source-word
 artifact. The native bridge binds the loaded engine, backend, request identity,

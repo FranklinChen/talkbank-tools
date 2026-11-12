@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::fa::cache_storage::read_values;
 use crate::fa::preparation::RequestScope;
 
 enum CandidateReceipt {
@@ -128,44 +129,6 @@ pub(in crate::fa) async fn collect_candidate_cache(
         );
     }
     receipts
-}
-
-pub(super) async fn read_values(
-    keys: &[String],
-    services: FaServices<'_>,
-) -> (
-    HashMap<String, serde_json::Value>,
-    HashMap<String, serde_json::Value>,
-) {
-    if keys.is_empty() {
-        return (HashMap::new(), HashMap::new());
-    }
-    let (derived, raw) = tokio::join!(
-        services
-            .pipeline
-            .cache
-            .get_batch(keys, FORCED_ALIGNMENT, services.cache_namespace),
-        services.pipeline.cache.get_batch(
-            keys,
-            FORCED_ALIGNMENT_RAW_EVIDENCE,
-            services.cache_namespace
-        ),
-    );
-    let derived = match derived {
-        Ok(values) => values,
-        Err(error) => {
-            warn!(%error, "FA derived cache unavailable; retain explicit inference misses");
-            HashMap::new()
-        }
-    };
-    let raw = match raw {
-        Ok(values) => values,
-        Err(error) => {
-            warn!(%error, "FA raw cache unavailable; retain explicit inference misses");
-            HashMap::new()
-        }
-    };
-    (derived, raw)
 }
 
 pub(super) async fn resolve(

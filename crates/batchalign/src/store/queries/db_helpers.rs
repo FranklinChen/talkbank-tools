@@ -125,10 +125,15 @@ impl JobStore {
     }
 
     /// Persist and attach a new active attempt record for one file.
-    pub(crate) async fn db_start_attempt(&self, job_id: &JobId, attempt: AttemptStartRecord<'_>) {
+    pub(crate) async fn db_start_attempt(
+        &self,
+        run: &super::super::RunBinding,
+        attempt: AttemptStartRecord<'_>,
+    ) {
         let Some(db) = &self.db else {
             return;
         };
+        let job_id = run.job_id();
 
         match db
             .insert_attempt_start(
@@ -142,10 +147,35 @@ impl JobStore {
             .await
         {
             Ok((attempt_id, _attempt_number)) => {
-                let _ = self
+                // The row is written before the registry holds its id, so the
+                // run can be superseded in between. A refused attach would
+                // leave the row open for ever, since nothing else knows its id:
+                // close it here, as deferred work the new run now owns.
+                if let Err(refusal) = self
                     .registry
-                    .attach_attempt_id(job_id, attempt.filename, attempt_id)
-                    .await;
+                    .attach_attempt_id(run, attempt.filename, attempt_id.clone())
+                    .await
+                {
+                    refusal.log(run, attempt.filename, "attach_attempt_id");
+                    if let Err(e) = db
+                        .finish_attempt(
+                            &attempt_id,
+                            AttemptOutcome::Cancelled,
+                            None,
+                            RetryDisposition::Defer,
+                            self.event_time().instant(),
+                        )
+                        .await
+                    {
+                        warn!(
+                            job_id = %job_id,
+                            filename = %attempt.filename,
+                            attempt_id = %attempt_id,
+                            error = %e,
+                            "DB finish_attempt for an unattached attempt failed"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 warn!(
@@ -161,13 +191,11 @@ impl JobStore {
     /// Finalize the currently active attempt for one file.
     pub(crate) async fn db_finish_attempt_for_file(
         &self,
-        job_id: &JobId,
+        run: &super::super::RunBinding,
         attempt: AttemptFinishRecord<'_>,
     ) {
-        let attempt_id = self
-            .registry
-            .take_attempt_id(job_id, attempt.filename)
-            .await;
+        let job_id = run.job_id();
+        let attempt_id = self.registry.take_attempt_id(run, attempt.filename).await;
 
         let Some(attempt_id) = attempt_id else {
             return;

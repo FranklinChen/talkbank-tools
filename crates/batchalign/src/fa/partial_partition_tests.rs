@@ -5,7 +5,7 @@ use super::*;
 use crate::api::{NonNegativeSeconds, OutputShortfallRecord};
 use crate::cache::{UtteranceCache, tasks::FORCED_ALIGNMENT};
 use crate::chat_ops::fa::coordinates::{Ms, Recording};
-use crate::chat_ops::fa::utr::{AsrTimingToken, inject_spaced};
+use crate::chat_ops::fa::utr::AsrTimingToken;
 use crate::chat_ops::fa::{
     AnchoredPart, AudioIdentity, EndOverlapPolicy, ExistingWorBoundaryPolicy, MainBulletPolicy,
     ReviewLevel, WordGapHealing, WordTiming, group_with_declared_window_limit,
@@ -115,11 +115,16 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
             working
                 .active_mut()
                 .expect("active")
-                .recover_timing(async |chat| {
-                    Ok(crate::provenance::UtrPassOutcome::Recovered {
-                        result: inject_spaced(chat, &tokens),
-                        models: crate::provenance::UtrModels::Unreported,
-                    })
+                .recover_timing(crate::api::UtrPass::Initial, async |chat| {
+                    Ok(crate::provenance::UtrPassOutcome::Recovered(
+                        crate::runner::CompletedRecognition::synthetic(
+                            crate::chat_ops::fa::utr::observe_spaced(chat, &tokens),
+                            crate::provenance::UtrProducer::new(
+                                &crate::options::UtrEngine::Whisper,
+                                crate::provenance::UtrModels::Unreported,
+                            ),
+                        ),
+                    ))
                 })
                 .await
                 .expect("synthetic UTR anchors");
@@ -309,7 +314,14 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
             .unwrap_or_else(|error| {
                 panic!("{label}: real FA pipeline without worker inference: {error}")
             });
-            let (output, trace) = result.into_document_and_timeline();
+            let (output, trace, recovery) = result.into_document_timeline_and_recovery();
+            assert_eq!(recovery.len(), 1);
+            let recovered = serde_json::to_value(recovery[0].as_ref()).unwrap();
+            assert_eq!(recovered["pass"], "initial");
+            assert_eq!(recovered["engine"], "whisper_utr");
+            assert_eq!(recovered["models"]["status"], "unreported");
+            assert_eq!(recovered["tokens"], serde_json::to_value(&tokens).unwrap());
+            assert_eq!(recovered["result"]["alignment"]["strategy"], "global");
             let crate::types::traces::FaGroupSpanTrace::Anchored {
                 pieces,
                 unrequested,
@@ -318,7 +330,26 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
                 panic!("anchored trace")
             };
             assert_eq!(pieces.len(), plan.units().count());
-            assert_eq!(trace.evidence_schema_version, 11);
+            assert_eq!(trace.evidence_schema_version, 13);
+            match control {
+                PartitionControl::DeclaredDuration => {
+                    assert!(trace.groups[0].source_windows.is_none());
+                }
+                PartitionControl::DeclaredResources => {
+                    let windows = trace.groups[0]
+                        .source_windows
+                        .as_ref()
+                        .expect("resource split retains its source");
+                    assert_eq!(windows.len(), 1);
+                    assert_eq!(
+                        windows[0].original_bullet,
+                        crate::types::traces::FaOriginalBulletTrace::Parsed {
+                            start_ms: 0,
+                            end_ms: ends[4],
+                        }
+                    );
+                }
+            }
             for (trace_piece, unit) in pieces.iter().zip(plan.units()) {
                 let context = trace_piece.context.as_ref().expect("schema 8 context");
                 assert_eq!(

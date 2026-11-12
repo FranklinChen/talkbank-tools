@@ -146,27 +146,21 @@ pub struct MorphosyntaxBatchItem {
 }
 
 impl MorphosyntaxBatchItem {
-    /// An utterance's words with the runs its main tier puts them in, its
-    /// terminator and language. Refused when the runs do not partition
-    /// exactly these words.
-    pub fn with_runs(
-        words: Vec<BatchWord>,
-        runs: crate::retokenize::WordRuns,
+    /// An utterance's words in the runs Chatter put them in, each word
+    /// made by `word` from its extracted form, with its terminator and
+    /// language. The words are the runs' own, so the runs partition them.
+    fn from_mor_runs(
+        runs: &talkbank_transform::extract::MorRuns,
+        word: impl FnMut(&ExtractedWord) -> BatchWord,
         terminator: talkbank_model::Terminator,
         lang: talkbank_model::model::LanguageCode,
-    ) -> Result<Self, crate::retokenize::RunsDisagree> {
-        if runs.word_count() != words.len() {
-            return Err(crate::retokenize::RunsDisagree {
-                walked: runs.word_count(),
-                extracted: words.len(),
-            });
-        }
-        Ok(Self {
-            words,
-            runs,
+    ) -> Self {
+        Self {
+            words: runs.words().map(word).collect(),
+            runs: crate::retokenize::WordRuns::from(runs),
             terminator,
             lang,
-        })
+        }
     }
 
     /// Words no tokenizer may merge (each its own run): an item with no
@@ -450,59 +444,52 @@ pub struct MorphologyInput<'source> {
 impl<'source> MorphologyInput<'source> {
     /// Prepare one analyzable utterance, irrespective of its existing tiers.
     ///
-    /// `Ok(None)` when the utterance has no `%mor` words; an error when the
-    /// run walk and the extractor disagree about how many it has.
+    /// `None` when the utterance has no `%mor` words.
     pub fn from_utterance(
         utterance: &'source talkbank_model::model::Utterance,
         declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
-    ) -> Result<Option<Self>, crate::retokenize::RunsDisagree> {
+    ) -> Option<Self> {
         let lang = match &utterance.main.content.language_code {
             Some(precode) => precode.code.clone(),
             None => declared_languages.primary().clone(),
         };
-        let mut words = Vec::new();
-        extract::collect_utterance_content(
-            &utterance.main.content.content,
-            PositionalDomain::Mor,
-            &mut words,
-        );
+        // The words and their runs come from one Chatter walk, so the runs
+        // partition exactly these words.
+        let mor_runs = extract::collect_mor_runs(&utterance.main.content.content);
+        let words: Vec<ExtractedWord> = mor_runs.words().cloned().collect();
         if words.is_empty() {
-            return Ok(None);
+            return None;
         }
-        let runs = crate::retokenize::WordRuns::of(&utterance.main.content.content, words.len())?;
-        let batch_words = words
-            .iter()
-            .map(|word| {
-                // Dispatch and governing-mark resolution share exactly one language.
-                // Own and span marks override utterance language; utterance marks do
-                // not turn all words into secondary-language placeholders.
-                let language = match word.language_kind() {
-                    GoverningMarkKind::Utterance => None,
-                    GoverningMarkKind::Own | GoverningMarkKind::Span => {
-                        let outcome = word.resolve_language(Some(&lang), declared_languages);
-                        for error in &outcome.diagnostics {
-                            tracing::warn!(error = %error, "word language resolution issue");
-                        }
-                        Some(outcome.resolution)
+        let batch_word = |word: &ExtractedWord| {
+            // Dispatch and governing-mark resolution share exactly one language.
+            // Own and span marks override utterance language; utterance marks do
+            // not turn all words into secondary-language placeholders.
+            let language = match word.language_kind() {
+                GoverningMarkKind::Utterance => None,
+                GoverningMarkKind::Own | GoverningMarkKind::Span => {
+                    let outcome = word.resolve_language(Some(&lang), declared_languages);
+                    for error in &outcome.diagnostics {
+                        tracing::warn!(error = %error, "word language resolution issue");
                     }
-                };
-                BatchWord::new(
-                    word.text.clone(),
-                    WordRole::of(word.form_type.clone(), language),
-                )
-            })
-            .collect();
-        let item = MorphosyntaxBatchItem::with_runs(
-            batch_words,
-            runs,
+                    Some(outcome.resolution)
+                }
+            };
+            BatchWord::new(
+                word.text.clone(),
+                WordRole::of(word.form_type.clone(), language),
+            )
+        };
+        let item = MorphosyntaxBatchItem::from_mor_runs(
+            &mor_runs,
+            batch_word,
             stanza_input_terminator(utterance),
-            lang,
-        )?;
-        Ok(Some(Self {
+            lang.clone(),
+        );
+        Some(Self {
             utterance,
             words,
             item,
-        }))
+        })
     }
 
     /// Compare semantic inputs, not source offsets, speaker identity or timing.
@@ -544,7 +531,7 @@ pub fn collect_payloads(
     primary_lang: &talkbank_model::model::LanguageCode,
     declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
     multilingual_policy: MultilingualPolicy,
-) -> Result<PayloadCollection, crate::retokenize::RunsDisagree> {
+) -> PayloadCollection {
     let total_utts = chat_file
         .lines
         .iter()
@@ -577,10 +564,7 @@ pub fn collect_payloads(
         });
 
         if !skip && !has_mor {
-            // A run-walk disagreement is a tool fault and fails the whole
-            // collection: production does not read `not_applicable`, so an
-            // outcome recorded there would vanish.
-            match MorphologyInput::from_utterance(utt, declared_languages)? {
+            match MorphologyInput::from_utterance(utt, declared_languages) {
                 Some(input) => batch_items.push(CollectedUtterance {
                     address: UtteranceAddress {
                         line: LineIdx::new(line_idx),
@@ -602,11 +586,11 @@ pub fn collect_payloads(
         utt_idx += 1;
     }
 
-    Ok(PayloadCollection {
+    PayloadCollection {
         batch_items,
         not_applicable,
         total_utterances: total_utts,
-    })
+    }
 }
 
 /// Why the morphology input language set is available.

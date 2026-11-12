@@ -5,7 +5,7 @@
 //! forward one sink call each, taking a time from their caller, are gone: a
 //! time-taking door beside the tracker was a way around it.
 
-use crate::api::{ContentType, DisplayPath, JobId};
+use crate::api::{ContentType, DisplayPath};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::{CompletedFileOutput, FileCompletion};
 
@@ -18,13 +18,12 @@ use super::{FileStage, RunnerEventSink};
 /// progress carries no time, so a caller holding the sink cannot misdate it.
 pub(crate) async fn set_file_progress(
     sink: &dyn RunnerEventSink,
-    job_id: &JobId,
     filename: &str,
     stage: FileStage,
     current: Option<i64>,
     total: Option<i64>,
 ) {
-    sink.set_file_progress(job_id, filename, stage, current, total)
+    sink.set_file_progress(filename, stage, current, total)
         .await;
 }
 
@@ -98,18 +97,14 @@ impl From<TerminalRecorded> for FileTaskOutcome {
 /// - finish as success, retry, or terminal error
 pub(crate) struct FileRunTracker<'a> {
     sink: &'a dyn RunnerEventSink,
-    job_id: &'a JobId,
     filename: &'a str,
 }
 
 impl<'a> FileRunTracker<'a> {
-    /// Bind the helper to one `(job_id, filename)` pair.
-    pub(crate) fn new(sink: &'a dyn RunnerEventSink, job_id: &'a JobId, filename: &'a str) -> Self {
-        Self {
-            sink,
-            job_id,
-            filename,
-        }
+    /// Bind the helper to one file of the sink's run. The sink already
+    /// names the job and the run, so the tracker names only the file.
+    pub(crate) fn new(sink: &'a dyn RunnerEventSink, filename: &'a str) -> Self {
+        Self { sink, filename }
     }
 
     /// Mark the file as processing, open the first durable attempt, and set the
@@ -117,13 +112,11 @@ impl<'a> FileRunTracker<'a> {
     pub(crate) async fn begin_first_attempt(&self, work_unit_kind: WorkUnitKind, stage: FileStage) {
         let started_at = self.sink.now();
         self.sink
-            .mark_file_processing(self.job_id, self.filename, started_at)
+            .mark_file_processing(self.filename, started_at)
             .await;
+        self.sink.clear_file_retry_state(self.filename).await;
         self.sink
-            .clear_file_retry_state(self.job_id, self.filename)
-            .await;
-        self.sink
-            .start_file_attempt(self.job_id, self.filename, work_unit_kind, started_at)
+            .start_file_attempt(self.filename, work_unit_kind, started_at)
             .await;
         self.stage(stage).await;
     }
@@ -141,19 +134,12 @@ impl<'a> FileRunTracker<'a> {
         category: FailureCategory,
     ) -> TerminalRecorded {
         let refused_at = self.sink.now();
+        self.sink.clear_file_retry_state(self.filename).await;
         self.sink
-            .clear_file_retry_state(self.job_id, self.filename)
+            .start_file_attempt(self.filename, WorkUnitKind::FileSetup, refused_at)
             .await;
         self.sink
-            .start_file_attempt(
-                self.job_id,
-                self.filename,
-                WorkUnitKind::FileSetup,
-                refused_at,
-            )
-            .await;
-        self.sink
-            .mark_file_error(self.job_id, self.filename, error, category, refused_at)
+            .mark_file_error(self.filename, error, category, refused_at)
             .await;
         TerminalRecorded(())
     }
@@ -162,18 +148,16 @@ impl<'a> FileRunTracker<'a> {
     /// label for the new run.
     pub(crate) async fn restart_attempt(&self, work_unit_kind: WorkUnitKind, stage: FileStage) {
         let started_at = self.sink.now();
+        self.sink.clear_file_retry_state(self.filename).await;
         self.sink
-            .clear_file_retry_state(self.job_id, self.filename)
-            .await;
-        self.sink
-            .start_file_attempt(self.job_id, self.filename, work_unit_kind, started_at)
+            .start_file_attempt(self.filename, work_unit_kind, started_at)
             .await;
         self.stage(stage).await;
     }
 
     /// Update the current human-readable progress stage.
     pub(crate) async fn stage(&self, stage: FileStage) {
-        set_file_progress(self.sink, self.job_id, self.filename, stage, None, None).await;
+        set_file_progress(self.sink, self.filename, stage, None, None).await;
     }
 
     /// Record a retryable failure now, eligible again after `backoff`.
@@ -186,7 +170,6 @@ impl<'a> FileRunTracker<'a> {
         let finished_at = self.sink.now();
         self.sink
             .mark_file_retry_pending(
-                self.job_id,
                 self.filename,
                 finished_at.deadline_after(backoff),
                 category,
@@ -200,7 +183,7 @@ impl<'a> FileRunTracker<'a> {
     pub(crate) async fn fail(&self, error: &str, category: FailureCategory) -> TerminalRecorded {
         let finished_at = self.sink.now();
         self.sink
-            .mark_file_error(self.job_id, self.filename, error, category, finished_at)
+            .mark_file_error(self.filename, error, category, finished_at)
             .await;
         TerminalRecorded(())
     }
@@ -309,11 +292,10 @@ impl<'a> FileRunTracker<'a> {
     async fn complete(&self, completion: FileCompletion) -> TerminalRecorded {
         let finished_at = self.sink.now();
         self.sink
-            .mark_file_done(self.job_id, self.filename, finished_at, completion)
+            .mark_file_done(self.filename, finished_at, completion)
             .await;
         self.sink
             .finish_file_attempt(
-                self.job_id,
                 self.filename,
                 AttemptOutcome::Succeeded,
                 None,

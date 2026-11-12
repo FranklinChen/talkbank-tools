@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use crate::api::{DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::super::job::{
@@ -391,11 +390,6 @@ impl JobStore {
                         }
                     }
 
-                    let completed_files = file_statuses
-                        .values()
-                        .filter(|file_status| file_status.status().is_terminal())
-                        .count() as i64;
-
                     let job_id_newtype = JobId::from(row.job_id.clone());
                     let mut job_error = row.error.clone();
                     if let Some(note) = job_status_note {
@@ -482,7 +476,6 @@ impl JobStore {
                             file_statuses,
                             results,
                             error: job_error,
-                            completed_files,
                         },
                         schedule: JobScheduleState {
                             submitted_at: row.submitted_at,
@@ -502,11 +495,7 @@ impl JobStore {
                                 }
                             }),
                         },
-                        runtime: JobRuntimeControl {
-                            cancel_token: CancellationToken::new(),
-                            runner_active: false,
-                            run_generation: crate::store::RunGeneration::FIRST,
-                        },
+                        runtime: JobRuntimeControl::unclaimed(),
                         execution_plan: None,
                     };
 

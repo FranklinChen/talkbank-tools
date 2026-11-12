@@ -12,7 +12,6 @@ fn snapshot(
     format: AudioExportFormat,
 ) -> RunnerJobSnapshot {
     RunnerJobSnapshot {
-        run_generation: crate::store::RunGeneration::FIRST,
         identity: RunnerJobIdentity {
             job_id: JobId::from("native-admission"),
             correlation_id: "test".into(),

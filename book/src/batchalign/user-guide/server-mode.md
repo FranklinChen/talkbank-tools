@@ -1,7 +1,7 @@
 # Server Mode
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:52 EDT
+**Last updated:** 2026-11-11 23:05 EST
 
 Batchalign includes a built-in HTTP server managed by `batchalign3 serve ...`.
 Ordinary local processing commands can still run inline, but when
@@ -183,8 +183,16 @@ Waiting for host memory has no setting and no time limit. A worker that
 cannot start, or a model that cannot load, because the machine's memory is
 reserved by other work waits in turn until the memory is free; the file
 shows "Waiting for host memory" and the server log says what it is waiting
-for once a minute. Only a model larger than the machine can ever hold (its
-total memory less `memory_gate_mb`) is refused, at once, naming the sizes.
+for once a minute. Only work the machine can never hold, keeping
+`memory_gate_mb` free, is refused instead of waited for, naming the sizes. A
+model too large for the machine on its own is refused at once. When the model
+fits but no stretch of a file does, BA3 tries each stretch first and then
+fails the file, naming the least it needed: on a machine with 16 GB, aligning
+with the Whisper aligner ends this way, since it needs about 13 GB for any
+stretch of a recording. When the machine can align most of a file but one
+stretch needs more than it can ever offer, only that stretch is left without
+timing: the file is written, reported as written with diagnostics, and its
+review names the stretch and the sizes.
 
 A count that must be positive and is written as `0` or below is refused, not
 corrected: `job_ttl_days`, `memory_gate_poll_s`, `max_concurrent_worker_startups`

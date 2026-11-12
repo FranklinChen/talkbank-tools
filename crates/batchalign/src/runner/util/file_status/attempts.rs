@@ -152,14 +152,12 @@ impl<'t, 'a> RetryGrant<'t, 'a> {
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::api::JobId;
     use crate::runner::util::file_status::test_sink::{RecordedError, RecordingSink};
 
     #[tokio::test(start_paused = true)]
     async fn a_transient_failure_is_retried_until_the_budget_and_then_recorded() {
         let sink = RecordingSink::default();
-        let job = JobId::from("job");
-        let lifecycle = FileRunTracker::new(&sink, &job, "a.cha");
+        let lifecycle = FileRunTracker::new(&sink, "a.cha");
         let mut attempts =
             FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Processing).await;
         let mut retries = 0;
@@ -192,8 +190,7 @@ mod tests {
     #[tokio::test]
     async fn a_failure_other_than_a_workers_is_recorded_at_once() {
         let sink = RecordingSink::default();
-        let job = JobId::from("job");
-        let lifecycle = FileRunTracker::new(&sink, &job, "a.cha");
+        let lifecycle = FileRunTracker::new(&sink, "a.cha");
         let attempts =
             FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Processing).await;
         let error = ServerError::Validation("not valid CHAT".to_owned());
@@ -212,8 +209,7 @@ mod tests {
     #[tokio::test]
     async fn an_abandoned_grant_records_its_reason_and_opens_no_attempt() {
         let sink = RecordingSink::default();
-        let job = JobId::from("job");
-        let lifecycle = FileRunTracker::new(&sink, &job, "a.cha");
+        let lifecycle = FileRunTracker::new(&sink, "a.cha");
         let attempts =
             FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Processing).await;
         let AfterFailure::Retry(grant) = attempts

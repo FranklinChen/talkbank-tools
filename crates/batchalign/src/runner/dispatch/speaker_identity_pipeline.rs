@@ -177,28 +177,32 @@ pub(crate) async fn dispatch_speaker_identity(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     pool: Arc<WorkerPool>,
-) {
+) -> crate::runner::DispatchEnd {
+    use crate::runner::DispatchEnd;
+    use crate::runner::refuse;
+
     let job_id = &job.identity.job_id;
     let sink = host.sink().clone();
 
     let CommandOptions::SpeakerIdentify(options) = &job.dispatch.options else {
-        let message =
+        return DispatchEnd::Refused(refuse(
+            job,
             "speaker-identify job carries options for another command; its row is corrupt"
-                .to_owned();
-        sink.fail_job(job_id, &message).await;
-        return;
+                .to_owned(),
+        ));
     };
 
     // Speaker embedding is language-independent, but the pool still needs a
     // concrete key. Refused rather than invented, exactly as the other audio
     // commands do.
     let Some(pool_key) = job.dispatch.lang.as_resolved().cloned() else {
-        let message = format!(
-            "speaker-identify requires `--lang <iso3>`; got '{}'.",
-            job.dispatch.lang
-        );
-        sink.fail_job(job_id, &message).await;
-        return;
+        return DispatchEnd::Refused(refuse(
+            job,
+            format!(
+                "speaker-identify requires `--lang <iso3>`; got '{}'.",
+                job.dispatch.lang
+            ),
+        ));
     };
     // One route for the whole job, so every embedding request reaches the
     // worker the probe selected and prepared: the plan routing probed with,
@@ -210,9 +214,10 @@ pub(crate) async fn dispatch_speaker_identity(
     ) {
         Ok(route) => route,
         Err(refusal) => {
-            sink.fail_job(job_id, &format!("cannot run speaker-identify: {refusal}"))
-                .await;
-            return;
+            return DispatchEnd::Refused(refuse(
+                job,
+                format!("cannot run speaker-identify: {refusal}"),
+            ));
         }
     };
 
@@ -237,8 +242,7 @@ pub(crate) async fn dispatch_speaker_identity(
         ));
     }
 
-    let abnormal_exits =
-        drain_supervised_file_tasks(sink.as_ref(), job_id, &job.cancel_token, tasks).await;
+    let abnormal_exits = drain_supervised_file_tasks(sink.as_ref(), &job.cancel_token, tasks).await;
     if abnormal_exits > 0 {
         warn!(
             job_id = %job_id,
@@ -246,6 +250,7 @@ pub(crate) async fn dispatch_speaker_identity(
             "Supervised speaker-identify file tasks exited abnormally"
         );
     }
+    DispatchEnd::Dispatched
 }
 
 async fn process_one_file(
@@ -257,10 +262,9 @@ async fn process_one_file(
     options: crate::options::SpeakerIdentifyOptions,
     file: &crate::store::PendingJobFile,
 ) -> FileTaskOutcome {
-    let job_id = &job.identity.job_id;
     let filename = file.filename.as_ref();
     let file_index = file.file_index;
-    let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
+    let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::Reading)

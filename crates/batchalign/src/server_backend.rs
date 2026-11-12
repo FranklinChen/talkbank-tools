@@ -175,14 +175,13 @@ impl QueuedJobOrchestrator for LocalJobOrchestrator {
     async fn handle_memory_gate_rejection(
         &self,
         sink: &Arc<dyn RunnerEventSink>,
-        job_id: &JobId,
     ) -> Result<MemoryGateRejectionDisposition, ServerError> {
         let retry_at = sink.now().deadline_after(
             self.memory_gate_retry_policy
                 .backoff_for_retry(1)
                 .duration(),
         );
-        sink.requeue_job_after_memory_gate(job_id, retry_at).await;
+        sink.requeue_job_after_memory_gate(retry_at).await;
         sink.bump_deferred_work_units().await;
         Ok(MemoryGateRejectionDisposition::Requeued { retry_at })
     }
@@ -501,8 +500,6 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use tokio_util::sync::CancellationToken;
-
     use crate::api::{
         CorrelationId, DisplayPath, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
     };
@@ -564,7 +561,6 @@ mod tests {
                 file_statuses,
                 results: Vec::new(),
                 error: None,
-                completed_files: 0,
             },
             schedule: JobScheduleState {
                 submitted_at: crate::api::MachineTime::now(),
@@ -574,11 +570,7 @@ mod tests {
                 lease: None,
                 last_cancel: None,
             },
-            runtime: JobRuntimeControl {
-                cancel_token: CancellationToken::new(),
-                runner_active: false,
-                run_generation: crate::store::RunGeneration::FIRST,
-            },
+            runtime: JobRuntimeControl::unclaimed(),
             execution_plan: None,
         }
     }

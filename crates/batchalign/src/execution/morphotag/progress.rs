@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! dispatch_morphotag_job
-//!   ├── BatchProgressReporter::spawn(sink, job_id)      ── owns the ledger
+//!   ├── BatchProgressReporter::spawn(sink) ── owns the ledger
 //!   ├── per file: reporter.port(filename) ──▶ MorphosyntaxParams.progress
 //!   │                                            └─▶ infer_batch ─▶ per chunk
 //!   └── reporter.finish().await                    (drains, publishes, exits)
@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::api::{DisplayPath, JobId, LanguageCode3, UtteranceCount};
+use crate::api::{DisplayPath, LanguageCode3, UtteranceCount};
 use crate::runner::util::batch_progress::{
     BackendProgress, BatchChunkIndex, BatchProgressLedger, ProgressReport, SourceProgress,
 };
@@ -76,10 +76,10 @@ pub(crate) struct BatchProgressReporter {
 
 impl BatchProgressReporter {
     /// Start a reporter for one job.
-    pub(crate) fn spawn(sink: Arc<dyn RunnerEventSink>, job_id: JobId) -> Self {
+    pub(crate) fn spawn(sink: Arc<dyn RunnerEventSink>) -> Self {
         let (tx, rx) = mpsc::channel::<ProgressReport>(REPORT_CHANNEL_DEPTH);
         let shutdown = CancellationToken::new();
-        let drain = tokio::spawn(drain_reports(sink, job_id, rx, shutdown.clone()));
+        let drain = tokio::spawn(drain_reports(sink, rx, shutdown.clone()));
         Self {
             tx: Some(tx),
             shutdown,
@@ -196,7 +196,6 @@ impl BackendProgressPort {
 /// Accumulate reports and publish snapshots until the channel closes.
 async fn drain_reports(
     sink: Arc<dyn RunnerEventSink>,
-    job_id: JobId,
     mut rx: mpsc::Receiver<ProgressReport>,
     shutdown: CancellationToken,
 ) {
@@ -216,7 +215,7 @@ async fn drain_reports(
                     unpublished_change |= ledger.record(report);
                 }
                 if unpublished_change {
-                    publish(sink.as_ref(), &job_id, &ledger).await;
+                    publish(sink.as_ref(), &ledger).await;
                 }
                 return;
             }
@@ -229,7 +228,7 @@ async fn drain_reports(
             Ok(None) => {
                 // Every port is gone: publish the final state and stop.
                 if unpublished_change {
-                    publish(sink.as_ref(), &job_id, &ledger).await;
+                    publish(sink.as_ref(), &ledger).await;
                 }
                 return;
             }
@@ -237,11 +236,11 @@ async fn drain_reports(
         }
 
         if unpublished_change && last_publish.elapsed() >= PUBLISH_INTERVAL {
-            publish(sink.as_ref(), &job_id, &ledger).await;
+            publish(sink.as_ref(), &ledger).await;
             unpublished_change = false;
             last_publish = Instant::now();
         } else if !unpublished_change && last_publish.elapsed() >= STALL_REPUBLISH_INTERVAL {
-            publish(sink.as_ref(), &job_id, &ledger).await;
+            publish(sink.as_ref(), &ledger).await;
             last_publish = Instant::now();
         }
     }
@@ -253,7 +252,7 @@ async fn drain_reports(
 /// 2026-07-30; see `runner::util::batch_progress` for why an aggregate whose
 /// denominator only covers the files currently in flight was retired rather
 /// than kept.
-async fn publish(sink: &dyn RunnerEventSink, job_id: &JobId, ledger: &BatchProgressLedger) {
+async fn publish(sink: &dyn RunnerEventSink, ledger: &BatchProgressLedger) {
     for source in ledger.source_progress() {
         // Skip a file whose utterances are all accounted for. Its row is about
         // to go terminal (or already has), and the store refuses progress on a
@@ -261,7 +260,7 @@ async fn publish(sink: &dyn RunnerEventSink, job_id: &JobId, ledger: &BatchProgr
         if source.completed.0 >= source.total.0 {
             continue;
         }
-        publish_source(sink, job_id, &source).await;
+        publish_source(sink, &source).await;
     }
 }
 
@@ -271,9 +270,8 @@ async fn publish(sink: &dyn RunnerEventSink, job_id: &JobId, ledger: &BatchProgr
 /// denominator, and it deliberately reuses `set_file_progress` rather than
 /// inventing a second per-file surface: `FileStage::Analyzing` is already what
 /// the CLI spinner, the TUI and the dashboard row render for this stage.
-async fn publish_source(sink: &dyn RunnerEventSink, job_id: &JobId, source: &SourceProgress) {
+async fn publish_source(sink: &dyn RunnerEventSink, source: &SourceProgress) {
     sink.set_file_progress(
-        job_id,
         source.source_id.as_ref(),
         FileStage::Analyzing,
         Some(i64::try_from(source.completed.0).unwrap_or(i64::MAX)),
@@ -322,8 +320,7 @@ mod tests {
     #[tokio::test]
     async fn reporter_publishes_per_file_counts() {
         let sink = Arc::new(RecordingSink::default());
-        let job_id = JobId::from("job-1");
-        let reporter = BatchProgressReporter::spawn(sink.clone(), job_id.clone());
+        let reporter = BatchProgressReporter::spawn(sink.clone());
 
         let port = reporter
             .port(DisplayPath::from("a.cha"))
@@ -351,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn a_finished_file_gets_no_further_per_file_write() {
         let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-2"));
+        let reporter = BatchProgressReporter::spawn(sink.clone());
 
         let port = reporter
             .port(DisplayPath::from("done.cha"))
@@ -371,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn two_chunks_of_one_file_sum_through_the_reporter() {
         let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-3"));
+        let reporter = BatchProgressReporter::spawn(sink.clone());
 
         let port = reporter
             .port(DisplayPath::from("big.cha"))
@@ -397,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn finish_does_not_wait_for_outstanding_ports() {
         let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-5"));
+        let reporter = BatchProgressReporter::spawn(sink.clone());
         let port = reporter
             .port(DisplayPath::from("held.cha"))
             .expect("port must exist");
@@ -423,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn model_load_progress_is_not_utterance_progress() {
         let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-6"));
+        let reporter = BatchProgressReporter::spawn(sink.clone());
         let port = reporter
             .port(DisplayPath::from("a.cha"))
             .expect("port must exist");
@@ -454,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_port_reports_nothing() {
         let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone(), JobId::from("job-4"));
+        let reporter = BatchProgressReporter::spawn(sink.clone());
         let port = reporter.port(DisplayPath::from("a.cha")).expect("port");
         reporter.finish().await;
 

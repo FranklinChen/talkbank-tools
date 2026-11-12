@@ -50,7 +50,171 @@ See [Proportional FA Estimation](../../architecture/alignment/proportional-fa-es
 for the former failure mechanism and repaired request boundary, and
 [Bullet and Word-Timing Policies](bullet-policies.md) for policy precedence.
 
+## Timing ownership and construction boundaries
+
+The first diagram is the **current active FA path**, not the intended contract.
+The early projection and its sequential policy choices are reachable today.
+No-group, complete `%wor` and pass-through routes have separate finalization
+paths and do not establish that the active path is final-only.
+
+```mermaid
+flowchart TD
+    src["Admitted input<br/>original bullet census"] --> bound["SourceBoundDocument<br/>working CHAT + source census + identity"]
+    bound --> input["SourceBoundUtrInput<br/>borrow + source identity"]
+    input --> recovery["UTR observation<br/>private candidate projection + identity"]
+    response["Recognizer response<br/>per bounded window"] --> convert["UTR token conversion<br/>accepted tokens + typed refusals"]
+    convert --> prepared["PreparedRecognition<br/>tokens + window responses + producer"]
+    prepared --> completed["CompletedRecognition<br/>correspondence + its recognition inputs"]
+    completed --> verify["recover_timing<br/>reject foreign identity"]
+    verify --> retained["RetainedUtrPass<br/>window responses + refusals + producer"]
+    retained --> group["group<br/>original source + retained UTR anchors"]
+    group --> ledger["UnitLedger<br/>receive unique tickets; assemble primary groups"]
+    ledger --> primary["ResolvedFaPopulation<br/>primary groups + retained preparation + UTR passes"]
+    primary --> early["inject<br/>primary postprocessing writes working CHAT"]
+    early --> applied["FaApplied"]
+    applied --> impose["then_impose<br/>restore kept bullets and clamp"]
+    impose --> session["SuppliedRetrySession<br/>derive missing slots and neighbour bounds"]
+    session --> pending["Consume actual missing-slot attempt<br/>one retained preparation + one observation"]
+    pending --> session
+    session -->|"all needed attempts observed"| finish["then_finalize<br/>retry application, repair, start and overlap policy"]
+    finish --> final["FaFinalized<br/>kept-bullet proof"]
+    final --> admitted["FaAdmission::finish<br/>validated output"]
+    admitted --> timeline["FA timeline, when requested"]
+    admitted --> sidecar["UTR sidecar, when debug directory requested"]
+    bound -.->|"DerefMut still permits changes<br/>to the working CHAT"| identitygap["Working source content is not sealed"]
+    primary -.->|"projection is allowed before<br/>joint assessment"| timinggap["Final-only rule not enforced"]
+```
+
+Opening a `UnitLedger` creates each receiving slot together with its only
+non-cloneable `ReplyTicket`. Cache hits consume the ticket; misses carry it
+through inference authorization and retained preparation. Only the transport's
+prepared-dispatch producer can pair the ticket with its worker outcome. A
+consumer cannot choose a different ledger or submit the ticket twice. Reused
+groups and unavailable ranges mint no tickets. Assembly still refuses actual
+missing replies and malformed timing populations; it does not invent timings.
+
+```mermaid
+flowchart TD
+    plan["Planned awaited request"] --> pair["Receiving slot + unique ReplyTicket"]
+    pair --> lookup["Ticket carries request through cache lookup"]
+    lookup -->|"hit"| cached["Consume ticket with admitted cached timings"]
+    lookup -->|"miss permitted"| auth["Authorization owns ticket"]
+    auth --> prepared["Prepared dispatch: canonical + alias tickets"]
+    prepared --> reply["Completed reply: ticket + admitted outcome"]
+    reply --> retain["Consume: cache once, complete slot, advance progress"]
+    cached --> assemble["Assembly reads its own receiving slots"]
+    retain --> assemble
+    assemble --> output["Source-bound group resolutions"]
+```
+
+Canonical evidence is retained before dispatch continuation is released.
+Aliases share timings from that execution and have distinct receiving tickets,
+but no second raw-evidence write capability. Progress advances only when a
+ticket completes its slot, starting with the already reused population. Losing
+the receiving owner is an internal failure, distinct from user cancellation.
+Optional supplied-window recovery keeps its separate single-request owner;
+it does not mutate a primary reply slot.
+
+The completed recognition's correspondence and window evidence come from the
+same prepared inputs. Neither a search corridor nor a recognizer or FA
+observation proves an acoustic boundary.
+
+For a completed UTR pass, the following boundary is implemented.
+For partial recovery, each `PendingWindow` owns its planned window and the
+same execution context across cache lookup or inference and conversion.
+Only exhausting that plan after at least one recognized window constructs
+`CompletedPartialRecognition`, which `PreparedRecognition` consumes. It
+normalizes the accepted tokens and retains their windows; its consuming search constructs
+`CompletedRecognition`. Production callers cannot assemble that outcome from
+independently supplied correspondence and window evidence. The
+partial path binds each conversion to the window used for its cache key or
+segment extraction. A full-file request proves its recording bounds before
+cache lookup or inference, then keeps its response, recording, engine and route
+together through conversion. If the bound cannot be established, the request
+stops before reading recognition evidence or invoking an engine. These
+boundaries do not independently verify a provider's response or a cached
+response's producing implementation.
+
+```mermaid
+flowchart LR
+    response["Recognizer response<br/>all tokens + model identity"] --> conversion["UtrTokenConversion<br/>owns response + window"]
+    window["Recording-bounded FaWindow"] --> conversion
+    full["Full-file execution context"] --> bound["BoundedRequest<br/>recording + whole-file window"]
+    bound -->|"cache or inference"| conversion
+    conversion -->|"full-file route"| fullresult["FullRecognition<br/>conversion + recording + route"]
+    fullresult --> prepared["PreparedRecognition<br/>normalized tokens + windows + producer"]
+    plan["Planned partial windows + execution context"] --> pending["PendingWindow<br/>cache key or segment + response"]
+    pending --> conversion
+    conversion -->|"next planned window"| pending
+    conversion -->|"plan exhausted"| partial["CompletedPartialRecognition<br/>nonempty conversions"]
+    partial --> prepared
+    pending -->|"abandoned"| fallback["Full-file recovery<br/>retains partial attempt"]
+    fallback -->|"failed; debug requested"| failure["Failed-fallback evidence<br/>partial attempt + failure"]
+    failure -->|"write fails"| stop["UtrRecoveryStop::Failed<br/>typed fault; file fails, no retry"]
+    fallback --> prepared
+    prepared --> search["PendingUtr<br/>searches with those tokens"]
+    search --> completed["CompletedRecognition<br/>observation + those windows"]
+    completed --> identity{"Same source identity?"}
+    identity -->|"yes"| pass["RetainedUtrPass<br/>only after completed recovery"]
+    identity -->|"no"| binding["UtrRecoveryFailure::SourceBinding"]
+    binding --> stop
+    response -.->|"no independent window constructor"| evidence["UtrRecognitionWindow"]
+    prepared -.->|"cannot attach unrelated observation"| completed
+    conversion -.->|"refused tokens are retained, not timed"| refused["Typed refusals<br/>index + reason"]
+```
+
+UTR observations now carry the identity minted by `SourceBoundDocument` and
+`recover_timing` rejects observations from another source before retaining them.
+`UtrRecoveryFailure` keeps source-binding and requested-evidence retention faults
+in a typed terminal family. `UtrRecoveryStop::Failed` stops initial recovery or
+an already-granted FA retry, records a system failure, and prevents output
+writeback. Such a refusal cannot become a provider-unavailability shortfall;
+ordinary provider failures retain their existing diagnosed-output behavior.
+
+```mermaid
+flowchart TD
+    source["Source identity refused"] --> binding["UtrRecoveryFailure<br/>SourceBinding"]
+    write["Requested evidence cannot be saved"] --> evidence["UtrRecoveryFailure<br/>EvidenceRetention"]
+    binding --> stop["UtrRecoveryStop::Failed<br/>typed internal fault"]
+    evidence --> stop
+    stop --> initial["Initial recovery<br/>fail the file as a system error"]
+    stop --> retry["Retry hook<br/>abandon the granted retry"]
+    initial --> closed["No output writeback or retry"]
+    retry --> closed
+```
+
+This identity check does not seal the working CHAT against mutation or make UTR
+a pure evidence-only search. A later normalization or search failure can still
+lose the full-file response.
+
+The next diagram is the **target contract, not implemented types or current
+behavior**. Solid arrows describe intended consuming transitions; dotted
+arrows name constructions that the finished design must make impossible.
+An unresolved outcome is retained evidence, not a fabricated timing.
+
+```mermaid
+flowchart LR
+    source["SourceBound<br/>original document + source identity"] --> recovered["Recovered<br/>source + UTR observations or refusals"]
+    recovered --> grouped["Grouped<br/>source-bound search windows"]
+    grouped --> resolved["Resolved<br/>primary FA observations and failures"]
+    resolved --> alternatives["AlternativesCollected<br/>primary + retry + UTR evidence"]
+    alternatives --> assessed["Assessed<br/>joint constraints + unresolved conflicts"]
+    assessed --> finalized["Finalized<br/>chosen or explicitly unresolved timing"]
+    finalized --> output["Validated output + retained provenance"]
+    source -.->|"forbid replacing source"| wrong["Different document / foreign response"]
+    grouped -.->|"forbid fabricating missing evidence"| fake["Invented observation or boundary"]
+    alternatives -.->|"forbid selecting or writing timing"| premature["Premature final timing"]
+    assessed -.->|"forbid suppressing uncertainty"| fake
+```
+
+The target assessment must consider start ordering, same-speaker end conflicts,
+marked overlap and kept bullets together. Its types and policy still need to be
+implemented and qualified; these diagrams do not claim acoustic correctness.
+
 ## Processing overview
+
+This overview omits ownership details; the active-path diagram above records the
+current construction boundaries and their limitations.
 
 ```mermaid
 flowchart TD
@@ -192,8 +356,9 @@ Both routes end up in `process_one_fa_file()` in
 
 ### Single-parse architecture
 
-The CHAT file is parsed **once** into a `ChatFile` AST. UTR mutates the AST in
-place (no serialization). FA receives the same AST directly via
+The CHAT file is parsed **once** into a `ChatFile` AST. UTR observes the source
+through a shared borrow and keeps any provisional projection on a private
+candidate (no serialization). FA receives the unchanged source AST directly via
 `run_fa_from_ast()` (no re-parse). The file is serialized **once** at the end.
 
 ```mermaid
@@ -207,7 +372,7 @@ flowchart TD
     norec["WithoutRecording:<br/>NoAlign pass-through, or<br/>refresh_from_complete_wor<br/>(no media, no worker)"]
     media["NeedsAudio: resolve media<br/>on the execution host"]
     wav["ensure_wav()<br/>container → cached WAV if needed"]
-    utr["UTR: mutate ChatFile in-place<br/>(no serialize)"]
+    utr["UTR: observe source<br/>private candidate; no source write"]
     fa["run_fa_from_ast(ActiveFaInput)<br/>FA grouping + worker dispatch<br/>(no re-parse)"]
     inject["Inject timings + %wor"]
     finalize["FaFinalized<br/>optional repair, then typed monotonicity"]
@@ -225,7 +390,9 @@ flowchart TD
 - `AlignRoute::decide(FaWorkingDocument, RealignmentRequest)`: decides once,
   at admission, whether the recording is read at all; only `NeedsAudio`
   resolves media
-- `run_utr_pass(&mut ChatFile, ...)`: mutates AST, returns `UtrResult`
+- `run_utr_pass(&SourceBoundUtrInput, ...)`: retains identity-bound UTR
+  observations without mutating the source AST; `recover_timing` rejects
+  observations from a different admitted source
 - `run_fa_from_ast(ActiveFaInput, ...)`: accepts an active attempt (a file
   with words to align, by type) and returns the admitted, writable result;
   every path ends in `FaAdmission::finish`, which takes the draft through the
@@ -313,10 +480,14 @@ flowchart TD
 
 ### Step 1: UTR (detect-and-skip)
 
-UTR mutates the `ChatFile` AST **in place** via `run_utr_pass(&mut ChatFile, ...)`.
-No serialization occurs, the same AST flows directly to FA. The orchestration
-lives in `crates/batchalign/src/runner/dispatch/utr.rs`; the core injection
-algorithm lives in `crates/batchalign/src/chat_ops/fa/utr.rs`.
+UTR observes the admitted AST through `run_utr_pass(&SourceBoundUtrInput, ...)`;
+the input grants only a shared borrow and carries its source identity. The
+completed observation returns that identity, which `recover_timing` checks
+before retaining it. No serialization occurs, and the unchanged source AST
+flows directly to FA. The orchestration lives in
+`crates/batchalign/src/runner/dispatch/utr.rs`; the core UTR correspondence
+and private candidate projection live in
+`crates/batchalign/src/chat_ops/fa/utr.rs`.
 
 **Detection:** `count_utterance_timing()` counts timed vs untimed utterances.
 If all utterances are timed, UTR is skipped entirely (the common case for
@@ -338,7 +509,8 @@ production CHAT files from CLAN).
    - **Full-file** (mostly-untimed or short audio): ASR runs on the full audio
      and the result is cached as a single entry.
 3. Converts ASR response tokens to `AsrTimingToken` (text + start_ms + end_ms).
-4. Calls `inject_utr_timing()`. That function first partitions the transcript
+4. Computes `inject_utr_timing()` on a private candidate, not on the admitted
+   source. That function first partitions the transcript
    into **anchored regions** (see "Anchored regions" below): the bullets the
    file already has bound both the utterances and the ASR onsets each region
    may match, and each region is solved on its own, within its own budget.
@@ -359,10 +531,10 @@ production CHAT files from CLAN).
    suffer from. The joint graph permits bounded adjacent-speaker episodes, not
    arbitrary text/audio reordering, three-way overlap or acoustic speaker proof.
 
-   Before mutation, a private prepared pass owns the mutable transcript borrow,
-   census, selected plan, anchors and following retained timing bounds.
-   Projection consumes that pass; it cannot accept another transcript or
-   independently supplied observations. Non-overlap hints intersect their
+   The private prepared pass owns the candidate, census, selected plan, anchors
+   and following retained timing bounds. Projection consumes that pass; it
+   cannot accept another transcript or independently supplied observations.
+   Its candidate timing is not installed into the source. Non-overlap hints intersect their
    provider span with the preceding non-overlap timing floor and the earliest
    following retained non-overlap start. Existing bullets are never rewritten.
    A nonempty intersection may narrow a hint but never extend it; exhaustion
@@ -375,7 +547,9 @@ production CHAT files from CLAN).
    **Two-pass only:** `--utr-fuzzy <threshold>` configures the experimental
    `--utr-strategy two-pass` strategy (default 0.85; 1.0 for exact-only
    matching). It does not change the default global strategy.
-5. Re-serializes the CHAT with recovered bullets.
+5. Retains the correspondence, candidate proposal and typed decisions; no UTR
+   timing is written to the source CHAT at this stage. Final joint disposition
+   with FA and retry evidence remains unimplemented.
 
 ```mermaid
 flowchart TD
@@ -791,6 +965,15 @@ from utterance 2's measurement`, and a refusal that follows it on the same
 line is explained by it. In the FA evidence file the decision carries the same
 facts as a `search_corridor` field (schema 10).
 
+FA evidence schema 12 also retains each source utterance's window and word
+range with the group, before merging, padding and resource partitioning. Its
+localization distinguishes an order corridor, a recognizer-candidate hull and
+a bullet in the working document. Full and incremental alignment bind that
+window to the original input's bullet or its absence before UTR runs. A
+working bullet may have come from UTR or another preparation step; its
+presence does not imply it was supplied. Older evidence and historical
+anchored geometries may omit source windows or original-bullet provenance.
+
 Complete lexical coverage does not by itself establish word-boundary accuracy,
 and partial or unmatched states require an explicit abstention or fallback in
 downstream research code.
@@ -966,12 +1149,33 @@ next utterance, missing the intervening line entirely.
 Source: strategy selection in `crates/batchalign/src/chat_ops/fa/utr.rs`,
 two-pass config and algorithm in `crates/batchalign/src/chat_ops/fa/utr/two_pass.rs`.
 
-**Current debugging hook:** When `$BATCHALIGN_DEBUG_DIR` is set, UTR writes the
-pre-injection CHAT and the ASR timing tokens that fed `inject_utr_timing()`.
-That is enough to reproduce token-starvation failures offline. It is not yet a
-full stage-by-stage trace: normalized word lists, DP match pairs, unmatched
-utterance reports, interpolation windows, and post-monotonicity stripping still
-need richer tracing support.
+**Recovery evidence:** With a debug directory configured, alignment writes
+`<stem>_utr_evidence.json` alongside its other debug artifacts. Schema 3
+records each completed recognizer pass, its engine and reported model status,
+the per-window recognizer responses and token-conversion refusals, prepared
+tokens and lexical units, and the correspondence result. Each refusal names
+its token in the response from the same bounded window. Initial and fallback
+passes remain separate. Failure to write the requested artifact fails the file
+rather than silently discarding it.
+
+The completed-pass artifact covers completed passes only: an empty list does
+not distinguish no recognition from a failed pass. When an abandoned partial attempt is followed
+by successful full-file recovery, the completed pass retains its window plan,
+completed window responses, admitted tokens, refusals, and the reason and
+location of abandonment. Those partial tokens do not become full-file
+correspondence. If full-file recovery also fails, a requested debug directory
+receives a separate schema-1 `<stem>_utr_<pass>_failed_evidence.json` with the
+abandoned partial attempt and the full-file failure and category. If this
+artifact cannot be written, recovery stops with a system file failure carrying
+both the recovery and write errors. Without a debug directory this artifact is
+disabled. The artifact does not retain a full-file response consumed before
+a later normalization or search failure. Recording-bound admission happens
+before recognition, so that failure cannot consume a response. Other partial-path errors and
+dropped-future cancellation are not covered. The pass-level
+model status is an aggregate; individual window responses retain their own
+reported identities. Without a debug directory this evidence is not durably
+recorded; dashboard timeline capture alone does not include it. These
+observations and correspondences do not establish acoustic accuracy.
 
 **Fallback UTR:** When the initial UTR pre-pass fails (ASR error) or is skipped
 (`--no-utr`) and FA subsequently fails with a retryable error, the retry handler
@@ -1667,17 +1871,32 @@ where the utterance bullet is a projection of its words. Under
 whole projection. The policy is not a raw cache-key dimension and does not
 change primary grouping. Pre-grouping passes (narrow-bullet rescue,
 edge-filler expansion and partial `%wor` refresh) may still widen the working
-windows. When kept source fit leaves missing positive word timing, full and
-incremental FA may perform one terminal retry over the complete original
-utterance and exact positive, recording-contained supplied window. It has its
-own request key and normal model/memory admission, preserves accepted timings,
-and cannot borrow padding. Cache-only recovery never infers. See
+windows. Full and incremental FA may collect one retry over the complete
+original utterance and exact positive, recording-contained supplied window.
+It has its own request key and normal model/memory admission and cannot borrow
+padding. Primary projection and kept-bullet imposition run once. An exclusive
+`SuppliedRetrySession` then derives actual missing slots and their retained
+neighbour bounds from that working document. Only a pending missing population
+can release its preparation claim. `resolve_attempt` consumes its
+`AwaitingSuppliedRetry`; a source reference alone cannot enter that producer,
+and the consumed attempt cannot run again. Complete primary output, including
+gap healing, grants no retry preparation or inference.
+
+Each observation returns the next session together with its diagnostic trace.
+After every needed attempt has been observed, `CompletedSuppliedRetries`
+applies the answers to missing slots only and finalizes the same exclusively
+borrowed document. Accepted primary timings are preserved. Schema-13 evidence
+retains actual retry observations, including unsuccessful answers or answers
+that fill no admissible slot. The reader still accepts older `complete_primary`
+records; current complete output produces no retry observation. The active
+pipeline does not yet jointly assess primary and alternative observations.
+Cache-only recovery never infers. See
 [bounded supplied-window recovery](../user-guide/commands/align.md#bounded-recovery-inside-a-supplied-bullet).
 
 **Capture at the parse.** The given bullets cannot be read off the working
-document later: by then those passes, and the UTR pre-pass (whose two-pass
-recovery writes ordinary `Authoritative` bullets onto utterances the input left
-unbulleted), have changed it, and `BulletSource` cannot tell the difference. So
+document later: working passes can change them, while UTR supplies separate
+search anchors. A working `BulletSource` cannot establish an original supplied
+window. So
 `MainBulletAuthority::bind` runs at the single parse in the align dispatch,
 before UTR, and the result travels with the model (`FaWorkingDocument`, then
 whichever route it takes: `CompleteWor` or `ActiveAlignment`). Each
@@ -1693,13 +1912,16 @@ does not itself carry the main-bullet choice).
 flowchart TD
     parse["align dispatch: single parse"] --> bind["MainBulletAuthority::bind<br/>(classify each input bullet;<br/>Backward or unparsed refuses the file)"]
     bind --> utr["UTR pre-pass, rescue, filler expansion<br/>(may widen bullets for grouping)"]
-    utr --> apply["apply_fa_results_with_projection_policy<br/>kept: skip the bullet update"]
-    apply --> impose["then_finalize: impose<br/>restore kept bullets, clamp words on<br/>main tier and %wor -> ImposedBullets"]
-    impose --> missing{"Missing positive word timing<br/>inside an original supplied window?"}
-    missing -->|"no"| repair["bullet repair (optional)<br/>requires ImposedBullets"]
-    missing -->|"yes"| retry["One terminal exact-window attempt<br/>unique preparation and normal cache/model admission"]
-    retry --> patch["Fill missing slots only, or retain unresolved timing<br/>accepted primary timings have no overwrite capability"]
-    patch --> repair
+    utr --> resolve["Resolve primary FA observations"]
+    resolve --> apply["apply_fa_results_with_projection_policy<br/>kept: skip the bullet update"]
+    apply --> impose["then_impose<br/>restore kept bullets and clamp words<br/>-> ImposedBullets"]
+    impose --> session["SuppliedRetrySession<br/>exclusive document + actual missing slots"]
+    session --> missing{"Unobserved missing target<br/>inside an original supplied window?"}
+    missing -->|"yes"| retry["Consume AwaitingSuppliedRetry<br/>one exact-window attempt<br/>normal cache/model admission"]
+    retry --> observed["ObservedRetry<br/>next session + retained trace"]
+    observed -->|"next distinct target"| session
+    missing -->|"none"| completed["CompletedSuppliedRetries<br/>apply answers only to missing slots"]
+    completed --> repair["bullet repair (optional)<br/>requires ImposedBullets"]
     repair --> mono["monotonicity<br/>requires ImposedBullets"]
     mono --> wor["%wor written (main-tier cuts folded in)"]
     wor --> held["restore_and_verify: restore given bullets<br/>of utterances not in the recording,<br/>then KeptBulletsHeld or KeptBulletError<br/>(fails the file)"]
@@ -2326,7 +2548,7 @@ provenance when comparing runs.
 
 ### FA cache
 
-FA keeps two per-group layers under the same semantic group key:
+FA keeps two per-request layers under one semantic request key:
 
 - an immutable worker-protocol response, preferred on reads and replayed
   through the current Rust timing projection, inside an envelope that proves
@@ -2336,10 +2558,35 @@ FA keeps two per-group layers under the same semantic group key:
   bare vectors are no longer admitted because they do not identify the worker
   version or distinguish direct inference from fallback output.
 
-The key is
-`BLAKE3("{audio identity}|{start}|{end}|{words}|{gap healing}|{engine}")`, so a
-different engine, a different audio window, or a different gap-healing policy
-cannot collide. The `--override-media-cache` flag bypasses this cache.
+The semantic BLAKE3 key binds audio identity, request window, source words,
+text-shaping mode and engine. Output gap-healing policy is applied after
+projection and does not change that inference identity. The
+`--override-media-cache` flag bypasses lookups; completed direct evidence can
+still be retained for a later run.
+
+SQLite's primary key is the key alone, so the two layers must have distinct
+physical addresses. Raw evidence retains its established semantic address;
+derived timings use `fa-derived-v1:<semantic key>`, constructed only by the FA
+storage owner. Consuming `ReplayableFaRawEvidence` supplies both its admitted
+request key and engine namespace; writers cannot independently choose either.
+Previously, writing raw evidence at the same physical key replaced the derived
+row and removed its compatibility fallback.
+
+New reads try the distinct derived address and read older timing-only rows at
+the semantic address when that address is absent. They do not rewrite or delete
+older evidence. Raw-first replay and all engine, request, cardinality and
+payload admission checks remain in force.
+
+```mermaid
+flowchart TD
+    admitted["ReplayableFaRawEvidence<br/>admitted request key + engine namespace"] --> storage["Consume through FA storage owner"]
+    storage --> raw["Raw response<br/>semantic address"]
+    storage --> derived["Derived timings<br/>distinct DerivedFaStorageKey"]
+    raw --> replay["Raw-first admission and current projection"]
+    replay -->|"absent or refused"| fallback["Admit derived-timing fallback"]
+    derived --> fallback
+    legacy["Older timing-only row<br/>semantic address"] -->|"new derived address absent"| fallback
+```
 
 Both caches use the same SQLite database (the analysis cache, see [Filesystem Paths](../reference/filesystem-paths.md#analysis-cache-sqlite)).
 

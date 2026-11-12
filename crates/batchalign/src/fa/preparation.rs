@@ -105,22 +105,22 @@ impl PreparedFaRequests {
     ) -> Result<Vec<PreparedFaDispatch<'a>>, ServerError> {
         let mut indices: HashMap<RequestScope, usize> = HashMap::new();
         let mut dispatches: Vec<PreparedFaDispatch<'a>> = Vec::new();
-        for unit in authorization.into_units() {
-            let scope = RequestScope::for_unit(unit);
+        for reply in authorization.into_replies() {
+            let scope = RequestScope::for_unit(reply.unit());
             match indices.entry(scope.clone()) {
                 std::collections::hash_map::Entry::Occupied(index) => {
-                    dispatches[*index.get()].aliases.push(unit)
+                    dispatches[*index.get()].aliases.push(reply)
                 }
                 std::collections::hash_map::Entry::Vacant(index) => {
                     let prepared = self.entries.remove(&scope).ok_or_else(|| {
                         ServerError::Worker(WorkerError::Protocol(format!(
                             "FA dispatch request {} has no retained preparation",
-                            unit.ordinal()
+                            reply.unit().ordinal()
                         )))
                     })?;
                     index.insert(dispatches.len());
                     dispatches.push(PreparedFaDispatch {
-                        unit,
+                        reply,
                         prepared,
                         aliases: Vec::new(),
                     });
@@ -132,9 +132,9 @@ impl PreparedFaRequests {
 }
 
 pub(super) struct PreparedFaDispatch<'a> {
-    pub(super) unit: &'a DispatchUnit<'a>,
+    pub(super) reply: super::units::ReplyTicket<'a>,
     pub(super) prepared: PreparedFaRequest,
-    pub(super) aliases: Vec<&'a DispatchUnit<'a>>,
+    pub(super) aliases: Vec<super::units::ReplyTicket<'a>>,
 }
 
 struct MaterializedFaInputs {
@@ -569,7 +569,7 @@ pub(super) fn prepare_population<'a: 'run, 'run>(
     progress: Option<&'run ProgressSender>,
 ) -> futures::future::BoxFuture<'run, Result<PreparedFaPopulation<'a>, ServerError>> {
     Box::pin(async move {
-        let mut planned = Vec::new();
+        let mut planned = resource_partition::FilePlan::default();
         let retain = sources
             .into_sources()
             .into_iter()
@@ -617,7 +617,7 @@ pub(super) fn prepare_population<'a: 'run, 'run>(
             if group.is_reusable_from(reusable)
                 && super::incremental::collect_preserved_group_timings(chat, group).is_some()
             {
-                planned.push(input.into_group());
+                planned.keep(input.into_group());
                 continue;
             }
             if let GroupSpan::Single(single) = group.span() {
@@ -626,11 +626,11 @@ pub(super) fn prepare_population<'a: 'run, 'run>(
                     .cached
                     .contains(whole.words(), whole.window(), context)
                 {
-                    planned.push(input.into_group());
+                    planned.keep(input.into_group());
                     continue;
                 }
             }
-            planned.extend(
+            planned.plan(
                 resource_partition::prepare_group(
                     input,
                     anchors,
@@ -641,6 +641,7 @@ pub(super) fn prepare_population<'a: 'run, 'run>(
                 .map_err(plan_error)?,
             );
         }
+        let planned = planned.finish().map_err(host_too_small)?;
         let (entries, residual) = probe
             .registry
             .freeze_retaining(selected, retain)
@@ -675,6 +676,20 @@ fn plan_error(error: ResourcePlanError<ServerError>) -> ServerError {
             "FA planner attempted a cut not supported by its source population".into(),
         )),
     }
+}
+
+/// The host admitted nothing of the file: the same final refusal a worker
+/// reservation gets, actionable and never retried, since the same host
+/// cannot offer more.
+fn host_too_small(host: resource_partition::HostTooSmall) -> ServerError {
+    ServerError::Worker(WorkerError::MemoryGuard(
+        crate::worker::memory_guard::MemoryGuardError::ExceedsHost(crate::host_memory::NeverFits {
+            label: format!("FA model {}", host.engine),
+            needed_mb: host.required_mb,
+            ceiling_mb: host.ceiling_mb,
+            reserve_mb: host.reserve_mb,
+        }),
+    ))
 }
 
 #[cfg(test)]

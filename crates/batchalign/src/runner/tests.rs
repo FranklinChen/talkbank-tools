@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 
 use crate::api::{
     DisplayPath, JobId, JobStatus, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
@@ -68,7 +67,6 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
             file_statuses,
             results: Vec::new(),
             error: None,
-            completed_files: 0,
         },
         schedule: JobScheduleState {
             submitted_at: crate::unix_time(1.0),
@@ -78,11 +76,7 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
             lease: None,
             last_cancel: None,
         },
-        runtime: JobRuntimeControl {
-            cancel_token: CancellationToken::new(),
-            runner_active: false,
-            run_generation: crate::store::RunGeneration::FIRST,
-        },
+        runtime: JobRuntimeControl::unclaimed(),
         execution_plan: None,
     }
 }
@@ -141,15 +135,10 @@ async fn preflight_media_failure_records_setup_attempt() {
         has_chat: false,
     }];
     let failures = HashMap::from([(0usize, String::from("Media file not found"))]);
-    let sink = StoreRunnerEventSink::wrap(store.clone());
+    let sink = StoreRunnerEventSink::wrap(store.clone(), &JobId::from("job-media-preflight"));
 
-    let failed_indices = record_preflight_media_failures(
-        sink.as_ref(),
-        &JobId::from("job-media-preflight"),
-        &file_list,
-        &failures,
-    )
-    .await;
+    let failed_indices =
+        record_preflight_media_failures(sink.as_ref(), &file_list, &failures).await;
 
     assert_eq!(failed_indices, HashSet::from([0usize]));
 

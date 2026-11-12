@@ -80,8 +80,6 @@ use crate::api::{
     InvalidStampSafeText, LanguageCode3, ReleasedCommand, ReportedEngineName, StampJoiner,
     StampSafeText,
 };
-#[cfg(test)]
-use crate::chat_ops::fa::utr::UtrResult;
 use crate::chat_ops::{ChatFile, Header, Line};
 use crate::engine_reports::FaCacheNamespace;
 use crate::morphosyntax::identity::AppliedAnalyses;
@@ -95,8 +93,11 @@ use batchalign_transform::serialize::to_chat_string;
 
 mod utr;
 #[cfg(test)]
-pub(crate) use utr::UtrProducer;
-pub(crate) use utr::{UtrContribution, UtrModels, UtrPassOutcome, UtrRecovery};
+pub(crate) use utr::UtrRecoveryFailure;
+pub(crate) use utr::{
+    UtrContribution, UtrModels, UtrPassOutcome, UtrPassReport, UtrProducer, UtrRecognitionEvidence,
+    UtrRecognitionWindow, UtrRecovery, UtrRecoveryStop, UtrTokenRejection, UtrTokenRejectionReason,
+};
 
 // ---------------------------------------------------------------------------
 // Shared literals
@@ -2970,13 +2971,9 @@ mod tests {
             "{ran}"
         );
 
-        let recovery = UtrRecovery::from_initial(
-            &UtrEngine::RevAi,
-            Ok(UtrPassOutcome::NothingUntimed(
-                UtrResult::not_run_no_untimed(3),
-            )),
-        )
-        .unwrap();
+        let recovery =
+            UtrRecovery::from_initial(&UtrEngine::RevAi, Ok(UtrPassReport::NothingUntimed))
+                .unwrap();
         let contribution = recovery.contribution();
         assert_eq!(*contribution, UtrContribution::NotRun);
         let not_run = align_provenance(

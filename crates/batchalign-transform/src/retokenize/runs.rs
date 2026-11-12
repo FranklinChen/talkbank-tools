@@ -9,58 +9,40 @@
 //! runs are, and the segmenter segments each run on its own, so a merged
 //! token can only join words with nothing between them.
 //!
-//! A run is a maximal sequence of plain, retokenizable words in the same
-//! container with no other main-tier content between them. Every other word
-//! the `%mor` list counts (an annotated word, each word of a replacement, a
-//! tag separator) is a run of its own, and every container edge ends a run.
-//! That is never coarser than the boundaries the rebuild checks
+//! Chatter decides the runs (`talkbank_transform::extract::collect_mor_runs`)
+//! in the same walk that decides which items are `%mor` words, and returns
+//! the words already partitioned. BA3 used to walk the main tier a second
+//! time with its own copy of the word rules, and refused an utterance when
+//! the two counts disagreed: BA3 0.8.8 refused whole files that way, over
+//! annotated fragments and `xxx [*]` that the second walk counted and the
+//! extractor rightly skipped. A [`WordRuns`] is now
+//! taken from Chatter's runs by a total conversion, so the runs partition
+//! the words by construction and no count can disagree.
+//!
+//! A run is never coarser than the boundaries the rebuild checks
 //! (`RetokenizeContext::at_boundary`), so tokens segmented within runs never
 //! cross one. The rebuild's check stays as the admission check on model
 //! output, which this module does not replace.
-//!
-//! The walk counts words by the rebuild walk's own rules (`should_retokenize`,
-//! `excluded_from_mor`, `is_tag_marker_separator`). Its total must equal the
-//! extractor's word count; [`WordRuns::of`] refuses otherwise, so a counting
-//! disagreement fails the utterance loudly instead of misplacing a boundary.
 
 use std::num::NonZeroUsize;
 
-use talkbank_model::alignment::helpers::is_tag_marker_separator;
-use talkbank_model::model::{BracketedItem, UtteranceContent};
+use talkbank_transform::extract::MorRuns;
 
-use super::rebuild::{excluded_from_mor, should_retokenize};
-
-/// One utterance's `%mor` words partitioned into runs, in order. Only
-/// [`WordRuns::of`] (from the main tier) and [`WordRuns::unmergeable`] make
-/// one, so the lengths always partition exactly the words they describe.
+/// One utterance's `%mor` words partitioned into runs, in order. Made only
+/// from Chatter's runs ([`WordRuns::from`]) or as [`WordRuns::unmergeable`],
+/// so the lengths always partition exactly the words they describe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordRuns(Vec<NonZeroUsize>);
 
-/// The run walk counted a different number of words than extraction did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("the run walk counted {walked} words where extraction found {extracted}")]
-pub struct RunsDisagree {
-    /// Words the run walk counted.
-    pub walked: usize,
-    /// Words chatter's extractor produced for the `%mor` list.
-    pub extracted: usize,
+impl From<&MorRuns> for WordRuns {
+    /// The run lengths of Chatter's partition. Total: every run Chatter
+    /// makes holds at least one word.
+    fn from(runs: &MorRuns) -> Self {
+        Self(runs.run_lengths().collect())
+    }
 }
 
 impl WordRuns {
-    /// The runs of a main tier whose extracted `%mor` word list has
-    /// `extracted` words.
-    pub fn of(content: &[UtteranceContent], extracted: usize) -> Result<Self, RunsDisagree> {
-        let mut walk = RunWalk::default();
-        walk.utterance(content);
-        walk.boundary();
-        let walked = walk.runs.iter().map(|run| run.get()).sum();
-        if walked == extracted {
-            Ok(Self(walk.runs))
-        } else {
-            Err(RunsDisagree { walked, extracted })
-        }
-    }
-
     /// `words` words of which none may merge with another: the honest runs
     /// of an item that has no authority to retokenize (a secondary-language
     /// span keeps its CHAT words as written).
@@ -72,184 +54,15 @@ impl WordRuns {
     pub fn lengths(&self) -> impl Iterator<Item = usize> + '_ {
         self.0.iter().map(|run| run.get())
     }
-
-    /// How many words the runs cover.
-    pub fn word_count(&self) -> usize {
-        self.lengths().sum()
-    }
-}
-
-/// The walk's state: the closed runs and the length of the one still open.
-#[derive(Default)]
-struct RunWalk {
-    runs: Vec<NonZeroUsize>,
-    open: usize,
-}
-
-impl RunWalk {
-    /// A plain retokenizable word extends the open run.
-    fn joinable_word(&mut self) {
-        self.open += 1;
-    }
-
-    /// Anything else ends the open run.
-    fn boundary(&mut self) {
-        if let Some(run) = NonZeroUsize::new(self.open) {
-            self.runs.push(run);
-        }
-        self.open = 0;
-    }
-
-    /// `count` counted words of which each stands alone.
-    fn lone_words(&mut self, count: usize) {
-        self.boundary();
-        self.runs
-            .extend(std::iter::repeat_n(NonZeroUsize::MIN, count));
-    }
-
-    /// A container's items, with a boundary at both edges.
-    fn container(&mut self, items: &[BracketedItem]) {
-        self.boundary();
-        self.bracketed(items);
-        self.boundary();
-    }
-
-    fn utterance(&mut self, content: &[UtteranceContent]) {
-        for item in content {
-            match item {
-                UtteranceContent::Word(word) if should_retokenize(word) => self.joinable_word(),
-                UtteranceContent::AnnotatedWord(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.lone_words(1);
-                    }
-                }
-                UtteranceContent::ReplacedWord(replaced) => {
-                    if excluded_from_mor(replaced.scoped_annotations.as_slice()) {
-                        self.boundary();
-                    } else {
-                        self.lone_words(replaced.replacement.words.len());
-                    }
-                }
-                UtteranceContent::Group(group) => self.container(&group.content.content),
-                UtteranceContent::PhoGroup(pho) => self.container(&pho.content.content),
-                UtteranceContent::SinGroup(sin) => self.container(&sin.content.content),
-                UtteranceContent::Quotation(quot) => self.container(&quot.content.content),
-                UtteranceContent::AnnotatedGroup(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.container(&annotated.inner.content.content);
-                    }
-                }
-                UtteranceContent::AnnotatedQuotation(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.container(&annotated.inner.content.content);
-                    }
-                }
-                UtteranceContent::Separator(sep) if is_tag_marker_separator(sep) => {
-                    self.lone_words(1);
-                }
-                // Enumerated, not `_`, like the rebuild walk's passthrough
-                // arm: each is content between words and counts none.
-                UtteranceContent::Word(_)
-                | UtteranceContent::OrphanAnnotation(_)
-                | UtteranceContent::Event(_)
-                | UtteranceContent::AnnotatedEvent(_)
-                | UtteranceContent::Pause(_)
-                | UtteranceContent::Retrace(_)
-                | UtteranceContent::AnnotatedRetrace(_)
-                | UtteranceContent::Action(_)
-                | UtteranceContent::AnnotatedAction(_)
-                | UtteranceContent::Freecode(_)
-                | UtteranceContent::Separator(_)
-                | UtteranceContent::OverlapPoint(_)
-                | UtteranceContent::InternalBullet(_)
-                | UtteranceContent::LongFeatureBegin(_)
-                | UtteranceContent::LongFeatureEnd(_)
-                | UtteranceContent::UnderlineBegin(_)
-                | UtteranceContent::UnderlineEnd(_)
-                | UtteranceContent::NonvocalBegin(_)
-                | UtteranceContent::NonvocalEnd(_)
-                | UtteranceContent::NonvocalSimple(_)
-                | UtteranceContent::OtherSpokenEvent(_) => self.boundary(),
-            }
-        }
-    }
-
-    fn bracketed(&mut self, items: &[BracketedItem]) {
-        for item in items {
-            match item {
-                BracketedItem::Word(word) if should_retokenize(word) => self.joinable_word(),
-                BracketedItem::AnnotatedWord(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.lone_words(1);
-                    }
-                }
-                BracketedItem::ReplacedWord(replaced) => {
-                    if excluded_from_mor(replaced.scoped_annotations.as_slice()) {
-                        self.boundary();
-                    } else {
-                        self.lone_words(replaced.replacement.words.len());
-                    }
-                }
-                BracketedItem::Group(group) => self.container(&group.content.content),
-                BracketedItem::PhoGroup(pho) => self.container(&pho.content.content),
-                BracketedItem::SinGroup(sin) => self.container(&sin.content.content),
-                BracketedItem::Quotation(quot) => self.container(&quot.content.content),
-                BracketedItem::AnnotatedGroup(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.container(&annotated.inner.content.content);
-                    }
-                }
-                BracketedItem::AnnotatedQuotation(annotated) => {
-                    if excluded_from_mor(&annotated.scoped_annotations) {
-                        self.boundary();
-                    } else {
-                        self.container(&annotated.inner.content.content);
-                    }
-                }
-                BracketedItem::Separator(sep) if is_tag_marker_separator(sep) => {
-                    self.lone_words(1);
-                }
-                BracketedItem::Word(_)
-                | BracketedItem::OrphanAnnotation(_)
-                | BracketedItem::Event(_)
-                | BracketedItem::AnnotatedEvent(_)
-                | BracketedItem::Pause(_)
-                | BracketedItem::Action(_)
-                | BracketedItem::AnnotatedAction(_)
-                | BracketedItem::Retrace(_)
-                | BracketedItem::AnnotatedRetrace(_)
-                | BracketedItem::OverlapPoint(_)
-                | BracketedItem::Separator(_)
-                | BracketedItem::InternalBullet(_)
-                | BracketedItem::Freecode(_)
-                | BracketedItem::LongFeatureBegin(_)
-                | BracketedItem::LongFeatureEnd(_)
-                | BracketedItem::UnderlineBegin(_)
-                | BracketedItem::UnderlineEnd(_)
-                | BracketedItem::NonvocalBegin(_)
-                | BracketedItem::NonvocalEnd(_)
-                | BracketedItem::NonvocalSimple(_)
-                | BracketedItem::OtherSpokenEvent(_) => self.boundary(),
-            }
-        }
-    }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
-    /// The runs of `body`, checked against the extractor's word count.
+    /// The runs Chatter gives `body`'s one utterance: BA3's boundary contract,
+    /// checked where the runs enter BA3.
     fn runs_of(body: &str) -> Vec<usize> {
         let source = format!(
             "@UTF8\n@Begin\n@Languages:\tyue\n@Participants:\tCHI Target_Child\n\
@@ -263,16 +76,8 @@ mod tests {
         )
         .expect("fixture parses");
         let utterance = chat.utterances().next().expect("one utterance");
-        let mut words = Vec::new();
-        crate::extract::collect_utterance_content(
-            &utterance.main.content.content,
-            talkbank_model::alignment::helpers::PositionalDomain::Mor,
-            &mut words,
-        );
-        WordRuns::of(&utterance.main.content.content, words.len())
-            .unwrap_or_else(|error| panic!("{body:?}: {error}"))
-            .lengths()
-            .collect()
+        let runs = crate::extract::collect_mor_runs(&utterance.main.content.content);
+        WordRuns::from(&runs).lengths().collect()
     }
 
     /// The shapes from real Cantonese child speech that the joined-string
@@ -301,36 +106,22 @@ mod tests {
         assert_eq!(runs_of("a b [*] c d ."), vec![1, 1, 2]);
     }
 
+    /// A scoped word that is not a %mor word (a fragment, a filler,
+    /// untranscribed material) counts none and ends the run, as the
+    /// extractor and the rebuild treat it: annotating it does not make it a
+    /// word. Counting it once stopped every file holding such a word (an
+    /// annotated fragment or `xxx`) as an internal fault.
     #[test]
-    fn a_walk_that_disagrees_with_extraction_is_refused() {
-        let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
-        let chat = crate::parse_and_validate_with_parser(
-            &parser,
-            "@UTF8\n@Begin\n@Languages:\tyue\n@Participants:\tCHI Target_Child\n\
-             @ID:\tyue|test|CHI|||||Target_Child|||\n*CHI:\ta b c .\n@End\n",
-            talkbank_model::ParseValidateOptions::default(),
-        )
-        .expect("fixture parses");
-        let content = &chat
-            .utterances()
-            .next()
-            .expect("utterance")
-            .main
-            .content
-            .content;
-        assert_eq!(
-            WordRuns::of(content, 2),
-            Err(RunsDisagree {
-                walked: 3,
-                extracted: 2
-            })
-        );
+    fn a_scoped_word_outside_the_mor_list_counts_none() {
+        assert_eq!(runs_of("a &+w [=! laughs] ."), vec![1]);
+        assert_eq!(runs_of("a b xxx [*] ."), vec![2]);
+        assert_eq!(runs_of("a &-um [=! shrugs] b ."), vec![1, 1]);
+        assert_eq!(runs_of("a <b &+c [=! laughs]> [!] d ."), vec![1, 1, 1]);
     }
 
     #[test]
     fn unmergeable_words_are_each_their_own_run() {
         let runs = WordRuns::unmergeable(3);
         assert_eq!(runs.lengths().collect::<Vec<_>>(), vec![1, 1, 1]);
-        assert_eq!(runs.word_count(), 3);
     }
 }

@@ -1,6 +1,6 @@
 //! Runner-owned job execution mutations on [`JobStore`].
 
-use crate::api::{JobId, MachineTime};
+use crate::api::MachineTime;
 
 use super::super::JobStore;
 use super::super::registry::{CompletionCleanup, RunExit, RunFinishProjection};
@@ -11,60 +11,44 @@ impl JobStore {
     /// Re-queue a job after memory-gate rejection and persist the retry deadline.
     pub(crate) async fn requeue_job_after_memory_gate(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         retry_at: MachineTime,
     ) {
-        let Some(job_update) = self
-            .registry
-            .requeue_after_memory_gate(job_id, retry_at)
-            .await
-        else {
+        let Some(job_update) = self.registry.requeue_after_memory_gate(run, retry_at).await else {
             return;
         };
         self.notify_job_item(job_update);
 
-        self.db_persist_job_status(job_id).await;
+        self.db_persist_job_status(run.job_id()).await;
     }
 
     /// Mark a job as running and clear any deferred retry deadline.
-    pub(crate) async fn mark_job_running(&self, job_id: &JobId) {
-        let Some(job_update) = self.registry.mark_job_running(job_id).await else {
+    pub(crate) async fn mark_job_running(&self, run: &crate::store::RunBinding) {
+        let Some(job_update) = self.registry.mark_job_running(run).await else {
             return;
         };
         self.notify_job_item(job_update);
 
-        self.db_persist_job_status(job_id).await;
+        self.db_persist_job_status(run.job_id()).await;
     }
 
     /// Record the per-job worker count chosen for this run.
-    pub(crate) async fn record_job_worker_count(&self, job_id: &JobId, num_workers: usize) {
+    pub(crate) async fn record_job_worker_count(
+        &self,
+        run: &crate::store::RunBinding,
+        num_workers: usize,
+    ) {
         // Recording a worker count is not a status transition; the row is
         // written from the job as it is, whatever status that is.
         if !self
             .registry
-            .record_job_worker_count(job_id, num_workers)
+            .record_job_worker_count(run, num_workers)
             .await
         {
             return;
         }
 
-        self.db_persist_job_status(job_id).await;
-    }
-
-    /// Fail a job immediately with a job-level error message.
-    pub(crate) async fn fail_job(
-        &self,
-        job_id: &JobId,
-        error: &str,
-        failed_at: crate::store::EventTime,
-    ) {
-        let completed_at = failed_at.instant();
-        let Some(job_update) = self.registry.fail_job(job_id, error, completed_at).await else {
-            return;
-        };
-        self.notify_job_item(job_update);
-
-        self.db_persist_job_status(job_id).await;
+        self.db_persist_job_status(run.job_id()).await;
     }
 
     /// A cancelled-before-claim task has completion authority only.
@@ -105,7 +89,8 @@ impl JobStore {
         exit: RunExit,
         finished_at: crate::store::EventTime,
     ) -> Result<RunCompletion, crate::error::ServerError> {
-        let job_id = claim.snapshot().identity.job_id.clone();
+        let run = claim.binding().clone();
+        let job_id = run.job_id().clone();
         let completion = self
             .registry
             .complete_run(claim, exit, finished_at)
@@ -134,7 +119,7 @@ impl JobStore {
             )
             .await;
             self.db_finish_attempt_for_file(
-                &job_id,
+                &run,
                 AttemptFinishRecord {
                     filename: &filename,
                     outcome: attempt_outcome,
@@ -189,7 +174,10 @@ mod tests {
 
         let retry_at = crate::unix_time(321.0);
         store
-            .requeue_job_after_memory_gate(&JobId::from("job-1"), retry_at)
+            .requeue_job_after_memory_gate(
+                &crate::store::RunBinding::first_run_of(JobId::from("job-1")),
+                retry_at,
+            )
             .await;
 
         let info = store.get(&JobId::from("job-1")).await.unwrap();
@@ -315,8 +303,20 @@ mod tests {
             category: FailureCategory::WorkerBootstrap,
             finished_at: crate::store::EventTime::fixed(crate::unix_time(400.0)),
         };
-        store.mark_file_error(&job_id, "a.cha", &failure).await;
-        store.mark_file_error(&job_id, "b.cha", &failure).await;
+        store
+            .mark_file_error(
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                "a.cha",
+                &failure,
+            )
+            .await;
+        store
+            .mark_file_error(
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                "b.cha",
+                &failure,
+            )
+            .await;
 
         let completion = store
             .complete_run(

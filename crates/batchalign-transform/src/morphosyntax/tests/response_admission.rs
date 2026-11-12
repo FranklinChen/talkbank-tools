@@ -31,7 +31,6 @@ fn items(chat: &ChatFile, language: &LanguageCode) -> Vec<CollectedUtterance> {
             .expect("nonempty fixture languages"),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items
 }
 

@@ -22,7 +22,7 @@ use tracing::warn;
 use super::raw_evidence::{
     ExpectedFaWords, FaEvidenceRoute, FaRawEvidence, FaRawEvidenceError, ReplayableFaRawEvidence,
 };
-use super::units::DispatchUnit;
+use super::units::{DispatchUnit, ReplyTicket};
 mod stream;
 
 /// One FA worker batch: the authorized missed requests and the run facts
@@ -47,11 +47,11 @@ pub(crate) struct FaWorkerBatch<'a> {
 /// a required-cache miss has no route to [`FaWorkerBatch`].
 #[derive(Debug)]
 pub(crate) struct FaInferenceAuthorization<'a> {
-    misses: Vec<&'a DispatchUnit<'a>>,
+    misses: Vec<ReplyTicket<'a>>,
 }
 
 impl<'a> FaInferenceAuthorization<'a> {
-    pub(super) fn into_units(self) -> Vec<&'a DispatchUnit<'a>> {
+    pub(super) fn into_replies(self) -> Vec<ReplyTicket<'a>> {
         self.misses
     }
 }
@@ -92,7 +92,7 @@ impl<'a> OptionalFaInference<'a> {
 /// the job required complete reusable evidence.
 pub(crate) fn plan_fa_inference<'a>(
     policy: CachePolicy,
-    misses: Vec<&'a DispatchUnit<'a>>,
+    misses: Vec<ReplyTicket<'a>>,
 ) -> Result<FaInferencePlan<'a>, ServerError> {
     let Some((first_miss, remaining_misses)) = misses.split_first() else {
         return Ok(FaInferencePlan::NothingToInfer);
@@ -101,8 +101,10 @@ pub(crate) fn plan_fa_inference<'a>(
         CachePolicy::RequireCache => {
             return Err(ServerError::RequiredEvidenceUnavailable(
                 MissingRequiredEvidence::ForcedAlignment(MissingForcedAlignmentEvidence::new(
-                    first_miss.ordinal().index(),
-                    remaining_misses.iter().map(|unit| unit.ordinal().index()),
+                    first_miss.unit().ordinal().index(),
+                    remaining_misses
+                        .iter()
+                        .map(|reply| reply.unit().ordinal().index()),
                 )),
             ));
         }
@@ -120,24 +122,21 @@ pub(crate) fn plan_fa_inference<'a>(
 #[derive(Debug)]
 pub(crate) enum FaWorkerUnitResult<'a> {
     /// A successful worker response admitted against the request and parsed.
-    Evidence(Box<FaWorkerEvidenceResult<'a>>),
+    Evidence(Box<FaWorkerEvidenceResult>),
     /// Another output ownership range using the same single execution.
-    Shared(FaSharedProjection<'a>),
+    Shared(FaSharedProjection),
     /// A request-local failure deliberately represented as unaligned words.
     Unaligned(FaWorkerUnalignedResult<'a>),
 }
 
 #[derive(Debug)]
-pub(crate) struct FaSharedProjection<'a> {
-    unit: &'a DispatchUnit<'a>,
+pub(crate) struct FaSharedProjection {
     timings: Vec<Option<WordTiming>>,
 }
 
 /// Timing projection and provenance issued together by the worker outcome.
 /// Callers cannot construct a projection with a fabricated evidence source.
-pub(crate) struct FaWorkerProjection<'a> {
-    /// The request these timings answer.
-    pub unit: &'a DispatchUnit<'a>,
+pub(crate) struct FaWorkerProjection {
     /// One optional timing per requested word.
     pub timings: Vec<Option<WordTiming>>,
     /// Replayable direct evidence, when admitted by the worker boundary.
@@ -147,7 +146,7 @@ pub(crate) struct FaWorkerProjection<'a> {
     source: crate::types::traces::FaEvidenceSourceTrace,
 }
 
-impl FaWorkerProjection<'_> {
+impl FaWorkerProjection {
     /// Provenance of this projection, including the absence of worker evidence.
     pub fn source(&self) -> crate::types::traces::FaEvidenceSourceTrace {
         self.source
@@ -160,11 +159,9 @@ impl<'a> FaWorkerUnitResult<'a> {
     fn share_with(&self, unit: &'a DispatchUnit<'a>) -> Self {
         match self {
             Self::Evidence(evidence) => Self::Shared(FaSharedProjection {
-                unit,
                 timings: evidence.timings.clone(),
             }),
             Self::Shared(shared) => Self::Shared(FaSharedProjection {
-                unit,
                 timings: shared.timings.clone(),
             }),
             Self::Unaligned(_) => unaligned_unit_result(unit),
@@ -172,25 +169,22 @@ impl<'a> FaWorkerUnitResult<'a> {
     }
 
     /// Preserve the outcome distinction when materializing unaligned words.
-    pub fn into_projection(self) -> FaWorkerProjection<'a> {
+    pub fn into_projection(self) -> FaWorkerProjection {
         use crate::types::traces::FaEvidenceSourceTrace;
         match self {
             Self::Evidence(evidence) => FaWorkerProjection {
-                unit: evidence.unit,
                 timings: evidence.timings,
                 raw_evidence: evidence.raw_evidence,
                 fallback_event: evidence.fallback_event,
                 source: FaEvidenceSourceTrace::Inference,
             },
             Self::Shared(shared) => FaWorkerProjection {
-                unit: shared.unit,
                 timings: shared.timings,
                 raw_evidence: None,
                 fallback_event: None,
                 source: FaEvidenceSourceTrace::Inference,
             },
             Self::Unaligned(unaligned) => FaWorkerProjection {
-                unit: unaligned.unit,
                 timings: vec![None; unaligned.unit.words().len()],
                 raw_evidence: None,
                 fallback_event: None,
@@ -202,9 +196,7 @@ impl<'a> FaWorkerUnitResult<'a> {
 
 /// Successful FA evidence paired inseparably with its parsed timing projection.
 #[derive(Debug)]
-pub(crate) struct FaWorkerEvidenceResult<'a> {
-    /// The request these timings answer.
-    pub unit: &'a DispatchUnit<'a>,
+pub(crate) struct FaWorkerEvidenceResult {
     /// Parsed timings in the established Rust FA timing domain.
     pub timings: Vec<Option<WordTiming>>,
     /// Immutable worker response admitted against engine and word cardinality.
@@ -219,6 +211,42 @@ pub(crate) struct FaWorkerEvidenceResult<'a> {
 pub(crate) struct FaWorkerUnalignedResult<'a> {
     /// The request left unaligned.
     pub unit: &'a DispatchUnit<'a>,
+}
+
+/// A completed primary reply owns its exact receiving slot. Only the
+/// transport's prepared-dispatch producer can construct this pairing.
+#[derive(Debug)]
+pub(super) struct FaWorkerReply<'unit> {
+    reply: ReplyTicket<'unit>,
+    result: FaWorkerUnitResult<'unit>,
+}
+
+impl<'unit> FaWorkerReply<'unit> {
+    fn share_with(&self, reply: ReplyTicket<'unit>) -> Self {
+        let result = self.result.share_with(reply.unit());
+        Self { reply, result }
+    }
+
+    pub(super) async fn retain(
+        self,
+        services: super::FaServices<'_>,
+    ) -> Result<Option<FaFallbackEventTrace>, ServerError> {
+        let projection = self.result.into_projection();
+        let source = projection.source();
+        // The completed-reply type already owns this exact destination.
+        // Retain canonical cache evidence before releasing continuation; an
+        // alias has no second raw-evidence capability.
+        if let Some(raw) = projection.raw_evidence {
+            super::cache_storage::store_unit_evidence(
+                services.pipeline.cache,
+                &projection.timings,
+                raw,
+            )
+            .await;
+        }
+        self.reply.observed(projection.timings, source)?;
+        Ok(projection.fallback_event)
+    }
 }
 
 /// Narrow transport adapter for FA worker inference.
@@ -236,7 +264,7 @@ pub(crate) enum FaWorkerTransport<'a> {
 pub(super) trait FaResultSink<'unit>: Send {
     fn retain<'step>(
         &'step mut self,
-        result: FaWorkerUnitResult<'unit>,
+        result: FaWorkerReply<'unit>,
     ) -> futures::future::BoxFuture<'step, Result<(), ServerError>>
     where
         'unit: 'step;
@@ -492,7 +520,7 @@ fn parse_unit_response(
     })
 }
 
-impl FaWorkerEvidenceResult<'_> {
+impl FaWorkerEvidenceResult {
     fn with_fallback_event(mut self, fallback_event: FaFallbackEventTrace) -> Self {
         self.fallback_event = Some(fallback_event);
         self
@@ -517,7 +545,7 @@ impl<'a> FaUnitEvidenceAdmission<'_, 'a> {
         &self,
         response: &crate::types::worker_v2::ExecuteResponseV2,
         route: FaEvidenceRoute,
-    ) -> Result<FaWorkerEvidenceResult<'a>, FaUnitFailure> {
+    ) -> Result<FaWorkerEvidenceResult, FaUnitFailure> {
         let raw_evidence = FaRawEvidence::admit_requested(
             response,
             self.requested_engine,
@@ -538,7 +566,6 @@ impl<'a> FaUnitEvidenceAdmission<'_, 'a> {
         // valid for this run and never persisted.
         let replayable_raw_evidence = raw_evidence.into_replayable().ok();
         Ok(FaWorkerEvidenceResult {
-            unit: self.unit,
             timings,
             raw_evidence: replayable_raw_evidence,
             fallback_event: None,
@@ -862,7 +889,6 @@ mod tests {
             ),
             (
                 FaWorkerUnitResult::Evidence(Box::new(FaWorkerEvidenceResult {
-                    unit,
                     timings: vec![None; 2],
                     raw_evidence: None,
                     fallback_event: None,
@@ -877,7 +903,6 @@ mod tests {
             let decoded: crate::types::traces::FaEvidenceSourceTrace =
                 serde_json::from_value(encoded).expect("read recorded source");
             assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
-            assert_eq!(projection.unit.ordinal(), unit.ordinal());
             assert_eq!(projection.timings, vec![None; 2]);
         }
     }
@@ -924,30 +949,98 @@ mod tests {
         }
         .admit(&response, FaEvidenceRoute::Direct)
         .unwrap();
-        let canonical = FaWorkerUnitResult::Evidence(Box::new(evidence));
-        let shared = canonical.share_with(units[1]).into_projection();
-        let canonical = canonical.into_projection();
-        assert_eq!(shared.timings, canonical.timings);
+        let mut frame = super::super::units::UnitLedger::open(&plan, |_| None);
+        let alias_ticket = frame.replies.pop().unwrap();
+        let canonical_ticket = frame.replies.pop().unwrap();
+        assert_ne!(
+            alias_ticket.unit().ordinal(),
+            canonical_ticket.unit().ordinal()
+        );
+        let canonical = FaWorkerReply {
+            reply: canonical_ticket,
+            result: FaWorkerUnitResult::Evidence(Box::new(evidence)),
+        };
+        let shared = canonical.share_with(alias_ticket);
+        let FaWorkerUnitResult::Evidence(evidence) = &canonical.result else {
+            panic!("canonical owns admitted evidence")
+        };
+        let FaWorkerUnitResult::Shared(alias) = &shared.result else {
+            panic!("an alias has no raw-evidence write capability")
+        };
+        assert_eq!(alias.timings, evidence.timings);
+        assert!(evidence.raw_evidence.is_some());
+        let directory = tempfile::tempdir().unwrap();
+        let cache = crate::cache::UtteranceCache::sqlite(Some(directory.path().join("cache")))
+            .await
+            .unwrap();
+        let pool = crate::worker::pool::WorkerPool::new(crate::worker::pool::PoolConfig {
+            python_path: directory
+                .path()
+                .join("inference-is-forbidden")
+                .to_string_lossy()
+                .into_owned(),
+            ..crate::worker::pool::PoolConfig::for_tests()
+        });
+        let gpu = crate::worker::pool::GpuModelPlan::alignment(
+            crate::types::engines::FaEngineName::Wave2Vec,
+            None,
+        );
+        let services = super::super::FaServices {
+            pipeline: crate::pipeline::PipelineServices::new(&pool, &cache),
+            cache_namespace: &namespace,
+            gpu: &gpu,
+            attention_capture_dir: None,
+        };
+        assert!(canonical.retain(services).await.unwrap().is_none());
+        assert!(shared.retain(services).await.unwrap().is_none());
+        frame
+            .ledger
+            .assemble("shared-context")
+            .expect("canonical and alias completed their own receiving slots");
+        let keys = vec![units[0].cache_key().as_str().to_owned()];
+        let (derived, raw) = super::super::cache_storage::read_values(&keys, services).await;
+        assert_eq!(
+            derived.len(),
+            1,
+            "raw retention must not overwrite derived timings"
+        );
+        assert_eq!(raw.len(), 1, "raw evidence keeps its own entry");
+        // Raw-first replay remains policy. If raw evidence is later corrupt,
+        // the separately retained derived population must still be admissible.
+        let admission = super::super::FaCacheUnitAdmission::new(
+            units[0],
+            crate::types::engines::FaEngineName::Wave2Vec,
+            &namespace,
+        );
         assert!(matches!(
-            shared.source(),
-            crate::types::traces::FaEvidenceSourceTrace::Inference
+            admission
+                .resolve(raw.get(&keys[0]), derived.get(&keys[0]))
+                .admitted,
+            super::super::AdmittedFaCacheGroup::RawEvidence(_)
         ));
+        let fallback = admission.resolve(
+            Some(&serde_json::json!({"malformed": true})),
+            derived.get(&keys[0]),
+        );
         assert!(matches!(
-            canonical.source(),
-            crate::types::traces::FaEvidenceSourceTrace::Inference
+            fallback.admitted,
+            super::super::AdmittedFaCacheGroup::DerivedTimings(_)
         ));
-        assert_ne!(shared.unit.ordinal(), canonical.unit.ordinal());
-        assert!(canonical.raw_evidence.is_some());
-        assert!(shared.raw_evidence.is_none());
-        assert!(shared.fallback_event.is_none());
+        assert_eq!(fallback.refusals.len(), 1);
+        pool.shutdown().await;
     }
 
     #[test]
     fn required_cache_misses_never_produce_fa_inference_authorization() {
         let groups = single_groups(&[(0, 100), (100, 200), (200, 300), (300, 400)]);
         let plan = plan_for(&groups);
-        let units: Vec<&DispatchUnit<'_>> = plan.units().collect();
-        let error = plan_fa_inference(CachePolicy::RequireCache, vec![units[1], units[3]])
+        let frame = super::super::units::UnitLedger::open(&plan, |_| None);
+        let misses = frame
+            .replies
+            .into_iter()
+            .filter(|reply| matches!(reply.unit().ordinal().index(), 1 | 3))
+            .collect();
+        let error = plan_fa_inference(CachePolicy::RequireCache, misses)
             .expect_err("required evidence misses must refuse worker inference");
 
         let ServerError::RequiredEvidenceUnavailable(missing) = error else {

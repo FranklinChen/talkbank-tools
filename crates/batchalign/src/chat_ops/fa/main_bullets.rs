@@ -290,6 +290,12 @@ pub enum GivenBulletError {
 /// rather than writing a transcript whose kept bullets moved.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeptBulletError {
+    /// A retry target captured from the exclusively borrowed document vanished.
+    #[error("supplied-window retry source utterance {utterance} is missing")]
+    RetrySourceMissing {
+        /// Utterance ordinal captured when the retry was planned.
+        utterance: talkbank_model::UtteranceIdx,
+    },
     /// A numeric kept-bullet invariant cannot be checked against rejected syntax.
     #[error(
         "utterance {utterance_idx} acquired an unparsed bullet {source_text:?} during alignment"

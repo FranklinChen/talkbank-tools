@@ -22,18 +22,122 @@ use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
 use crate::media::probe::AudioDuration;
 use crate::options::UtrEngine;
 use crate::params::CachePolicy;
-use crate::provenance::{UtrModels, UtrPassOutcome};
+use crate::provenance::{
+    UtrPassOutcome, UtrRecognitionWindow, UtrTokenRejection, UtrTokenRejectionReason,
+};
 use crate::runner::debug_dumper::DebugDumper;
 use crate::types::worker_v2::DecodeBudgetSeconds;
 use batchalign_types::interval::AdmittedInterval;
 use tracing::{info, warn};
 
+#[path = "utr_full.rs"]
+mod full;
+#[path = "utr_partial.rs"]
+mod partial;
 #[path = "utr_work.rs"]
 mod work;
+pub(crate) use work::CompletedRecognition;
+#[cfg(test)]
+pub(crate) use work::PreparedRecognition;
+
+/// How the recognizer inputs for a completed correspondence were obtained.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum UtrRecognitionRoute {
+    Full,
+    Partial,
+    FullAfterPartial {
+        #[serde(serialize_with = "serialize_abandoned")]
+        abandoned: std::sync::Arc<AbandonedPartialAttempt>,
+    },
+}
+
+#[derive(Clone)]
+enum UtrFullRoute {
+    Direct,
+    AfterPartial(std::sync::Arc<AbandonedPartialAttempt>),
+}
+
+fn serialize_abandoned<S: serde::Serializer>(
+    abandoned: &std::sync::Arc<AbandonedPartialAttempt>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(abandoned.as_ref(), serializer)
+}
+
+impl From<UtrFullRoute> for UtrRecognitionRoute {
+    fn from(route: UtrFullRoute) -> Self {
+        match route {
+            UtrFullRoute::Direct => Self::Full,
+            UtrFullRoute::AfterPartial(abandoned) => Self::FullAfterPartial { abandoned },
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum AbandonedPartialAttempt {
+    PlanRefused {
+        reason: PartialPlanRefusal,
+    },
+    ExecutionStopped {
+        planned_windows: Vec<UtrWindowBounds>,
+        completed_windows: Vec<AbandonedRecognitionWindow>,
+        reason: PartialExecutionStop,
+    },
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AbandonedRecognitionWindow {
+    accepted_tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
+    evidence: UtrRecognitionWindow,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PartialPlanRefusal {
+    Recording { error: String },
+    WindowPlanning { error: String },
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PartialExecutionStop {
+    NoWindows,
+    SegmentExtraction {
+        window: UtrWindowBounds,
+        error: String,
+    },
+    Recognition {
+        window: UtrWindowBounds,
+        error: String,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct UtrWindowBounds(FaWindow);
+
+impl From<FaWindow> for UtrWindowBounds {
+    fn from(window: FaWindow) -> Self {
+        Self(window)
+    }
+}
+
+impl serde::Serialize for UtrWindowBounds {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UtrWindowBounds", 2)?;
+        state.serialize_field("start_ms", &self.0.audio_start().get())?;
+        state.serialize_field("end_ms", &self.0.end().get())?;
+        state.end()
+    }
+}
 
 /// Immutable runtime inputs for one UTR execution.
 #[derive(Clone, Copy)]
 pub(in crate::runner) struct UtrPassContext<'a> {
+    /// Which source recovery transition owns this attempt.
+    pub pass: crate::api::UtrPass,
     /// Audio file used to recover utterance timing.
     pub audio_path: &'a Path,
     /// CHAT language for ASR/UTR normalization.
@@ -126,13 +230,14 @@ fn resolve_strategy(
 /// When `progress` is provided, per-window updates are sent during partial UTR
 /// so frontends can show "Recovering utterance timing 2/5" etc.
 ///
-/// Mutates `chat_file` in place, no serialize/re-parse cycle. The caller owns
-/// the AST and can pass it directly to FA without a round-trip through text.
+/// Observes `chat_file` without mutation or a serialize/re-parse cycle. The
+/// caller retains the source AST and can pass it directly to FA.
 pub(in crate::runner) async fn run_utr_pass(
-    chat_file: &mut crate::chat_ops::ChatFile,
+    source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
     context: UtrPassContext<'_>,
     progress: Option<&super::super::util::ProgressSender>,
 ) -> Result<UtrPassOutcome, crate::error::ServerError> {
+    let chat_file = source.document();
     let (timed, untimed) = crate::chat_ops::fa::count_utterance_timing(chat_file);
     let total_utts = timed + untimed;
 
@@ -180,16 +285,16 @@ pub(in crate::runner) async fn run_utr_pass(
                     error = %why,
                     "Partial UTR needs a non-empty recording, falling back to full-file recovery"
                 );
-                return run_utr_pass_full(chat_file, context, progress).await;
+                let route = UtrFullRoute::AfterPartial(std::sync::Arc::new(
+                    AbandonedPartialAttempt::PlanRefused {
+                        reason: PartialPlanRefusal::Recording {
+                            error: why.to_string(),
+                        },
+                    },
+                ));
+                return run_utr_pass_full(source, context, progress, route).await;
             }
         };
-        // Named once, so every token recovered in this pass records the same
-        // engine as its provenance.
-        let utr_engine_id = EngineId::new(context.engine.as_wire_name());
-        // Every segment response is read and written under the namespace of the
-        // engine AND the models it ran, never another stage's engine version
-        // and never rows a different checkpoint produced.
-        let cache_namespace = utr_cache_eligibility(context);
         // The recording built above is the single derivation of the audio's
         // length on this path. It used to be derived a SECOND time three lines
         // later, from the context's raw milliseconds through an `expect` whose
@@ -212,163 +317,92 @@ pub(in crate::runner) async fn run_utr_pass(
                     error = %why,
                     "Partial UTR window is not inside the recording, falling back to full-file recovery"
                 );
-                return run_utr_pass_full(chat_file, context, progress).await;
+                let route = UtrFullRoute::AfterPartial(std::sync::Arc::new(
+                    AbandonedPartialAttempt::PlanRefused {
+                        reason: PartialPlanRefusal::WindowPlanning {
+                            error: why.to_string(),
+                        },
+                    },
+                ));
+                return run_utr_pass_full(source, context, progress, route).await;
             }
         };
 
-        if windows.is_empty() {
-            info!(
-                context.filename,
-                "Partial UTR: no windows found, falling back to full-file recovery"
-            );
-        } else {
-            info!(
-                context.filename,
-                windows = windows.len(),
-                "Partial UTR: running ASR on untimed windows only"
-            );
-
-            let mut all_tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken> = Vec::new();
-            // The models every window's response reported, folded as each
-            // arrives; `None` only before the first.
-            let mut models: Option<UtrModels> = None;
-            let total_windows = windows.len() as i64;
-
-            for (window_idx, window) in windows.iter().enumerate() {
-                let (start_ms, end_ms) = (window.audio_start().get(), window.end().get());
-                let seg_cache_key = crate::chat_ops::fa::utr_asr_segment_cache_key(
-                    context.audio_identity,
-                    context.engine,
-                    start_ms,
-                    end_ms,
-                    context.lang,
+        let total_windows = windows.len() as i64;
+        let mut pending = match partial::PendingWindow::start(windows, context) {
+            Ok(pending) => pending,
+            Err(route) => {
+                info!(
+                    context.filename,
+                    "Partial UTR: no windows found, falling back to full-file recovery"
                 );
-                let cached_seg = lookup_utr_asr_cache(
-                    context.services.pipeline.cache,
-                    &seg_cache_key,
-                    &cache_namespace,
-                    context.cache_policy.response(),
-                )
-                .await?;
-
-                let seg_response = match cached_seg {
-                    UtrAsrCacheLookup::Hit(cached) => {
-                        info!(context.filename, start_ms, end_ms, "UTR segment cache hit");
-                        *cached
-                    }
-                    UtrAsrCacheLookup::Miss(miss) => {
-                        let segment_path = match crate::ensure_wav::extract_audio_segment(
-                            context.audio_path,
-                            *window,
-                        )
-                        .await
-                        {
-                            Ok(path) => path,
-                            Err(error) => {
-                                warn!(
-                                    context.filename,
-                                    error = %error,
-                                    start_ms,
-                                    end_ms,
-                                    "Failed to extract audio segment, falling back to full UTR"
-                                );
-                                // Release this segment's single-flight lease
-                                // now: a waiter for the same segment must not
-                                // sit behind a whole-file pass it is not part of.
-                                drop(miss);
-                                return run_utr_pass_full(chat_file, context, progress).await;
-                            }
-                        };
-
-                        // A segment's budget is the window's own length: it is the
-                        // audio handed to the engine, and the window is proven
-                        // inside the recording. (The whole file's duration would
-                        // be a far looser bound than this segment needs.)
-                        let segment_budget =
-                            Some(DecodeBudgetSeconds::for_duration_ms(window.len().0));
-                        match miss.infer(&segment_path, segment_budget, context).await {
-                            Ok(inferred) => {
-                                inferred
-                                    .commit(
-                                        context.services.pipeline.cache,
-                                        &seg_cache_key,
-                                        context.filename,
-                                    )
-                                    .await
-                            }
-                            Err(error) => {
-                                warn!(
-                                    context.filename,
-                                    error = %error,
-                                    "UTR segment ASR failed, falling back to full-file recovery"
-                                );
-                                return run_utr_pass_full(chat_file, context, progress).await;
-                            }
-                        }
-                    }
-                };
-
-                // The segment handed to the engine is the window itself, already
-                // inside the recording: the second conversion (`FaWindow::over`)
-                // and its unreachable skip arm are gone.
-                models = Some(match models {
-                    None => UtrModels::of(&seg_response),
-                    Some(seen) => seen.and(&seg_response),
-                });
-                let converted = asr_response_to_utr_tokens(&seg_response, window, &utr_engine_id);
-                converted.warn_if_lossy(&context);
-                all_tokens.extend(converted.tokens);
-
-                // Report per-window progress so the frontend shows "Recovering
-                // utterance timing 2/5" as each window's ASR completes.
                 if let Some(tx) = progress {
                     use super::super::util::{FileStage, ProgressUpdate};
                     let _ = tx.send(ProgressUpdate::new(
                         FileStage::RecoveringUtteranceTiming,
-                        Some(window_idx as i64 + 1),
-                        Some(total_windows),
+                        Some(0),
+                        Some(1),
                     ));
                 }
+                return run_utr_pass_full(source, context, progress, route).await;
             }
+        };
+        info!(
+            context.filename,
+            windows = total_windows,
+            "Partial UTR: running ASR on untimed windows only"
+        );
 
-            all_tokens.sort_by_key(|token| token.start_ms);
-            let all_tokens = normalize_utr_tokens(all_tokens, context.lang)?;
-
-            if context.dumper.is_enabled() {
-                let text = batchalign_transform::serialize::to_chat_string(chat_file);
-                context.dumper.dump_utr_input(context.filename, &text);
+        let mut completed_count = 0;
+        let completed = loop {
+            let step = match pending.run().await? {
+                partial::WindowResult::Abandoned(route) => {
+                    return run_utr_pass_full(source, context, progress, route).await;
+                }
+                partial::WindowResult::Recognized(step) => step,
+            };
+            completed_count += 1;
+            if let Some(tx) = progress {
+                use super::super::util::{FileStage, ProgressUpdate};
+                let _ = tx.send(ProgressUpdate::new(
+                    FileStage::RecoveringUtteranceTiming,
+                    Some(completed_count),
+                    Some(total_windows),
+                ));
             }
+            match *step {
+                partial::RecognizedWindow::Next(next) => pending = next,
+                partial::RecognizedWindow::Completed(completed) => break completed,
+            }
+        };
+        let prepared = work::PreparedRecognition::partial(completed)?;
+
+        if context.dumper.is_enabled() {
+            let text = batchalign_transform::serialize::to_chat_string(chat_file);
+            context.dumper.dump_utr_input(context.filename, &text);
+        }
+        context
+            .dumper
+            .dump_utr_tokens(context.filename, prepared.tokens().tokens());
+
+        let strategy = resolve_strategy(&context, recording);
+        let completed = prepared.run(source, strategy, progress).await?;
+        let utr_result = completed.observation().result();
+
+        info!(
+            context.filename,
+            candidate_injected = utr_result.injected(),
+            skipped = utr_result.skipped(),
+            unmatched = utr_result.unmatched(),
+            "UTR partial observation complete"
+        );
+
+        if context.dumper.is_enabled() {
             context
                 .dumper
-                .dump_utr_tokens(context.filename, all_tokens.tokens());
-
-            let strategy = resolve_strategy(&context, recording);
-            let utr_result = work::PendingUtr::new(chat_file, strategy, all_tokens)
-                .run(progress)
-                .await?;
-
-            info!(
-                context.filename,
-                injected = utr_result.injected(),
-                skipped = utr_result.skipped(),
-                unmatched = utr_result.unmatched(),
-                "UTR partial pass complete"
-            );
-
-            if context.dumper.is_enabled() {
-                let text = batchalign_transform::serialize::to_chat_string(chat_file);
-                context
-                    .dumper
-                    .dump_utr_output(context.filename, &text, &utr_result);
-            }
-            return Ok(UtrPassOutcome::Recovered {
-                result: utr_result,
-                // The windows are non-empty here, so the fold saw a response;
-                // were it not to, no response reported models, which is what
-                // `Unreported` says.
-                models: models.unwrap_or(UtrModels::Unreported),
-            });
+                .dump_utr_observation(context.filename, utr_result);
         }
+        return Ok(UtrPassOutcome::Recovered(completed));
     }
 
     // Full-file path: signal 0/1 so the frontend knows it's a single-window pass.
@@ -381,83 +415,48 @@ pub(in crate::runner) async fn run_utr_pass(
         ));
     }
 
-    run_utr_pass_full(chat_file, context, progress).await
+    run_utr_pass_full(source, context, progress, UtrFullRoute::Direct).await
 }
 
 /// Run the full-file UTR path with cache reuse.
 async fn run_utr_pass_full(
-    chat_file: &mut crate::chat_ops::ChatFile,
+    source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
     context: UtrPassContext<'_>,
     progress: Option<&super::super::util::ProgressSender>,
+    route: UtrFullRoute,
 ) -> Result<UtrPassOutcome, crate::error::ServerError> {
-    let cache_key = crate::chat_ops::fa::utr_asr_cache_key(
-        context.audio_identity,
-        context.engine,
-        context.lang,
-    );
-    let cache_namespace = utr_cache_eligibility(context);
-    let asr_response = match lookup_utr_asr_cache(
-        context.services.pipeline.cache,
-        &cache_key,
-        &cache_namespace,
-        context.cache_policy.response(),
-    )
-    .await?
-    {
-        UtrAsrCacheLookup::Hit(cached) => {
-            info!(context.filename, "UTR ASR cache hit");
-            *cached
-        }
-        UtrAsrCacheLookup::Miss(miss) => {
-            info!(
+    let result = run_utr_pass_full_inner(source, context, progress, route.clone()).await;
+    match (result, route) {
+        (Err(cause), UtrFullRoute::AfterPartial(abandoned)) => {
+            match context.dumper.dump_utr_failed_fallback(
                 context.filename,
-                engine = context.engine.as_wire_name(),
-                "UTR ASR cache miss, running inference"
-            );
-            // The whole file: the duration the pipeline measured once, if it
-            // could; otherwise no budget and the transport's fallback ceiling.
-            let whole_file_budget = context
-                .audio_duration
-                .map(|duration| DecodeBudgetSeconds::for_duration_ms(duration.length().0));
-            match miss
-                .infer(context.audio_path, whole_file_budget, context)
-                .await
-            {
-                Ok(inferred) => {
-                    inferred
-                        .commit(
-                            context.services.pipeline.cache,
-                            &cache_key,
-                            context.filename,
-                        )
-                        .await
-                }
-                Err(error) => {
-                    warn!(context.filename, error = %error, "UTR ASR inference failed");
-                    return Err(error);
-                }
+                context.pass,
+                context.engine,
+                &abandoned,
+                &cause,
+            ) {
+                Ok(_) => Err(cause),
+                Err(failure) => Err(crate::error::UtrEvidenceRetentionFailure::new(
+                    cause,
+                    failure.to_string(),
+                )
+                .into()),
             }
         }
-    };
+        (result, _) => result,
+    }
+}
 
-    // The whole file is the window here, so the offset is zero, but the BOUND
-    // still matters: an engine that loses alignment reports positions past the
-    // end of the audio whether or not a window offset is involved. This path
-    // passed a bare `0` and checked nothing.
-    let recording = context.recording().await?;
-    let whole_file =
-        FaWindow::within(&recording, FileMs::new(0), recording.duration()).map_err(|why| {
-            crate::error::ServerError::RecordingDuration(
-                crate::error::RecordingDurationError::WholeFileWindow(why),
-            )
-        })?;
-    let converted = asr_response_to_utr_tokens(
-        &asr_response,
-        &whole_file,
-        &EngineId::new(context.engine.as_wire_name()),
-    );
-    converted.warn_if_lossy(&context);
-    let asr_tokens = normalize_utr_tokens(converted.tokens, context.lang)?;
+async fn run_utr_pass_full_inner(
+    source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
+    context: UtrPassContext<'_>,
+    progress: Option<&super::super::util::ProgressSender>,
+    route: UtrFullRoute,
+) -> Result<UtrPassOutcome, crate::error::ServerError> {
+    let chat_file = source.document();
+    let recognition = full::FullRecognition::run(context, route).await?;
+    let recording = recognition.recording();
+    let prepared = work::PreparedRecognition::full(recognition)?;
 
     if context.dumper.is_enabled() {
         let text = batchalign_transform::serialize::to_chat_string(chat_file);
@@ -465,31 +464,26 @@ async fn run_utr_pass_full(
     }
     context
         .dumper
-        .dump_utr_tokens(context.filename, asr_tokens.tokens());
+        .dump_utr_tokens(context.filename, prepared.tokens().tokens());
 
     let strategy = resolve_strategy(&context, recording);
-    let utr_result = work::PendingUtr::new(chat_file, strategy, asr_tokens)
-        .run(progress)
-        .await?;
+    let completed = prepared.run(source, strategy, progress).await?;
+    let utr_result = completed.observation().result();
 
     info!(
         context.filename,
-        injected = utr_result.injected(),
+        candidate_injected = utr_result.injected(),
         skipped = utr_result.skipped(),
         unmatched = utr_result.unmatched(),
-        "UTR pass complete"
+        "UTR observation complete"
     );
 
     if context.dumper.is_enabled() {
-        let text = batchalign_transform::serialize::to_chat_string(chat_file);
         context
             .dumper
-            .dump_utr_output(context.filename, &text, &utr_result);
+            .dump_utr_observation(context.filename, utr_result);
     }
-    Ok(UtrPassOutcome::Recovered {
-        result: utr_result,
-        models: UtrModels::of(&asr_response),
-    })
+    Ok(UtrPassOutcome::Recovered(completed))
 }
 
 /// Fetch one UTR ASR response from the selected backend and map it into the
@@ -839,25 +833,65 @@ fn rev_utr_evidence_identity(filename: &str, cache_key: &CacheKey) -> String {
 /// reports no word timings and an engine whose timings all collapsed both
 /// leave UTR with nothing to inject, and a bare token list cannot say which.
 pub(crate) struct UtrTokenConversion {
-    pub(crate) tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
-    /// Tokens the engine gave no start or no end for.
-    ///
-    /// This path's own field: an ASR token can carry no span at all, which the
-    /// FA path never sees because its engines answer per word.
-    pub(crate) dropped_untimed: usize,
-    /// The classes this path shares with FA, reported under the same names so
-    /// one engine failure can be aggregated across both.
-    pub(crate) rejected: SpanRejections,
+    window: FaWindow,
+    response: crate::transcribe::AsrResponse,
+    tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
+    rejections: Vec<UtrTokenRejection>,
 }
 
 impl UtrTokenConversion {
+    fn into_evidence(
+        self,
+    ) -> (
+        Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
+        UtrRecognitionWindow,
+    ) {
+        UtrRecognitionWindow::from_conversion(self)
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        FaWindow,
+        crate::transcribe::AsrResponse,
+        Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
+        Vec<UtrTokenRejection>,
+    ) {
+        (self.window, self.response, self.tokens, self.rejections)
+    }
+
+    fn summary(&self) -> (usize, SpanRejections) {
+        let mut untimed = 0;
+        let mut rejected = SpanRejections::default();
+        for refusal in &self.rejections {
+            match refusal.reason {
+                UtrTokenRejectionReason::Untimed => untimed += 1,
+                UtrTokenRejectionReason::NoExtent => rejected.no_extent += 1,
+                UtrTokenRejectionReason::InvertedInterval
+                | UtrTokenRejectionReason::InvertedSpan => rejected.inverted += 1,
+                UtrTokenRejectionReason::NotFinite
+                | UtrTokenRejectionReason::Negative
+                | UtrTokenRejectionReason::OutOfRange
+                | UtrTokenRejectionReason::OffsetOverflow => rejected.inadmissible += 1,
+                UtrTokenRejectionReason::OutsideWindow { overshoot_ms } => {
+                    rejected.outside_window += 1;
+                    rejected.worst_overshoot = rejected
+                        .worst_overshoot
+                        .max(crate::chat_ops::fa::coordinates::Ms(overshoot_ms));
+                }
+            }
+        }
+        (untimed, rejected)
+    }
+
     /// Log at most one line describing what was discarded.
-    pub(crate) fn warn_if_lossy(&self, context: &UtrPassContext<'_>) {
+    fn warn_if_lossy(&self, context: &UtrPassContext<'_>) {
         // Nothing discarded is the common case and deserves no log line.
         // Written as a total over the three counts rather than a three-way
         // pattern: the question is "was anything lost", and summing says that
         // once instead of enumerating the ways it could be false.
-        let discarded = self.dropped_untimed + self.rejected.total();
+        let (dropped_untimed, rejected) = self.summary();
+        let discarded = dropped_untimed + rejected.total();
         if discarded == 0 {
             return;
         }
@@ -867,12 +901,12 @@ impl UtrTokenConversion {
             filename = context.filename,
             engine = context.engine.as_wire_name(),
             total = self.tokens.len() + discarded,
-            dropped_untimed = self.dropped_untimed,
-            no_extent = self.rejected.no_extent,
-            inverted = self.rejected.inverted,
-            outside_window = self.rejected.outside_window,
-            inadmissible = self.rejected.inadmissible,
-            worst_overshoot_ms = self.rejected.worst_overshoot.0,
+            dropped_untimed,
+            no_extent = rejected.no_extent,
+            inverted = rejected.inverted,
+            outside_window = rejected.outside_window,
+            inadmissible = rejected.inadmissible,
+            worst_overshoot_ms = rejected.worst_overshoot.0,
             "ASR tokens discarded before UTR"
         );
     }
@@ -905,20 +939,24 @@ impl UtrTokenConversion {
 /// utterance bullets that the FA postprocess then perpetuates indefinitely
 /// (see OCSC bug, 2026-04-08).
 fn asr_response_to_utr_tokens(
-    asr_response: &crate::transcribe::AsrResponse,
-    window: &FaWindow,
+    asr_response: crate::transcribe::AsrResponse,
+    window: FaWindow,
     engine: &EngineId,
 ) -> UtrTokenConversion {
     let mut conversion = UtrTokenConversion {
         tokens: Vec::with_capacity(asr_response.tokens.len()),
-        dropped_untimed: 0,
-        rejected: SpanRejections::default(),
+        rejections: Vec::new(),
+        window,
+        response: asr_response,
     };
-    for token in &asr_response.tokens {
+    for (index, token) in conversion.response.tokens.iter().enumerate() {
         let (Some(start_s), Some(end_s)) = (token.start_s, token.end_s) else {
             // The engine reported no span for this token. Distinct from a span
             // it reported as empty: that is a measurement, this is a silence.
-            conversion.dropped_untimed += 1;
+            conversion.rejections.push(UtrTokenRejection {
+                index,
+                reason: UtrTokenRejectionReason::Untimed,
+            });
             continue;
         };
         // The pair is admitted once as an interval: rounded to the nearest
@@ -927,7 +965,26 @@ fn asr_response_to_utr_tokens(
         let interval = match AdmittedInterval::admit_positions(start_s, end_s) {
             Ok(interval) => interval,
             Err(refusal) => {
-                conversion.rejected.record_refusal(refusal);
+                let reason = match refusal {
+                    batchalign_types::interval::IntervalRefusal::Inverted { .. } => {
+                        UtrTokenRejectionReason::InvertedInterval
+                    }
+                    batchalign_types::interval::IntervalRefusal::NotFinite { .. } => {
+                        UtrTokenRejectionReason::NotFinite
+                    }
+                    batchalign_types::interval::IntervalRefusal::Negative { .. } => {
+                        UtrTokenRejectionReason::Negative
+                    }
+                    batchalign_types::interval::IntervalRefusal::OutOfRange { .. } => {
+                        UtrTokenRejectionReason::OutOfRange
+                    }
+                    batchalign_types::interval::IntervalRefusal::OffsetOverflow { .. } => {
+                        UtrTokenRejectionReason::OffsetOverflow
+                    }
+                };
+                conversion
+                    .rejections
+                    .push(UtrTokenRejection { index, reason });
                 continue;
             }
         };
@@ -956,14 +1013,61 @@ fn asr_response_to_utr_tokens(
                         start_ms: span.start().at().get(),
                         end_ms: span.end().at().get(),
                     }),
-                Err(fault) => conversion.rejected.record_span_fault(fault),
+                Err(fault) => {
+                    let reason = match fault {
+                        crate::chat_ops::fa::timing::SpanFault::NoExtent { .. } => {
+                            UtrTokenRejectionReason::NoExtent
+                        }
+                        crate::chat_ops::fa::timing::SpanFault::Inverted { .. } => {
+                            UtrTokenRejectionReason::InvertedSpan
+                        }
+                    };
+                    conversion
+                        .rejections
+                        .push(UtrTokenRejection { index, reason });
+                }
             },
             // Either end past the segment condemns the token: half of a span is
             // not a span, and keeping the surviving end would invent the other.
-            (Err(fault), _) | (Ok(_), Err(fault)) => conversion.rejected.record_outside(fault),
+            (Err(fault), _) | (Ok(_), Err(fault)) => {
+                let crate::chat_ops::fa::coordinates::OutsideWindow::BeyondWindowEnd {
+                    exceeds_by,
+                    ..
+                } = fault;
+                conversion.rejections.push(UtrTokenRejection {
+                    index,
+                    reason: UtrTokenRejectionReason::OutsideWindow {
+                        overshoot_ms: exceeds_by.0,
+                    },
+                });
+            }
         }
     }
     conversion
+}
+
+#[cfg(test)]
+pub(crate) fn convert_utr_for_test(
+    response: crate::transcribe::AsrResponse,
+    window: FaWindow,
+) -> UtrTokenConversion {
+    asr_response_to_utr_tokens(response, window, &EngineId::new("test-asr"))
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_after_partial_failure_for_test(
+    windows: &[FaWindow],
+    completed: UtrTokenConversion,
+    failed_window: FaWindow,
+    full: UtrTokenConversion,
+) -> Result<work::PreparedRecognition, crate::error::ServerError> {
+    let route = partial::abandon_for_test(windows, completed, failed_window);
+    work::PreparedRecognition::full_for_test(
+        full,
+        &UtrEngine::Whisper,
+        &LanguageCode3::eng(),
+        route,
+    )
 }
 
 /// Prepare recovered tokens for the job's language: its script, once over
@@ -1063,20 +1167,21 @@ mod utr_token_conversion_tests {
     fn untimed_and_degenerate_discards_are_counted_apart() {
         let (_rec, window) = wide_window(0, 60_000);
         let converted = asr_response_to_utr_tokens(
-            &response(vec![
+            response(vec![
                 token("kept", Some(1.0), Some(1.5)),
                 token("no start", None, Some(2.0)),
                 token("no end", Some(2.0), None),
                 token("empty span", Some(3.0), Some(3.0)),
                 token("inverted", Some(5.0), Some(4.0)),
             ]),
-            &window,
+            window,
             &test_engine(),
         );
 
         assert_eq!(converted.tokens.len(), 1);
         assert_eq!(converted.tokens[0].text, "kept");
-        assert_eq!(converted.dropped_untimed, 2);
+        let (untimed, rejected) = converted.summary();
+        assert_eq!(untimed, 2);
         // These two were one counter (`dropped_degenerate == 2`) until
         // 2026-08-15, when this path started building spans through
         // `WordSpan::measured` instead of testing `end > start` by hand. The
@@ -1085,9 +1190,22 @@ mod utr_token_conversion_tests {
         // two answers contradict each other, and the FA path had always kept
         // them apart. One number for both made the two paths' logs
         // incomparable for the same engine failure.
-        assert_eq!(converted.rejected.no_extent, 1);
-        assert_eq!(converted.rejected.inverted, 1);
-        assert_eq!(converted.rejected.outside_window, 0);
+        assert_eq!(rejected.no_extent, 1);
+        assert_eq!(rejected.inverted, 1);
+        assert_eq!(rejected.outside_window, 0);
+        let (_, evidence) = converted.into_evidence();
+        let evidence = serde_json::to_value(evidence).unwrap();
+        assert_eq!(evidence["response"]["tokens"][1]["text"], "no start");
+        assert_eq!(evidence["response"]["tokens"][3]["text"], "empty span");
+        assert_eq!(evidence["rejections"][0]["index"], 1);
+        assert_eq!(evidence["rejections"][0]["reason"]["kind"], "untimed");
+        assert_eq!(evidence["rejections"][2]["index"], 3);
+        assert_eq!(evidence["rejections"][2]["reason"]["kind"], "no_extent");
+        assert_eq!(evidence["rejections"][3]["index"], 4);
+        assert_eq!(
+            evidence["rejections"][3]["reason"]["kind"],
+            "inverted_interval"
+        );
     }
 
     /// A token whose ends lie past the admissible range (an epoch timestamp
@@ -1099,41 +1217,43 @@ mod utr_token_conversion_tests {
         let (_rec, window) = wide_window(0, 60_000);
         let epoch = 1_700_000_000.0;
         let converted = asr_response_to_utr_tokens(
-            &response(vec![
+            response(vec![
                 token("kept", Some(1.0), Some(1.5)),
                 token("epoch", Some(epoch), Some(epoch + 0.5)),
             ]),
-            &window,
+            window,
             &test_engine(),
         );
         assert_eq!(converted.tokens.len(), 1);
-        assert_eq!(converted.rejected.inadmissible, 1);
-        assert_eq!(converted.rejected.outside_window, 0);
+        let (_, rejected) = converted.summary();
+        assert_eq!(rejected.inadmissible, 1);
+        assert_eq!(rejected.outside_window, 0);
     }
 
     #[test]
     fn a_clean_response_reports_no_losses() {
         let (_rec, window) = wide_window(0, 60_000);
         let converted = asr_response_to_utr_tokens(
-            &response(vec![
+            response(vec![
                 token("one", Some(0.0), Some(0.5)),
                 token("two", Some(0.5), Some(1.0)),
             ]),
-            &window,
+            window,
             &test_engine(),
         );
         assert_eq!(converted.tokens.len(), 2);
-        assert_eq!(converted.dropped_untimed, 0);
-        assert_eq!(converted.rejected.no_extent, 0);
-        assert_eq!(converted.rejected.outside_window, 0);
+        let (untimed, rejected) = converted.summary();
+        assert_eq!(untimed, 0);
+        assert_eq!(rejected.no_extent, 0);
+        assert_eq!(rejected.outside_window, 0);
     }
 
     #[test]
     fn the_offset_applies_to_both_ends() {
         let (_rec, window) = wide_window(10_000, 70_000);
         let converted = asr_response_to_utr_tokens(
-            &response(vec![token("w", Some(1.0), Some(2.0))]),
-            &window,
+            response(vec![token("w", Some(1.0), Some(2.0))]),
+            window,
             &test_engine(),
         );
         assert_eq!(converted.tokens[0].start_ms, 11_000);
@@ -1159,11 +1279,11 @@ mod utr_token_conversion_tests {
             .expect("window inside the recording");
 
         let converted = asr_response_to_utr_tokens(
-            &response(vec![
+            response(vec![
                 token("real", Some(1.0), Some(2.0)),
                 token("hallucinated", Some(33.02), Some(33.5)),
             ]),
-            &window,
+            window,
             &test_engine(),
         );
 
@@ -1171,8 +1291,9 @@ mod utr_token_conversion_tests {
         // COUNTED, rather than being written out as a measurement.
         assert_eq!(converted.tokens.len(), 1);
         assert_eq!(converted.tokens[0].text, "real");
-        assert_eq!(converted.rejected.outside_window, 1);
-        assert_eq!(converted.rejected.worst_overshoot, Ms(28_217));
+        let (_, rejected) = converted.summary();
+        assert_eq!(rejected.outside_window, 1);
+        assert_eq!(rejected.worst_overshoot, Ms(28_217));
 
         // The property that actually matters, stated directly: nothing this
         // conversion emits can name a moment the recording does not contain.
@@ -1193,6 +1314,316 @@ mod utr_evidence_cache_tests {
         RevAsrModelRevision,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    enum FullFallbackCase {
+        DirectSuccess,
+        DirectUnprobeable,
+        PartialSuccess,
+        CachedSuccess,
+        CacheMiss,
+        CacheMissUnwritableEvidence,
+    }
+
+    async fn partial_cache_hit_then_extraction_failure(case: FullFallbackCase) {
+        use crate::api::AudioPositionSeconds;
+        use crate::chat_ops::fa::AudioIdentity;
+        use crate::engine_reports::FaCacheNamespace;
+        use crate::pipeline::PipelineServices;
+        use crate::types::engines::FaEngineName;
+        use crate::worker::pool::{GpuModelPlan, PoolConfig, WorkerPool};
+        use talkbank_parser::TreeSitterParser;
+        use talkbank_parser_tests::test_error::ParseProductTestExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let audio_path = directory.path().join("recording.mp3");
+        crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
+        let duration = crate::runner::util::probe_audio_duration(&audio_path)
+            .await
+            .expect("fixture has a proven duration");
+        std::fs::remove_file(&audio_path).unwrap();
+        let mut chat = TreeSitterParser::new()
+            .unwrap()
+            .parse_chat_file(
+                "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tSPK Speaker\n\
+                 @ID:\teng|test|SPK|||||Speaker|||\n@Media:\trecording, audio\n\
+                 *SPK:\tone . \u{15}0_5000\u{15}\n\
+                 *SPK:\thello .\n\
+                 *SPK:\ttwo . \u{15}15000_20000\u{15}\n\
+                 *SPK:\tworld .\n\
+                 *SPK:\tthree . \u{15}40000_45000\u{15}\n@End\n",
+            )
+            .expect_built();
+        let windows =
+            crate::chat_ops::fa::find_untimed_windows(&chat, &Recording::of_audio(duration), 500)
+                .unwrap();
+        assert_eq!(windows.len(), 2);
+        let token = |text: &str, start: f64, end: f64| crate::transcribe::AsrToken {
+            text: text.into(),
+            start_s: Some(AudioPositionSeconds::try_from(start).unwrap()),
+            end_s: Some(AudioPositionSeconds::try_from(end).unwrap()),
+            speaker: None,
+            confidence: None,
+        };
+        let response = |tokens| crate::transcribe::AsrResponse {
+            tokens,
+            lang: LanguageCode3::eng(),
+            seam_ambiguities: Vec::new(),
+            source_monologues: None,
+            model: None,
+        };
+        let partial = response(vec![
+            token("hello", 0.1, 0.2),
+            crate::transcribe::AsrToken {
+                text: "untimed".into(),
+                start_s: None,
+                end_s: None,
+                speaker: None,
+                confidence: None,
+            },
+        ]);
+        let full = response(vec![token("hello", 6.0, 6.1), token("world", 25.0, 25.1)]);
+        let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))
+            .await
+            .unwrap();
+        let engine = UtrEngine::Whisper;
+        let language = LanguageCode3::eng();
+        let identity = AudioIdentity::from_metadata("recording.mp3", 0, 0);
+        let UtrAsrCacheEligibility::Pinned(namespace) = test_eligibility(&engine) else {
+            panic!("test requires pinned cache")
+        };
+        let first = windows[0];
+        let segment_key = crate::chat_ops::fa::utr_asr_segment_cache_key(
+            &identity,
+            &engine,
+            first.audio_start().get(),
+            first.end().get(),
+            &language,
+        );
+        let full_key = crate::chat_ops::fa::utr_asr_cache_key(&identity, &engine, &language);
+        cache
+            .put(
+                segment_key.as_str(),
+                tasks::UTR_ASR,
+                &namespace,
+                &serde_json::to_value(partial).unwrap(),
+            )
+            .await
+            .unwrap();
+        if matches!(case, FullFallbackCase::PartialSuccess) {
+            let second = windows[1];
+            let key = crate::chat_ops::fa::utr_asr_segment_cache_key(
+                &identity,
+                &engine,
+                second.audio_start().get(),
+                second.end().get(),
+                &language,
+            );
+            cache
+                .put(
+                    key.as_str(),
+                    tasks::UTR_ASR,
+                    &namespace,
+                    &serde_json::to_value(response(vec![token("world", 0.3, 0.4)])).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        if matches!(
+            case,
+            FullFallbackCase::CachedSuccess | FullFallbackCase::DirectSuccess
+        ) {
+            cache
+                .put(
+                    full_key.as_str(),
+                    tasks::UTR_ASR,
+                    &namespace,
+                    &serde_json::to_value(full).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        if matches!(case, FullFallbackCase::DirectUnprobeable) {
+            cache
+                .put(
+                    full_key.as_str(),
+                    tasks::UTR_ASR,
+                    &namespace,
+                    &serde_json::json!({"not": "an ASR response"}),
+                )
+                .await
+                .unwrap();
+        }
+        let pool = WorkerPool::new(PoolConfig::for_tests());
+        let fa_namespace = FaCacheNamespace::for_test("test-fa");
+        let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
+        let debug_path = directory.path().join("debug");
+        if matches!(case, FullFallbackCase::CacheMissUnwritableEvidence) {
+            std::fs::write(&debug_path, b"not a directory").unwrap();
+        }
+        let dumper = DebugDumper::new(Some(&debug_path));
+        let strategy = ResolvedUtrStrategy::Global;
+        let overrides =
+            crate::params::CacheOverrides::from_common(&crate::options::CommonOptions {
+                require_media_cache: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let context = UtrPassContext {
+            pass: crate::api::UtrPass::Initial,
+            audio_path: &audio_path,
+            lang: &language,
+            services: crate::fa::FaServices {
+                pipeline: PipelineServices::new(&pool, &cache),
+                cache_namespace: &fa_namespace,
+                gpu: &gpu,
+                attention_capture_dir: None,
+            },
+            audio_identity: &identity,
+            cache_policy: crate::params::UtrCachePolicies::from_overrides(&overrides),
+            audio_duration: match case {
+                FullFallbackCase::DirectUnprobeable => None,
+                _ => Some(duration),
+            },
+            aggregation_target: None,
+            filename: "sample.cha",
+            engine: &engine,
+            strategy: &strategy,
+            dumper: &dumper,
+        };
+        if matches!(case, FullFallbackCase::DirectSuccess) {
+            chat = TreeSitterParser::new()
+                .unwrap()
+                .parse_chat_file(
+                    "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tSPK Speaker\n\
+                     @ID:\teng|test|SPK|||||Speaker|||\n@Media:\trecording, audio\n\
+                     *SPK:\thello .\n*SPK:\tworld .\n@End\n",
+                )
+                .expect_built();
+        }
+        let source = crate::chat_ops::fa::SourceBoundUtrInput::for_test(&chat);
+        let result = run_utr_pass(&source, context, None).await;
+        if matches!(case, FullFallbackCase::DirectUnprobeable) {
+            assert!(matches!(
+                result,
+                Err(ServerError::RecordingDuration(
+                    crate::error::RecordingDurationError::Probe(_)
+                ))
+            ));
+            return;
+        }
+        if matches!(case, FullFallbackCase::CacheMissUnwritableEvidence) {
+            let Err(ServerError::UtrEvidenceRetention(failure)) = result else {
+                panic!("requested evidence failure must be fatal")
+            };
+            let text = failure.to_string();
+            assert!(text.contains("required UTR ASR evidence is missing"));
+            assert!(text.contains("could not retain failed UTR evidence"));
+            return;
+        }
+        if matches!(case, FullFallbackCase::CacheMiss) {
+            let Err(ServerError::Persistence(cause)) = result else {
+                panic!("expected original cache-only failure")
+            };
+            assert!(cause.contains("required UTR ASR evidence is missing"));
+            let artifact: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(debug_path.join("sample_utr_initial_failed_evidence.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(artifact["failure_category"], "system");
+            assert!(artifact["failure"].as_str().unwrap().contains(&cause));
+            let partial = &artifact["abandoned_partial"];
+            assert_eq!(partial["reason"]["kind"], "segment_extraction");
+            let evidence = &partial["completed_windows"][0]["evidence"];
+            assert_eq!(evidence["response"]["tokens"][1]["text"], "untimed");
+            assert_eq!(evidence["rejections"][0]["index"], 1);
+            assert_eq!(evidence["rejections"][0]["reason"]["kind"], "untimed");
+            return;
+        }
+        let UtrPassOutcome::Recovered(completed) = result.unwrap() else {
+            panic!("expected full recovery")
+        };
+        let (observation, _, inputs) = completed.into_parts();
+        let evidence = serde_json::to_value(inputs).unwrap();
+        if matches!(case, FullFallbackCase::DirectSuccess) {
+            assert_eq!(evidence["route"]["kind"], "full");
+            assert_eq!(evidence["first"]["start_ms"], 0);
+            assert_eq!(
+                evidence["first"]["end_ms"],
+                Recording::of_audio(duration).duration().get()
+            );
+            assert_eq!(evidence["first"]["response"]["tokens"][0]["text"], "hello");
+            assert_eq!(evidence["first"]["response"]["tokens"][1]["text"], "world");
+            assert_eq!(observation.tokens().tokens()[0].start_ms, 6000);
+            return;
+        }
+        if matches!(case, FullFallbackCase::PartialSuccess) {
+            assert_eq!(evidence["route"]["kind"], "partial");
+            assert_eq!(
+                evidence["first"]["start_ms"],
+                windows[0].audio_start().get()
+            );
+            assert_eq!(evidence["first"]["response"]["tokens"][0]["text"], "hello");
+            assert_eq!(
+                evidence["remaining"][0]["start_ms"],
+                windows[1].audio_start().get()
+            );
+            assert_eq!(
+                evidence["remaining"][0]["response"]["tokens"][0]["text"],
+                "world"
+            );
+            assert_eq!(
+                observation.tokens().tokens()[1].start_ms,
+                windows[1].audio_start().get() + 300
+            );
+            return;
+        }
+        let route = &evidence["route"];
+        assert_eq!(route["kind"], "full_after_partial");
+        assert_eq!(route["abandoned"]["reason"]["kind"], "segment_extraction");
+        assert_eq!(
+            route["abandoned"]["reason"]["window"]["start_ms"],
+            windows[1].audio_start().get()
+        );
+        assert_eq!(
+            route["abandoned"]["completed_windows"][0]["accepted_tokens"][0]["text"],
+            "hello"
+        );
+        assert_eq!(
+            route["abandoned"]["planned_windows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(observation.tokens().tokens()[0].start_ms, 6000);
+    }
+
+    #[tokio::test]
+    async fn full_cached_request_owns_its_response_and_recording_window() {
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::DirectSuccess).await;
+    }
+
+    #[tokio::test]
+    async fn full_request_requires_recording_before_reading_cache() {
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::DirectUnprobeable).await;
+    }
+
+    #[tokio::test]
+    async fn partial_cached_windows_keep_each_response_with_its_request() {
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::PartialSuccess).await;
+    }
+
+    #[tokio::test]
+    async fn partial_cache_hit_then_extraction_failure_retains_the_attempt() {
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::CachedSuccess).await;
+    }
+
+    #[tokio::test]
+    async fn failed_full_fallback_retains_partial_evidence_or_reports_write_failure() {
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::CacheMiss).await;
+        partial_cache_hit_then_extraction_failure(FullFallbackCase::CacheMissUnwritableEvidence)
+            .await;
+    }
 
     struct CountingRevService {
         calls: AtomicUsize,
@@ -1242,7 +1673,7 @@ mod utr_evidence_cache_tests {
         let before = batchalign_transform::serialize::to_chat_string(active.document());
         let dumper = DebugDumper::new(None);
         let recovered = active
-            .recover_timing(async |_| {
+            .recover_timing(crate::api::UtrPass::Initial, async |_| {
                 resolve_rev_utr_asr_response(
                     &request,
                     &cache,

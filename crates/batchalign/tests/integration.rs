@@ -1192,6 +1192,10 @@ async fn server_starts_with_real_worker_capability_gate() {
 
     // Real worker, NOT test-echo. This exercises the capability gate.
     let pool_config = PoolConfig {
+        // The pool runs on the host this test app is built on.
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(
+            &batchalign::host_facts::HostSnapshot::for_tests(&config),
+        ),
         python_path: python_path.clone(),
         test_echo: false,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),

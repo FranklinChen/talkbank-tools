@@ -1,7 +1,7 @@
 # Host Facts Pipeline
 
 **Status:** Current
-**Last updated:** 2026-11-09 13:01 EST
+**Last updated:** 2026-11-10 16:43 EST
 
 The host-facts pipeline is the four-layer architecture that resolves
 operator overrides against detected host capabilities and warns when
@@ -117,7 +117,7 @@ host exactly once:
 | Composition root | Reads the host with |
 |---|---|
 | `serve start --foreground` | `HostSnapshot::read`, then hands it to `serve_with_runtime` |
-| direct CLI dispatch | `HostSnapshot::read`, then hands it to `DirectHost::new` |
+| direct CLI dispatch | `HostSnapshot::read`, then hands it to `prepare_workers`; `DirectHost::new` takes it from the prepared workers |
 | `worker`, `replay`, daemon device flags, transcribe replay | `HostSnapshot::read` |
 | tests | `HostSnapshot::for_tests` or `for_tests_in` (the same declared 16 GB host) |
 
@@ -152,6 +152,23 @@ consume views from that one snapshot. Other tests cannot spend its capacity;
 CPU/memory figures, admission policy and spawn gates remain the same. This
 keeps a two-worker warmup control from accidentally testing a one-worker file
 load when another test holds a reservation.
+
+**One host for an app and its workers.** `prepare_workers(host, pool_config,
+discovery)` takes the snapshot and refuses a pool configuration whose runtime
+reads another host. The `PreparedWorkers` it returns carry that snapshot, and
+every app or direct host built over them takes its host from them
+(`PreparedWorkers::host_for(&config)`), never from a second argument:
+`create_app_with_prepared_workers` and `DirectHost::new` have no host
+parameter. `host_for` resolves the workers' machine with the app's own
+configuration (`HostSnapshot::reconfigured`) and refuses a configuration whose
+runtime half (reserve, startup limit, tier) differs, since the pool cannot
+follow it. The shared test fixtures used to run sessions keeping no headroom
+(`memory_gate_mb: 0`) over a pool keeping the default reserve: one machine
+judged two ways, the shape behind the live align hang fixed on 2026-11-10.
+They now prepare their pool on their session configuration's own snapshot,
+with a fixture-owned ledger and worker registry. They used to leave the
+registry unset and adopt from it, which in-process resolves to the machine's
+own `~/.batchalign3/workers.json`.
 
 ```mermaid
 flowchart LR

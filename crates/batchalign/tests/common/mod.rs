@@ -72,6 +72,8 @@ use crate::live_deadline::{HarnessBudget, ProgressSnapshot, ServerTestDeadline, 
 /// Cached worker backend that survives across isolated server and direct sessions.
 struct LiveFixtureBackend {
     _machine_lock: MachineMlTestLock,
+    /// Holds the pool's own ledger and worker registry.
+    _host_dir: tempfile::TempDir,
     prepared_workers: PreparedWorkers,
     session_config: ServerConfig,
 }
@@ -85,14 +87,25 @@ impl LiveFixtureBackend {
         let session_config = live_fixture_server_config();
         let machine_lock = MachineMlTestLock::acquire("batchalign live fixture")
             .map_err(|error| format!("machine-wide ML test lock unavailable: {error}"))?;
+        // One host for the pool and every session over it, with its own
+        // ledger and registry: sessions keep the reserve their pool keeps,
+        // and the pool adopts no worker another server admitted.
+        let host_dir = tempfile::TempDir::new()
+            .map_err(|error| format!("could not create the fixture host dir: {error}"))?;
+        let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests_in(
+            &session_config,
+            host_dir.path().join("host-memory.json"),
+        ));
         let prepared_workers = prepare_workers(
-            live_fixture_pool_config(&python_path),
-            RegistryDiscovery::Adopt,
+            host.clone(),
+            live_fixture_pool_config(&python_path, &host, host_dir.path()),
+            RegistryDiscovery::Ignore,
         )
         .await
         .map_err(|error| format!("could not prepare live workers: {error}"))?;
         Ok(Self {
             _machine_lock: machine_lock,
+            _host_dir: host_dir,
             prepared_workers,
             session_config,
         })
@@ -356,11 +369,8 @@ impl LiveDirectSession {
         let runtime_root = tempfile::TempDir::new().expect("tempdir");
         let state_dir = runtime_root.path().to_path_buf();
         let config = live_fixture_server_config();
-        let host_snapshot =
-            std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(&config));
         let host = DirectHost::new(
             config,
-            host_snapshot,
             RuntimeLayout::from_state_dir(state_dir.clone()),
             None,
             Some(state_dir.join("cache")),
@@ -801,12 +811,8 @@ async fn start_session(
     let runtime_root = tempfile::TempDir::new().expect("tempdir");
     let layout = RuntimeLayout::from_state_dir(runtime_root.path().to_path_buf());
     let cache_dir = runtime_root.path().join("cache");
-    let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(
-        &backend.session_config,
-    ));
     let (router, state) = create_app_with_prepared_workers(
         backend.session_config.clone(),
-        host,
         layout,
         AppStorageOverrides {
             jobs_dir: None,
@@ -1278,10 +1284,16 @@ fn live_fixture_server_config() -> ServerConfig {
 ///   On a 64GB machine, keeping all task workers resident simultaneously can OOM.
 /// - `max_workers_per_key: 1`, one worker per (task, lang) pair. Tests are
 ///   serialized via semaphore anyway, so >1 just wastes memory.
-fn live_fixture_pool_config(python_path: &str) -> PoolConfig {
+fn live_fixture_pool_config(
+    python_path: &str,
+    host: &batchalign::host_facts::HostSnapshot,
+    host_dir: &std::path::Path,
+) -> PoolConfig {
     PoolConfig {
         python_path: python_path.into(),
         test_echo: false,
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(host),
+        worker_registry_path: Some(host_dir.join("workers.json")),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<3_600>(),
         // One number buys both winning a host-wide startup slot and this
         // worker's own model load; see `HarnessBudget::FixtureWorkerReady`.

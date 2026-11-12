@@ -14,6 +14,26 @@ pub(crate) enum DeclaredModel {
         minimum: NonZeroU64,
         maximum: NonZeroU64,
     },
+    /// The host can hold a request of at most this many words (zero: none),
+    /// and refuses larger ones for host memory.
+    HostMemory {
+        fits_words: u64,
+    },
+    /// The host refuses, for host memory, any request holding this word:
+    /// one dense spot in an otherwise alignable source.
+    HostMemoryAround {
+        dense_word: usize,
+    },
+}
+
+/// The host-memory constraint every declared host refusal carries.
+pub(crate) fn declared_host_memory() -> FaResourceConstraintV2 {
+    FaResourceConstraintV2::HostMemory {
+        engine: ReportedEngineName::try_from("declared-model").unwrap(),
+        required_mb: 14_100,
+        reserve_mb: 2_048,
+        ceiling_mb: 14_000,
+    }
 }
 
 pub(crate) struct DeclaredPreparation {
@@ -29,7 +49,29 @@ impl ResourceProbe for DeclaredModel {
         &mut self,
         request: GroupUnit<'_>,
     ) -> Result<ResourceProbeOutcome<Self::Prepared>, Infallible> {
+        // A declared host refusal, or the request as the host admits it.
+        let host = |refuses: bool| {
+            Ok(if refuses {
+                ResourceProbeOutcome::Limited(declared_host_memory())
+            } else {
+                ResourceProbeOutcome::Prepared(DeclaredPreparation {
+                    window: request.window(),
+                    ids: request.words().iter().map(FaWord::stable_id).collect(),
+                })
+            })
+        };
         let (unit, provided, minimum, maximum) = match self {
+            Self::HostMemory { fits_words } => {
+                return host(request.words().len() as u64 > *fits_words);
+            }
+            Self::HostMemoryAround { dense_word } => {
+                return host(
+                    request
+                        .words()
+                        .iter()
+                        .any(|word| word.utterance_word_index.raw() == *dense_word),
+                );
+            }
             Self::AudioSamples { maximum } => (
                 FaConstraintUnitV2::AudioSamples,
                 request.window().len().0 * 16,
@@ -103,6 +145,9 @@ pub(crate) async fn shared_context_partition<P: ResourceProbe>(
         utterance: words.as_slice()[0].utterance_index,
         words,
         window: request.window(),
+        source_window: request.window(),
+        localization: super::super::grouping::Localization::NotRecorded,
+        original_bullet: crate::types::traces::FaOriginalBulletTrace::NotRecorded,
     };
     let first = source.words.first_word();
     let last = source.words.last_word();

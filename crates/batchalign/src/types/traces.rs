@@ -211,7 +211,7 @@ pub enum UtteranceEndTrace {
 // ---------------------------------------------------------------------------
 
 /// Schema written by the current [`FaTimelineTrace`] producer.
-pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_FA_EVIDENCE_SCHEMA_VERSION: u32 = 13;
 
 /// Forced alignment trace: grouping, timing injection, and post-processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +318,48 @@ pub struct FaTimelineTrace {
     pub violations: Vec<ViolationTrace>,
     /// Engine fallback events that occurred while aligning this file.
     pub fallback_events: Vec<FaFallbackEventTrace>,
+    /// Supplied-window retry observations collected before primary projection.
+    /// Absent for older evidence and for routes that did not collect retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplied_retries: Option<Vec<FaSuppliedRetryTrace>>,
+}
+
+/// One original supplied window and its optional independent retry answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FaSuppliedRetryTrace {
+    /// Source utterance ordinal.
+    pub utterance: usize,
+    /// Exact words supplied to this retry request.
+    pub words: Vec<String>,
+    /// Original supplied window.
+    pub start_ms: u64,
+    /// End of the original supplied window.
+    pub end_ms: u64,
+    /// Whether a retry was requested and what it returned.
+    pub outcome: FaSuppliedRetryOutcomeTrace,
+}
+
+/// Retry evidence is diagnostic, not authority to choose a timing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FaSuppliedRetryOutcomeTrace {
+    /// Compatibility with earlier preflight records. Current complete primary
+    /// output creates no retry observation, including under gap healing.
+    CompletePrimary,
+    /// The retry returned timings for its source words, including absences.
+    Timings {
+        /// Raw retry observations, before choosing whether to use them.
+        timings: Vec<Option<TimingTrace>>,
+        /// The cache or inference route reported by the retry.
+        source: String,
+    },
+    /// The retry could not provide an alternative.
+    Unresolved {
+        /// Retained reason for the unavailable alternative.
+        reason: String,
+    },
 }
 
 /// One typed pipeline decision retained in a forced-alignment evidence file.
@@ -1631,10 +1673,77 @@ pub struct FaGroupTrace {
     /// Stable AST-derived identity corresponding one-to-one with `words`.
     #[serde(default)]
     pub word_ids: Vec<String>,
+    /// Source windows retained before grouping and resource partitioning.
+    /// Absent in older traces and geometries that did not retain them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_windows: Option<Vec<FaSourceWindowTrace>>,
     /// How the group was executed and where each request's evidence came
     /// from (schema 6). Required: there is no honest value to give a group
     /// written before it, whose evidence lived in the top-level arrays.
     pub span: FaGroupSpanTrace,
+}
+
+/// One utterance's window and lexical ownership before grouping or padding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct FaSourceWindowTrace {
+    /// Zero-based source utterance ordinal.
+    pub utterance: usize,
+    /// First source word index, inclusive.
+    pub first_word: usize,
+    /// Last source word index, inclusive.
+    pub last_word: usize,
+    /// Window start, in file milliseconds.
+    pub start_ms: u64,
+    /// Window end, in file milliseconds.
+    pub end_ms: u64,
+    /// What the original input said at this utterance, if source-bound.
+    pub original_bullet: FaOriginalBulletTrace,
+    /// How grouping obtained the window, without claiming acoustic truth.
+    pub localization: FaSourceLocalizationTrace,
+}
+
+/// Original main-bullet presence, distinct from a later working bullet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FaOriginalBulletTrace {
+    /// The original source had no bullet.
+    Absent,
+    /// The original source contained numeric timing.
+    Parsed {
+        /// Original start in milliseconds.
+        start_ms: u64,
+        /// Original end in milliseconds.
+        end_ms: u64,
+    },
+    /// The original source carried a rejected, unparsed bullet.
+    Unparsed {
+        /// The exact rejected source.
+        source: String,
+    },
+    /// This geometry was not bound to an original input.
+    NotRecorded,
+}
+
+/// The information available when grouping acquired a source window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FaSourceLocalizationTrace {
+    /// A bullet existed in the working document, not necessarily the input.
+    WorkingBullet,
+    /// The window is a hull of recognizer-token candidates.
+    UtrCandidates,
+    /// The window is a search corridor, not an utterance localization.
+    UtrOrderCorridor {
+        /// Provenance of the corridor's lower edge.
+        floor: CorridorBoundTrace,
+        /// Provenance of the corridor's upper edge.
+        ceiling: CorridorBoundTrace,
+    },
+    /// The geometry was produced without recorded localization.
+    NotRecorded,
 }
 
 /// How one group's audio was presented to the aligner, with the evidence of

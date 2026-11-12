@@ -13,7 +13,7 @@ use crate::options::EngineBackend as _;
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::provenance::AlignTiming;
-use crate::provenance::UtrRecovery;
+use crate::provenance::{UtrRecovery, UtrRecoveryStop};
 use crate::runner::DispatchHostContext;
 use crate::runner::debug_dumper::DebugDumper;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
@@ -430,7 +430,7 @@ impl AudioFileTask for AlignAudioTask<'_> {
         &mut self,
         lifecycle: &FileRunTracker<'_>,
         _error: &crate::error::ServerError,
-    ) -> Result<(), crate::chat_ops::fa::utr::UtrCancelled> {
+    ) -> Result<(), UtrRecoveryStop> {
         if let Some(pending) = self.utr_recovery.fallback() {
             info!(
                 filename = %self.destination.filename,
@@ -442,12 +442,13 @@ impl AudioFileTask for AlignAudioTask<'_> {
             let recovered = self
                 .model
                 .active_mut()
-                .recover_timing(async |file| {
+                .recover_timing(crate::api::UtrPass::Fallback, async |file| {
                     // UTR's ASR fetch owns its pinned future at the producer.
                     // This hook needs no independent boxing or preparation.
                     run_utr_pass(
                         file,
                         UtrPassContext {
+                            pass: crate::api::UtrPass::Fallback,
                             audio_path: media.wav.as_path(),
                             lang: self.admitted.primary_language(),
                             services: self.services,
@@ -557,30 +558,38 @@ async fn finalize_fa_output(
     // The shortfalls (untimed words make the file diagnosed) and the
     // exclusions (notes left out on purpose, which do not) leave with the
     // bytes, whichever way they leave.
-    let aligned =
-        if retention.requires_timeline() {
-            let (aligned, timeline) = fa_result.into_document_and_timeline();
-            dumper.dump_fa_evidence(filename, &timeline).map_err(|error| {
-            crate::error::ServerError::Persistence(format!(
-                "could not retain requested forced-alignment evidence for {filename}: {error}"
-            ))
-        })?;
-            if retention.stores_trace() {
-                let file_traces = crate::types::traces::FileTraces {
-                    filename: DisplayPath::from(filename.as_str()),
-                    dp_alignments: Vec::new(),
-                    asr_pipeline: None,
-                    fa_timeline: Some(timeline),
-                    retokenizations: Vec::new(),
-                };
-                host.trace_store()
-                    .upsert_file(job_id, file_index, file_traces)
-                    .await;
-            }
-            aligned
-        } else {
-            fa_result.into_document()
-        };
+    let aligned = if retention.requires_timeline() {
+        let (aligned, timeline, recovery) = fa_result.into_document_timeline_and_recovery();
+        dumper
+            .dump_fa_evidence(filename, &timeline)
+            .map_err(|error| {
+                crate::error::ServerError::Persistence(format!(
+                    "could not retain requested forced-alignment evidence for {filename}: {error}"
+                ))
+            })?;
+        dumper
+            .dump_utr_evidence(filename, &recovery)
+            .map_err(|error| {
+                crate::error::ServerError::Persistence(format!(
+                    "could not retain requested recovery evidence for {filename}: {error}"
+                ))
+            })?;
+        if retention.stores_trace() {
+            let file_traces = crate::types::traces::FileTraces {
+                filename: DisplayPath::from(filename.as_str()),
+                dp_alignments: Vec::new(),
+                asr_pipeline: None,
+                fa_timeline: Some(timeline),
+                retokenizations: Vec::new(),
+            };
+            host.trace_store()
+                .upsert_file(job_id, file_index, file_traces)
+                .await;
+        }
+        aligned
+    } else {
+        fa_result.into_document()
+    };
     let crate::fa::AlignedOutput {
         document,
         mut shortfalls,
@@ -708,8 +717,7 @@ pub(crate) async fn dispatch_fa_infer(
         ));
     }
 
-    let abnormal_exits =
-        drain_supervised_file_tasks(sink.as_ref(), job_id, &job.cancel_token, tasks).await;
+    let abnormal_exits = drain_supervised_file_tasks(sink.as_ref(), &job.cancel_token, tasks).await;
     if abnormal_exits > 0 {
         warn!(
             job_id = %job_id,
@@ -741,7 +749,7 @@ async fn process_one_fa_file(
     let job_id = &job.identity.job_id;
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
-    let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
+    let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileForcedAlignment, FileStage::Reading)
@@ -1022,16 +1030,14 @@ async fn process_one_fa_file(
                 // Observed: the pre-pass runs before the audio-file shell, so
                 // it installs its own observer, and the file shows "waiting
                 // for a worker" while one of its checkouts waits.
-                let (utr_progress, utr_waits, utr_forwarder) = spawn_observed_progress_forwarder(
-                    sink.clone(),
-                    job_id.clone(),
-                    filename.to_string(),
-                );
+                let (utr_progress, utr_waits, utr_forwarder) =
+                    spawn_observed_progress_forwarder(sink.clone(), filename.to_string());
 
-                let recovered = active.recover_timing(async |file| {
+                let recovered = active.recover_timing(crate::api::UtrPass::Initial, async |file| {
                     run_utr_pass(
                         file,
                         UtrPassContext {
+                            pass: crate::api::UtrPass::Initial,
                             audio_path: utr_audio_path,
                             lang: &file_lang,
                             services,
@@ -1057,9 +1063,15 @@ async fn process_one_fa_file(
                 utr_forwarder.finished().await;
                 match UtrRecovery::from_initial(utr_engine, recovered) {
                     Ok(recovery) => recovery,
-                    Err(crate::chat_ops::fa::utr::UtrCancelled) => {
+                    Err(UtrRecoveryStop::Cancelled) => {
                         return lifecycle
                             .fail("Timing recovery cancelled", FailureCategory::Cancelled)
+                            .await
+                            .into();
+                    }
+                    Err(UtrRecoveryStop::Failed(failure)) => {
+                        return lifecycle
+                            .fail(&failure.to_string(), FailureCategory::System)
                             .await
                             .into();
                     }

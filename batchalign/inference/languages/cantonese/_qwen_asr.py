@@ -77,7 +77,7 @@ class QwenAsr:
 
     def transcribe(self, item: AsrBatchItem) -> MonologueAsrResponse:
         """Transcribe one provider media item into the shared monologue payload."""
-        payload, _timed_words = self.recognizer.transcribe(
+        payload = self.recognizer.transcribe(
             item.audio_path, decode_budget_seconds=item.decode_budget_seconds
         )
         # Qwen3-ASR performs no speaker separation, so its payload says so and

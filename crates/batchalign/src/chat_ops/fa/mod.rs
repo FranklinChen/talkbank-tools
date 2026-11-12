@@ -53,7 +53,9 @@ pub use self::grouping::{
     FaGroup, GroupSpan, GroupWords, Grouping, MAX_GROUP_LABEL_BYTES, SingleSpan,
     count_utterance_timing, group_utterances,
 };
-pub(crate) use self::grouping::{GroupUnit, GroupUnits};
+pub(crate) use self::grouping::{
+    GroupUnit, GroupUnits, SourceBoundDocument, SourceBoundUtrInput, SourceIdentity,
+};
 pub use self::injection::inject_timings_for_utterance;
 pub use self::main_bullets::{
     FaProjection, GivenBulletError, KeptBulletError, KeptBulletsHeld, MainBulletAuthority,

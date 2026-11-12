@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::api::JobId;
-use crate::host_memory::{HostMemoryError, JobExecutionPlan};
+use crate::host_memory::{BoundedRefusal, JobExecutionPlan, LeaseFailure};
 use crate::scheduling::FailureCategory;
 use crate::store::{JobStore, RunCompletion, RunnerJobSnapshot};
 
@@ -24,6 +24,7 @@ use super::context::{
     DirectExecutionHost, DispatchHostContext, ExecutionReservationError, HostedJobRunOutcome,
     JobDispatchRequest, MemoryGateFailurePolicy, ServerExecutionHost,
 };
+use super::job_scope::{ClaimedRunEnd, ExecutionEnd};
 use super::util::{FileRunTracker, RunnerEventSink, compute_job_workers, preflight_validate_media};
 
 /// Build the future that owns one background job lifecycle.
@@ -124,9 +125,6 @@ async fn run_hosted_job(
     engine: &super::context::ExecutionEngine,
     memory_gate_policy: MemoryGateFailurePolicy,
 ) -> Result<HostedJobRunOutcome, crate::error::ServerError> {
-    let host_context = DispatchHostContext::from_store(store.clone());
-    let sink = host_context.sink().clone();
-
     // Exclusive-runner claim. Exactly one live runner may own a job: a
     // restarted job's new runner arrives here while the cancelled one is
     // still tearing down its in-flight file, and must WAIT for the release
@@ -149,7 +147,9 @@ async fn run_hosted_job(
                     break claim;
                 }
                 Some(crate::store::BeginRunnerOutcome::Stopped { completion }) => {
-                    store.complete_stopped_run(completion, sink.now()).await?;
+                    store
+                        .complete_stopped_run(completion, store.event_time())
+                        .await?;
                     return Ok(HostedJobRunOutcome::Completed);
                 }
                 Some(crate::store::BeginRunnerOutcome::RunnerStillLive) => {
@@ -175,6 +175,9 @@ async fn run_hosted_job(
         }
     };
 
+    // Dispatch writes only as this run: its sink is minted from the claim.
+    let host_context = DispatchHostContext::for_run(store.clone(), &claim);
+    let sink = host_context.sink().clone();
     let job = Arc::clone(claim.snapshot());
     let correlation_id = job.identity.correlation_id.clone();
     let ended = super::job_scope::RunScope::for_run(claim)
@@ -184,18 +187,29 @@ async fn run_hosted_job(
         )
         .await;
     let claim = ended.claim;
-    match ended.outcome {
-        Ok(HostedJobRunOutcome::Requeued { retry_at }) => {
+    // Every end consumes the claim exactly once.
+    let completion = match ended.outcome {
+        Ok(ClaimedRunEnd::Executed(ExecutionEnd::Requeued { retry_at })) => {
             store.release_run(claim).await;
             return Ok(HostedJobRunOutcome::Requeued { retry_at });
         }
-        Ok(HostedJobRunOutcome::Completed) => {}
+        // The registry reads the job's own cancellation when finishing.
+        Ok(ClaimedRunEnd::Executed(ExecutionEnd::Dispatched) | ClaimedRunEnd::Cancelled) => {
+            store.complete_run(claim, sink.now()).await?
+        }
+        // A refusal is the job's answer, not a server fault: the run fails
+        // with its reason on the job and on every unfinished file.
+        Ok(ClaimedRunEnd::Executed(ExecutionEnd::Refused(refusal))) => {
+            store
+                .fail_run(claim, refusal.into_reason(), sink.now())
+                .await?
+        }
         Err(error) => {
             store.fail_run(claim, error.to_string(), sink.now()).await?;
             return Err(error);
         }
-    }
-    match store.complete_run(claim, sink.now()).await? {
+    };
+    match completion {
         RunCompletion::Superseded => info!(job_id = %job_id, correlation_id = %correlation_id,
             "run superseded by restart or shutdown; leaving resumable files intact"),
         RunCompletion::Finished {
@@ -220,7 +234,7 @@ async fn execute_claimed_job(
     engine: &super::context::ExecutionEngine,
     memory_gate_policy: MemoryGateFailurePolicy,
     host_context: &DispatchHostContext,
-) -> Result<HostedJobRunOutcome, crate::error::ServerError> {
+) -> Result<ExecutionEnd, crate::error::ServerError> {
     let job_id = &job.identity.job_id;
     let correlation_id = &job.identity.correlation_id;
     let sink = host_context.sink();
@@ -244,9 +258,7 @@ async fn execute_claimed_job(
             error,
         }) => match &memory_gate_policy {
             MemoryGateFailurePolicy::Queued { orchestrator } => {
-                let disposition = orchestrator
-                    .handle_memory_gate_rejection(sink, job_id)
-                    .await?;
+                let disposition = orchestrator.handle_memory_gate_rejection(sink).await?;
                 match disposition {
                     super::context::MemoryGateRejectionDisposition::Requeued { retry_at } => {
                         warn!(
@@ -257,7 +269,7 @@ async fn execute_claimed_job(
                             retry_at = %retry_at,
                             "Re-queueing job after host-memory capacity rejection"
                         );
-                        return Ok(HostedJobRunOutcome::Requeued { retry_at });
+                        return Ok(ExecutionEnd::Requeued { retry_at });
                     }
                 }
             }
@@ -275,10 +287,10 @@ async fn execute_claimed_job(
     let _job_memory_lease = execution_plan.lease;
 
     // Mark as running only after job execution memory has been reserved.
-    sink.mark_job_running(job_id).await;
+    sink.mark_job_running().await;
 
     // Record on job and DB
-    sink.record_job_worker_count(job_id, num_workers.0).await;
+    sink.record_job_worker_count(num_workers.0).await;
 
     info!(
         job_id = %job_id,
@@ -304,8 +316,7 @@ async fn execute_claimed_job(
         file_list
     } else {
         let failed_indices =
-            record_preflight_media_failures(sink.as_ref(), job_id, &file_list, &media_failures)
-                .await;
+            record_preflight_media_failures(sink.as_ref(), &file_list, &media_failures).await;
         file_list
             .into_iter()
             .filter(|file| !failed_indices.contains(&file.file_index))
@@ -317,7 +328,7 @@ async fn execute_claimed_job(
     // workers are keyed by that plan, and pre-scaling from the options alone
     // warmed a worker no request reached (`runner::dispatch::pre_scale_workers`).
 
-    engine
+    let end = engine
         .dispatch_job(
             JobDispatchRequest {
                 job: job.clone(),
@@ -327,8 +338,10 @@ async fn execute_claimed_job(
             host_context,
         )
         .await?;
-
-    Ok(HostedJobRunOutcome::Completed)
+    Ok(match end {
+        super::context::DispatchEnd::Dispatched => ExecutionEnd::Dispatched,
+        super::context::DispatchEnd::Refused(refusal) => ExecutionEnd::Refused(refusal),
+    })
 }
 
 /// Reserve host memory for the job and compute the execution plan (worker
@@ -366,22 +379,25 @@ async fn reserve_job_execution(
 
     match plan {
         Ok(plan) => Ok(plan),
-        Err(crate::host_memory::QueuedLeaseFailure::Refused(
-            error @ (HostMemoryError::CapacityRejected { .. } | HostMemoryError::TimedOut { .. }),
-        )) => Err(ExecutionReservationError::Capacity {
-            requested_workers,
-            error,
-        }),
-        Err(crate::host_memory::QueuedLeaseFailure::Refused(error)) => Err(
+        // Congestion that outlasted the bounded wait: requeue and try later.
+        Err(LeaseFailure::Refused(BoundedRefusal::TimedOut(error))) => {
+            Err(ExecutionReservationError::Capacity {
+                requested_workers,
+                error,
+            })
+        }
+        // A plan that can never fit, or a host that cannot be used: waiting
+        // would requeue for ever, so the job fails with the reason.
+        Err(LeaseFailure::Refused(BoundedRefusal::Final(refusal))) => Err(
             ExecutionReservationError::Fatal(crate::error::ServerError::Persistence(format!(
-                "host-memory coordinator failed for job {job_id}: {error}"
+                "host memory refused job {job_id}: {refusal}"
             ))),
         ),
-        Err(crate::host_memory::QueuedLeaseFailure::AttemptDidNotFinish(error)) => Err(
-            ExecutionReservationError::Fatal(crate::error::ServerError::Persistence(format!(
+        Err(LeaseFailure::AttemptDidNotFinish(error)) => Err(ExecutionReservationError::Fatal(
+            crate::error::ServerError::Persistence(format!(
                 "host-memory planner task failed for job {job_id}: {error}"
-            ))),
-        ),
+            )),
+        )),
     }
 }
 
@@ -389,7 +405,6 @@ async fn reserve_job_execution(
 /// job enters any concrete dispatch path.
 pub(super) async fn record_preflight_media_failures(
     sink: &dyn RunnerEventSink,
-    job_id: &JobId,
     file_list: &[crate::store::PendingJobFile],
     media_failures: &HashMap<usize, String>,
 ) -> HashSet<usize> {
@@ -398,7 +413,7 @@ pub(super) async fn record_preflight_media_failures(
     for (&idx, err_msg) in media_failures {
         failed_indices.insert(idx);
         if let Some(file) = file_list.iter().find(|file| file.file_index == idx) {
-            FileRunTracker::new(sink, job_id, &file.filename)
+            FileRunTracker::new(sink, &file.filename)
                 .record_setup_failure(err_msg, FailureCategory::Validation)
                 .await;
         }
@@ -431,7 +446,6 @@ mod tests {
         async fn handle_memory_gate_rejection(
             &self,
             _sink: &Arc<dyn RunnerEventSink>,
-            _job_id: &JobId,
         ) -> Result<MemoryGateRejectionDisposition, crate::error::ServerError> {
             panic!("memory-gate path must not be reached when the job is missing from the store")
         }
@@ -486,6 +500,46 @@ mod tests {
             !matches!(outcome, Ok(HostedJobRunOutcome::Completed)),
             "run_server_job_attempt reported Completed for a job missing from \
              the local store (outcome: {outcome:?}); expected a typed error."
+        );
+    }
+
+    /// A job-level refusal is the job's answer, carried back through the
+    /// claim: the run fails with the refusal's own reason on the job and on
+    /// every file it left unfinished, not a generic "did not reach terminal
+    /// status". Morphotag needs CHAT, and this file has none, so dispatch
+    /// refuses before reaching any worker.
+    #[tokio::test]
+    async fn a_refused_job_fails_its_run_with_the_refusal_reason() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let host = build_empty_host(tempdir.path()).await;
+        let mut job = crate::store::test_support::running_job_fixture();
+        job.execution.status = crate::api::JobStatus::Queued;
+        job.runtime.runner_active = false;
+        job.filesystem.has_chat = vec![false];
+        let job_id = job.identity.job_id.clone();
+        host.store.submit(job).await.expect("submit the job");
+
+        let outcome = run_server_job_attempt(&job_id, &host)
+            .await
+            .expect("a refusal is a handled end, not a server error");
+        assert_eq!(outcome, HostedJobRunOutcome::Completed);
+
+        let info = host
+            .store
+            .get(&job_id)
+            .await
+            .expect("job stays in the store");
+        let reason = "'morphotag' needs CHAT input for every file, and at least one file has none";
+        assert_eq!(info.status, crate::api::JobStatus::Failed);
+        assert_eq!(info.error.as_deref(), Some(reason));
+        let [file] = info.file_statuses.as_slice() else {
+            panic!("one file expected: {:?}", info.file_statuses);
+        };
+        assert_eq!(file.error.as_deref(), Some(reason));
+        assert!(
+            info.active_lease.is_none(),
+            "the refused run must release its claim: {:?}",
+            info.active_lease
         );
     }
 }

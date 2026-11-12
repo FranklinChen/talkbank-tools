@@ -21,7 +21,7 @@ pub use event_time::EventTime;
 pub use job::*;
 pub(crate) use job::{
     CompletedFileOutput, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
-    JobStatusColumns, Stop,
+    FileWriteRefusal, JobStatusColumns, Stop,
 };
 pub(crate) use queries::LeaseRenewalOutcome;
 pub(crate) use queries::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};

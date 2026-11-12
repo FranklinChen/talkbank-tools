@@ -73,6 +73,8 @@ struct SessionSnapshot {
 /// session. The fields mirror what [`create_app_with_prepared_workers`]
 /// needs at session-creation time.
 struct TestEchoBackend {
+    /// Holds the pool's own ledger and worker registry.
+    _host_dir: tempfile::TempDir,
     prepared_workers: PreparedWorkers,
     session_config: ServerConfig,
 }
@@ -86,13 +88,24 @@ impl TestEchoBackend {
             .map_err(|missing| missing.to_string())?
             .interpreter();
         let session_config = test_echo_server_config();
+        // One host for the pool and every session over it, with its own
+        // ledger and registry: sessions keep the reserve their pool keeps,
+        // and the pool adopts no worker another server admitted.
+        let host_dir = tempfile::TempDir::new()
+            .map_err(|error| format!("could not create the fixture host dir: {error}"))?;
+        let host = std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests_in(
+            &session_config,
+            host_dir.path().join("host-memory.json"),
+        ));
         let prepared_workers = prepare_workers(
-            test_echo_pool_config(&python_path),
-            RegistryDiscovery::Adopt,
+            host.clone(),
+            test_echo_pool_config(&python_path, &host, host_dir.path()),
+            RegistryDiscovery::Ignore,
         )
         .await
         .map_err(|error| format!("could not prepare test-echo workers: {error}"))?;
         Ok(Self {
+            _host_dir: host_dir,
             prepared_workers,
             session_config,
         })
@@ -464,10 +477,16 @@ fn test_echo_server_config() -> ServerConfig {
 /// shared workers persist across the entire test-binary run; a
 /// generous `max_workers_per_key` so concurrent sessions can dispatch
 /// in parallel without queueing on a single worker.
-fn test_echo_pool_config(python_path: &str) -> PoolConfig {
+fn test_echo_pool_config(
+    python_path: &str,
+    host: &batchalign::host_facts::HostSnapshot,
+    host_dir: &std::path::Path,
+) -> PoolConfig {
     PoolConfig {
         python_path: python_path.into(),
         test_echo: true,
+        runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(host),
+        worker_registry_path: Some(host_dir.join("workers.json")),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),

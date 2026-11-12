@@ -515,6 +515,7 @@ fn dispatch_direct_mode<'run>(
         let cfg = cfg.with_device_flags(force_cpu, allow_mps);
         let host_snapshot = std::sync::Arc::new(crate::host_facts::HostSnapshot::read(&cfg)?);
         let direct_workers = prepare_workers(
+            host_snapshot.clone(),
             build_direct_pool_config(&cfg, &host_snapshot, layout.state_dir()),
             RegistryDiscovery::Ignore,
         )
@@ -522,7 +523,6 @@ fn dispatch_direct_mode<'run>(
         .map_err(CliError::from)?;
         let host = DirectHost::new(
             cfg,
-            host_snapshot,
             layout,
             None,
             None,

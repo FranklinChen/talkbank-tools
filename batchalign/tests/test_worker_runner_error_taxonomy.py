@@ -25,12 +25,13 @@ from pydantic import BaseModel, ValidationError
 from batchalign.inference._model_access_errors import ModelAccessDeniedError
 from batchalign.inference._provider_errors import ProviderQuotaExhaustedError
 from batchalign.inference.qwen_forced_alignment import (
+    IndexedWindowUnit,
     PairedWindowAlignment,
-    ReportedTimestampTrace,
     WindowAlignedWord,
 )
 from batchalign.inference.qwen_timing import (
     AudioWindow,
+    ObservedWindowSpan,
     RecordingChunkSpeech,
     RecordingStart,
     SpokenWindowWords,
@@ -52,7 +53,6 @@ from batchalign.worker._types import BatchInferResponse
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
     ExecuteRequestV2,
-    ExecuteResponseV2,
     FaBackendV2,
     FaCandidateV2,
     FaTextModeV2,
@@ -96,21 +96,17 @@ def _quota_error() -> Exception:
 
 
 def _bad_qwen_timing() -> Exception:
+    """A span constructor handed a span admission would have rejected. Model
+    timing defects are untimed evidence, never an error; this guard is the
+    remaining Qwen timing refusal."""
     try:
-        WindowAlignment(
-            PairedWindowAlignment.of(
-                ["hello", "world"],
-                [
-                    WindowAlignedWord("hello", 0.7, 0.8),
-                    WindowAlignedWord("world", 0.5, 0.6),
-                ],
-                native_trace=ReportedTimestampTrace(100.0, (7, 8, 5, 6)),
-            ),
+        ObservedWindowSpan(
+            IndexedWindowUnit(0, WindowAlignedWord("hello", 0.7, 1.4)),
             AudioWindow(1.0),
         )
     except Exception as error:
         return error
-    raise AssertionError("backwards model timing was admitted")
+    raise AssertionError("an out-of-window span was constructed")
 
 
 def _bad_recording_placement() -> Exception:
@@ -311,28 +307,6 @@ def test_a_text_runner_exception_keeps_its_class_code(
     assert isinstance(response.outcome, ExecuteErrorV2)
     assert response.outcome.code is expected
     assert response.result is None
-
-
-def test_rejected_qwen_report_survives_worker_protocol(tmp_path: Path) -> None:
-    error = _bad_qwen_timing()
-
-    def _raise(*_args: object) -> BatchInferResponse:
-        raise error
-
-    response = execute_on_loads(
-        _morphosyntax_request(tmp_path),
-        loads(
-            (MORPHOSYNTAX_LOAD, morphosyntax(_raise)),
-        ),
-    )
-    restored = ExecuteResponseV2.model_validate_json(response.model_dump_json())
-    assert isinstance(restored.outcome, ExecuteErrorV2)
-    assert restored.outcome.code is ProtocolErrorCodeV2.MODEL_OUTPUT_INVALID
-    assert restored.outcome.message == f"{type(error).__name__}: {error}"
-    diagnostic = json.loads(
-        restored.outcome.message.split("Qwen rejected alignment diagnostic: ", 1)[1]
-    )
-    assert diagnostic["reported"]["native_trace"]["timestamp_classes"] == [7, 8, 5, 6]
 
 
 @pytest.mark.parametrize(("make_error", "expected"), _CASES)

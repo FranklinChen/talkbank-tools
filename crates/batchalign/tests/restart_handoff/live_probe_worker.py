@@ -37,7 +37,11 @@ def hold_with_progress() -> None:
                 },
             }
         )
-        (state / "load-ticks").write_text(str(tick))
+        # Atomic replace: a reader sees the previous count or this one, never
+        # the empty file a truncating write exposes mid-update.
+        staged = state / "load-ticks.tmp"
+        staged.write_text(str(tick))
+        os.replace(staged, state / "load-ticks")
         time.sleep(0.05)
 
 

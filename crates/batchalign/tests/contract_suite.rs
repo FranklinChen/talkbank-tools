@@ -15,8 +15,6 @@
 mod cli_common;
 mod live_deadline;
 
-#[path = "chat_ops_mor_count_parity_reference_corpus.rs"]
-mod chat_ops_mor_count_parity_reference_corpus;
 #[path = "command_surface_manifest.rs"]
 mod command_surface_manifest;
 #[path = "compare_runs_cli.rs"]

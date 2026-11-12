@@ -96,16 +96,12 @@ pub(crate) async fn dispatch_benchmark_infer(
             ),
             Err(error) => {
                 for file in &job.pending_files {
-                    FileRunTracker::new(
-                        sink.as_ref(),
-                        &job.identity.job_id,
-                        file.filename.as_ref(),
-                    )
-                    .fail(
-                        &format!("Benchmark planning failed: {error}"),
-                        FailureCategory::Validation,
-                    )
-                    .await;
+                    FileRunTracker::new(sink.as_ref(), file.filename.as_ref())
+                        .fail(
+                            &format!("Benchmark planning failed: {error}"),
+                            FailureCategory::Validation,
+                        )
+                        .await;
                 }
                 return;
             }
@@ -159,13 +155,7 @@ pub(crate) async fn dispatch_benchmark_infer(
         ));
     }
 
-    let abnormal_exits = drain_supervised_file_tasks(
-        sink.as_ref(),
-        &job.identity.job_id,
-        &job.cancel_token,
-        tasks,
-    )
-    .await;
+    let abnormal_exits = drain_supervised_file_tasks(sink.as_ref(), &job.cancel_token, tasks).await;
     if abnormal_exits > 0 {
         warn!(
             job_id = %job.identity.job_id,
@@ -194,7 +184,7 @@ async fn process_one_benchmark_file(
     let job_id = &job.identity.job_id;
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
-    let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
+    let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
@@ -219,7 +209,6 @@ async fn process_one_benchmark_file(
         planned_unit,
         &job.dispatch.options,
         sink.as_ref(),
-        job_id,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -276,7 +265,7 @@ async fn process_one_benchmark_file(
         FileAttempts::begin(&lifecycle, WorkUnitKind::FileInfer, FileStage::Benchmarking).await;
     loop {
         let (progress_tx, wait_observer, forwarder) =
-            spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename.to_string());
+            spawn_observed_progress_forwarder(sink.clone(), filename.to_string());
 
         let attempt = crate::worker::pool::checkout_wait::observing_pool_waits(
             wait_observer,

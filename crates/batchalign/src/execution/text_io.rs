@@ -25,11 +25,7 @@ pub(crate) async fn load_text_inputs(
     };
 
     for file in &job.pending_files {
-        let lifecycle = FileRunTracker::new(
-            host.sink().as_ref(),
-            &job.identity.job_id,
-            file.filename.as_ref(),
-        );
+        let lifecycle = FileRunTracker::new(host.sink().as_ref(), file.filename.as_ref());
         lifecycle.stage(FileStage::Reading).await;
 
         let read_path = resolve_input_path(job, file);
@@ -71,11 +67,7 @@ pub(crate) async fn write_text_results(
     let sink = host.sink().clone();
     let total_results = results.len() as i64;
     for (result_idx, file_result) in results.into_iter().enumerate() {
-        let lifecycle = FileRunTracker::new(
-            sink.as_ref(),
-            &job.identity.job_id,
-            file_result.filename.as_ref(),
-        );
+        let lifecycle = FileRunTracker::new(sink.as_ref(), file_result.filename.as_ref());
         let file_index = job
             .pending_files
             .iter()
@@ -113,7 +105,6 @@ pub(crate) async fn write_text_results(
                 let finished = crate::pipeline::post_validate::ProducedOutput::Admitted(finished);
                 set_file_progress(
                     sink.as_ref(),
-                    &job.identity.job_id,
                     file_result.filename.as_ref(),
                     FileStage::Writing,
                     Some(result_idx as i64 + 1),
@@ -251,7 +242,7 @@ mod reporting_tests {
                 Arc::new(crate::clock::SystemClock),
             ));
             store.submit(job).await.unwrap();
-            let host = DispatchHostContext::from_store(store.clone());
+            let host = DispatchHostContext::from_store(store.clone(), &snapshot.identity.job_id);
             let address = crate::morphosyntax::report::SpanAddress::for_test(0, 2, 1, "spa");
             let report = if unavailable {
                 SecondaryReport::for_test(

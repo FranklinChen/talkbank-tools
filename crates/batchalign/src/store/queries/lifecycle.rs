@@ -165,7 +165,9 @@ mod tests {
             ))
             .await
             .expect("submit");
-        store.mark_job_running(&job_id).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
+            .await;
         store
             .cancel(&job_id, CancellationRequest::default())
             .await
@@ -173,7 +175,10 @@ mod tests {
 
         // The memory gate rejects moments later and tries to requeue.
         store
-            .requeue_job_after_memory_gate(&job_id, MachineTime::now())
+            .requeue_job_after_memory_gate(
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                MachineTime::now(),
+            )
             .await;
 
         assert_eq!(
@@ -226,7 +231,9 @@ mod tests {
         );
 
         // The runner picks the job up moments later. It must decline.
-        store.mark_job_running(&job_id).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
+            .await;
 
         assert_eq!(
             store.job_status(&job_id).await,
@@ -266,8 +273,16 @@ mod tests {
         store.submit(job_a).await.expect("submit job-a");
         store.submit(job_b).await.expect("submit job-b");
 
-        store.mark_job_running(&JobId::from("shutdown-a")).await;
-        store.mark_job_running(&JobId::from("shutdown-b")).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
+                "shutdown-a",
+            )))
+            .await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
+                "shutdown-b",
+            )))
+            .await;
 
         // Drive the shutdown path.
         let interrupted = store.interrupt_all_for_shutdown().await;
@@ -358,7 +373,6 @@ mod tests {
             content_type: ContentType::Chat,
             error: Some("worker dispatch failed".into()),
         });
-        job.execution.completed_files = 2;
 
         store.submit(job).await.expect("submit test job");
 
@@ -451,8 +465,16 @@ mod tests {
         );
         store.submit(job_a).await.expect("submit job-a");
         store.submit(job_b).await.expect("submit job-b");
-        store.mark_job_running(&JobId::from("shutdown-sig-a")).await;
-        store.mark_job_running(&JobId::from("shutdown-sig-b")).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
+                "shutdown-sig-a",
+            )))
+            .await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
+                "shutdown-sig-b",
+            )))
+            .await;
 
         // Snapshot the active job IDs before shutdown processing.
         let active_ids: Vec<JobId> = store
@@ -586,7 +608,9 @@ mod tests {
             )
             .await;
             store
-                .mark_job_running(&JobId::from("shutdown-recover"))
+                .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
+                    "shutdown-recover",
+                )))
                 .await;
 
             let interrupted = store.interrupt_all_for_shutdown().await;

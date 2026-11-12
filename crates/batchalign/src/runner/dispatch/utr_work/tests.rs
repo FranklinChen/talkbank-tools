@@ -1,5 +1,6 @@
 use super::*;
-use crate::chat_ops::fa::utr::{GlobalUtr, TwoPassOverlapUtr};
+use crate::chat_ops::ChatFile;
+use crate::chat_ops::fa::utr::{GlobalUtr, TwoPassOverlapUtr, UtrResult};
 use tokio::sync::oneshot;
 
 fn source() -> ChatFile {
@@ -8,6 +9,10 @@ fn source() -> ChatFile {
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello world .\n@End\n")
         .admit(talkbank_model::model::TranscriptName::Anonymous, &talkbank_model::NullErrorSink)
         .expect("valid input").into_valid_file().into_unchecked()
+}
+
+fn source_bound(source: &ChatFile) -> SourceBoundUtrInput<'_> {
+    SourceBoundUtrInput::for_test(source)
 }
 
 fn tokens() -> PreparedUtrTokens {
@@ -30,23 +35,24 @@ fn tokens() -> PreparedUtrTokens {
 }
 
 #[tokio::test]
-async fn completed_candidate_matches_both_synchronous_strategies() {
+async fn completed_observation_preserves_source_for_both_strategies() {
     for strategy in [
         Box::new(GlobalUtr) as Box<dyn UtrStrategy>,
         Box::new(TwoPassOverlapUtr::new()),
     ] {
-        let mut original = source();
+        let original = source();
+        let admitted = source_bound(&original);
         let mut expected = original.clone();
+        let before = serde_json::to_value(&original).unwrap();
         let expected_result = strategy.inject(&mut expected, &tokens());
         let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
-        let observed = PendingUtr::new(&mut original, strategy, tokens())
+        let observed = PendingUtr::new(&admitted, strategy, tokens())
             .run(Some(&progress))
             .await
             .expect("completed");
-        assert_eq!(
-            serde_json::to_value(&original).unwrap(),
-            serde_json::to_value(&expected).unwrap()
-        );
+        assert_eq!(observed.tokens().tokens()[0].start_ms, 100);
+        let observed = observed.result();
+        assert_eq!(serde_json::to_value(&original).unwrap(), before);
         assert_eq!(observed.injected(), expected_result.injected());
         assert_eq!(observed.unmatched(), expected_result.unmatched());
         assert_eq!(observed.injected(), 1);
@@ -68,21 +74,21 @@ struct HeldSearch {
 async fn long_document_owned_execution_preserves_recovery_and_budget_results() {
     use crate::chat_ops::fa::utr::region_tests::long_turn_fixture;
     for anchored in [false, true] {
-        let (mut document, tokens) = long_turn_fixture(anchored);
+        let (document, tokens) = long_turn_fixture(anchored);
+        let admitted = source_bound(&document);
+        let before = serde_json::to_value(&document).unwrap();
         let mut expected = document.clone();
         let expected_result = GlobalUtr.inject(
             &mut expected,
             &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
         );
         let tokens = PreparedUtrTokens::spaced(&tokens);
-        let result = PendingUtr::new(&mut document, Box::new(GlobalUtr), tokens)
+        let result = PendingUtr::new(&admitted, Box::new(GlobalUtr), tokens)
             .run(None)
             .await
             .unwrap();
-        assert_eq!(
-            serde_json::to_value(&document).unwrap(),
-            serde_json::to_value(&expected).unwrap()
-        );
+        let result = result.result();
+        assert_eq!(serde_json::to_value(&document).unwrap(), before);
         assert_eq!(
             (result.injected(), result.skipped(), result.unmatched()),
             (
@@ -135,7 +141,8 @@ impl UtrStrategy for HeldSearch {
 /// while CPU work is held elsewhere. No latency assertion or sleep is needed.
 #[tokio::test]
 async fn dropping_pending_work_stops_the_search_and_preserves_source() {
-    let mut original = source();
+    let original = source();
+    let admitted = source_bound(&original);
     let before = serde_json::to_value(&original).unwrap();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -145,7 +152,7 @@ async fn dropping_pending_work_stops_the_search_and_preserves_source() {
         release: std::sync::Mutex::new(release_rx),
         stopped: std::sync::Mutex::new(Some(stopped_tx)),
     };
-    let mut work = Box::pin(PendingUtr::new(&mut original, Box::new(strategy), tokens()).run(None));
+    let mut work = Box::pin(PendingUtr::new(&admitted, Box::new(strategy), tokens()).run(None));
     assert!(futures::poll!(&mut work).is_pending());
     assert_ne!(entered_rx.await.unwrap(), std::thread::current().id());
     drop(work);
@@ -173,9 +180,10 @@ impl UtrStrategy for Panics {
 
 #[tokio::test]
 async fn producer_panic_is_system_failure_and_cannot_install_candidate() {
-    let mut original = source();
+    let original = source();
+    let admitted = source_bound(&original);
     let before = serde_json::to_value(&original).unwrap();
-    let error = PendingUtr::new(&mut original, Box::new(Panics), tokens())
+    let error = PendingUtr::new(&admitted, Box::new(Panics), tokens())
         .run(None)
         .await
         .expect_err("failed task");
@@ -271,11 +279,12 @@ fn cancellation_aborts_queued_work_before_search_entry() {
         });
         occupied_rx.await.unwrap();
         let (dropped_tx, dropped_rx) = oneshot::channel();
-        let mut original = source();
+        let original = source();
+        let admitted = source_bound(&original);
         let before = serde_json::to_value(&original).unwrap();
         let mut pending = Box::pin(
             PendingUtr::new(
-                &mut original,
+                &admitted,
                 Box::new(NeverStarted(Some(dropped_tx), AtomicBool::new(false))),
                 tokens(),
             )

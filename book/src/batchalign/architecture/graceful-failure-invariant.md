@@ -1,7 +1,7 @@
 # Graceful Failure Invariant
 
 **Status:** Current
-**Last updated:** 2026-09-22 17:47 EDT
+**Last updated:** {{git-dates:page}}
 
 ## The rule
 
@@ -13,6 +13,14 @@ error and emits an empty success-shaped response in its place.
 This rule is system-wide. It applies to every command in batchalign3:
 `align`, `transcribe`, `morphotag`, `translate`, `utseg`, `coref`,
 `benchmark`, `opensmile`, `avqi`, `compare`.
+
+Explicit recoverable absence has its own typed outcome. A Qwen unit with an
+unusable span can retain its text as untimed evidence; optional UTR provider
+unavailability can be retained as an output shortfall. Neither is an empty
+success response or an invented timing. These command-owned recovery outcomes
+are distinct from an unhandled runtime failure. An internal source-binding
+contradiction is a typed terminal recovery fault, not provider unavailability;
+it prevents output and retry.
 
 ## Why this rule exists
 

@@ -127,9 +127,14 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
         },
         ..PoolConfig::for_tests()
     };
-    let workers = batchalign::worker_setup::prepare_echo_workers_behind_live_runner(pool_config)
-        .await
-        .expect("echo workers behind the live runner");
+    let workers = batchalign::worker_setup::prepare_echo_workers_behind_live_runner(
+        std::sync::Arc::new(batchalign::host_facts::HostSnapshot::for_tests(
+            &ServerConfig::default(),
+        )),
+        pool_config,
+    )
+    .await
+    .expect("echo workers behind the live runner");
     let (router, _state) = batchalign::create_test_app_with_prepared_workers(
         ServerConfig::default(),
         RuntimeLayout::from_state_dir(state_dir.clone()),

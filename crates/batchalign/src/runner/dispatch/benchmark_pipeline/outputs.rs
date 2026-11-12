@@ -1,6 +1,6 @@
 //! Source-bound benchmark output admission and successful-write completion.
 
-use crate::api::{JobId, ReleasedCommand};
+use crate::api::ReleasedCommand;
 use crate::benchmark::BenchmarkOutputs;
 use crate::error::ServerError;
 use crate::recipe_runner::materialize::{MaterializedArtifactRole, PlannedMaterializedFile};
@@ -18,7 +18,6 @@ pub(super) struct BenchmarkOutputPlan<'a> {
     filesystem: &'a RunnerFilesystemConfig,
     file: &'a PendingJobFile,
     sink: &'a dyn RunnerEventSink,
-    job_id: &'a JobId,
     primary: PlannedMaterializedFile,
     sidecar: PlannedMaterializedFile,
 }
@@ -30,7 +29,6 @@ impl<'a> BenchmarkOutputPlan<'a> {
         unit: &BenchmarkWorkUnit,
         options: &crate::options::CommandOptions,
         sink: &'a dyn RunnerEventSink,
-        job_id: &'a JobId,
     ) -> Result<Self, ServerError> {
         if file.filename != unit.audio().display_path {
             return Err(ServerError::Validation(
@@ -61,7 +59,6 @@ impl<'a> BenchmarkOutputPlan<'a> {
             filesystem,
             file,
             sink,
-            job_id,
             primary,
             sidecar,
         })
@@ -69,7 +66,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
 
     /// Persistence failures are terminal; they must not repeat paid inference.
     pub(super) async fn persist(self, outputs: BenchmarkOutputs) -> FileTaskOutcome {
-        let lifecycle = FileRunTracker::new(self.sink, self.job_id, self.file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(self.sink, self.file.filename.as_ref());
         match self.write(outputs).await {
             Ok(written) => written.complete().await,
             Err(error) => lifecycle
@@ -112,7 +109,6 @@ impl<'a> BenchmarkOutputPlan<'a> {
         Ok(WrittenBenchmark {
             file: self.file,
             sink: self.sink,
-            job_id: self.job_id,
             primary: self.primary,
         })
     }
@@ -123,13 +119,12 @@ impl<'a> BenchmarkOutputPlan<'a> {
 struct WrittenBenchmark<'a> {
     file: &'a PendingJobFile,
     sink: &'a dyn RunnerEventSink,
-    job_id: &'a JobId,
     primary: PlannedMaterializedFile,
 }
 
 impl WrittenBenchmark<'_> {
     async fn complete(self) -> FileTaskOutcome {
-        FileRunTracker::new(self.sink, self.job_id, self.file.filename.as_ref())
+        FileRunTracker::new(self.sink, self.file.filename.as_ref())
             .complete_with_result(self.primary.display_path, self.primary.content_type)
             .await
             .into()
@@ -208,10 +203,8 @@ mod tests {
         let unit = unit(&temp.path().join("input/clip.wav"));
         let file = file();
         let sink = RecordingSink::default();
-        let job_id = JobId::from("benchmark-plan-test");
         let options = crate::recipe_runner::runtime::test_options(ReleasedCommand::Align);
-        let Err(error) =
-            BenchmarkOutputPlan::admit(&filesystem, &file, &unit, &options, &sink, &job_id)
+        let Err(error) = BenchmarkOutputPlan::admit(&filesystem, &file, &unit, &options, &sink)
         else {
             panic!("another command's options cannot admit benchmark output");
         };
@@ -243,14 +236,12 @@ mod tests {
             let unit = unit(&temp.path().join("input/clip.wav"));
             let file = file();
             let sink = RecordingSink::default();
-            let job_id = JobId::from("benchmark-output-test");
             let plan = BenchmarkOutputPlan::admit(
                 &filesystem,
                 &file,
                 &unit,
                 &crate::recipe_runner::runtime::test_options(ReleasedCommand::Benchmark),
                 &sink,
-                &job_id,
             )
             .expect("admitted output plan");
             assert!(matches!(
@@ -285,7 +276,6 @@ mod tests {
             let unit = unit(&temp.path().join("input/clip.wav"));
             let file = file();
             let sink = RecordingSink::default();
-            let job_id = JobId::from("benchmark-output-test");
             let outputs = outputs();
             let expected_csv = outputs.metrics.to_csv_string().expect("CSV");
             let plan = BenchmarkOutputPlan::admit(
@@ -294,7 +284,6 @@ mod tests {
                 &unit,
                 &crate::recipe_runner::runtime::test_options(ReleasedCommand::Benchmark),
                 &sink,
-                &job_id,
             )
             .expect("admitted output plan");
             plan.persist(outputs).await;
@@ -333,15 +322,13 @@ mod tests {
         let mut file = file();
         file.filename = "other.wav".into();
         let sink = RecordingSink::default();
-        let job_id = JobId::from("benchmark-output-test");
         assert!(matches!(
             BenchmarkOutputPlan::admit(
                 &filesystem,
                 &file,
                 &unit,
                 &crate::recipe_runner::runtime::test_options(ReleasedCommand::Benchmark),
-                &sink,
-                &job_id
+                &sink
             ),
             Err(ServerError::Validation(_))
         ));

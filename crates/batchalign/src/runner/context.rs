@@ -12,11 +12,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{JobId, MachineTime, NumWorkers};
+use crate::api::{MachineTime, NumWorkers};
 use crate::cache::UtteranceCache;
 use crate::config::ServerConfig;
 use crate::host_facts::EffectiveConfig;
-use crate::host_memory::HostMemoryError;
 use crate::runner::util::{RunnerEventSink, StoreRunnerEventSink};
 use crate::store::{JobStore, RunnerJobSnapshot};
 use crate::worker::pool::WorkerPool;
@@ -62,7 +61,7 @@ impl ExecutionEngine {
         &self,
         request: JobDispatchRequest,
         host: &DispatchHostContext,
-    ) -> Result<(), crate::error::ServerError> {
+    ) -> Result<DispatchEnd, crate::error::ServerError> {
         super::routing::dispatch_job_with_execution_context(request, host, &self.context).await
     }
 
@@ -97,14 +96,27 @@ pub(crate) struct DispatchHostContext {
 }
 
 impl DispatchHostContext {
-    pub(crate) fn from_store(store: Arc<JobStore>) -> Self {
+    /// The dispatch context of the run that `claim` owns: its sink writes
+    /// only as that run. The only production route, so dispatch cannot hold
+    /// a sink that is not bound to a run.
+    pub(crate) fn for_run(store: Arc<JobStore>, claim: &crate::store::RunnerClaim) -> Self {
+        Self::with_sink(StoreRunnerEventSink::for_run(store.clone(), claim), store)
+    }
+
+    /// A dispatch context for a test job in its first run.
+    #[cfg(test)]
+    pub(crate) fn from_store(store: Arc<JobStore>, job_id: &crate::api::JobId) -> Self {
+        Self::with_sink(StoreRunnerEventSink::wrap(store.clone(), job_id), store)
+    }
+
+    fn with_sink(sink: Arc<dyn RunnerEventSink>, store: Arc<JobStore>) -> Self {
         // The host was read once, where the server was composed; per-job
         // dispatch reads that snapshot rather than re-detecting facts. Runtime
         // memory pressure is the live memory guard's (`worker::memory_guard`).
         Self {
             config: Arc::new(store.config().clone()),
             host: store.host().clone(),
-            sink: StoreRunnerEventSink::wrap(store.clone()),
+            sink,
             store,
         }
     }
@@ -213,7 +225,7 @@ pub(super) struct JobDispatchRequest {
 pub(super) enum ExecutionReservationError {
     Capacity {
         requested_workers: NumWorkers,
-        error: HostMemoryError,
+        error: crate::host_memory::WaitExpired,
     },
     Fatal(crate::error::ServerError),
 }
@@ -223,6 +235,41 @@ pub(super) enum ExecutionReservationError {
 pub(crate) enum MemoryGateRejectionDisposition {
     /// The host re-queued the job for a later eligibility deadline.
     Requeued { retry_at: MachineTime },
+}
+
+/// A whole job that dispatch declined to run, with the reason the run's
+/// failure records on the job and on every file it leaves unfinished.
+///
+/// A value, not a store write: dispatch hands it back to the consuming run
+/// scope, which alone holds the claim that may fail the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JobRefusal(String);
+
+impl JobRefusal {
+    /// Only the runner's routing refuses a whole job.
+    pub(super) fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+
+    pub(crate) fn into_reason(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for JobRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// How command dispatch ended for a claimed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "a refusal must reach the run scope that owns the claim"]
+pub(crate) enum DispatchEnd {
+    /// Dispatch ran; every file it reached recorded its own terminal state.
+    Dispatched,
+    /// The whole job was refused before or during dispatch.
+    Refused(JobRefusal),
 }
 
 /// Result of one host-owned job execution attempt.
@@ -247,7 +294,6 @@ pub(crate) trait QueuedJobOrchestrator: Send + Sync {
     async fn handle_memory_gate_rejection(
         &self,
         sink: &Arc<dyn RunnerEventSink>,
-        job_id: &JobId,
     ) -> Result<MemoryGateRejectionDisposition, crate::error::ServerError>;
 }
 

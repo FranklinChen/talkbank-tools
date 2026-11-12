@@ -7,6 +7,8 @@ use talkbank_model::{UtteranceIdx, WordIdx};
 use super::super::FaWord;
 use super::super::coordinates::FaWindow;
 use super::super::split::NonEmptyWords;
+use super::Localization;
+use crate::types::traces::FaOriginalBulletTrace;
 
 /// A localized utterance after its complete window was admitted to a recording.
 /// Only the consuming localization transition constructs this owner.
@@ -14,14 +16,24 @@ pub(super) struct RecordedUtterance {
     utterance: UtteranceIdx,
     words: NonEmptyWords,
     window: FaWindow,
+    localization: Localization,
+    original_bullet: FaOriginalBulletTrace,
 }
 
 impl RecordedUtterance {
-    pub(super) fn new(utterance: UtteranceIdx, words: NonEmptyWords, window: FaWindow) -> Self {
+    pub(super) fn new(
+        utterance: UtteranceIdx,
+        words: NonEmptyWords,
+        window: FaWindow,
+        localization: Localization,
+        original_bullet: FaOriginalBulletTrace,
+    ) -> Self {
         Self {
             utterance,
             words,
             window,
+            localization,
+            original_bullet,
         }
     }
 
@@ -44,6 +56,8 @@ struct SourceSlice {
     words: Range<usize>,
     first_word: WordIdx,
     last_word: WordIdx,
+    localization: Localization,
+    original_bullet: FaOriginalBulletTrace,
 }
 
 /// Canonical words and the retained source boundaries that own them.
@@ -68,6 +82,8 @@ impl GroupPopulation {
                 words: range,
                 first_word,
                 last_word,
+                localization: source.localization,
+                original_bullet: source.original_bullet,
             }],
         }
     }
@@ -97,6 +113,8 @@ impl GroupPopulation {
             words: &self.words[source.words.clone()],
             first_word: source.first_word,
             last_word: source.last_word,
+            localization: source.localization,
+            original_bullet: &source.original_bullet,
         })
     }
 
@@ -123,6 +141,8 @@ impl GroupPopulation {
                     words: start..cursor,
                     first_word: words[start].utterance_word_index,
                     last_word: words[cursor - 1].utterance_word_index,
+                    localization: Localization::NotRecorded,
+                    original_bullet: FaOriginalBulletTrace::NotRecorded,
                 }
             })
             .collect();
@@ -138,6 +158,8 @@ pub(crate) struct SourceUtterance<'a> {
     words: &'a [FaWord],
     first_word: WordIdx,
     last_word: WordIdx,
+    localization: Localization,
+    original_bullet: &'a FaOriginalBulletTrace,
 }
 
 impl<'a> SourceUtterance<'a> {
@@ -155,5 +177,11 @@ impl<'a> SourceUtterance<'a> {
     }
     pub(crate) fn words(&self) -> &'a [FaWord] {
         self.words
+    }
+    pub(in crate::chat_ops::fa) fn localization(&self) -> Localization {
+        self.localization
+    }
+    pub(in crate::chat_ops::fa) fn original_bullet(&self) -> &FaOriginalBulletTrace {
+        self.original_bullet
     }
 }

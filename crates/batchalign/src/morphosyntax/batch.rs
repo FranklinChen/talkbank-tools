@@ -329,7 +329,6 @@ mod tests {
         let lang = crate::chat_ops::LanguageCode::new("eng").unwrap();
         let langs = declared_languages(&chat, &lang).expect("admitted fixture language context");
         let items = collect_payloads(&chat, &lang, langs.as_ref(), MultilingualPolicy::ProcessAll)
-            .expect("the run walk agrees with extraction")
             .batch_items;
         let response = serde_json::from_str(
             r#"{"sentences":[{"words":[

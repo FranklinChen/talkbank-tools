@@ -52,7 +52,7 @@ pub(crate) async fn dispatch_utseg_job(
     }
 
     for file in &job.pending_files {
-        FileRunTracker::new(sink.as_ref(), &job.identity.job_id, file.filename.as_ref())
+        FileRunTracker::new(sink.as_ref(), file.filename.as_ref())
             .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Segmenting)
             .await;
     }
@@ -108,7 +108,6 @@ pub(crate) async fn dispatch_utseg_job(
                 // A saturated checkout shows on this file's progress.
                 let results = crate::runner::util::observing_file_waits(
                     host_for_task.sink(),
-                    &job_for_task.identity.job_id,
                     single.iter().map(|file| file.filename.to_string()),
                     gateway_for_task.utseg_batch(
                         &single,
@@ -256,7 +255,6 @@ mod tests {
         std::fs::write(input_dir.join("a.cha"), text).unwrap();
         std::fs::write(input_dir.join("b.cha"), text).unwrap();
         RunnerJobSnapshot {
-            run_generation: crate::store::RunGeneration::FIRST,
             identity: crate::store::RunnerJobIdentity {
                 job_id: JobId::from("job-utseg"),
                 correlation_id: CorrelationId::from("corr-utseg"),
@@ -304,12 +302,15 @@ mod tests {
 
     fn host() -> DispatchHostContext {
         let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        DispatchHostContext::from_store(Arc::new(crate::store::JobStore::for_tests(
-            crate::config::ServerConfig::default(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        )))
+        DispatchHostContext::from_store(
+            Arc::new(crate::store::JobStore::for_tests(
+                crate::config::ServerConfig::default(),
+                None,
+                tx,
+                std::sync::Arc::new(crate::clock::SystemClock),
+            )),
+            &JobId::from("job-utseg"),
+        )
     }
 
     /// A registry serving English and Spanish with every processor the

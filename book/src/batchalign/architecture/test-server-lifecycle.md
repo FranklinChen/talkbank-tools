@@ -1,7 +1,7 @@
 # Test Server and Worker Lifecycle
 
 **Status:** Current
-**Last updated:** 2026-10-01 17:40 EDT
+**Last updated:** 2026-11-11 23:05 EST
 
 ## The problem
 
@@ -126,8 +126,8 @@ sequenceDiagram
 
     alt BackendState::Uninitialized (first test)
         FT->>BS: ensure_backend()
-        BS->>PW: prepare_workers()
-        Note over PW: PythonWorker::establish_shared()<br/>(fails the test if missing)<br/>spawn workers<br/>load models<br/>(Stanza, Whisper, etc.)
+        BS->>PW: prepare_workers(host, pool_config, Ignore)
+        Note over PW: PythonWorker::establish_shared()<br/>(fails the test if missing)<br/>one declared host, fixture-owned<br/>ledger and registry; no worker yet<br/>(workers start with the first job)
         PW-->>BS: PreparedWorkers
         BS-->>FT: BackendState::Ready
     end
@@ -150,9 +150,15 @@ sequenceDiagram
 
 ## Python worker startup and model loading
 
-When the backend initializes (first `Acquire`), `prepare_workers()` spawns
-Python worker subprocesses. Each worker loads multi-GB ML models into memory
-and signals readiness over its stdio JSON-lines protocol.
+When the backend initializes (first `Acquire`), it reads one declared host
+for the pool and every session over it (`HostSnapshot::for_tests_in` with
+the session configuration and a fixture-owned ledger) and calls
+`prepare_workers(host, pool_config, RegistryDiscovery::Ignore)`. The pool's
+runtime is built from that snapshot (`WorkerRuntimeConfig::for_tests_on`) and
+its worker registry lives in the fixture's own directory, so it adopts no
+worker another server admitted. `prepare_workers` itself spawns no worker:
+Python workers start when the first job needs them, load multi-GB models and
+signal readiness over their stdio JSON-lines protocol.
 
 ```mermaid
 sequenceDiagram
@@ -160,7 +166,9 @@ sequenceDiagram
     participant WP as WorkerPool
     participant PY as python3 -m batchalign.worker
 
-    RS->>WP: prepare_workers(config, pool_config)
+    RS->>WP: prepare_workers(host, pool_config)
+    WP-->>RS: PreparedWorkers { pool, host }
+    Note over RS: first job needs a worker
 
     WP->>PY: spawn(--task morphosyntax --lang eng)
     Note over PY: import stanza<br/>stanza.Pipeline("en")<br/>~1.5 GB into RAM<br/>~15-30s cold start
@@ -174,8 +182,7 @@ sequenceDiagram
 
     Note over WP: Workers registered in pool<br/>PID files written to ~/.batchalign3/worker-pids/
 
-    WP-->>RS: PreparedWorkers { pool, infer_tasks }
-    Note over RS: Backend ready, all subsequent<br/>Acquire commands reuse these workers
+    Note over RS: Backend ready, all subsequent<br/>Acquire commands reuse these workers<br/>and take their host from them
 ```
 
 ## Per-test session lifecycle

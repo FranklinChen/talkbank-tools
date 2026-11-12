@@ -131,38 +131,86 @@ PairedWindowAlignment (model units and reported times, arity checked)
 
 `PairedWindowAlignment` snapshots both sequences and admits their arity.
 Both ASR and standalone FA must then construct `WindowAlignment` with the
-actual audio duration. Every interval must be finite, nonnegative, forward
-and contained in that audio; nonblank positive-duration units must have
-nondecreasing starts and ends. Ordinary overlap is permitted when both
-boundaries advance. `ObservedWindowSpan` and `UnavailableWindowTiming` are
-distinct states. Zero-width units retain their fold positions as unavailable
-evidence and cannot supply observed word endpoints. The FA fold leaves a word
-untimed if any constituent is unavailable, or if its interval disappears when
-rounded to milliseconds. No neighboring interval supplies the missing times.
+actual audio duration. Admission never fails the file on model timing: every
+unit gets exactly one `WindowTiming` state, and every state but
+`ObservedWindowSpan` is explicit absence that keeps its reason.
 
-Recording placement adds the offset once. An immutable recording prefix accepts
+```mermaid
+flowchart TD
+    decoded["decoded unit"] --> read{"read_decoded_unit:<br/>both times present and numeric?"}
+    read -->|no| missing["RejectedWindowTiming<br/>(MissingUnitTime)"]
+    read -->|yes| unit["WindowAlignedWord"]
+    unit --> judge{"_judge_span: own span finite,<br/>nonnegative, forward, inside window?"}
+    judge -->|no| rejected["RejectedWindowTiming<br/>(that unit's defect)"]
+    judge -->|"yes, zero width"| unavailable["UnavailableWindowTiming"]
+    judge -->|"yes, positive"| observed["ObservedWindowSpan"]
+    observed --> order{"_first_disorder: spoken observed units'<br/>starts and ends nondecreasing?"}
+    order -->|yes| kept["kept: window keeps its timing"]
+    order -->|"no: first backwards pair"| disordered["DisorderedWindowTiming<br/>(every observed span of the window,<br/>each keeping the same pair)"]
+```
+
+`read_decoded_unit` is the boundary parse, and it is total: a decoded unit with
+a missing or non-numeric time is an `UntimedReportedUnit`, kept in its
+position (the fold attributes units to words by position) and admitted as
+`RejectedWindowTiming` with a `MissingUnitTime` defect. Nothing invents a zero
+or NaN in its place. A unit whose own span is non-finite, negative, reversed or
+past the window's end is `RejectedWindowTiming`: only that unit is untimed. A pair of spoken
+units whose start or end runs backwards is a defect of the window's order,
+not of either unit, so no span in that window can be trusted:
+`_first_disorder` finds the first such pair and every observed span in the
+window becomes `DisorderedWindowTiming`, keeping the pair. Units already
+rejected keep their own, more specific defect. Other windows are unaffected.
+Ordinary overlap is permitted when both boundaries advance. Zero-width units
+retain their fold positions as unavailable evidence and cannot supply observed
+word endpoints. The FA fold leaves a word untimed if any constituent is not
+observed, or if its interval disappears when rounded to milliseconds. No
+neighboring interval supplies the missing times.
+
+Recording placement adds the offset once, through `_place`, the one edge from
+window time to recording time. At a large enough offset a short positive span
+cannot stay positive in float64; `_place` then returns `CollapsedPlacement`, an
+untimed state keeping a `CollapsedSpan` defect, and `_align_chunk` logs it
+through `log_placement_defects`, instead of failing the chunk or inventing a
+span. `_stays_positive` is the one placement rule, shared by `_place` and the
+`ObservedRecordingSpan` guard. An immutable recording prefix accepts
 only a subsequent disjoint window; containment plus ordered windows prevents
 cross-chunk time reversal. Publication consumes that prefix, so the ASR result
 cannot publish a bare, unchecked list of chunk timestamps. Unavailable words
 retain their text with absent timestamps on the ASR wire.
 
-An inadmissible interval raises `QwenTimingInvalid`, a
-`ModelOutputInvalidError`, before conversion or CHAT construction. It reports
-the offending unit and original times, the preceding unit for backwards
-timing, and whether the start or end moved backwards. `_align_chunk` adds
-the recording window while preserving the relative coordinate labels.
-The worker reports `model_output_invalid`; the identical request is not
-automatically retried. Do not sort or clamp these times to manufacture an
+A window with any untimed defect is logged once at WARNING by
+`_log_untimed_defects`: how many units are untimed, each defect with the
+original reported times (for a backwards pair, both units and whether the start
+or end moved), and the unchanged report as `RejectedAlignmentDiagnostic` JSON,
+including the native classifier trace. `_align_chunk` passes its
+`RecordingWindow`, so the log names the recording window while the times
+stay window-relative. The reason does not yet cross the FA worker wire, which
+carries only "no timing" for a word; the file's untimed-words diagnostic counts
+these words. `QwenTimingInvalid` remains only as the guard on the span
+constructors, so a direct caller cannot build an observed span from a span
+admission rejected. Do not sort or clamp these times to manufacture an
 apparently valid alignment.
 
-`PunctuatedAlignment(text, spoken)` compares the complete lexical sequence of
+`restore_punctuation(text, spoken)` compares the complete lexical sequence of
 the recognition text with the concatenated alignment units. Letters, numbers,
 Unicode combining marks and the ASCII apostrophe count as lexical characters.
 This preserves tone marks as evidence: dropping a combining mark is a mismatch,
-not punctuation normalization. Changed, missing or additional lexical text
-raises `ValueError`, as does a nonlexical aligned unit. There is no fuzzy match.
+not punctuation normalization. `_judge_correspondence` is the one rule: it
+returns a `_Correspondence` proof (each unit's punctuation) or a
+`PunctuationRefusal`. There is no fuzzy match. `PunctuatedAlignment` is built
+only from that proof, so nothing judges twice, and `restore_punctuation` never
+raises; it returns the alignment or the refusal, and `_with_punctuation`
+decides what each refusal honestly keeps:
 
-On success, the constructor returns one owned tuple of `AlignedWindowWord`
+| Refusal | Meaning | The window keeps |
+| --- | --- | --- |
+| `NonlexicalUnit` | a unit with no lexical character; the units still spell the recognized text | its timed spoken units, without restored punctuation |
+| `LexicalDrift` | the aligner's units spell different letters, digits or marks | the recognized text, untimed (`UntimedRecognition`), never the aligner's spelling |
+
+Both are logged with the recording window. Neither fails the file, and the
+transcript text is never replaced by the aligner's spelling.
+
+On success, `PunctuatedAlignment` holds one owned tuple of `AlignedWindowWord`
 values. It appends supported sentence/clause punctuation to the preceding unit
 and preserves the same immutable timing evidence. Quotes and arbitrary symbols
 are not restored. Do not return a separate spelling list and zip it onto times:
@@ -177,18 +225,22 @@ aligner, whose standalone fold needs every unit's position.
 ## Replay compatibility
 
 The ready standalone FA host reports a `QwenFaCacheIdentity`: model ID plus
-`QwenFaAdmissionRevision.UNIT_DEFECTS_UNTIMED_V2`. The wire name ends in
-`@unit-defects-untimed-v2`. Both raw and derived FA cache envelopes are admitted
-against this name. Under this revision a unit whose own span is unusable
-(non-finite, negative, reversed, or past its window's end) is admitted as
-`RejectedWindowTiming`: that unit is untimed with its defect kept and the
-unchanged report logged, and every other unit keeps its timing. Units that run
-backwards against each other still reject the window. The previous revision,
-`@bounded-unit-evidence-v1`, failed the whole window for one such unit, so its
-results cannot replay under this one. Earlier model-only namespaces cannot
-authorize replay under these timing rules either; the cached rows no longer contain the unit evidence
-needed to prove those rules retroactively. Existing cache bytes are retained.
-This changes replay compatibility without renaming the selected model.
+`QwenFaAdmissionRevision.TIMING_DEFECTS_UNTIMED_V3`. The wire name ends in
+`@timing-defects-untimed-v3`. Both raw and derived FA cache envelopes are
+admitted against this name. Under this revision no timing defect fails the
+file: a unit whose own span is unusable or whose time is missing is
+`RejectedWindowTiming`, and a window whose units run backwards against each
+other is `DisorderedWindowTiming`, as described above. Neither earlier revision
+replays under this one:
+
+- `@unit-defects-untimed-v2` failed the file for a backwards pair or a missing
+  time.
+- `@bounded-unit-evidence-v1` also failed it for one unusable unit.
+- Earlier model-only namespaces lack the unit evidence needed to prove these
+  rules retroactively.
+
+Existing cache bytes are retained. This changes replay compatibility without
+renaming the selected model.
 
 The shared identity fixture is consumed by the Python loader test and the
 Rust raw/derived replay test, including acceptance of current evidence. A

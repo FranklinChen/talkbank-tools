@@ -291,6 +291,25 @@ fn missing_words_keep_a_source_order_search_corridor_without_timing_authority() 
          its earliest heard token's end bounds the missing end (2026-11-03; it used to be the \
          same speaker's later turn, 480, since a backchannel was allowed to interleave)"
     );
+    let grouping = crate::chat_ops::fa::group_utterances(
+        &chat,
+        crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+        &recording,
+        &result.anchors,
+    );
+    let windows: Vec<_> = grouping
+        .groups
+        .iter()
+        .flat_map(|group| group.source_windows().unwrap())
+        .filter(|window| window.utterance == 1)
+        .collect();
+    assert_eq!(windows.len(), 1);
+    let window = serde_json::to_value(&windows[0]).unwrap();
+    assert_eq!(window["start_ms"], 200);
+    assert_eq!(window["end_ms"], 380);
+    assert_eq!(window["localization"]["kind"], "utr_order_corridor");
+    assert_eq!(window["localization"]["floor"]["utterance"], 0);
+    assert_eq!(window["localization"]["ceiling"]["utterance"], 2);
     let mut wrong_source = words;
     wrong_source[1].text = "different".to_owned();
     assert!(

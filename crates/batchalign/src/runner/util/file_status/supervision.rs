@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 
-use crate::api::{DisplayPath, JobId};
+use crate::api::DisplayPath;
 use crate::runner::job_scope::{RunContext, SpawnScope};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition};
 
@@ -114,7 +114,6 @@ where
 /// runner's coarse "force unfinished files to terminal state" fallback.
 pub(crate) async fn drain_supervised_file_tasks(
     sink: &dyn RunnerEventSink,
-    job_id: &JobId,
     cancel_token: &CancellationToken,
     tasks: Vec<SpawnedFileTask>,
 ) -> usize {
@@ -131,7 +130,6 @@ pub(crate) async fn drain_supervised_file_tasks(
             (Ok(FileTaskOutcome::StoppedByCancellation), _) => {
                 record_abnormal_file_task_exit(
                     sink,
-                    job_id,
                     task.filename.as_ref(),
                     task.role,
                     FileTaskExit::Cancelled,
@@ -143,7 +141,7 @@ pub(crate) async fn drain_supervised_file_tasks(
             (Err(join_error), false) => FileTaskExit::Panicked(join_error.to_string()),
         };
         abnormal_exits += 1;
-        record_abnormal_file_task_exit(sink, job_id, task.filename.as_ref(), task.role, exit).await;
+        record_abnormal_file_task_exit(sink, task.filename.as_ref(), task.role, exit).await;
     }
 
     abnormal_exits
@@ -171,7 +169,6 @@ pub(crate) async fn drain_supervised_file_tasks(
 /// next stage is published, so no late update lands after it.
 pub(crate) fn spawn_observed_progress_forwarder(
     sink: Arc<dyn RunnerEventSink>,
-    job_id: JobId,
     filename: String,
 ) -> (
     super::ProgressSender,
@@ -193,7 +190,6 @@ pub(crate) fn spawn_observed_progress_forwarder(
                     Some(update) => {
                         set_file_progress(
                             sink.as_ref(),
-                            &job_id,
                             &filename,
                             update.label,
                             update.current,
@@ -204,7 +200,7 @@ pub(crate) fn spawn_observed_progress_forwarder(
                     None => progress_open = false,
                 },
                 change = wait_rx.recv(), if waits_open => match change {
-                    Some(change) => sink.set_file_worker_wait(&job_id, &filename, change).await,
+                    Some(change) => sink.set_file_worker_wait(&filename, change).await,
                     None => waits_open = false,
                 },
             }
@@ -241,7 +237,6 @@ impl FileProgressForwarder {
 /// recorded as ended.
 pub(crate) async fn observing_file_waits<F: std::future::Future>(
     sink: &Arc<dyn RunnerEventSink>,
-    job_id: &JobId,
     filenames: impl IntoIterator<Item = String>,
     work: F,
 ) -> F::Output {
@@ -250,7 +245,7 @@ pub(crate) async fn observing_file_waits<F: std::future::Future>(
         .map(|filename| {
             // The work reports its own progress; only waits go through here.
             let (_progress, observer, forwarder) =
-                spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), filename);
+                spawn_observed_progress_forwarder(sink.clone(), filename);
             (observer, forwarder)
         })
         .unzip();
@@ -332,14 +327,12 @@ impl crate::worker::pool::checkout_wait::PoolWaitObserver for ForwardedWaits {
 /// ones whose task actually started.
 pub(crate) async fn record_file_cancelled_before_dispatch(
     sink: &dyn RunnerEventSink,
-    job_id: &JobId,
     filename: &str,
 ) {
     let finished_at = sink.now();
     let message = "dispatch cancelled before this file's task was ever started".to_owned();
 
     sink.finish_file_attempt(
-        job_id,
         filename,
         AttemptOutcome::Cancelled,
         Some(FailureCategory::Cancelled),
@@ -348,14 +341,8 @@ pub(crate) async fn record_file_cancelled_before_dispatch(
     )
     .await;
 
-    sink.mark_file_error(
-        job_id,
-        filename,
-        &message,
-        FailureCategory::Cancelled,
-        finished_at,
-    )
-    .await;
+    sink.mark_file_error(filename, &message, FailureCategory::Cancelled, finished_at)
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +363,6 @@ enum FileTaskExit {
 /// cancellation.
 async fn record_abnormal_file_task_exit(
     sink: &dyn RunnerEventSink,
-    job_id: &JobId,
     filename: &str,
     role: &str,
     exit: FileTaskExit,
@@ -396,7 +382,6 @@ async fn record_abnormal_file_task_exit(
     };
 
     sink.finish_file_attempt(
-        job_id,
         filename,
         outcome,
         Some(category),
@@ -405,6 +390,6 @@ async fn record_abnormal_file_task_exit(
     )
     .await;
 
-    sink.mark_file_error(job_id, filename, &message, category, finished_at)
+    sink.mark_file_error(filename, &message, category, finished_at)
         .await;
 }

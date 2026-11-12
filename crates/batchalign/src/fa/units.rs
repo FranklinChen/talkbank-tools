@@ -22,8 +22,10 @@
 //! ```mermaid
 //! flowchart LR
 //!     groups["groups (FaGroup)"] -->|"DispatchPlan::build"| plan["one PlannedGroup per group,<br/>its units by shape"]
-//!     plan -->|"UnitLedger::open"| ledger["per group: Reused, or<br/>one slot per request"]
-//!     ledger -->|"cache / worker"| ledger
+//!     plan -->|"UnitLedger::open"| ledger["per group: Reused, or<br/>one receiving slot per request"]
+//!     plan -->|"mint once with slot"| ticket["unique ReplyTicket"]
+//!     ticket -->|"cache hit, or prepared worker reply"| retained["consume ticket; complete its slot"]
+//!     retained --> ledger
 //!     ledger -->|"assemble"| timings["group timings, word order"]
 //!     timings --> inject["injection (unchanged)"]
 //! ```
@@ -34,11 +36,16 @@
 //! the pieces), and the ledger holds each group's resolution in the same
 //! shape: a group reused from `%wor` is `Reused` and has no request slots at
 //! all, and every request slot is paired with the unit it awaits. Assembly
-//! therefore walks pairs, never parallel arrays; the one lookup by ordinal is
-//! where a worker reply comes back, and it fails loudly if the reply names a
-//! request the ledger does not await.
+//! therefore walks pairs, never parallel arrays. Each request's unique ticket
+//! owns its receiving destination through cache lookup and inference. No free
+//! ledger/unit pair, ordinal lookup, or duplicate insertion is available.
+
+mod replies;
+pub(in crate::fa) use replies::ReplyTicket;
+use replies::{ReplyProgress, ReplySlot};
 
 mod inference;
+use inference::RetainUnitResults;
 
 use std::collections::HashSet;
 
@@ -54,11 +61,9 @@ use tracing::{info, warn};
 use super::preparation::{FaPreparationContext, PreparedFaPopulation};
 use super::transport::{FaInferencePlan, FaWorkerBatch, FaWorkerTransport, plan_fa_inference};
 use super::{
-    AdmittedCachedFaTimings, AdmittedFaCacheGroup, FaCacheUnitAdmission, FaServices,
-    incremental::collect_preserved_group_timings,
+    AdmittedFaCacheGroup, FaCacheUnitAdmission, incremental::collect_preserved_group_timings,
 };
 use crate::api::DurationMs;
-use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::CacheKey;
 use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::chat_ops::fa::resource_partition::{ResourcePart, ResourceUnavailable};
@@ -108,19 +113,6 @@ impl std::fmt::Display for UnitOrdinal {
     }
 }
 
-/// A piece's position within its anchored group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PieceOrdinal(usize);
-
-/// Which share of its group a request is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UnitRole {
-    /// A single group's one request, over all its words.
-    Whole,
-    /// One piece of an anchored group.
-    Piece(PieceOrdinal),
-}
-
 /// Source-owned request capability. A piece keeps context, owned output range
 /// and window together, so dispatch cannot combine independently chosen parts.
 #[derive(Debug, Clone, Copy)]
@@ -151,7 +143,6 @@ impl<'g> UnitRequest<'g> {
 pub(crate) struct DispatchUnit<'g> {
     ordinal: UnitOrdinal,
     group: GroupOrdinal,
-    role: UnitRole,
     request: UnitRequest<'g>,
     cache_key: CacheKey,
 }
@@ -164,7 +155,6 @@ impl<'g> DispatchUnit<'g> {
         Self::keyed(
             UnitOrdinal(0),
             GroupOrdinal(0),
-            UnitRole::Whole,
             UnitRequest::Whole(source.request()),
             &RequestKeying {
                 audio_identity: context.audio.audio_identity,
@@ -177,7 +167,6 @@ impl<'g> DispatchUnit<'g> {
     fn keyed(
         ordinal: UnitOrdinal,
         group: GroupOrdinal,
-        role: UnitRole,
         request: UnitRequest<'g>,
         key: &RequestKeying<'_>,
     ) -> Self {
@@ -197,7 +186,6 @@ impl<'g> DispatchUnit<'g> {
         Self {
             ordinal,
             group,
-            role,
             request,
             cache_key,
         }
@@ -310,16 +298,9 @@ fn plan_parts<'g>(
 ) -> PlannedUnits<'g> {
     PlannedUnits::Pieces(
         parts
-            .enumerate()
-            .map(|(position, part)| match part {
+            .map(|part| match part {
                 PartInput::Request(piece) => PlannedPart::Request(PlannedPiece {
-                    unit: DispatchUnit::keyed(
-                        mint(),
-                        group,
-                        UnitRole::Piece(PieceOrdinal(position)),
-                        UnitRequest::Piece(piece),
-                        key,
-                    ),
+                    unit: DispatchUnit::keyed(mint(), group, UnitRequest::Piece(piece), key),
                     first_word: piece.first_word(),
                     last_word: piece.last_word(),
                 }),
@@ -399,7 +380,6 @@ impl<'g> DispatchPlan<'g> {
                     GroupUnits::Whole(request) => PlannedUnits::Whole(DispatchUnit::keyed(
                         mint(),
                         ordinal,
-                        UnitRole::Whole,
                         UnitRequest::Whole(request),
                         &key,
                     )),
@@ -459,15 +439,12 @@ impl UnitResolution {
     }
 }
 
-/// One awaited request and its resolution, once it has one.
-type Slot<'p, 'g> = (&'p DispatchUnit<'g>, Option<UnitResolution>);
-
 /// How one group is being resolved, in the group's own shape.
 enum GroupResolution<'p, 'g> {
     /// Reused whole from `%wor`: no request is awaited.
     Reused(Vec<Option<WordTiming>>),
     /// A single group's one request.
-    Whole(Slot<'p, 'g>),
+    Whole(ReplySlot<'p, 'g>),
     /// An anchored group's pieces, each paired with its bounds.
     Pieces(Vec<PartResolution<'p, 'g>>),
 }
@@ -475,7 +452,7 @@ enum GroupResolution<'p, 'g> {
 /// An unavailable part has no reply slot and cannot receive a worker result.
 enum PartResolution<'p, 'g> {
     Request {
-        slot: Slot<'p, 'g>,
+        slot: ReplySlot<'p, 'g>,
         piece: &'p PlannedPiece<'g>,
     },
     Unavailable(&'p Unrequested<'g>),
@@ -488,29 +465,46 @@ pub(super) struct UnitLedger<'p, 'g> {
     groups: Vec<(&'p PlannedGroup<'g>, GroupResolution<'p, 'g>)>,
 }
 
+pub(super) struct OpenedLedger<'p, 'g> {
+    pub(super) ledger: UnitLedger<'p, 'g>,
+    pub(super) replies: Vec<ReplyTicket<'p>>,
+    progress: ReplyProgress,
+}
+
 impl<'p, 'g> UnitLedger<'p, 'g> {
-    /// Open the ledger, deciding `%wor` reuse per group: `reuse` returns a
-    /// group's preserved timings when the whole group may be reused.
-    fn open(
+    /// Decide whole-group reuse and mint each awaited slot with its only
+    /// completion ticket. Reused and unavailable populations mint none.
+    pub(super) fn open(
         plan: &'p DispatchPlan<'g>,
         mut reuse: impl FnMut(&FaGroup) -> Option<Vec<Option<WordTiming>>>,
-    ) -> Self {
+    ) -> OpenedLedger<'p, 'g> {
+        let progress = ReplyProgress::for_plan(plan);
+        let mut replies = Vec::new();
         let groups = plan
             .groups
             .iter()
             .map(|planned| {
                 let resolution = match reuse(planned.group) {
-                    Some(timings) => GroupResolution::Reused(timings),
+                    Some(timings) => {
+                        progress.reused(planned);
+                        GroupResolution::Reused(timings)
+                    }
                     None => match &planned.units {
-                        PlannedUnits::Whole(unit) => GroupResolution::Whole((unit, None)),
+                        PlannedUnits::Whole(unit) => {
+                            let (slot, reply) = ReplySlot::open(unit, progress.clone());
+                            replies.push(reply);
+                            GroupResolution::Whole(slot)
+                        }
                         PlannedUnits::Pieces(pieces) => GroupResolution::Pieces(
                             pieces
                                 .iter()
                                 .map(|part| match part {
-                                    PlannedPart::Request(piece) => PartResolution::Request {
-                                        slot: (&piece.unit, None),
-                                        piece,
-                                    },
+                                    PlannedPart::Request(piece) => {
+                                        let (slot, reply) =
+                                            ReplySlot::open(&piece.unit, progress.clone());
+                                        replies.push(reply);
+                                        PartResolution::Request { slot, piece }
+                                    }
                                     PlannedPart::Unavailable(piece) => {
                                         PartResolution::Unavailable(piece)
                                     }
@@ -522,7 +516,11 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 (planned, resolution)
             })
             .collect();
-        Self { groups }
+        OpenedLedger {
+            ledger: Self { groups },
+            replies,
+            progress,
+        }
     }
 
     /// How many requests belong to groups reused from `%wor`.
@@ -536,57 +534,6 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
             .sum()
     }
 
-    /// Every awaited request's slot, in plan order.
-    fn open_slots(&mut self) -> Vec<&mut Slot<'p, 'g>> {
-        let mut slots = Vec::new();
-        for (_, resolution) in &mut self.groups {
-            match resolution {
-                GroupResolution::Reused(_) => {}
-                GroupResolution::Whole(slot) => slots.push(slot),
-                GroupResolution::Pieces(pieces) => {
-                    slots.extend(pieces.iter_mut().filter_map(|part| match part {
-                        PartResolution::Request { slot, .. } => Some(slot),
-                        PartResolution::Unavailable(_) => None,
-                    }));
-                }
-            }
-        }
-        slots
-    }
-
-    /// Record a worker reply for `unit`. Refused, loudly, when the ledger
-    /// does not await that request: a reply for a reused group, for a shape
-    /// the group does not have, or from another file's plan.
-    fn record(
-        &mut self,
-        unit: &DispatchUnit<'_>,
-        resolution: UnitResolution,
-    ) -> Result<(), ServerError> {
-        let not_awaited = || {
-            ServerError::Validation(format!(
-                "FA reply for request {} (group {}) answers no awaited request",
-                unit.ordinal, unit.group
-            ))
-        };
-        let (_, group) = self.groups.get_mut(unit.group.0).ok_or_else(not_awaited)?;
-        let slot = match (group, unit.role) {
-            (GroupResolution::Whole((_, slot)), UnitRole::Whole) => slot,
-            (GroupResolution::Pieces(pieces), UnitRole::Piece(index)) => {
-                match pieces.get_mut(index.0).ok_or_else(not_awaited)? {
-                    PartResolution::Request {
-                        slot: (_, slot), ..
-                    } => slot,
-                    PartResolution::Unavailable(_) => return Err(not_awaited()),
-                }
-            }
-            (GroupResolution::Reused(_), UnitRole::Whole | UnitRole::Piece(_))
-            | (GroupResolution::Whole(_), UnitRole::Piece(_))
-            | (GroupResolution::Pieces(_), UnitRole::Whole) => return Err(not_awaited()),
-        };
-        *slot = Some(resolution);
-        Ok(())
-    }
-
     /// Turn every group's resolution into its timings, in word order, with
     /// its evidence. THE place units become groups.
     ///
@@ -596,7 +543,7 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
     /// must have been resolved, and must have answered for exactly its own
     /// words, since injection walks the group's words with one cursor: a
     /// short or missing piece would shift every timing after it.
-    fn assemble(self, context: &str) -> Result<Vec<ResolvedGroup>, ServerError> {
+    pub(super) fn assemble(self, context: &str) -> Result<Vec<ResolvedGroup>, ServerError> {
         let mut missing: Vec<UnitOrdinal> = Vec::new();
         let mut resolved = Vec::with_capacity(self.groups.len());
         for (planned, resolution) in self.groups {
@@ -630,11 +577,12 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                     };
                     (timings, span)
                 }
-                GroupResolution::Whole((unit, None)) => {
-                    missing.push(unit.ordinal);
-                    continue;
-                }
-                GroupResolution::Whole((unit, Some(answer))) => {
+                GroupResolution::Whole(slot) => {
+                    let (unit, answer) = slot.receive();
+                    let Some(answer) = answer else {
+                        missing.push(unit.ordinal);
+                        continue;
+                    };
                     let span = single_span(unit, answer.source);
                     (answered(unit, answer, context)?, span)
                 }
@@ -652,16 +600,16 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                                     FaEvidenceSourceTrace::Unaligned,
                                 ));
                             }
-                            PartResolution::Request {
-                                slot: (unit, answer),
-                                piece,
-                            } => match answer {
-                                None => missing.push(unit.ordinal),
-                                Some(answer) => {
-                                    traces.push(piece_trace(piece, answer.source));
-                                    timings.extend(answered(unit, answer, context)?);
+                            PartResolution::Request { slot, piece } => {
+                                let (unit, answer) = slot.receive();
+                                match answer {
+                                    None => missing.push(unit.ordinal),
+                                    Some(answer) => {
+                                        traces.push(piece_trace(piece, answer.source));
+                                        timings.extend(answered(unit, answer, context)?);
+                                    }
                                 }
-                            },
+                            }
                         }
                     }
                     // A group with an unresolved request has nothing to
@@ -680,6 +628,7 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 }
             };
             resolved.push(ResolvedGroup {
+                group: planned.group.clone(),
                 contents: group_contents(planned.group, span),
                 timings,
             });
@@ -790,6 +739,7 @@ fn group_contents(group: &FaGroup, span: FaGroupSpanTrace) -> FaGroupContents {
         utterances: group.utterance_indices(),
         words: group.words().map(|w| w.text.clone()).collect(),
         word_ids: group.words().map(|word| word.stable_id()).collect(),
+        source_windows: group.source_windows(),
         span,
     }
 }
@@ -797,6 +747,7 @@ fn group_contents(group: &FaGroup, span: FaGroupSpanTrace) -> FaGroupContents {
 /// One group's assembled timings and its evidence.
 #[derive(Debug)]
 pub(super) struct ResolvedGroup {
+    group: FaGroup,
     timings: Vec<Option<WordTiming>>,
     contents: FaGroupContents,
 }
@@ -808,36 +759,40 @@ pub(super) struct ResolvedGroups {
     pub(super) fallback_events: Vec<FaFallbackEventTrace>,
 }
 
+struct ProjectionParts {
+    groups: Vec<FaGroup>,
+    timings: Vec<Vec<Option<WordTiming>>>,
+    evidence: Vec<FaGroupEvidence>,
+    fallback_events: Vec<FaFallbackEventTrace>,
+}
+
 impl ResolvedGroups {
     /// Split into the timings injection consumes (one list per group, in
     /// group order) and the evidence the trace records, whose pre-injection
     /// snapshot is taken from those very timings.
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        Vec<Vec<Option<WordTiming>>>,
-        Vec<FaGroupEvidence>,
-        Vec<FaFallbackEventTrace>,
-    ) {
-        let (timings, evidence) = self
-            .groups
-            .into_iter()
-            .map(|group| {
-                let pre_injection_timings = group
-                    .timings
-                    .iter()
-                    .map(|timing| timing.as_ref().map(TimingTrace::from_word_timing))
-                    .collect();
-                (
-                    group.timings,
-                    FaGroupEvidence {
-                        group: group.contents,
-                        pre_injection_timings,
-                    },
-                )
-            })
-            .unzip();
-        (timings, evidence, self.fallback_events)
+    fn into_parts(self) -> ProjectionParts {
+        let mut groups = Vec::with_capacity(self.groups.len());
+        let mut timings = Vec::with_capacity(self.groups.len());
+        let mut evidence = Vec::with_capacity(self.groups.len());
+        for resolved in self.groups {
+            let pre_injection_timings = resolved
+                .timings
+                .iter()
+                .map(|timing| timing.as_ref().map(TimingTrace::from_word_timing))
+                .collect();
+            groups.push(resolved.group);
+            timings.push(resolved.timings);
+            evidence.push(FaGroupEvidence {
+                group: resolved.contents,
+                pre_injection_timings,
+            });
+        }
+        ProjectionParts {
+            groups,
+            timings,
+            evidence,
+            fallback_events: self.fallback_events,
+        }
     }
 }
 
@@ -850,6 +805,7 @@ pub(super) struct FaDispatchInputs<'a, 'document> {
     /// Utterances whose existing `%wor` timing may be reused; a group is
     /// reused only when every one of its utterances is in this set.
     pub(super) reusable_utterances: &'document HashSet<usize>,
+    pub(super) recovery: &'a [std::sync::Arc<super::input::RetainedUtrPass>],
     /// Progress sink.
     pub(super) progress: Option<&'document ProgressSender>,
     /// Which path is resolving, for errors and logs.
@@ -858,9 +814,9 @@ pub(super) struct FaDispatchInputs<'a, 'document> {
 
 /// Source geometry cannot be paired with another population's timing arrays.
 pub(super) struct ResolvedFaPopulation<'a> {
-    groups: Vec<FaGroup>,
     resolved: ResolvedGroups,
     retry: super::supplied_retry::FaRetryInputs<'a>,
+    recovery: &'a [std::sync::Arc<super::input::RetainedUtrPass>],
 }
 
 pub(super) struct InjectedFaPopulation<'a> {
@@ -868,6 +824,7 @@ pub(super) struct InjectedFaPopulation<'a> {
     pub(super) evidence: Vec<FaGroupEvidence>,
     pub(super) fallback_events: Vec<FaFallbackEventTrace>,
     pub(super) retry: super::supplied_retry::FaRetryInputs<'a>,
+    pub(super) recovery: Vec<std::sync::Arc<super::input::RetainedUtrPass>>,
 }
 
 impl<'a> ResolvedFaPopulation<'a> {
@@ -877,13 +834,14 @@ impl<'a> ResolvedFaPopulation<'a> {
         projection: crate::chat_ops::fa::FaProjection,
         write_wor: bool,
     ) -> Result<InjectedFaPopulation<'a>, ServerError> {
-        let (timings, evidence, fallback_events) = self.resolved.into_parts();
+        let ProjectionParts {
+            groups,
+            timings,
+            evidence,
+            fallback_events,
+        } = self.resolved.into_parts();
         let applied = crate::chat_ops::fa::apply_fa_results_with_projection_policy(
-            chat,
-            &self.groups,
-            &timings,
-            projection,
-            write_wor,
+            chat, &groups, &timings, projection, write_wor,
         )
         .map_err(super::kept_bullets_failed)?;
         Ok(InjectedFaPopulation {
@@ -891,6 +849,7 @@ impl<'a> ResolvedFaPopulation<'a> {
             evidence,
             fallback_events,
             retry: self.retry,
+            recovery: self.recovery.to_vec(),
         })
     }
 }
@@ -905,6 +864,7 @@ pub(super) async fn resolve_group_timings<'a>(
         population,
         chat_file,
         reusable_utterances,
+        recovery,
         progress,
         context,
     } = inputs;
@@ -942,7 +902,11 @@ pub(super) async fn resolve_group_timings<'a>(
     // Tier 1: a group whose every utterance already carries clean `%wor`
     // timing is reused whole. Group-level on purpose: reuse reads whole
     // utterances back, which is what a group is made of.
-    let mut ledger = UnitLedger::open(&plan, |group| {
+    let OpenedLedger {
+        ledger,
+        replies,
+        progress: reply_progress,
+    } = UnitLedger::open(&plan, |group| {
         match group.is_reusable_from(reusable_utterances) {
             true => collect_preserved_group_timings(chat_file, group),
             false => None,
@@ -951,16 +915,16 @@ pub(super) async fn resolve_group_timings<'a>(
     let reused_units = ledger.reused_units();
 
     // Tiers 2 and 3: admitted cache evidence for every awaited request.
-    let mut slots = ledger.open_slots();
-    let key_strings: Vec<String> = slots
+    let key_strings: Vec<String> = replies
         .iter()
-        .filter(|(unit, _)| {
+        .map(ReplyTicket::unit)
+        .filter(|unit| {
             matches!(
                 candidate_cache.state(unit),
                 cache::CandidateCacheState::Unexamined
             )
         })
-        .map(|(unit, _)| unit.cache_key.as_str().to_owned())
+        .map(|unit| unit.cache_key.as_str().to_owned())
         .collect();
     let (cached, cached_raw) = match fa_params.cache_policy {
         crate::params::CachePolicy::SkipCache => (
@@ -968,13 +932,14 @@ pub(super) async fn resolve_group_timings<'a>(
             std::collections::HashMap::new(),
         ),
         crate::params::CachePolicy::UseCache | crate::params::CachePolicy::RequireCache => {
-            cache::read_values(&key_strings, services).await
+            super::cache_storage::read_values(&key_strings, services).await
         }
     };
 
-    let mut misses: Vec<&DispatchUnit<'_>> = Vec::new();
+    let mut misses = Vec::new();
     let mut fallback_events = Vec::new();
-    for (unit, slot) in slots.iter_mut().map(|slot| (slot.0, &mut slot.1)) {
+    for reply in replies {
+        let unit = reply.unit();
         let answer = match candidate_cache.state(unit) {
             cache::CandidateCacheState::Admitted(answer) => Some(answer.clone()),
             cache::CandidateCacheState::Miss => None,
@@ -989,14 +954,13 @@ pub(super) async fn resolve_group_timings<'a>(
             }
         };
         match answer {
-            Some(answer) => *slot = Some(answer),
-            None => misses.push(unit),
+            Some(answer) => reply.cached(answer)?,
+            None => misses.push(reply),
         }
     }
-    drop(slots);
 
     {
-        let sink = ledger.retaining(services, &mut fallback_events, progress);
+        let sink = RetainUnitResults::new(reply_progress, services, &mut fallback_events, progress);
         let resolved_without_inference = sink.completed();
         info!(
             context,
@@ -1043,62 +1007,14 @@ pub(super) async fn resolve_group_timings<'a>(
     };
     drop(plan);
     Ok(ResolvedFaPopulation {
-        groups,
         resolved,
+        recovery,
         retry: super::supplied_retry::FaRetryInputs {
             preparation,
             retry,
             cached: candidate_cache,
         },
     })
-}
-
-/// Write one request's direct evidence to both cache layers. Failures are
-/// logged and non-fatal: the timings are valid for this run either way.
-pub(super) async fn store_unit_evidence(
-    services: FaServices<'_>,
-    key: &str,
-    timings: &[Option<WordTiming>],
-    raw_evidence: super::raw_evidence::ReplayableFaRawEvidence,
-) {
-    match AdmittedCachedFaTimings::encode_from_raw(timings.to_vec(), &raw_evidence) {
-        Ok(cache_data) => {
-            if let Err(error) = services
-                .pipeline
-                .cache
-                .put_batch(
-                    &[(key.to_owned(), cache_data)],
-                    FORCED_ALIGNMENT,
-                    services.cache_namespace,
-                )
-                .await
-            {
-                warn!(error = %error, "Failed to cache derived FA evidence (non-fatal)");
-            }
-        }
-        Err(error) => {
-            warn!(error = %error, "Failed to encode derived FA evidence (non-fatal)");
-        }
-    }
-    match serde_json::to_value(raw_evidence) {
-        Ok(cache_data) => {
-            if let Err(error) = services
-                .pipeline
-                .cache
-                .put_batch(
-                    &[(key.to_owned(), cache_data)],
-                    FORCED_ALIGNMENT_RAW_EVIDENCE,
-                    services.cache_namespace,
-                )
-                .await
-            {
-                warn!(error = %error, "Failed to cache raw FA evidence (non-fatal)");
-            }
-        }
-        Err(error) => {
-            warn!(error = %error, "Failed to serialize raw FA evidence (non-fatal)");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1187,12 +1103,32 @@ mod tests {
     fn split_parts(
         resolved: Vec<ResolvedGroup>,
     ) -> (Vec<Vec<Option<WordTiming>>>, Vec<FaGroupEvidence>) {
-        let (timings, evidence, _) = ResolvedGroups {
+        let ProjectionParts {
+            timings, evidence, ..
+        } = ResolvedGroups {
             groups: resolved,
             fallback_events: Vec::new(),
         }
         .into_parts();
         (timings, evidence)
+    }
+
+    #[test]
+    fn source_window_trace_does_not_invent_provenance_for_older_groups() {
+        let legacy = serde_json::json!({
+            "audio_start_ms": 0,
+            "audio_end_ms": 1000,
+            "utterance_indices": [0],
+            "words": ["hello"],
+            "word_ids": ["u0:w0"],
+            "span": {
+                "kind": "single",
+                "source": "inference",
+                "cache_key": "key"
+            }
+        });
+        let trace: crate::types::traces::FaGroupTrace = serde_json::from_value(legacy).unwrap();
+        assert!(trace.source_windows.is_none());
     }
 
     /// Single and anchored groups side by side: the plan lays out one unit
@@ -1224,7 +1160,16 @@ mod tests {
         assert_eq!(shape, vec![(0, 0, 2), (1, 1, 2), (2, 1, 2), (3, 1, 1)]);
 
         // Resolve out of order, as cache hits and inference interleave.
-        let mut ledger = UnitLedger::open(&plan, |_| None);
+        let OpenedLedger {
+            ledger,
+            replies,
+            progress,
+        } = UnitLedger::open(&plan, |_| None);
+        assert_eq!((progress.completed(), progress.total()), (0, 4));
+        let mut tickets: std::collections::HashMap<_, _> = replies
+            .into_iter()
+            .map(|reply| (reply.unit().ordinal().index(), reply))
+            .collect();
         let replies = [
             (
                 3,
@@ -1248,11 +1193,14 @@ mod tests {
             ),
         ];
         for (index, timings, source) in replies {
-            ledger
-                .record(units[index], answer(timings, source))
-                .expect("every request is awaited");
+            tickets
+                .remove(&index)
+                .expect("one completion right per request")
+                .cached(answer(timings, source))
+                .expect("receiving ledger remains owned");
         }
 
+        assert_eq!((progress.completed(), progress.total()), (4, 4));
         let (timings, evidence) = split_parts(
             ledger
                 .assemble("test")
@@ -1313,15 +1261,18 @@ mod tests {
     fn assemble_refuses_a_group_with_an_unresolved_piece() {
         let groups = vec![anchored_group()];
         let plan = plan_for(&groups);
-        let units: Vec<&DispatchUnit<'_>> = plan.units().collect();
-        let mut ledger = UnitLedger::open(&plan, |_| None);
-        for (index, timings) in [(0, vec![None, None]), (2, vec![None])] {
-            ledger
-                .record(
-                    units[index],
-                    answer(timings, FaEvidenceSourceTrace::Unaligned),
-                )
-                .expect("awaited");
+        let OpenedLedger {
+            ledger, replies, ..
+        } = UnitLedger::open(&plan, |_| None);
+        for reply in replies {
+            if reply.unit().ordinal().index() == 1 {
+                drop(reply); // An actual abandoned response, not a foreign or duplicate write.
+            } else {
+                let timings = vec![None; reply.unit().words().len()];
+                reply
+                    .cached(answer(timings, FaEvidenceSourceTrace::Unaligned))
+                    .expect("receiving ledger remains owned");
+            }
         }
         let error = ledger
             .assemble("test")
@@ -1339,12 +1290,13 @@ mod tests {
     fn assemble_refuses_a_piece_answering_for_other_words() {
         let groups = vec![anchored_group()];
         let plan = plan_for(&groups);
-        let units: Vec<&DispatchUnit<'_>> = plan.units().collect();
-        let mut ledger = UnitLedger::open(&plan, |_| None);
-        for unit in &units {
-            ledger
-                .record(unit, answer(vec![None], FaEvidenceSourceTrace::Cache))
-                .expect("awaited");
+        let OpenedLedger {
+            ledger, replies, ..
+        } = UnitLedger::open(&plan, |_| None);
+        for reply in replies {
+            reply
+                .cached(answer(vec![None], FaEvidenceSourceTrace::Cache))
+                .expect("receiving ledger remains owned");
         }
         let error = ledger
             .assemble("test")
@@ -1370,23 +1322,16 @@ mod tests {
     }
 
     /// A group reused from `%wor` takes its timings whole, records every one
-    /// of its requests as reused, and awaits no reply: one is refused.
+    /// of its requests as reused, and mints no reply capability.
     #[test]
     fn a_reused_group_takes_its_timings_whole_and_awaits_no_reply() {
         let groups = vec![anchored_group()];
         let plan = plan_for(&groups);
         let whole = vec![timing(1, 2), None, None, None, timing(3, 4)];
-        let mut ledger = UnitLedger::open(&plan, |_| Some(whole.clone()));
-        let stray = plan.units().next().expect("the group has requests");
-        assert!(
-            ledger
-                .record(
-                    stray,
-                    answer(vec![None, None], FaEvidenceSourceTrace::Cache)
-                )
-                .is_err(),
-            "a reused group holds no request slot"
-        );
+        let OpenedLedger {
+            ledger, replies, ..
+        } = UnitLedger::open(&plan, |_| Some(whole.clone()));
+        assert!(replies.is_empty(), "reused groups mint no completion right");
         let (timings, evidence) =
             split_parts(ledger.assemble("test").expect("reuse covers the group"));
         assert_eq!(timings, vec![whole]);
@@ -1425,25 +1370,27 @@ mod tests {
         let plan = plan_for(&groups);
         let units: Vec<_> = plan.units().collect();
         assert_eq!(units.len(), 2, "no request for original word 2");
-        let mut ledger = UnitLedger::open(&plan, |_| None);
-        assert_eq!(ledger.open_slots().len(), 2);
-        ledger
-            .record(
-                units[1],
-                answer(
-                    vec![timing(31_000, 32_000), timing(33_000, 34_000)],
-                    FaEvidenceSourceTrace::Cache,
-                ),
-            )
+        let OpenedLedger {
+            ledger,
+            mut replies,
+            ..
+        } = UnitLedger::open(&plan, |_| None);
+        assert_eq!(replies.len(), 2);
+        replies
+            .pop()
+            .unwrap()
+            .cached(answer(
+                vec![timing(31_000, 32_000), timing(33_000, 34_000)],
+                FaEvidenceSourceTrace::Cache,
+            ))
             .expect("suffix reply");
-        ledger
-            .record(
-                units[0],
-                answer(
-                    vec![timing(100, 200), timing(300, 400)],
-                    FaEvidenceSourceTrace::Cache,
-                ),
-            )
+        replies
+            .pop()
+            .unwrap()
+            .cached(answer(
+                vec![timing(100, 200), timing(300, 400)],
+                FaEvidenceSourceTrace::Cache,
+            ))
             .expect("prefix reply");
         let (timings, evidence) =
             split_parts(ledger.assemble("partial").expect("all requests answered"));
@@ -1480,8 +1427,12 @@ mod tests {
         // Reuse remains whole-group evidence, including timing on the range
         // that this run could not freshly request. No request slot is opened.
         let whole = vec![timing(100, 200); 5];
-        let mut reused = UnitLedger::open(&plan, |_| Some(whole.clone()));
-        assert!(reused.open_slots().is_empty());
+        let OpenedLedger {
+            ledger: reused,
+            replies,
+            ..
+        } = UnitLedger::open(&plan, |_| Some(whole.clone()));
+        assert!(replies.is_empty());
         let (timings, evidence) = split_parts(reused.assemble("reuse").expect("retained evidence"));
         assert_eq!(timings[0], whole);
         let FaGroupSpanTrace::Anchored { unrequested, .. } = &evidence[0].group.span else {

@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:37 EST
+**Last updated:** 2026-11-11 23:05 EST
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -86,8 +86,11 @@ On the app side, the current execution split is now:
 - `ServerBackend` / `LocalServerBackend`, route-facing server control-plane
   seam over persisted jobs, orchestration, event subscription, traces, and
   runtime shutdown
-- `prepare_workers*()` vs `prepare_direct_workers()`: explicit separation
-  between server worker bootstrap and direct local worker bootstrap
+- `prepare_workers(host, pool_config, discovery)`: the one worker bootstrap,
+  for the server (`RegistryDiscovery::Adopt`) and direct local execution
+  (`RegistryDiscovery::Ignore`) alike. The `PreparedWorkers` it returns carry
+  their host snapshot, and every app or direct host built over them takes its
+  host from them (`PreparedWorkers::host_for`).
 
 ### Align / FA host flow
 
@@ -113,7 +116,7 @@ flowchart TD
     prep["prepare_paths_submission()\nsource_paths + output_paths\nmedia_mapping + media_subdir"]
 
     direct["dispatch_direct_mode()"]
-    direct_workers["prepare_direct_workers()"]
+    direct_workers["prepare_workers(host, ..., Ignore)"]
     direct_host["DirectHost::submit_submission()\nDirectHost::run_job()"]
 
     server["dispatch_single_server()"]

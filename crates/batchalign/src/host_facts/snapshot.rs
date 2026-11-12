@@ -109,7 +109,18 @@ impl HostSnapshot {
     /// to both the app and its worker pool: unrelated test apps then cannot
     /// consume the capacity required to reach a particular boundary.
     pub fn for_tests_in(config: &ServerConfig, ledger_path: std::path::PathBuf) -> Self {
-        let facts = super::test_helpers::laptop_16gb();
+        Self::declared_in(config, super::test_helpers::laptop_16gb(), ledger_path)
+    }
+
+    /// A stated machine (one of [`super::test_helpers`]' fact sets) with a
+    /// fixture-owned ledger, for a test whose boundary depends on what the
+    /// host can hold: a model that genuinely needs more than the default
+    /// laptop names the machine it needs instead of inflating that laptop.
+    pub fn declared_in(
+        config: &ServerConfig,
+        facts: HostFacts,
+        ledger_path: std::path::PathBuf,
+    ) -> Self {
         let readings = HostReadings::Declared(DeclaredHost::from_facts(&facts));
         let ledger = HostMemoryRuntimeConfig::from_sources(
             ledger_path,
@@ -117,6 +128,21 @@ impl HostSnapshot {
             config.max_concurrent_worker_startups,
         );
         Self::resolve(config, facts, readings, ledger)
+    }
+
+    /// This machine, as `config` resolves it: the same facts, readings and
+    /// ledger file, with the configuration's knobs, reserve and startup
+    /// limit. An app built over prepared workers is resolved this way from
+    /// its own configuration, so its store judges by the configuration it
+    /// runs with; [`PreparedWorkers::host_for`](crate::PreparedWorkers::host_for)
+    /// refuses one whose runtime half differs from the workers'.
+    pub(crate) fn reconfigured(&self, config: &ServerConfig) -> Self {
+        let ledger = HostMemoryRuntimeConfig::from_sources(
+            self.ledger.coordinator_path.clone(),
+            config.resolved_memory_gate_mb(),
+            config.max_concurrent_worker_startups,
+        );
+        Self::resolve(config, self.facts.clone(), self.readings, ledger)
     }
 
     /// The facts as read.

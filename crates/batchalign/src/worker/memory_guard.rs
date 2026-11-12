@@ -33,9 +33,7 @@ use std::sync::LazyLock;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use crate::host_memory::{
-    HostMemoryError, HostMemoryLease, QueuedLeaseFailure, WorkerLeaseRequest,
-};
+use crate::host_memory::{HostMemoryLease, QueuedLeaseFailure, WorkerLeaseRequest};
 
 use super::handle::WorkerConfig;
 
@@ -69,24 +67,12 @@ pub enum MemoryGuardError {
 
     /// The reservation is larger than this host can ever grant with its
     /// reserve kept free: no amount of waiting fits it.
-    #[error(
-        "{label} needs {requested_mb} MB of host memory, more than this host can ever grant: \
-         {total_mb} MB total, {reserve_mb} MB kept free (memory_gate_mb)"
-    )]
-    ExceedsHost {
-        /// What the reservation was for (the ledger label).
-        label: String,
-        /// What it asked for.
-        requested_mb: u64,
-        /// The host's reserve.
-        reserve_mb: u64,
-        /// The host's total memory.
-        total_mb: u64,
-    },
+    #[error(transparent)]
+    ExceedsHost(crate::host_memory::NeverFits),
 
     /// The coordinator could not read the host or use its ledger.
     #[error("host memory coordinator could not decide a reservation: {0}")]
-    LedgerUnusable(#[source] HostMemoryError),
+    LedgerUnusable(#[source] crate::host_memory::UnusableHost),
 
     /// The blocking task taking the reservation panicked or was cancelled.
     #[error("host memory reservation task did not finish: {0}")]
@@ -94,33 +80,15 @@ pub enum MemoryGuardError {
 }
 
 impl From<QueuedLeaseFailure> for MemoryGuardError {
-    /// A queued wait stops only on a refusal no waiting clears.
+    /// A queued wait stops only on a final refusal, its own type: neither a
+    /// congestion nor a timeout can arrive here.
     fn from(failure: QueuedLeaseFailure) -> Self {
+        use crate::host_memory::FinalRefusal;
         match failure {
-            QueuedLeaseFailure::Refused(HostMemoryError::CapacityRejected {
-                label,
-                requested_mb,
-                reserve_mb,
-                total_mb,
-                ..
-            }) => Self::ExceedsHost {
-                label,
-                requested_mb,
-                reserve_mb,
-                total_mb,
-            },
-            // The rest a queued wait stops on: the host or the ledger cannot
-            // be read or written. (A busy slot or test lock is retried and a
-            // timeout belongs to bounded waits, so neither reaches here; they
-            // are named, not wildcarded, so a new refusal must decide.)
-            QueuedLeaseFailure::Refused(
-                error @ (HostMemoryError::Unreadable(_)
-                | HostMemoryError::Io { .. }
-                | HostMemoryError::CorruptLedger { .. }
-                | HostMemoryError::StartupSlotsBusy { .. }
-                | HostMemoryError::MlTestLockBusy { .. }
-                | HostMemoryError::TimedOut { .. }),
-            ) => Self::LedgerUnusable(error),
+            QueuedLeaseFailure::Refused(FinalRefusal::NeverFits(never)) => Self::ExceedsHost(never),
+            QueuedLeaseFailure::Refused(FinalRefusal::Unusable(unusable)) => {
+                Self::LedgerUnusable(unusable)
+            }
             QueuedLeaseFailure::AttemptDidNotFinish(join) => Self::ReservationTaskFailed(join),
         }
     }
@@ -244,10 +212,12 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(MemoryGuardError::ExceedsHost {
-                    reserve_mb: 1_000_000_000,
-                    ..
-                })
+                Err(MemoryGuardError::ExceedsHost(
+                    crate::host_memory::NeverFits {
+                        reserve_mb: 1_000_000_000,
+                        ..
+                    }
+                ))
             ),
             "expected a refusal no waiting clears"
         );

@@ -79,7 +79,7 @@ def native_report(end_class: int) -> PairedWindowAlignment:
     )
 
 
-def test_native_trace_survives_warning_level_and_rejection(
+def test_native_trace_survives_warning_level_when_a_unit_is_untimed(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """An out-of-window unit is untimed, and the unchanged report, native
@@ -98,7 +98,7 @@ def test_native_trace_survives_warning_level_and_rejection(
     assert payload["window_duration_s"] == 1.0
 
 
-def test_valid_native_alignment_does_not_emit_a_rejection_trace(
+def test_valid_native_alignment_does_not_emit_an_untimed_trace(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING):

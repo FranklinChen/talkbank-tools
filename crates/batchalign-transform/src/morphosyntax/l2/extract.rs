@@ -483,8 +483,7 @@ mod tests {
             talkbank_model::DeclaredLanguagesRef::new(&[eng.clone(), spa])
                 .expect("nonempty fixture language context"),
             MultilingualPolicy::ProcessAll,
-        )
-        .expect("the run walk agrees with extraction");
+        );
         let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
         inject_results(
             &parser,

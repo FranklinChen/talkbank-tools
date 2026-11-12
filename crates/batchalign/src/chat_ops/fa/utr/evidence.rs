@@ -8,10 +8,10 @@ use batchalign_transform::decisions::{DecisionRecord, LineIdx};
 
 use super::anchors::AnchorIndex;
 
-/// Result summary from UTR injection.
+/// Summary of the private UTR candidate projection and its retained evidence.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UtrResult {
-    /// Utterances that received timing from ASR tokens.
+    /// Untimed utterances that received a candidate timing from ASR tokens.
     pub(super) injected: usize,
     /// Already-timed utterances left unchanged.
     pub(super) skipped: usize,
@@ -69,7 +69,7 @@ impl UtrResult {
         }
     }
 
-    /// Number of utterances that received UTR timing.
+    /// Number of untimed utterances given candidate timing by the private UTR projection.
     pub fn injected(&self) -> usize {
         self.injected
     }

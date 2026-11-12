@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{JobId, MachineTime};
+use crate::api::MachineTime;
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::{
     AttemptFinishRecord, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
@@ -29,22 +29,15 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     /// which only the store's clock produces, so a caller cannot record an
     /// event at a time it chose.
     fn now(&self) -> crate::store::EventTime;
-    async fn mark_file_processing(
-        &self,
-        job_id: &JobId,
-        filename: &str,
-        started_at: crate::store::EventTime,
-    );
+    async fn mark_file_processing(&self, filename: &str, started_at: crate::store::EventTime);
     async fn mark_file_done(
         &self,
-        job_id: &JobId,
         filename: &str,
         finished_at: crate::store::EventTime,
         completion: FileCompletion,
     );
     async fn mark_file_error(
         &self,
-        job_id: &JobId,
         filename: &str,
         error: &str,
         category: FailureCategory,
@@ -52,14 +45,12 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     );
     async fn start_file_attempt(
         &self,
-        job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
         started_at: crate::store::EventTime,
     );
     async fn finish_file_attempt(
         &self,
-        job_id: &JobId,
         filename: &str,
         outcome: AttemptOutcome,
         failure_category: Option<FailureCategory>,
@@ -68,17 +59,15 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     );
     async fn mark_file_retry_pending(
         &self,
-        job_id: &JobId,
         filename: &str,
         retry_at: MachineTime,
         category: FailureCategory,
         message: &str,
         finished_at: crate::store::EventTime,
     );
-    async fn clear_file_retry_state(&self, job_id: &JobId, filename: &str);
+    async fn clear_file_retry_state(&self, filename: &str);
     async fn set_file_progress(
         &self,
-        job_id: &JobId,
         filename: &str,
         stage: FileStage,
         current: Option<i64>,
@@ -87,35 +76,53 @@ pub(crate) trait RunnerEventSink: Send + Sync {
     /// One of the file's worker checkouts started or stopped waiting on a
     /// saturated pool. A fact of its own, beside the reported stage: the
     /// file shows "waiting for a worker" while any wait is open.
-    async fn set_file_worker_wait(
-        &self,
-        job_id: &JobId,
-        filename: &str,
-        change: crate::store::WorkerWaitChange,
-    );
-    /// Fail the whole job, stamped now.
-    async fn fail_job(&self, job_id: &JobId, error: &str);
-    async fn mark_job_running(&self, job_id: &JobId);
-    async fn record_job_worker_count(&self, job_id: &JobId, worker_count: usize);
-    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: MachineTime);
+    async fn set_file_worker_wait(&self, filename: &str, change: crate::store::WorkerWaitChange);
+    /// The run has its memory and starts processing: the job is running.
+    async fn mark_job_running(&self);
+    async fn record_job_worker_count(&self, worker_count: usize);
+    async fn requeue_job_after_memory_gate(&self, retry_at: MachineTime);
     async fn bump_deferred_work_units(&self);
     async fn bump_memory_gate_aborts(&self);
 }
 
-/// Store-backed implementation of the runner event sink.
+/// Store-backed implementation of the runner event sink, bound to one run.
+///
+/// Every write it makes carries its [`RunBinding`](crate::store::RunBinding),
+/// so a caller names neither the job nor the run, and the store
+/// refuses a write from a run that is no longer the job's current one. So a
+/// task of a cancelled or restarted run, still finishing a step when it was
+/// stopped, cannot write onto the files of the run that replaced it.
 #[derive(Clone)]
 pub(crate) struct StoreRunnerEventSink {
     store: Arc<JobStore>,
+    run: crate::store::RunBinding,
 }
 
 impl StoreRunnerEventSink {
-    /// Wrap one concrete store as the current runner event sink.
+    /// The sink of the run that `claim` owns: the only production route.
     ///
-    /// Named `wrap` rather than `new` because the return type is the trait
-    /// object `Arc<dyn RunnerEventSink>`, not `Self`, clippy's
-    /// `new_ret_no_self` rule prefers the non-`new` name for such factories.
-    pub(crate) fn wrap(store: Arc<JobStore>) -> Arc<dyn RunnerEventSink> {
-        Arc::new(Self { store })
+    /// Not `new`: the return type is the trait object, and clippy's
+    /// `new_ret_no_self` rule prefers another name for such factories.
+    pub(crate) fn for_run(
+        store: Arc<JobStore>,
+        claim: &crate::store::RunnerClaim,
+    ) -> Arc<dyn RunnerEventSink> {
+        Arc::new(Self {
+            store,
+            run: claim.binding().clone(),
+        })
+    }
+
+    /// A sink for a test job in its first run, with no claim to bind to.
+    #[cfg(test)]
+    pub(crate) fn wrap(
+        store: Arc<JobStore>,
+        job_id: &crate::api::JobId,
+    ) -> Arc<dyn RunnerEventSink> {
+        Arc::new(Self {
+            store,
+            run: crate::store::RunBinding::first_run_of(job_id.clone()),
+        })
     }
 }
 
@@ -125,32 +132,25 @@ impl RunnerEventSink for StoreRunnerEventSink {
         self.store.event_time()
     }
 
-    async fn mark_file_processing(
-        &self,
-        job_id: &JobId,
-        filename: &str,
-        started_at: crate::store::EventTime,
-    ) {
+    async fn mark_file_processing(&self, filename: &str, started_at: crate::store::EventTime) {
         self.store
-            .mark_file_processing(job_id, filename, started_at)
+            .mark_file_processing(&self.run, filename, started_at)
             .await;
     }
 
     async fn mark_file_done(
         &self,
-        job_id: &JobId,
         filename: &str,
         finished_at: crate::store::EventTime,
         completion: FileCompletion,
     ) {
         self.store
-            .mark_file_done(job_id, filename, finished_at, completion)
+            .mark_file_done(&self.run, filename, finished_at, completion)
             .await;
     }
 
     async fn mark_file_error(
         &self,
-        job_id: &JobId,
         filename: &str,
         error: &str,
         category: FailureCategory,
@@ -158,7 +158,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
     ) {
         self.store
             .mark_file_error(
-                job_id,
+                &self.run,
                 filename,
                 &FileFailureRecord {
                     message: error.to_string(),
@@ -171,19 +171,17 @@ impl RunnerEventSink for StoreRunnerEventSink {
 
     async fn start_file_attempt(
         &self,
-        job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
         started_at: crate::store::EventTime,
     ) {
         self.store
-            .start_file_attempt(job_id, filename, work_unit_kind, started_at)
+            .start_file_attempt(&self.run, filename, work_unit_kind, started_at)
             .await;
     }
 
     async fn finish_file_attempt(
         &self,
-        job_id: &JobId,
         filename: &str,
         outcome: AttemptOutcome,
         failure_category: Option<FailureCategory>,
@@ -192,7 +190,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
     ) {
         self.store
             .db_finish_attempt_for_file(
-                job_id,
+                &self.run,
                 AttemptFinishRecord {
                     filename,
                     outcome,
@@ -206,7 +204,6 @@ impl RunnerEventSink for StoreRunnerEventSink {
 
     async fn mark_file_retry_pending(
         &self,
-        job_id: &JobId,
         filename: &str,
         retry_at: MachineTime,
         category: FailureCategory,
@@ -215,7 +212,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
     ) {
         self.store
             .mark_file_retry_pending(
-                job_id,
+                &self.run,
                 filename,
                 &FileRetryRecord {
                     message: message.to_string(),
@@ -227,13 +224,12 @@ impl RunnerEventSink for StoreRunnerEventSink {
             .await;
     }
 
-    async fn clear_file_retry_state(&self, job_id: &JobId, filename: &str) {
-        self.store.clear_file_retry_state(job_id, filename).await;
+    async fn clear_file_retry_state(&self, filename: &str) {
+        self.store.clear_file_retry_state(&self.run, filename).await;
     }
 
     async fn set_file_progress(
         &self,
-        job_id: &JobId,
         filename: &str,
         stage: FileStage,
         current: Option<i64>,
@@ -241,7 +237,7 @@ impl RunnerEventSink for StoreRunnerEventSink {
     ) {
         self.store
             .set_file_progress(
-                job_id,
+                &self.run,
                 filename,
                 &FileProgressRecord {
                     stage: stage.api_stage(),
@@ -252,36 +248,25 @@ impl RunnerEventSink for StoreRunnerEventSink {
             .await;
     }
 
-    async fn set_file_worker_wait(
-        &self,
-        job_id: &JobId,
-        filename: &str,
-        change: crate::store::WorkerWaitChange,
-    ) {
+    async fn set_file_worker_wait(&self, filename: &str, change: crate::store::WorkerWaitChange) {
         self.store
-            .set_file_worker_wait(job_id, filename, change)
+            .set_file_worker_wait(&self.run, filename, change)
             .await;
     }
 
-    async fn fail_job(&self, job_id: &JobId, error: &str) {
+    async fn mark_job_running(&self) {
+        self.store.mark_job_running(&self.run).await;
+    }
+
+    async fn record_job_worker_count(&self, worker_count: usize) {
         self.store
-            .fail_job(job_id, error, self.store.event_time())
+            .record_job_worker_count(&self.run, worker_count)
             .await;
     }
 
-    async fn mark_job_running(&self, job_id: &JobId) {
-        self.store.mark_job_running(job_id).await;
-    }
-
-    async fn record_job_worker_count(&self, job_id: &JobId, worker_count: usize) {
+    async fn requeue_job_after_memory_gate(&self, retry_at: MachineTime) {
         self.store
-            .record_job_worker_count(job_id, worker_count)
-            .await;
-    }
-
-    async fn requeue_job_after_memory_gate(&self, job_id: &JobId, retry_at: MachineTime) {
-        self.store
-            .requeue_job_after_memory_gate(job_id, retry_at)
+            .requeue_job_after_memory_gate(&self.run, retry_at)
             .await;
     }
 

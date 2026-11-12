@@ -5,10 +5,78 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- `morphotag` no longer refuses a file whose utterance holds an annotated or
+  replaced item that is not a `%mor` word, such as `wait &+w [=! laughs] .`
+  or `them xxx [*] .`. Such files used to stop with "the run walk counted N
+  words where extraction found N-1". BA3 now takes each utterance's words and
+  the stretches a tokenizer may merge from Chatter 0.34.3 in one piece, so the
+  two can no longer disagree. Output for files that already worked is
+  unchanged.
+
+- A model request that this machine can never hold no longer waits for
+  memory indefinitely while the job looks busy. When the machine can align
+  no part of a file with the chosen engine, the file fails, naming the least
+  it needs and what the machine can offer. On a 16 GB machine this is what
+  `align` with the Whisper aligner does: it needs about 13 GB at peak for any
+  stretch. When only some stretches of a file are too large for the machine,
+  just those are left without timing and the file is written, reported as
+  written with diagnostics, with each stretch and the sizes in its review.
+  Nothing switches to another engine on its own. Requests that only have to
+  wait for other work to finish still wait.
+
+- A cancelled or restarted run can no longer write onto a job's files after
+  it has been superseded, and a finished file can no longer be finished a
+  second time. Previously a file task stopped mid-step could, rarely, mark a
+  cancelled file done or count it twice. The completed-file count is now
+  computed from the files' states rather than kept separately. The same holds
+  for the job itself: a superseded run can no longer mark the job running,
+  change its worker count or requeue it. A file attempt that started just as
+  its run was superseded is now closed in the attempt history instead of
+  being left open.
+
+- A job refused before or during dispatch (for example a command that needs
+  CHAT input given a file without it) now records its reason on every file it
+  left unfinished, not only on the job; those files used to say only that
+  they "did not reach terminal status". The refusal now travels back to the
+  run that owns the job instead of being written on the side.
+
+- Qwen output no longer fails a file for any timing or punctuation defect,
+  in `align` or `transcribe`. Two units timed backwards against each other
+  untime their window; a unit decoded without a usable time is untimed in its
+  position; a span too short to survive placement at a large recording offset
+  is untimed; and when the aligner's units do not spell the recognized text,
+  the window keeps the recognized text untimed rather than the aligner's
+  spelling. Each case
+  logs a warning naming the recording window and the defect, and every other
+  window keeps its timing. The Qwen FA cache revision is now
+  `timing-defects-untimed-v3`, so earlier Qwen FA cache entries are recomputed
+  once.
+
 - Cancellation now owns job-slot and host-memory waits before worker preparation.
   Completion, failure and deferral consume the run's claim; delayed terminal-job
   tasks cannot start another run. Shutdown supersedes old cleanup so unfinished
   files remain resumable instead of becoming user-cancellation errors.
+
+- Complete primary alignment no longer speculatively prepares or infers an
+  exact-window retry under gap healing. Only actual missing slots after
+  projection and kept-bullet imposition can issue a consuming retry attempt.
+  Actual retry observations remain in diagnostic evidence; accepted primary
+  timings are preserved.
+
+- Raw FA evidence no longer overwrites its derived-timing fallback in SQLite.
+  Storage derives distinct layer addresses from the admitted response's own
+  request identity and engine namespace. Existing raw evidence and older
+  timing-only rows remain readable under the same admission policy.
+
+- FA cache lookup and prepared inference carry a unique reply ticket for each
+  awaited request. Completing a result consumes its ticket; duplicate writes
+  and choosing another ledger are unavailable. Shared-input projections retain
+  distinct tickets and one raw-evidence owner. Missing or malformed responses
+  still fail at their admission boundary.
+
+- UTR evidence from a different source now stops alignment as a typed internal
+  recovery failure. It cannot be downgraded to provider unavailability or
+  continue into output/retry. Ordinary provider shortfalls remain recoverable.
 
 - Cancelling during worker preparation now stops the whole dispatch, including
   extra-worker startup before any file starts. The run-owned cancellation scope
@@ -205,9 +273,10 @@ Implementation details follow.
   and a model that cannot load wait in turn until it is free: the file shows
   "Waiting for host memory" and the server log says what it waits for once a
   minute. A worker's start used to give up after `worker_ready_timeout_s` of
-  waiting and fail the file. Cancelling the job ends the wait. Only a model larger than the machine can ever hold
-  (its total memory less `memory_gate_mb`) is refused, at once, naming the
-  sizes, and it is not retried.
+  waiting and fail the file. Cancelling the job ends the wait. Only a model
+  the machine can never hold, with what its worker keeps resident and
+  `memory_gate_mb` kept free, is refused, at once, naming the sizes, and it
+  is not retried.
 - Every model a worker holds is now reserved with the host's memory
   coordinator, each by its own load, for as long as the worker holds it: the
   local pyannote pipeline, the speaker-embedding model and coreference

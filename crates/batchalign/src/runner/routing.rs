@@ -14,7 +14,8 @@
 //! ([`super::dispatch::FaWorkerAdmission`]): align is a per-file command, and
 //! the worker a file reaches is keyed by the language that file declares, so
 //! there is no job-level worker to read the FA engine (the cache namespace)
-//! off. Every refusal in this module goes through [`fail_job`].
+//! off. Every job-level refusal goes through [`refuse`] and returns to the
+//! run scope, whose claim fails the run with that reason.
 
 use std::sync::Arc;
 
@@ -30,7 +31,9 @@ use crate::execution::{
 use crate::store::RunnerJobSnapshot;
 use crate::worker::pool::GpuModelPlan;
 
-use super::context::{DispatchHostContext, JobDispatchRequest, RunnerExecutionContext};
+use super::context::{
+    DispatchEnd, DispatchHostContext, JobDispatchRequest, JobRefusal, RunnerExecutionContext,
+};
 use super::dispatch::{
     BatchedInferDispatchPlan, BenchmarkDispatchPlan, BenchmarkDispatchRuntime, FaDispatchPlan,
     FaDispatchRuntime, MediaAnalysisDispatchPlan, MediaAnalysisDispatchRuntime,
@@ -48,7 +51,7 @@ pub(super) async fn dispatch_job_with_execution_context(
     request: JobDispatchRequest,
     host: &DispatchHostContext,
     execution: &RunnerExecutionContext,
-) -> Result<(), crate::error::ServerError> {
+) -> Result<DispatchEnd, crate::error::ServerError> {
     let JobDispatchRequest {
         job,
         file_list,
@@ -62,26 +65,27 @@ pub(super) async fn dispatch_job_with_execution_context(
     // Native work shares the managed runner's admission and supervision, but
     // cannot pass through test echo or probing an invented worker task.
     if command_runner_dispatch_kind(command) == RunnerDispatchKind::NativeAudioExport {
-        crate::execution::native_media::dispatch_audio_export(&job, host, &file_list, num_workers)
-            .await;
-        return Ok(());
+        return Ok(crate::execution::native_media::dispatch_audio_export(
+            &job,
+            host,
+            &file_list,
+            num_workers,
+        )
+        .await);
     }
 
     if command_requires_chat_infer(command) && !all_chat {
-        fail_job(
+        return Ok(DispatchEnd::Refused(refuse(
             &job,
-            host,
             format!("'{command}' needs CHAT input for every file, and at least one file has none"),
-        )
-        .await;
-        return Ok(());
+        )));
     }
 
     // Test-echo workers answer every task and are never probed per command.
     if execution.test_echo_mode {
         dispatch_test_echo_files(&job, host.sink().as_ref(), &file_list, pool.test_delay_ms())
             .await;
-        return Ok(());
+        return Ok(DispatchEnd::Dispatched);
     }
 
     // The job's family plan is built BEFORE any worker is probed. It owns the
@@ -90,7 +94,7 @@ pub(super) async fn dispatch_job_with_execution_context(
     // align job an FA-only worker beside the one its UTR requests needed. A
     // refused plan also fails the job before a model is loaded for it.
     let runner_dispatch_kind = command_runner_dispatch_kind(command);
-    let Some(family) = FamilyPlan::build(
+    let family = match FamilyPlan::build(
         &job,
         host,
         runner_dispatch_kind,
@@ -98,8 +102,11 @@ pub(super) async fn dispatch_job_with_execution_context(
         pool.tencent_engine(),
     )
     .await
-    else {
-        return Ok(());
+    {
+        Ok(family) => family,
+        // Each file already recorded its own refusal; the run finishes them.
+        Err(PlanStop::FilesRefused) => return Ok(DispatchEnd::Dispatched),
+        Err(PlanStop::JobRefused(refusal)) => return Ok(DispatchEnd::Refused(refusal)),
     };
 
     info!(
@@ -127,7 +134,7 @@ pub(super) async fn dispatch_job_with_execution_context(
                 plan,
             )
             .await;
-            return Ok(());
+            return Ok(DispatchEnd::Dispatched);
         }
         FamilyPlan::JobLevel(family) => family,
     };
@@ -162,12 +169,16 @@ pub(super) async fn dispatch_job_with_execution_context(
     .await
     {
         Ok(_) => {}
-        // The cancellation path records the job's end; there is nothing to
-        // fail.
-        Err(crate::runner::dispatch::WorkerProbeRefusal::Cancelled) => return Ok(()),
+        // The run scope owns cancellation and records the job's end; there
+        // is nothing to refuse.
+        Err(crate::runner::dispatch::WorkerProbeRefusal::Cancelled) => {
+            return Ok(DispatchEnd::Dispatched);
+        }
         Err(refusal) => {
-            fail_job(&job, host, format!("cannot run '{command}': {refusal}")).await;
-            return Ok(());
+            return Ok(DispatchEnd::Refused(refuse(
+                &job,
+                format!("cannot run '{command}': {refusal}"),
+            )));
         }
     }
     // Skipped for per-file text commands (morphotag, translate, coref): they
@@ -228,33 +239,36 @@ pub(super) async fn dispatch_job_with_execution_context(
             .await;
         }
         JobLevelFamily::SpeakerIdentity => {
-            crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
-                &job,
-                host,
-                pool.clone(),
-            )
-            .await;
+            return Ok(
+                crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
+                    &job,
+                    host,
+                    pool.clone(),
+                )
+                .await,
+            );
         }
         JobLevelFamily::BatchedText => {
-            dispatch_batched_text_command(&job, host, execution, num_workers).await?;
+            return dispatch_batched_text_command(&job, host, execution, num_workers).await;
         }
     }
 
-    Ok(())
+    Ok(DispatchEnd::Dispatched)
 }
 
-/// Fail a whole job with `message`, logged with the job's identity.
+/// Refuse a whole job with `message`, logged with the job's identity.
 ///
-/// The one route every job-level refusal in this router takes, so each
-/// refusal is logged and recorded the same way.
-async fn fail_job(job: &RunnerJobSnapshot, host: &DispatchHostContext, message: String) {
+/// The one route every job-level refusal in this router takes. It records
+/// nothing: the refusal travels back to the run scope, whose claim fails the
+/// run with this reason on the job and on every file left unfinished.
+pub(crate) fn refuse(job: &RunnerJobSnapshot, message: String) -> JobRefusal {
     warn!(
         job_id = %job.identity.job_id,
         correlation_id = %job.identity.correlation_id,
         command = %job.dispatch.command,
         "{message}"
     );
-    host.sink().fail_job(&job.identity.job_id, &message).await;
+    JobRefusal::new(message)
 }
 
 /// Run one batched-text command on the recipe-owned execution path.
@@ -276,7 +290,7 @@ async fn dispatch_batched_text_command(
     host: &DispatchHostContext,
     execution: &RunnerExecutionContext,
     num_workers: NumWorkers,
-) -> Result<(), crate::error::ServerError> {
+) -> Result<DispatchEnd, crate::error::ServerError> {
     let command = job.dispatch.command;
     let plan = BatchedInferDispatchPlan::from_job(job);
     let gateway = PooledWorkerGateway::new(execution.pool.clone(), execution.cache.clone());
@@ -292,12 +306,14 @@ async fn dispatch_batched_text_command(
     let dispatch_language = match DispatchLanguage::resolve(command, &job.dispatch.lang) {
         Ok(language) => language,
         Err(refusal) => {
-            fail_job(job, host, format!("cannot run '{command}': {refusal}")).await;
-            return Ok(());
+            return Ok(DispatchEnd::Refused(refuse(
+                job,
+                format!("cannot run '{command}': {refusal}"),
+            )));
         }
     };
 
-    match (dispatch_language, command) {
+    let dispatched = match (dispatch_language, command) {
         (DispatchLanguage::PerFile, ReleasedCommand::Morphotag) => {
             dispatch_morphotag_job(
                 job,
@@ -333,8 +349,7 @@ async fn dispatch_batched_text_command(
             {
                 Ok(route) => route,
                 Err(unavailable) => {
-                    fail_job(job, host, unavailable.to_string()).await;
-                    return Ok(());
+                    return Ok(DispatchEnd::Refused(refuse(job, unavailable.to_string())));
                 }
             };
             // The Stanza route reads constituency trees, so a language whose
@@ -345,8 +360,7 @@ async fn dispatch_batched_text_command(
             let route = match route.admit(&execution.pool.stanza_registry()) {
                 Ok(route) => route,
                 Err(unservable) => {
-                    fail_job(job, host, unservable.to_string()).await;
-                    return Ok(());
+                    return Ok(DispatchEnd::Refused(refuse(job, unservable.to_string())));
                 }
             };
             dispatch_utseg_job(job, host, Arc::new(gateway), &route).await
@@ -369,8 +383,8 @@ async fn dispatch_batched_text_command(
         // with the arm written for it. Changing one without the other is the
         // drift that made coref undispatchable, so both halves are named.
         //
-        // It FAILS the job. Returning `Ok(())` would leave the job sitting in
-        // `Running` with nothing dispatched and nothing to reconcile it.
+        // It REFUSES the job: the run fails with this reason. Treating it as
+        // dispatched would end the job with no reason recorded.
         //
         // This replaced two adjacent arms, an eight-command enumeration and a
         // shape-mismatch arm, which reported the same thing twice: the
@@ -382,20 +396,18 @@ async fn dispatch_batched_text_command(
                 DispatchLanguage::Fixed(_) => "fixed",
                 DispatchLanguage::Job(_) => "job-level",
             };
-            fail_job(
+            return Ok(DispatchEnd::Refused(refuse(
                 job,
-                host,
                 format!(
                     "No dispatch arm handled command '{command}' with a {shape} language shape \
                      on the batched-text path. Either its catalog entry declares \
                      BatchedTextInfer without a text arm in runner::routing, or its declared \
                      shape in dispatch_language disagrees with that arm."
                 ),
-            )
-            .await;
-            Ok(())
+            )));
         }
-    }
+    };
+    dispatched.map(|()| DispatchEnd::Dispatched)
 }
 
 /// Fail every pending file of a job whose plan was refused.
@@ -419,13 +431,7 @@ pub(super) async fn fail_files_for_refused_plan(
         "Command plan refused; failing this job's files"
     );
     for file in &job.pending_files {
-        record_plan_refusal_for_file(
-            host.sink().as_ref(),
-            &job.identity.job_id,
-            file.filename.as_ref(),
-            &message,
-        )
-        .await;
+        record_plan_refusal_for_file(host.sink().as_ref(), file.filename.as_ref(), &message).await;
     }
 }
 
@@ -443,17 +449,16 @@ pub(super) async fn fail_files_for_refused_plan(
 /// advertising the file as actively processing.
 async fn record_plan_refusal_for_file(
     sink: &dyn super::util::RunnerEventSink,
-    job_id: &crate::api::JobId,
     filename: &str,
     message: &str,
 ) {
-    super::util::FileRunTracker::new(sink, job_id, filename)
+    super::util::FileRunTracker::new(sink, filename)
         .record_setup_failure(message, crate::scheduling::FailureCategory::Validation)
         .await;
 }
 
 /// Build one command's dispatch plan, or fail this job's files and answer
-/// `None`.
+/// [`PlanStop::FilesRefused`].
 ///
 /// The four audio dispatchers below each repeated the same six lines: match the
 /// plan constructor, and on a refusal call `fail_files_for_refused_plan` and
@@ -468,14 +473,24 @@ async fn plan_or_fail_files<Plan>(
         &RunnerJobSnapshot,
         &crate::host_policy::HostExecutionPolicy,
     ) -> Result<Plan, super::dispatch::DispatchPlanRefusal>,
-) -> Option<Plan> {
+) -> Result<Plan, PlanStop> {
     match from_job(job, &host.host_policy()) {
-        Ok(plan) => Some(plan),
+        Ok(plan) => Ok(plan),
         Err(refusal) => {
             fail_files_for_refused_plan(job, host, &refusal).await;
-            None
+            Err(PlanStop::FilesRefused)
         }
     }
+}
+
+/// Why no dispatch plan was built. Two different outcomes, so not an
+/// `Option`: refused files are already terminal and the run finishes them
+/// normally, while a refused job fails the run with its reason.
+enum PlanStop {
+    /// Every file recorded its own plan refusal.
+    FilesRefused,
+    /// The job itself cannot run.
+    JobRefused(JobRefusal),
 }
 
 /// One job's dispatch plan, built from its persisted snapshot before any
@@ -511,28 +526,25 @@ enum JobLevelFamily {
 }
 
 impl FamilyPlan {
-    /// Build the plan for `kind`, or fail the job (or its files) and answer
-    /// `None`. Every refusal is recorded here, before any worker is probed,
-    /// so a job that cannot run never has a model loaded for it.
+    /// Build the plan for `kind`, or say why not. Every refusal is decided
+    /// here, before any worker is probed, so a job that cannot run never has
+    /// a model loaded for it.
     async fn build(
         job: &RunnerJobSnapshot,
         host: &DispatchHostContext,
         kind: RunnerDispatchKind,
         all_chat: bool,
         tencent: &crate::model_manifest::TencentEngineSetting,
-    ) -> Option<Self> {
-        Some(match kind {
+    ) -> Result<Self, PlanStop> {
+        Ok(match kind {
             RunnerDispatchKind::NativeAudioExport => {
                 // Unreachable through `dispatch_job_with_execution_context`,
                 // which runs native commands before planning; refused rather
                 // than probed if a future caller gets here.
-                fail_job(
+                return Err(PlanStop::JobRefused(refuse(
                     job,
-                    host,
                     "native command reached worker-backed dispatch".into(),
-                )
-                .await;
-                return None;
+                )));
             }
             RunnerDispatchKind::TranscribeAudioInfer => Self::JobLevel(JobLevelFamily::Transcribe(
                 plan_or_fail_files(job, host, |job, policy| {
@@ -553,17 +565,14 @@ impl FamilyPlan {
                 Self::JobLevel(JobLevelFamily::SpeakerIdentity)
             }
             RunnerDispatchKind::SpeakerIdentity => {
-                fail_job(
+                return Err(PlanStop::JobRefused(refuse(
                     job,
-                    host,
                     format!(
                         "No released dispatch path remains for command '{}' without CHAT \
                          input for every file. Legacy process-path fallback is retired.",
                         job.dispatch.command
                     ),
-                )
-                .await;
-                return None;
+                )));
             }
             RunnerDispatchKind::ForcedAlignment => {
                 Self::PerFileAudio(plan_or_fail_files(job, host, FaDispatchPlan::from_job).await?)
@@ -592,7 +601,6 @@ impl JobLevelFamily {
 mod tests {
     use super::record_plan_refusal_for_file;
     use crate::ReleasedCommand;
-    use crate::api::JobId;
     use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
     use crate::runner::util::test_sink::RecordingSink;
     use crate::scheduling::{FailureCategory, WorkUnitKind};
@@ -606,7 +614,6 @@ mod tests {
         let sink = RecordingSink::default();
         record_plan_refusal_for_file(
             &sink,
-            &JobId::from("job-refused"),
             "sample.cha",
             "command plan could not be built from job options",
         )

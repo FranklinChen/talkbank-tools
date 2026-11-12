@@ -100,6 +100,47 @@ pub(crate) struct FinishingRun {
     pub projection: RunFinishProjection,
 }
 
+/// Why the store did not apply one run's write to one file. Each reason is
+/// a different fact: two are expected in a run's ordinary life, two say the
+/// runner and the store disagree about the job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefusedFileWrite {
+    /// The job is no longer in the store.
+    NoSuchJob,
+    /// The run was cancelled or restarted; the job's files now belong to
+    /// the run that replaced it.
+    StaleRun,
+    /// The job itself refused the write.
+    File(crate::store::FileWriteRefusal),
+}
+
+impl RefusedFileWrite {
+    /// Record a refused write at the level its reason deserves. A stale run
+    /// or an already finished file is expected (late progress after a
+    /// cancel, a task still finishing a step) and is debug; a missing job
+    /// or file means the runner wrote about something the store never had,
+    /// and is a warning.
+    pub(crate) fn log(self, run: &crate::store::RunBinding, filename: &str, write: &'static str) {
+        use crate::store::FileWriteRefusal;
+        match self {
+            Self::StaleRun | Self::File(FileWriteRefusal::AlreadyTerminal) => tracing::debug!(
+                run = %run,
+                filename,
+                write,
+                refusal = ?self,
+                "file write refused"
+            ),
+            Self::NoSuchJob | Self::File(FileWriteRefusal::UnknownFile) => tracing::warn!(
+                run = %run,
+                filename,
+                write,
+                refusal = ?self,
+                "file write refused: the store has no such job or file"
+            ),
+        }
+    }
+}
+
 /// One file update projected into the WebSocket/dashboard shape.
 #[derive(Debug, Clone)]
 pub(crate) struct FileUpdateProjection {
@@ -293,7 +334,7 @@ impl JobRegistry {
             job_id: job.identity.job_id.clone(),
             file: status.to_entry(),
             phase: status.phase.clone(),
-            completed_files: job.execution.completed_files,
+            completed_files: job.execution.completed_files(),
         })
     }
 
@@ -462,11 +503,12 @@ impl JobRegistry {
     /// is no longer active; callers must then persist nothing.
     pub(crate) async fn requeue_after_memory_gate(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         retry_at: MachineTime,
     ) -> Option<JobListItem> {
-        self.update_job(job_id.clone(), move |job| {
-            job.requeue_after_memory_gate(retry_at)
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            (binding.is_current_for(job) && job.requeue_after_memory_gate(retry_at))
                 .then(|| job.to_list_item())
         })
         .await
@@ -475,44 +517,39 @@ impl JobRegistry {
 
     /// Mark one queued job as running and return its updated summary row.
     ///
-    /// `None` means either no such job OR the job refused the transition
-    /// because it is no longer active (see [`Job::mark_running`]); callers
-    /// must treat it as "do not persist Running".
-    pub(crate) async fn mark_job_running(&self, job_id: &JobId) -> Option<JobListItem> {
-        self.update_job(job_id.clone(), |job| {
-            job.mark_running().then(|| job.to_list_item())
-        })
-        .await
-        .flatten()
-    }
-
-    /// Record the runner's worker-count choice for one job; `false` when
-    /// there is no such job.
-    pub(crate) async fn record_job_worker_count(&self, job_id: &JobId, num_workers: usize) -> bool {
-        self.update_job(job_id.clone(), move |job| {
-            job.record_worker_count(num_workers);
-        })
-        .await
-        .is_some()
-    }
-
-    /// Fail one job immediately and return the summary row for notifications.
-    ///
-    /// `None` means no such job OR the job was already terminal and refused
-    /// the transition, so a late dispatch error cannot overwrite a user's
-    /// `Cancelled` with `Failed`.
-    pub(crate) async fn fail_job(
+    /// `None` means no such job, a run that is no longer the job's current
+    /// one, or a job that refused the transition because it is no longer
+    /// active (see [`Job::mark_running`]); callers must treat it as "do not
+    /// persist Running".
+    pub(crate) async fn mark_job_running(
         &self,
-        job_id: &JobId,
-        error: &str,
-        completed_at: MachineTime,
+        run: &crate::store::RunBinding,
     ) -> Option<JobListItem> {
-        let error = error.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            job.fail(&error, completed_at).then(|| job.to_list_item())
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            (binding.is_current_for(job) && job.mark_running()).then(|| job.to_list_item())
         })
         .await
         .flatten()
+    }
+
+    /// Record the runner's worker-count choice for its run of one job;
+    /// `false` when there is no such job or the run is no longer current.
+    pub(crate) async fn record_job_worker_count(
+        &self,
+        run: &crate::store::RunBinding,
+        num_workers: usize,
+    ) -> bool {
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            let current = binding.is_current_for(job);
+            if current {
+                job.record_worker_count(num_workers);
+            }
+            current
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Consume a run's authority in one actor mutation. Generation admission,
@@ -523,9 +560,9 @@ impl JobRegistry {
         exit: RunExit,
         finished_at: crate::store::EventTime,
     ) -> Option<FinishingRun> {
-        let job_id = claim.snapshot().identity.job_id.clone();
+        let job_id = claim.binding().job_id().clone();
         self.update_job(job_id, move |job| {
-            if job.runtime.run_generation != claim.generation() {
+            if !claim.binding().is_current_for(job) {
                 return FinishingRun { claim, projection: RunFinishProjection::Superseded };
             }
             let cancelled = job.is_cancelled();
@@ -551,10 +588,12 @@ impl JobRegistry {
                 .collect::<Vec<_>>();
             let mut updates = Vec::with_capacity(files.len());
             for (filename, failure) in files {
-                job.mark_file_error(&filename, &failure);
-                // This filename came from this same map and cannot disappear
-                // during the actor mutation.
-                if let Some(update) = Self::file_update_projection(job, &filename) {
+                // This filename came from this same map, unfinished, and
+                // cannot change during the actor mutation; the update is
+                // published only for a write that applied.
+                if job.mark_file_error(&filename, &failure).is_ok()
+                    && let Some(update) = Self::file_update_projection(job, &filename)
+                {
                     updates.push(ForcedFileUpdate { update, failure });
                 }
             }
@@ -807,178 +846,183 @@ impl JobRegistry {
             .await
     }
 
+    /// One file write from one run, in one actor mutation, admitted only
+    /// while `run` is still the job's current generation and the job's
+    /// transition accepts it. Every per-file write goes through here, so a
+    /// task of a cancelled or restarted run cannot write onto the files of
+    /// the run that replaced it, whatever it was doing when it was stopped;
+    /// and each refusal says which of those it was.
+    async fn update_file_of_run(
+        &self,
+        run: &crate::store::RunBinding,
+        filename: &str,
+        transition: impl FnOnce(&mut Job, &str) -> Result<(), crate::store::FileWriteRefusal>
+        + Send
+        + 'static,
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        let filename = filename.to_string();
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            if !binding.is_current_for(job) {
+                return Err(RefusedFileWrite::StaleRun);
+            }
+            transition(job, &filename).map_err(RefusedFileWrite::File)?;
+            // The transition just found this file in the same mutation.
+            Self::file_update_projection(job, &filename).ok_or(RefusedFileWrite::File(
+                crate::store::FileWriteRefusal::UnknownFile,
+            ))
+        })
+        .await
+        .unwrap_or(Err(RefusedFileWrite::NoSuchJob))
+    }
+
     /// Mark one file as processing and return its file-update projection.
     pub(crate) async fn mark_file_processing(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         started_at: MachineTime,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            if job.mark_file_processing(&filename, started_at) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.mark_file_processing(file, started_at)
         })
         .await
-        .flatten()
     }
 
     /// Mark one file as complete and return the new file-update projection.
     pub(crate) async fn mark_file_done(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         finished_at: MachineTime,
         completion: FileCompletion,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            if job.mark_file_done(&filename, finished_at, completion.clone()) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.mark_file_done(file, finished_at, completion)
         })
         .await
-        .flatten()
     }
 
     /// Mark one file as terminally failed and return the projected update.
     pub(crate) async fn mark_file_error(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         failure: &FileFailureRecord,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
         let failure = failure.clone();
-        self.update_job(job_id.clone(), move |job| {
-            if job.mark_file_error(&filename, &failure) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.mark_file_error(file, &failure)
         })
         .await
-        .flatten()
     }
 
     /// Record the start of one file attempt and return the projected update.
     pub(crate) async fn start_file_attempt(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         started_at: MachineTime,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            if job.start_file_attempt(&filename, started_at) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.start_file_attempt(file, started_at)
         })
         .await
-        .flatten()
     }
 
     /// Mark one file as waiting for retry and return the projected update.
     pub(crate) async fn mark_file_retry_pending(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         retry: &FileRetryRecord,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
         let retry = retry.clone();
-        self.update_job(job_id.clone(), move |job| {
-            if job.mark_file_retry_pending(&filename, &retry) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.mark_file_retry_pending(file, &retry)
         })
         .await
-        .flatten()
     }
 
     /// Clear retry-only transient fields before a fresh attempt.
-    pub(crate) async fn clear_file_retry_state(&self, job_id: &JobId, filename: &str) -> bool {
-        let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            job.clear_file_retry_state(&filename)
-        })
-        .await
-        .is_some()
+    pub(crate) async fn clear_file_retry_state(
+        &self,
+        run: &crate::store::RunBinding,
+        filename: &str,
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        self.update_file_of_run(run, filename, |job, file| job.clear_file_retry_state(file))
+            .await
     }
 
     /// Apply one worker-wait change and return the projected file-update
     /// payload.
     pub(crate) async fn set_file_worker_wait(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         change: crate::store::WorkerWaitChange,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            if job.set_file_worker_wait(&filename, change) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.set_file_worker_wait(file, change)
         })
         .await
-        .flatten()
     }
 
     /// Apply one progress update and return the projected file-update payload.
     pub(crate) async fn set_file_progress(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         progress: &FileProgressRecord,
-    ) -> Option<FileUpdateProjection> {
-        let filename = filename.to_string();
+    ) -> Result<FileUpdateProjection, RefusedFileWrite> {
         let progress = progress.clone();
-        self.update_job(job_id.clone(), move |job| {
-            if job.set_file_progress(&filename, &progress) {
-                Self::file_update_projection(job, &filename)
-            } else {
-                None
-            }
+        self.update_file_of_run(run, filename, move |job, file| {
+            job.set_file_progress(file, &progress)
         })
         .await
-        .flatten()
     }
 
-    /// Attach one newly created attempt identifier to a file status entry.
+    /// Attach one newly created attempt identifier to a file of this run.
     pub(crate) async fn attach_attempt_id(
         &self,
-        job_id: &JobId,
+        run: &crate::store::RunBinding,
         filename: &str,
         attempt_id: String,
-    ) -> bool {
+    ) -> Result<(), RefusedFileWrite> {
         let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
-            if let Some(file_status) = job.execution.file_statuses.get_mut(&filename) {
-                file_status.current_attempt_id = Some(attempt_id.clone());
-                true
-            } else {
-                false
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            if !binding.is_current_for(job) {
+                return Err(RefusedFileWrite::StaleRun);
             }
+            let file_status =
+                job.execution
+                    .file_statuses
+                    .get_mut(&filename)
+                    .ok_or(RefusedFileWrite::File(
+                        crate::store::FileWriteRefusal::UnknownFile,
+                    ))?;
+            file_status.current_attempt_id = Some(attempt_id);
+            Ok(())
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(Err(RefusedFileWrite::NoSuchJob))
     }
 
-    /// Take and clear the currently active attempt id for one file.
-    pub(crate) async fn take_attempt_id(&self, job_id: &JobId, filename: &str) -> Option<String> {
+    /// Take and clear the active attempt id of a file of this run. A stale
+    /// run gets nothing, so it cannot close the attempt of the run that
+    /// replaced it.
+    pub(crate) async fn take_attempt_id(
+        &self,
+        run: &crate::store::RunBinding,
+        filename: &str,
+    ) -> Option<String> {
         let filename = filename.to_string();
-        self.update_job(job_id.clone(), move |job| {
+        let binding = run.clone();
+        self.update_job(run.job_id().clone(), move |job| {
+            if !binding.is_current_for(job) {
+                return None;
+            }
             job.execution
                 .file_statuses
                 .get_mut(&filename)

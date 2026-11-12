@@ -16,7 +16,8 @@ below, or 30 seconds of audio), and reports:
 The figure a lease is sized from is the in-use one, after an inference, never
 the built one. Building a model can leave most of its weights unread, so they
 are not yet resident: the Stanza coreference pipeline measured +520 MiB built
-and +2406 MiB after resolving one two-sentence document (2026-11-06, ming).
+and +2406 MiB after resolving one two-sentence document (2026-11-06, an Apple
+Silicon development machine).
 A build-only measurement under-reserves every lease it sizes.
 
 Downloads are off unless ``--allow-download`` is given: a model not already
@@ -29,6 +30,7 @@ Usage:
     uv run --no-sync python scripts/measure_model_residency.py embedding
     uv run --no-sync python scripts/measure_model_residency.py morphosyntax
     uv run --no-sync python scripts/measure_model_residency.py utseg
+    uv run --no-sync python scripts/measure_model_residency.py whisper-fa [--input-scale N]
 
 ``baseline`` is the other half: what a worker holds before any load, the
 Python runtime with the worker package and the libraries its loads import
@@ -41,6 +43,14 @@ pipeline) and annotate a short English document on it. Stanza fetches a
 missing language pack itself, so they need the English pack already
 installed to measure without a download. ``pyannote`` and ``embedding`` run
 on a synthesized waveform held in memory; no media file is written.
+
+``whisper-fa`` loads the Whisper forced aligner through the worker's own loader
+and, for each inference, first prints the worker's own memory projection for
+that request (model bytes and peak workspace, exactly what the Rust host-memory
+admission is told), then runs the alignment and measures it. One 30 s window
+(Whisper pads every window to 30 s) aligned against ``--input-scale`` times 25
+English words, so a sweep of the scale shows how the projection grows with the
+decoder's label count against what the process actually holds.
 """
 
 from __future__ import annotations
@@ -195,12 +205,75 @@ def run_embedding(model: Any, scale: int) -> None:
     model.inference(torch.from_numpy(window).reshape(1, 1, -1))
 
 
+WHISPER_FA_WORDS = (
+    "the teacher gave the children a book and she asked them to read it "
+    "then the children told their parents about the story they had read"
+).split()
+"""Plain English words (not CHAT) for one Whisper FA request; 25 per scale."""
+
+
+def build_whisper_fa(_allow_download: bool) -> Any:
+    """The Whisper FA handle, loaded exactly as the worker loads it, and the
+    worker's own request preparer over that same handle."""
+    from batchalign.inference.fa import WHISPER_FA_MODEL_ID, load_whisper_fa
+    from batchalign.worker._loads import LoadedWhisperFa
+    from batchalign.worker._model_loading.pinned_hub import (
+        resolve_transformers,
+        unpinned,
+    )
+
+    handle = load_whisper_fa(
+        resolve_transformers(unpinned(WHISPER_FA_MODEL_ID), kind="forced alignment")
+    )
+    return handle, LoadedWhisperFa.from_model(handle)
+
+
+def run_whisper_fa(loaded: Any, scale: int) -> None:
+    """Print the worker's projection for one request, then run it."""
+    import torch
+
+    from batchalign.inference.fa import infer_whisper_fa
+    from batchalign.worker._types_v2 import (
+        FaBackendV2,
+        FaPreparationBindingV2,
+        FaPreparedV2,
+        FaTextModeV2,
+    )
+
+    handle, host = loaded
+    words = (WHISPER_FA_WORDS * scale)[: 25 * scale]
+    text = " ".join(words)
+    waveform = synthetic_waveform(handle.sample_rate, 1)
+    binding = FaPreparationBindingV2(
+        execution_request_id="measure-whisper-fa",
+        backend=FaBackendV2.WHISPER,
+        engine=host.engine,
+        payload_ref_id="words",
+        audio_ref_id="audio",
+        samples=len(waveform),
+        sample_rate_hz=handle.sample_rate,
+        text_mode=FaTextModeV2.SPACE_JOINED,
+        attention_capture=None,
+    ).model_dump_json()
+    outcome = host.prepare(binding, words, text)
+    if not isinstance(outcome, FaPreparedV2):
+        raise RuntimeError(f"the worker refused to prepare this request: {outcome!r}")
+    memory = outcome.plan.memory
+    print(
+        f"whisper-fa projection for {len(words)} words: "
+        f"model {memory.model / MIB:.0f} MiB, "
+        f"workspace {memory.workspace / MIB:.0f} MiB"
+    )
+    infer_whisper_fa(handle, torch.from_numpy(waveform), text)
+
+
 PROBES: dict[str, Probe] = {
     "coref": Probe(build_coref, run_coref),
     "pyannote": Probe(build_pyannote, run_pyannote),
     "embedding": Probe(build_embedding, run_embedding),
     "morphosyntax": Probe(build_morphosyntax, run_stanza),
     "utseg": Probe(build_utseg, run_stanza),
+    "whisper-fa": Probe(build_whisper_fa, run_whisper_fa),
 }
 
 

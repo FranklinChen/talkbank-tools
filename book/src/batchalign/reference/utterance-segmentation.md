@@ -1,7 +1,7 @@
 # Utterance Segmentation
 
 **Status:** Current
-**Last updated:** 2026-11-03 14:16 EST
+**Last updated:** 2026-11-11 22:44 EST
 
 Utterance segmentation splits continuous ASR output into individual utterances
 for CHAT transcription. This is a critical step, CHAT requires one utterance
@@ -323,7 +323,7 @@ capitalizable word is capitalized under the same rule the pre-CHAT pass
 applies to every utterance (markers, fillers, fragments, retrace copies and
 letter forms skipped), on the main tier and on the corroborating `%wor` word.
 Until 2026-11-03 every non-last child was written with `.` and every
-non-first child began lowercase. The pinned Chatter (v0.34.0) split plan has
+non-first child began lowercase. The pinned Chatter (v0.34.3) split plan has
 no way to take a terminator per child, which is why the terminator is set
 after the split; the next Chatter release's plan accepts it per child
 boundary and replaces that half of the transition.

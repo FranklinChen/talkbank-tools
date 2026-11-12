@@ -1,7 +1,7 @@
 # Terminator Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-11 22:44 EST
 
 This document is a comprehensive reference for how CHAT terminators are created,
 stored, defaulted, validated, and propagated through every batchalign3 pipeline.
@@ -167,7 +167,7 @@ exercises both halves of that boundary. The `%wor` terminators are kept in
 sync with their new main tiers. These cuts are not included in the ASR
 assembly's synthesized-end count.
 
-The pinned Chatter (v0.34.0) `UtteranceSplitPlan` rebuilds every earlier
+The pinned Chatter (v0.34.3) `UtteranceSplitPlan` rebuilds every earlier
 child with a period and has no parameter for a terminator per child, so BA3
 sets the predicted terminator after the split, in `split_source` and
 `finish_child`, the one transition from a rebuilt child to a line of the

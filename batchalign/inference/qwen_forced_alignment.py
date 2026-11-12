@@ -22,11 +22,10 @@ bootstrap can reference it without paying for either.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
-from enum import Enum
+from dataclasses import dataclass
+from enum import Enum, StrEnum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -138,30 +137,62 @@ class WindowAlignedWord:
     start_s: float
     end_s: float
 
-    @classmethod
-    def from_decoded(cls, unit: Mapping[str, Any]) -> WindowAlignedWord:
-        """Read ONE decoded aligner unit. The boundary parse, and it is total.
 
-        `decode_forced_alignment` documents `text`, `start_time` and
-        `end_time`, and the shipped implementation writes all three. This read
-        is nonetheless total over `text`, because it used to be: the ASR
-        caller's own guard began `word.get("text", "") or ""`, so a unit with
-        no text was skipped rather than crashing a chunk mid-transcription.
-        Replacing that with `unit["text"]` moved a skip to a `KeyError` on a
-        path that had worked for a year.
+class TimeField(StrEnum):
+    """A decoded unit's time key, named as `decode_forced_alignment` writes it."""
 
-        The TIMES are different: they are refused by name rather than
-        defaulted, because a unit carries its position in the FA fold and a
-        dropped or zeroed one shifts every later span onto the wrong word.
-        """
-        for key in ("start_time", "end_time"):
-            if unit.get(key) is None:
-                raise QwenUnitNotTimed(key=key, unit=dict(unit))
-        return cls(
-            text=str(unit.get("text", "") or ""),
-            start_s=float(unit["start_time"]),
-            end_s=float(unit["end_time"]),
-        )
+    START = "start_time"
+    END = "end_time"
+
+
+@dataclass(frozen=True, slots=True)
+class UntimedReportedUnit:
+    """A decoded unit with a time that is absent or not a number.
+
+    It keeps its text and its POSITION: the fold attributes units to CHAT
+    words by position, so dropping it would move every later span onto the
+    wrong word, and a zero or NaN in its place would fabricate a time.
+    Admission turns it into an untimed unit; it never fails the file.
+    """
+
+    text: str
+    field: TimeField
+    decoded: str
+    """The unit exactly as decoded (`repr`), for the log."""
+
+
+type ReportedUnit = WindowAlignedWord | UntimedReportedUnit
+"""What one decoded aligner unit says: a reported span, or no usable time."""
+
+
+def read_decoded_unit(unit: Mapping[str, Any]) -> ReportedUnit:
+    """Read ONE decoded aligner unit. The boundary parse, and it is total.
+
+    `decode_forced_alignment` documents `text`, `start_time` and `end_time`,
+    and the shipped implementation writes all three. The read is total anyway:
+    a missing text is empty (the ASR caller once skipped such units rather than
+    crash a chunk), and a missing or non-numeric time is an
+    `UntimedReportedUnit` that keeps the unit's position.
+    """
+    text = str(unit.get("text", "") or "")
+    start_s = _decoded_time(unit.get(TimeField.START))
+    if start_s is None:
+        return UntimedReportedUnit(text, TimeField.START, repr(dict(unit)))
+    end_s = _decoded_time(unit.get(TimeField.END))
+    if end_s is None:
+        return UntimedReportedUnit(text, TimeField.END, repr(dict(unit)))
+    return WindowAlignedWord(text=text, start_s=start_s, end_s=end_s)
+
+
+def _decoded_time(value: object) -> float | None:
+    """A decoded time as a float, or None when it is absent or not a number.
+    Non-finite numbers are kept: admission judges them as span defects."""
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        return float(value)
+    except ValueError, OverflowError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,90 +243,12 @@ class OutsideAudioWindow:
     duration_s: float
 
 
-type TimingProblem = InvalidUnitSpan | BackwardsUnitSpan | OutsideAudioWindow
-
-
 @dataclass(frozen=True, slots=True)
-class RelativeAudioWindow:
-    """The shared aligner knows only window-relative coordinates."""
+class MissingUnitTime:
+    """A unit the decoder reported without a usable time, at its position."""
 
-
-@dataclass(frozen=True, slots=True)
-class RecordingAudioWindow:
-    start_s: float
-    duration_s: float
-
-
-type TimingLocation = RelativeAudioWindow | RecordingAudioWindow
-
-_RELATIVE_AUDIO_WINDOW = RelativeAudioWindow()
-
-
-class QwenTimingInvalid(ModelOutputInvalidError):
-    """A rejected model result, with its original values and coordinate space."""
-
-    def __init__(
-        self,
-        problem: TimingProblem,
-        location: TimingLocation = _RELATIVE_AUDIO_WINDOW,
-        *,
-        diagnostic: RejectedAlignmentDiagnostic | None = None,
-    ) -> None:
-        self.problem = problem
-        self.location = location
-        self.diagnostic = diagnostic
-        match problem:
-            case InvalidUnitSpan(unit=unit, defect=defect):
-                detail = f"unit {unit.index + 1} {unit.word.text!r} has {defect.value} timing {unit.word.start_s!r}..{unit.word.end_s!r} s"
-            case BackwardsUnitSpan(
-                previous=previous, current=current, boundary=boundary
-            ):
-                detail = (
-                    f"unit {current.index + 1} {current.word.text!r} has a backwards {boundary.value}: "
-                    f"{current.word.start_s!r}..{current.word.end_s!r} s after "
-                    f"unit {previous.index + 1} {previous.word.text!r} "
-                    f"{previous.word.start_s!r}..{previous.word.end_s!r} s"
-                )
-            case OutsideAudioWindow(unit=unit, duration_s=duration):
-                detail = (
-                    f"unit {unit.index + 1} {unit.word.text!r} reports "
-                    f"{unit.word.start_s!r}..{unit.word.end_s!r} s outside its "
-                    f"0..{duration:g} s audio window"
-                )
-            case unreachable:
-                assert_never(unreachable)
-        match location:
-            case RelativeAudioWindow():
-                where = "window-relative coordinates"
-            case RecordingAudioWindow(start_s=start, duration_s=duration):
-                where = f"recording window {start:g}..{start + duration:g} s (reported times are relative to that window)"
-            case unreachable:
-                assert_never(unreachable)
-        message = (
-            f"Qwen forced-aligner model output rejected in {where}: {detail}. "
-            "These are generated timings, not a CHAT input error; retain this diagnostic "
-            "with the audio sample for investigation before rerunning the batch."
-        )
-        if diagnostic is not None:
-            message += "\nQwen rejected alignment diagnostic: " + json.dumps(
-                asdict(diagnostic), ensure_ascii=False
-            )
-        super().__init__(message)
-
-    def with_diagnostic(
-        self, diagnostic: RejectedAlignmentDiagnostic
-    ) -> QwenTimingInvalid:
-        """Attach the available paired report at its admission failure edge."""
-        return QwenTimingInvalid(self.problem, self.location, diagnostic=diagnostic)
-
-    def in_recording_window(
-        self, start_s: float, duration_s: float
-    ) -> QwenTimingInvalid:
-        return QwenTimingInvalid(
-            self.problem,
-            RecordingAudioWindow(start_s, duration_s),
-            diagnostic=self.diagnostic,
-        )
+    index: int
+    reported: UntimedReportedUnit
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,8 +261,8 @@ class PairedWindowAlignment:
 
     units: tuple[str, ...]
     """The aligner's own segmentation, as the aligning call used it."""
-    words: tuple[WindowAlignedWord, ...]
-    """One timed span per unit, in the same order."""
+    words: tuple[ReportedUnit, ...]
+    """One report per unit, in the same order: a span, or no usable time."""
     native_trace: ReportedTimestampTrace | None = None
     """Original classifier observations when supplied by the native producer.
 
@@ -331,7 +284,7 @@ class PairedWindowAlignment:
     def of(
         cls,
         units: Iterable[str],
-        words: Iterable[WindowAlignedWord],
+        words: Iterable[ReportedUnit],
         *,
         native_trace: ReportedTimestampTrace | None = None,
     ) -> PairedWindowAlignment:
@@ -343,10 +296,11 @@ class PairedWindowAlignment:
 
 @dataclass(frozen=True, slots=True)
 class RejectedAlignmentDiagnostic:
-    """An unchanged rejected report bound to the actual supplied window.
+    """An unchanged report bound to the actual supplied window.
 
-    This accompanies the typed failure through worker protocol and job storage;
-    retaining model observations must not depend on a process's log level.
+    Logged at WARNING with every window whose units admission untimed for a
+    defect (`qwen_timing._log_untimed_defects`), so the model's observations
+    survive for investigation whatever the log level elsewhere.
     """
 
     reported: PairedWindowAlignment
@@ -367,24 +321,6 @@ class ForcedAligner(Protocol):
     def align(
         self, audio: Any, transcript: str, language: QwenLanguageLabel
     ) -> PairedWindowAlignment: ...
-
-
-class QwenUnitNotTimed(ModelOutputInvalidError):
-    """A decoded aligner unit arrived without one of its times.
-
-    Named rather than left as the raw `KeyError` the dict access would raise,
-    and refused rather than skipped: a unit holds a POSITION in the fold, so
-    dropping it silently moves every later span onto the wrong CHAT word.
-    """
-
-    def __init__(self, key: str, unit: dict[str, Any]) -> None:
-        super().__init__(
-            f"Qwen3 decoded an alignment unit with no {key!r}: {unit!r}; the "
-            f"unit cannot be dropped, because the fold attributes units to "
-            f"CHAT words by position."
-        )
-        self.key = key
-        self.unit = unit
 
 
 class QwenSegmentationDrift(ModelOutputInvalidError):
@@ -601,8 +537,7 @@ class WordSegmentation:
         """
         from batchalign.inference.qwen_timing import (
             ObservedWindowSpan,
-            RejectedWindowTiming,
-            UnavailableWindowTiming,
+            UntimedWindowTiming,
         )
 
         aligned = alignment.words
@@ -629,7 +564,7 @@ class WordSegmentation:
                 match constituent.timing:
                     case ObservedWindowSpan() as span:
                         observed.append(span)
-                    case UnavailableWindowTiming() | RejectedWindowTiming():
+                    case UntimedWindowTiming():
                         break
                     case unreachable:
                         assert_never(unreachable)
@@ -784,7 +719,7 @@ class QwenForcedAligner:
             timestamp_token_id=self.model.config.timestamp_token_id,
         )[0]
 
-        words = tuple(WindowAlignedWord.from_decoded(unit) for unit in aligned)
+        words = tuple(read_decoded_unit(unit) for unit in aligned)
         predictions = logits.argmax(dim=-1)[0]
         marker_mask = inputs["input_ids"][0] == self.model.config.timestamp_token_id
         trace = ReportedTimestampTrace(
@@ -825,7 +760,7 @@ class QwenFaHost:
 
         return QwenFaCacheIdentity(
             QWEN_FORCED_ALIGNER_MODEL_ID,
-            QwenFaAdmissionRevision.UNIT_DEFECTS_UNTIMED_V2,
+            QwenFaAdmissionRevision.TIMING_DEFECTS_UNTIMED_V3,
         )
 
     def segment(self, words: list[str]) -> WordSegmentation:
@@ -913,13 +848,16 @@ __all__ = [
     "QwenLanguageLabel",
     "QwenSegmentationDrift",
     "QwenSegmentationNotDecomposable",
-    "QwenUnitNotTimed",
     "QwenWordFold",
+    "ReportedUnit",
+    "TimeField",
     "TimedChatWord",
     "UntimedChatWord",
     "UntimedReason",
+    "UntimedReportedUnit",
     "WindowAlignedWord",
     "WordSegmentation",
     "load_qwen_fa",
+    "read_decoded_unit",
     "resolve_qwen_language",
 ]

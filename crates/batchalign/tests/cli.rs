@@ -620,8 +620,19 @@ async fn cli_morphotag_real_server() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_align_real_server_live_fa_succeeds() {
+/// What one live Whisper align run produced: the CLI's exit status and
+/// streams, and the output directory (kept alive with its temp root).
+struct LiveAlignRun {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+    out_dir: std::path::PathBuf,
+    _tmp: tempfile::TempDir,
+}
+
+/// Align the committed fixture pair with Whisper FA against a live server
+/// on the stated machine, keeping BA3's default headroom free.
+async fn run_live_whisper_align(host_facts: batchalign::host_facts::HostFacts) -> LiveAlignRun {
     use batchalign::worker::InferTask;
 
     let python_path = crate::prerequisite::PythonWorker::require().interpreter();
@@ -655,9 +666,11 @@ async fn cli_align_real_server_live_fa_succeeds() {
         + "\n";
     std::fs::write(in_dir.join("test.cha"), stripped_chat).expect("write stripped chat");
 
-    let server = start_live_server(
+    let server = crate::cli_common::start_live_server_on(
         &python_path,
         vec![batchalign_types::paths::ServerPath::new(in_dir.clone())],
+        host_facts,
+        crate::cli_common::LiveHeadroom::ProductDefault,
     )
     .await
     .unwrap_or_else(|message| {
@@ -694,24 +707,63 @@ async fn cli_align_real_server_live_fa_succeeds() {
 
     server.shutdown().await;
 
-    let stderr = String::from_utf8_lossy(&cli_result.stderr);
-    let stdout = String::from_utf8_lossy(&cli_result.stdout);
+    let stderr = String::from_utf8_lossy(&cli_result.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&cli_result.stdout).into_owned();
     eprintln!("CLI stdout: {stdout}");
     eprintln!("CLI stderr: {stderr}");
+    LiveAlignRun {
+        status: cli_result.status,
+        stdout,
+        stderr,
+        out_dir,
+        _tmp: tmp,
+    }
+}
+
+/// Whisper FA needs about 13 GB at peak (measured: 12.9 to 13.7 GB for one
+/// 30 s window), so a machine with room for it, its headroom kept, aligns
+/// every word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_align_real_server_live_fa_succeeds() {
+    let run =
+        run_live_whisper_align(batchalign::host_facts::test_helpers::apple_silicon_64gb()).await;
+    let (stdout, stderr) = (&run.stdout, &run.stderr);
     assert!(
-        cli_result.status.success(),
+        run.status.success(),
         "CLI should succeed. stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         stderr.contains("All done! 1 file(s) written"),
         "CLI should report a completed write. stderr: {stderr}"
     );
-
     let output_chat =
-        std::fs::read_to_string(out_dir.join("test.cha")).expect("read aligned output");
+        std::fs::read_to_string(run.out_dir.join("test.cha")).expect("read aligned output");
     assert!(
         output_chat.contains("%wor:"),
         "aligned output should contain a %wor tier. output:\n{output_chat}"
+    );
+}
+
+/// With BA3's default headroom kept free, the same laptop can never hold
+/// Whisper FA: the file fails promptly and says what it needs and what the
+/// host can offer, rather than waiting for memory that will never come or
+/// switching engines unasked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_align_live_whisper_fa_on_a_host_too_small_fails_with_the_numbers() {
+    let started = std::time::Instant::now();
+    let run = run_live_whisper_align(batchalign::host_facts::test_helpers::laptop_16gb()).await;
+    let (stdout, stderr) = (&run.stdout, &run.stderr);
+    assert!(
+        !run.status.success(),
+        "a host too small for Whisper FA must not report success. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("this host can ever offer") || stdout.contains("this host can ever offer"),
+        "the failure must name what the host can offer. stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(240),
+        "the refusal must be prompt, not a memory wait that times out"
     );
 }
 

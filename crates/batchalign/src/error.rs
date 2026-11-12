@@ -557,6 +557,75 @@ impl std::fmt::Display for AlignmentCompletionFailure {
 
 impl std::error::Error for AlignmentCompletionFailure {}
 
+/// A recovery failure whose requested diagnostic evidence could not be stored.
+#[derive(Debug, thiserror::Error)]
+#[error("could not retain failed UTR evidence: {failure}; recovery failed: {cause}")]
+pub struct UtrEvidenceRetentionFailure {
+    #[source]
+    cause: Box<ServerError>,
+    failure: String,
+}
+
+impl UtrEvidenceRetentionFailure {
+    pub(crate) fn new(cause: ServerError, failure: String) -> Self {
+        Self {
+            cause: Box::new(cause),
+            failure,
+        }
+    }
+}
+
+/// An internal contradiction between the admitted source and working model.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AlignmentSourceBindingFailure {
+    /// UTR correspondence evidence belongs to another admitted source.
+    #[error("utterance-timing evidence belongs to a different source document")]
+    UtrEvidenceFromDifferentSource,
+    /// An admitted utterance is missing from the working document.
+    #[error("working alignment document is missing source utterance {utterance}")]
+    MissingWorkingUtterance {
+        /// First missing utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+    /// The working document contains an utterance absent from the source.
+    #[error("working alignment document has an unexpected utterance {utterance}")]
+    UnexpectedWorkingUtterance {
+        /// First unexpected utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+    /// The working utterance's speaker differs from the admitted source.
+    #[error("working alignment utterance {utterance} has a different speaker")]
+    SpeakerChanged {
+        /// First differing utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+    /// The working utterance's source location differs.
+    #[error("working alignment utterance {utterance} has a different source location")]
+    LocationChanged {
+        /// First differing utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+    /// The working utterance's alignable words differ.
+    #[error("working alignment utterance {utterance} has different alignable words")]
+    WordsChanged {
+        /// First differing utterance.
+        utterance: talkbank_model::UtteranceIdx,
+    },
+}
+
+/// A completed reply lost its receiving population before delivery.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AlignmentReplyDeliveryFailure {
+    /// The population was released; this does not establish a user cancel.
+    #[error("alignment request {request} of group {group} lost its receiving owner")]
+    OwnerReleased {
+        /// Group ordinal in the producing plan.
+        group: usize,
+        /// Request ordinal in the producing plan.
+        request: usize,
+    },
+}
+
 #[cfg(all(test, feature = "server"))]
 mod alignment_completion_tests {
     use super::*;
@@ -593,6 +662,40 @@ mod alignment_completion_tests {
                 !((category).retryability() == crate::types::scheduling::Retryability::Retryable)
             );
         }
+    }
+
+    #[test]
+    fn alignment_source_binding_is_an_internal_nonretryable_failure() {
+        let utterance = talkbank_model::UtteranceIdx::new(1);
+        for error in [
+            ServerError::from(AlignmentSourceBindingFailure::MissingWorkingUtterance { utterance }),
+            crate::fa::kept_bullets_failed(
+                crate::chat_ops::fa::KeptBulletError::RetrySourceMissing { utterance },
+            ),
+        ] {
+            let category = crate::runner::util::classify_server_error(&error);
+            assert_eq!(category, crate::scheduling::FailureCategory::System);
+            assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_ne!(
+                category.retryability(),
+                crate::types::scheduling::Retryability::Retryable
+            );
+        }
+    }
+
+    #[test]
+    fn alignment_reply_delivery_is_an_internal_nonretryable_failure() {
+        let error = ServerError::from(AlignmentReplyDeliveryFailure::OwnerReleased {
+            group: 0,
+            request: 0,
+        });
+        let category = crate::runner::util::classify_server_error(&error);
+        assert_eq!(category, crate::scheduling::FailureCategory::System);
+        assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(
+            category.retryability(),
+            crate::types::scheduling::Retryability::Retryable
+        );
     }
 }
 
@@ -749,14 +852,6 @@ pub enum ServerError {
     )]
     AdmissionDisagreement,
 
-    /// The retokenize run walk and Chatter's extractor counted one
-    /// utterance's `%mor` words differently.
-    ///
-    /// **HTTP 500.** Both walk the same main tier, so a disagreement is a
-    /// tool fault, never the transcript's.
-    #[error("internal fault: {0}; no output was written")]
-    WordRunsDisagree(#[from] batchalign_transform::retokenize::RunsDisagree),
-
     /// A consumer configured to receive no morphology reports received
     /// analysis or provenance outcomes. This is an internal policy mismatch,
     /// never invalid CHAT or an inference retry condition.
@@ -848,6 +943,18 @@ pub enum ServerError {
     /// evidence; loss of source correspondence is an internal producer fault.
     #[error(transparent)]
     AlignmentCompletion(#[from] AlignmentCompletionFailure),
+
+    /// Source and working alignment identity disagree: an internal fault.
+    #[error(transparent)]
+    AlignmentSourceBinding(#[from] AlignmentSourceBindingFailure),
+
+    /// The requested diagnostic evidence could not be retained after UTR failed.
+    #[error(transparent)]
+    UtrEvidenceRetention(#[from] UtrEvidenceRetentionFailure),
+
+    /// A completed reply lost its receiving population.
+    #[error(transparent)]
+    AlignmentReplyDelivery(#[from] AlignmentReplyDeliveryFailure),
 
     /// A diagnostic record named an utterance its document does not hold.
     /// Records are located against the document they describe, so this is
@@ -1511,7 +1618,6 @@ impl ServerError {
                 StatusCode::BAD_REQUEST
             }
             Self::AdmissionDisagreement
-            | Self::WordRunsDisagree(_)
             | Self::UnexpectedMorphologyReport
             | Self::UtrTask(_)
             | Self::ReplacementPlanContradicted { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1520,6 +1626,9 @@ impl ServerError {
             | Self::GeneratedHeader(_)
             | Self::MorphosyntaxInjection(_)
             | Self::UtterancePartition(_)
+            | Self::AlignmentSourceBinding(_)
+            | Self::UtrEvidenceRetention(_)
+            | Self::AlignmentReplyDelivery(_)
             | Self::UtteranceLocation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RequiredEvidenceUnavailable(_) | Self::AnalysisUnavailable(_) => {
                 StatusCode::PRECONDITION_FAILED

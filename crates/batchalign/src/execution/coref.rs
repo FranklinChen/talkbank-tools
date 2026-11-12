@@ -44,7 +44,7 @@ pub(crate) async fn dispatch_coref_job(
     let sink = host.sink().clone();
 
     for file in &job.pending_files {
-        FileRunTracker::new(sink.as_ref(), &job.identity.job_id, file.filename.as_ref())
+        FileRunTracker::new(sink.as_ref(), file.filename.as_ref())
             .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::ResolvingCoreference)
             .await;
     }
@@ -57,7 +57,6 @@ pub(crate) async fn dispatch_coref_job(
     // One batch over every file: a saturated checkout shows on all of them.
     let results = crate::runner::util::observing_file_waits(
         &sink,
-        &job.identity.job_id,
         inputs
             .file_texts
             .iter()
@@ -172,7 +171,6 @@ mod tests {
         std::fs::write(input_dir.join("a.cha"), text).unwrap();
         std::fs::write(input_dir.join("b.cha"), text).unwrap();
         RunnerJobSnapshot {
-            run_generation: crate::store::RunGeneration::FIRST,
             identity: crate::store::RunnerJobIdentity {
                 job_id: JobId::from("job-coref"),
                 correlation_id: CorrelationId::from("corr-coref"),
@@ -224,12 +222,15 @@ mod tests {
 
     fn host() -> DispatchHostContext {
         let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        DispatchHostContext::from_store(Arc::new(crate::store::JobStore::for_tests(
-            crate::config::ServerConfig::default(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        )))
+        DispatchHostContext::from_store(
+            Arc::new(crate::store::JobStore::for_tests(
+                crate::config::ServerConfig::default(),
+                None,
+                tx,
+                std::sync::Arc::new(crate::clock::SystemClock),
+            )),
+            &JobId::from("job-coref"),
+        )
     }
 
     /// RED FIRST: a coref job submitted in its only legal shape (`PerFile`)

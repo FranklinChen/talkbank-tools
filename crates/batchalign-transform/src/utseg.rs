@@ -567,7 +567,7 @@ enum FinishedSplit<'source> {
 /// Admit and execute one source's partition, then finish its children.
 ///
 /// Chatter's plan rebuilds the children with a period on every earlier child
-/// and the parent's terminator on the last (pinned Chatter v0.34.0 has no
+/// and the parent's terminator on the last (pinned Chatter v0.34.3 has no
 /// way to hand the plan a terminator per child), so the ends the
 /// segmentation states and the capitalization the file's language asks for
 /// are applied here, as the one transition between a rebuilt child and a

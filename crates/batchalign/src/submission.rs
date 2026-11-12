@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use batchalign_types::paths::ServerPath;
-use tokio_util::sync::CancellationToken;
 
 use crate::api::{CorrelationId, DisplayPath, JobId, JobStatus, JobSubmission};
 use crate::error::ServerError;
@@ -182,7 +181,6 @@ pub(crate) async fn materialize_submission_job(
             file_statuses,
             results: Vec::new(),
             error: None,
-            completed_files: 0,
         },
         schedule: JobScheduleState {
             submitted_at: context.submitted_at.instant(),
@@ -192,11 +190,7 @@ pub(crate) async fn materialize_submission_job(
             lease: None,
             last_cancel: None,
         },
-        runtime: JobRuntimeControl {
-            cancel_token: CancellationToken::new(),
-            runner_active: false,
-            run_generation: crate::store::RunGeneration::FIRST,
-        },
+        runtime: JobRuntimeControl::unclaimed(),
         execution_plan: None,
     })
 }

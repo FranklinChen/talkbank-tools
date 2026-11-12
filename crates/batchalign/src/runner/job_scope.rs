@@ -120,10 +120,34 @@ pub(super) struct RunScope {
     context: RunContext,
 }
 
+/// How execution itself ended. It has no cancelled ending: cancellation is
+/// decided by the [`RunScope`] that races execution against the job's
+/// cancel token, so execution cannot report one.
+#[derive(Debug)]
+pub(super) enum ExecutionEnd {
+    /// Dispatch ran; files recorded their own terminal states.
+    Dispatched,
+    /// Host capacity deferred the job; the claim is released for a retry.
+    Requeued { retry_at: crate::api::MachineTime },
+    /// The whole job was refused; the run fails with this reason.
+    Refused(super::context::JobRefusal),
+}
+
+/// How a claimed run ended, each way named: the claim's owner turns each one
+/// into exactly one store transition.
+#[derive(Debug)]
+pub(super) enum ClaimedRunEnd {
+    /// Execution ran to one of its own endings.
+    Executed(ExecutionEnd),
+    /// The job's cancellation won before execution ended. Only
+    /// [`RunScope::execute`] makes this.
+    Cancelled,
+}
+
 /// Execution returns the claim with its outcome, never a second run scope.
 pub(super) struct EndedDispatch {
     pub claim: crate::store::RunnerClaim,
-    pub outcome: Result<super::context::HostedJobRunOutcome, crate::error::ServerError>,
+    pub outcome: Result<ClaimedRunEnd, crate::error::ServerError>,
 }
 
 /// The claimed run owns its heartbeat, including abort on dropped execution.
@@ -152,9 +176,7 @@ impl RunScope {
     pub(super) async fn execute(
         self,
         store: std::sync::Arc<crate::store::JobStore>,
-        execution: impl Future<
-            Output = Result<super::context::HostedJobRunOutcome, crate::error::ServerError>,
-        >,
+        execution: impl Future<Output = Result<ExecutionEnd, crate::error::ServerError>>,
     ) -> EndedDispatch {
         let Self { claim, context } = self;
         let job_id = context.job_id.clone();
@@ -184,8 +206,8 @@ impl RunScope {
                 RUN_SCOPE.scope(context, async move {
                     tokio::select! {
                         biased;
-                        () = cancelled.cancelled() => Ok(super::context::HostedJobRunOutcome::Completed),
-                        result = execution => result,
+                        () = cancelled.cancelled() => Ok(ClaimedRunEnd::Cancelled),
+                        result = execution => result.map(ClaimedRunEnd::Executed),
                     }
                 }),
             )

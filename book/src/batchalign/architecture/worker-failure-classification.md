@@ -381,7 +381,7 @@ Each variant has a documented retryability class.
 | `ModelRuntime(String)` | A local model's generic `RuntimeFailure` (see below) | Bounded retries (`LocalRuntime`); the code alone does not identify the cause |
 | `RequestRefused(String)` | Worker returned `{"op":"error", "kind":"invalid_request"}`: the line was not JSON, the op or its `request` mapping was missing, or the payload failed the request model | **Terminal** (`WorkerProtocol`): the same request is refused again; the worker stays in service |
 | `Io(io::Error)` | Pipe-level I/O failure (broken pipe, etc.) | Retryable, pool replaces worker |
-| `MemoryGuard(MemoryGuardError)` | Memory-guard refused to admit the worker (insufficient headroom under the configured budget) | Retryable after a backoff (`MemoryPressure`): memory frees as other work ends |
+| `MemoryGuard(MemoryGuardError)` | Host memory refused a reservation for good: `ExceedsHost` (it can never fit this host, keeping `memory_gate_mb` free) or `LedgerUnusable` (the host or its ledger cannot be used). A full host is not here: that wait queues | **Terminal**: `ExceedsHost` is `WorkerBootstrap`, `LedgerUnusable` is `System` |
 | `NoWorker { command, lang }` | Reserved variant; unused today | Terminal |
 | `PoolShuttingDown` | The pool is shutting down; dispatch, task loading and a shared worker's in-flight requests are refused | **Terminal** (`System`): nothing will serve the request; the job is recovered at the next start |
 | `WorkerRetired` | The pool retired the shared worker a request was in flight on (its capability report was refused, or it is being replaced) and keeps serving | Retryable (`WorkerCrash`): the retry reaches another worker |

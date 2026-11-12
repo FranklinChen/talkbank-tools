@@ -1,6 +1,8 @@
 //! Input-bound preparation, before the only transition that grants execution.
 
-use super::fa_capacity::{FaCapacityRefusal, FaHostAssessment, HostFeasibleFaDemand};
+use super::fa_capacity::{
+    FaCapacityNumbers, FaCapacityRefusal, FaHostAssessment, HostFeasibleFaDemand,
+};
 use crate::types::worker_v2::{
     ArtifactRefV2, ExecuteOutcomeRef, ExecuteRequestV2, ExecuteResponseV2, FaPreparationOutcomeV2,
     FaPreparationPlanV2, FaRequestMemoryV2, FaRequestPhaseV2, ForcedAlignmentRequestV2,
@@ -57,10 +59,13 @@ impl PhysicallyFeasibleFaPreparation {
     }
 }
 
+/// A preparation whose request is too large for this host, though the model
+/// fits: a smaller cut may fit. Only [`FaCapacityRefusal::RequestTooLarge`]
+/// makes one; a model that never fits refuses the probe instead.
 #[derive(Debug)]
 pub(crate) struct PhysicallyLimitedFaPreparation {
     preparation: BoundFaPreparation,
-    refusal: FaCapacityRefusal,
+    refusal: FaCapacityNumbers,
 }
 
 impl PhysicallyLimitedFaPreparation {
@@ -69,7 +74,7 @@ impl PhysicallyLimitedFaPreparation {
             engine: self.preparation.plan.binding.engine,
             required_mb: self.refusal.required.0,
             reserve_mb: self.refusal.reserve.0,
-            total_mb: self.refusal.total.0,
+            ceiling_mb: self.refusal.ceiling.0,
         }
     }
 }
@@ -317,11 +322,20 @@ impl super::WorkerPool {
                             _feasibility: feasibility,
                         },
                     )),
-                    FaHostAssessment::Exceeds(refusal) => {
+                    FaHostAssessment::Exceeds(FaCapacityRefusal::RequestTooLarge(refusal)) => {
                         Ok(FaProbeCompletion::Limited(PhysicallyLimitedFaPreparation {
                             preparation,
                             refusal,
                         }))
+                    }
+                    // No request of this model fits this host, so no cut of
+                    // this one is worth probing: the file fails now, with
+                    // the numbers, as any other never-fitting request does.
+                    FaHostAssessment::Exceeds(FaCapacityRefusal::ModelNeverFits(refusal)) => {
+                        Err(WorkerError::MemoryGuard(refusal.into_guard_error(format!(
+                            "FA model {}",
+                            preparation.plan.binding.engine
+                        ))))
                     }
                 }
             }

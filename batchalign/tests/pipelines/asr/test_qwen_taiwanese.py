@@ -12,6 +12,7 @@ from batchalign.inference.languages.cantonese._qwen_chunking import (
 from batchalign.inference.languages.cantonese._qwen_common import (
     LoadedQwen,
     QwenRecognizerConfig,
+    QwenTranscription,
     ReadyQwenRecognizer,
 )
 from batchalign.inference.qwen_asr_profile import QwenAsrProfile
@@ -20,10 +21,17 @@ from batchalign.inference.qwen_forced_alignment import (
     WindowAlignedWord,
     resolve_qwen_language,
 )
-from batchalign.inference.qwen_punctuation import PunctuatedAlignment
+from batchalign.inference.qwen_punctuation import (
+    LexicalDrift,
+    NonlexicalUnit,
+    PunctuatedAlignment,
+    restore_punctuation,
+)
 from batchalign.inference.qwen_timing import (
     AudioWindow,
+    CompletedRecording,
     ObservedRecordingSpan,
+    RecordingStart,
     SpokenWindowWords,
     WindowAlignment,
 )
@@ -74,18 +82,86 @@ def test_taiwanese_recognition_does_not_widen_standalone_alignment_support():
     ],
 )
 def test_punctuation_joins_only_lexically_identical_units(text, words, expected):
-    assert (
-        tuple(word.text for word in PunctuatedAlignment(text, _spoken(words)).words)
-        == expected
-    )
+    restored = restore_punctuation(text, _spoken(words))
+    assert isinstance(restored, PunctuatedAlignment)
+    assert tuple(word.text for word in restored.words) == expected
 
 
 @pytest.mark.parametrize(
-    "words", [["你", "壞"], ["你"], ["你", "好", "啊"], ["你", "!", "好"]]
+    "words, refusal",
+    [
+        (["你", "壞"], LexicalDrift),
+        (["你"], LexicalDrift),
+        (["你", "好", "啊"], LexicalDrift),
+        (["你", "!", "好"], NonlexicalUnit),
+    ],
 )
-def test_punctuation_refuses_changed_or_missing_words(words):
-    with pytest.raises(ValueError):
-        PunctuatedAlignment("你好。", _spoken(words))
+def test_punctuation_refuses_changed_or_missing_words_without_raising(words, refusal):
+    """The production edge never raises on model output: it says why."""
+    assert isinstance(restore_punctuation("你好。", _spoken(words)), refusal)
+
+
+def _drifting_recognizer(units):
+    class Aligner:
+        def align(self, audio, text, language):
+            return PairedWindowAlignment.of(
+                [unit for unit, _start, _end in units],
+                [WindowAlignedWord(unit, start, end) for unit, start, end in units],
+            )
+
+    return ReadyQwenRecognizer(
+        QwenRecognizerConfig(lang="nan", device="cpu", recognition=TAIWANESE_POLICY),
+        LoadedQwen(processor=object(), model=object(), aligner=Aligner()),
+    )
+
+
+def test_a_respelled_chunk_keeps_the_recognized_text_untimed(caplog):
+    """The aligner spelled different words than were recognized: its spelling
+    never replaces the recognized text, and no time is attributed to it."""
+    recognizer = _drifting_recognizer([("你", 0.1, 0.4), ("壞", 0.5, 0.9)])
+    chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
+    with caplog.at_level("WARNING"):
+        speech = recognizer._align_chunk(chunk, "你好。")
+    assert speech.text == "你好。"
+    assert speech.words == ()
+    assert "does not spell the recognized text" in caplog.text
+    assert "recording window 30..31 s" in caplog.text
+
+
+def test_a_respelled_chunk_reaches_the_transcript_as_recognized_untimed_text(
+    monkeypatch,
+):
+    recognizer = _drifting_recognizer([("你", 0.1, 0.4), ("壞", 0.5, 0.9)])
+    chunk = recognizer._align_chunk(
+        AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0), "你好。"
+    )
+    result = QwenTranscription(CompletedRecording(RecordingStart().append(chunk)), ())
+    monkeypatch.setattr(
+        ReadyQwenRecognizer, "_run_model", lambda *_args, **_kwargs: result
+    )
+    (element,) = recognizer.transcribe("unused.wav")["monologues"][0]["elements"]
+    assert (element["value"], element["ts"], element["end_ts"]) == (
+        "你好。",
+        None,
+        None,
+    )
+
+
+def test_a_nonlexical_unit_keeps_timed_words_without_punctuation(caplog):
+    """The units still spell the recognized text, so their timing stands; only
+    punctuation is lost, and the log says why."""
+    recognizer = _drifting_recognizer(
+        [("你", 0.1, 0.4), ("!", 0.45, 0.5), ("好", 0.5, 0.9)]
+    )
+    chunk = AudioChunk(samples=np.zeros(16000, dtype=np.float32), offset=30.0)
+    with caplog.at_level("WARNING"):
+        speech = recognizer._align_chunk(chunk, "你好。")
+    assert [
+        (word.timing.start_s, word.timing.end_s, word.text)
+        for word in speech.words
+        if isinstance(word.timing, ObservedRecordingSpan)
+    ] == [(30.1, 30.4, "你"), (30.45, 30.5, "!"), (30.5, 30.9, "好")]
+    assert "punctuation not restored in recording window 30..31 s" in caplog.text
 
 
 def test_recognizer_retains_punctuation_and_exact_file_relative_times():
@@ -201,10 +277,10 @@ def test_the_worker_boundary_requires_the_control_plane_policy():
 
 
 def test_punctuation_does_not_erase_combining_tone_marks():
-    with pytest.raises(ValueError):
-        PunctuatedAlignment("a\u0301.", _spoken(["a"]))
+    assert isinstance(restore_punctuation("a\u0301.", _spoken(["a"])), LexicalDrift)
     aligned = _spoken(["a\u0301"])
-    result = PunctuatedAlignment("a\u0301.", aligned)
+    result = restore_punctuation("a\u0301.", aligned)
+    assert isinstance(result, PunctuatedAlignment)
     assert result.words[0].text == "a\u0301."
     assert result.words[0].timing is aligned.words[0].timing
 

@@ -1,7 +1,7 @@
 # Morphotag Reconciliation Invariants
 
 **Status:** Current
-**Last updated:** 2026-10-12 22:13 EDT
+**Last updated:** 2026-11-11 23:22 EST
 
 This page documents the **1-to-1 invariant** that the morphotag pipeline
 relies on, the three stages that together make it hold deterministically,
@@ -120,11 +120,15 @@ back into one `%mor` chunk per CHAT word.
 
 Each stage's correctness is independently testable:
 
-- **Stage 1**: the parity test at
-  `crates/batchalign/tests/chat_ops_mor_count_parity_reference_corpus.rs`
-  asserts that `Utterance::mor_alignable_word_count()` and
-  `extract::collect_utterance_content(..., Mor, ...).len()` agree on
-  every utterance in the 98-file reference corpus.
+- **Stage 1**: Chatter's own reference-corpus test
+  (`mor_runs_partition_the_flat_extraction_over_the_reference_corpus` in
+  talkbank-transform, from 0.34.3) asserts that the `%mor` aligner's
+  position count (`count_tier_positions`, which
+  `Utterance::mor_alignable_word_count()` delegates to) equals the flat
+  `%mor` extraction on every reference utterance, and that the runs BA3
+  receives partition it. Both walkers are Chatter's, so the invariant is
+  gated in Chatter's release; BA3 kept a copy of this test until Chatter
+  0.34.3, when finding Chatter's corpus began to need a Chatter checkout.
 - **Stage 2**: the contract test at
   `batchalign/tests/inference/test_morphosyntax_realignment_contract.py`
   asserts that `tok_ctx.original_words = word_lists` happens before
@@ -257,5 +261,5 @@ no producer sets does not exist:
 - `crates/batchalign-transform/src/morphosyntax/payload.rs`: NotApplicable classification
 - `batchalign/inference/morphosyntax.py`: realignment stage
 - `batchalign/tests/inference/test_morphosyntax_realignment_contract.py`: Stage 2 tests
-- `crates/batchalign/tests/chat_ops_mor_count_parity_reference_corpus.rs`: Stage 1 tests
+- Chatter `talkbank-transform/src/extract.rs`: Stage 1 test (reference-corpus parity)
 - `talkbank-tools/../chatter/crates/talkbank-model/src/alignment/helpers/rules.rs`: `counts_for_tier`

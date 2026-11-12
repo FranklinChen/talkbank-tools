@@ -279,8 +279,7 @@ fn snapshot_collected_payloads() {
         &primary,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    )
-    .expect("the run walk agrees with extraction");
+    );
     let items = collected.batch_items;
     let total = collected.total_utterances;
 
@@ -322,7 +321,6 @@ fn collect_payloads_uses_file_language_not_batch_default_spa() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -356,7 +354,6 @@ fn collect_payloads_uses_file_language_not_batch_default_rus() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -388,7 +385,6 @@ fn collect_payloads_uses_file_language_not_batch_default_zho() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -420,7 +416,6 @@ fn collect_payloads_uses_file_language_not_batch_default_fra() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -453,7 +448,6 @@ fn collect_payloads_lang_correct_when_primary_matches_header() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -484,7 +478,6 @@ fn collect_payloads_uses_first_declared_language_for_multilingual() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -529,7 +522,6 @@ fn test_inject_results_retokenize_cantonese_retrace() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert!(!batch_items.is_empty(), "Should have batch items");
@@ -640,7 +632,6 @@ fn test_french_elision_in_quoted_context() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1, "Should have exactly 1 utterance payload");
@@ -692,7 +683,6 @@ fn collect_payloads_identifies_at_s_positions_single() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1, "should have 1 utterance");
@@ -750,7 +740,6 @@ fn collect_payloads_identifies_contiguous_at_s_span() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -807,7 +796,6 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(
         batch_items.len(),
@@ -1004,7 +992,6 @@ fn inject_results_retokenize_mwt_range_tokens_no_failure() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(batch_items.len(), 1, "should have 1 utterance");
@@ -1198,7 +1185,6 @@ fn assert_coraal_injection_complete(raw_words: &str) {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(batch_items.len(), 1, "should have one payload");
@@ -1263,7 +1249,6 @@ fn inject_results_preserve_minga_because_keeps_mor_gra() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(batch_items.len(), 1, "should have one payload");
@@ -1326,7 +1311,6 @@ fn inject_results_preserve_kings_continuation_keeps_mor_gra() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(batch_items.len(), 2, "should have two payloads");
@@ -1409,7 +1393,6 @@ fn collect_payloads_bare_at_s_shortcut_resolution() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     assert_eq!(items.len(), 1);
@@ -1605,7 +1588,6 @@ fn collect_payloads_treats_empty_mor_placeholder_as_unprocessed() {
         talkbank_model::DeclaredLanguagesRef::new(&langs).expect("nonempty fixture languages"),
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(
         items.len(),
@@ -1621,8 +1603,7 @@ fn collect_payloads_treats_empty_mor_placeholder_as_unprocessed() {
         &primary_lang,
         talkbank_model::DeclaredLanguagesRef::new(&langs).expect("nonempty fixture languages"),
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
-    )
-    .expect("the run walk agrees with extraction");
+    );
     let items = collected.batch_items;
     let total = collected.total_utterances;
     assert_eq!(total, 1, "one utterance in fixture");
@@ -1704,7 +1685,6 @@ fn inject_results_count_mismatch_propagates_error() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -1773,7 +1753,6 @@ fn mid_utterance_comma_end_to_end_injects_cm_mor() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -1923,7 +1902,6 @@ fn family_a_single_word_at_o_keeps_root_deprel_when_head_is_zero() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2010,7 +1988,6 @@ fn family_a_multi_word_all_at_si_keeps_root_deprel_at_head_zero() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -2092,7 +2069,6 @@ fn family_a_host_modifier_with_at_o_root_keeps_root_deprel() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -2192,7 +2168,6 @@ fn family_a_at_o_with_nonzero_head_does_not_become_root() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -2412,7 +2387,6 @@ fn morphotag_inject_results_preserves_utterance_multiplicity_one_to_one() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     // Complete synthetic responses exercise preservation after successful
@@ -2570,7 +2544,6 @@ fn l2_fallback_unsupported_secondary_at_s_lang_remains_l2_xxx() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2646,7 +2619,6 @@ fn l2_fallback_multiple_languages_at_s_marker_remains_l2_xxx() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2712,7 +2684,6 @@ fn l2_fallback_ambiguous_languages_at_s_marker_remains_l2_xxx() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2774,7 +2745,6 @@ fn unsupported_precode_without_analysis_refuses_completion() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2869,7 +2839,6 @@ fn l2_supported_precode_whole_utterance_does_not_fall_back_to_l2_xxx() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -2973,7 +2942,6 @@ fn l2_fallback_unresolved_bare_at_s_shortcut_remains_l2_xxx() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -3082,7 +3050,6 @@ fn l2_fallback_bare_at_s_shortcut_resolves_to_unsupported_lang_remains_l2_xxx() 
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -3176,7 +3143,6 @@ fn l2_fallback_no_l2_morphotag_flag_off_keeps_l2_xxx_for_supported_lang() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1, "fixture has one utterance");
 
@@ -3284,7 +3250,6 @@ fn run_synthesis_root_invariant_check(form_marker: &str, surface: &str, expected
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(
         batch_items.len(),
@@ -3487,7 +3452,6 @@ fn assert_empty_stanza_synthesizes_root(form_marker: &str, surface: &str, expect
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -3598,7 +3562,6 @@ fn synthesis_stanza_tokenizes_xbxxx_into_two_at_q_root_keeps_root_deprel() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     assert_eq!(batch_items.len(), 1);
 
@@ -3680,8 +3643,7 @@ fn synthesis_at_top_bypass_runs_for_poker_q_with_synthetic_stanza() {
         &primary_lang,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    )
-    .expect("the run walk agrees with extraction");
+    );
     let batch_items = payloads.batch_items;
     assert_eq!(batch_items.len(), 3, "fixture has three utterances");
 
@@ -3814,7 +3776,6 @@ fn no_stanza_response_through_inject_should_produce_observed_failure_shape() {
             langs.as_ref(),
             MultilingualPolicy::ProcessAll,
         )
-        .expect("the run walk agrees with extraction")
         .batch_items;
         let primary_ud = ud_response_from_words(words_json);
 
@@ -3895,8 +3856,7 @@ fn synthesis_production_fixture_at_q_with_timestamp() {
         &primary_lang,
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
-    )
-    .expect("the run walk agrees with extraction");
+    );
     let batch_items = payloads.batch_items;
     assert_eq!(
         batch_items.len(),
@@ -3980,7 +3940,6 @@ fn synthesis_at_n_non_root_position_uses_dep_deprel() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
 
     // Stanza response: "said" is the root, "haho@n"-placeholder is OBJ.
@@ -4055,7 +4014,6 @@ fn injection_writes_no_invented_feature_values() {
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     let ud = ud_response_from_words(
         r#"[
@@ -4115,7 +4073,6 @@ fn inject_retokenized(
         langs.as_ref(),
         MultilingualPolicy::ProcessAll,
     )
-    .expect("the run walk agrees with extraction")
     .batch_items;
     let injection = inject_results(
         &parser,

@@ -28,6 +28,7 @@ from batchalign.inference.qwen_forced_alignment import (
 )
 from batchalign.inference.qwen_timing import (
     AudioWindow,
+    CollapsedPlacement,
     CompletedRecording,
     ObservedRecordingSpan,
     ObservedWindowSpan,
@@ -38,6 +39,7 @@ from batchalign.inference.qwen_timing import (
     SpokenWindowWords,
     UnavailableWindowTiming,
     WindowAlignment,
+    log_placement_defects,
 )
 from batchalign.tests.pipelines.fa.test_qwen_forced_alignment import (
     _QwenLikeAligner,
@@ -162,11 +164,10 @@ def test_asr_wire_keeps_unavailable_word_text_without_fabricating_a_timestamp(
     monkeypatch.setattr(
         ReadyQwenRecognizer, "_run_model", lambda *_args, **_kwargs: result
     )
-    payload, timed = recognizer.transcribe("unused.wav")
-    element = payload["monologues"][0]["elements"][0]
+    payload = recognizer.transcribe("unused.wav")
+    (element,) = payload["monologues"][0]["elements"]
     assert element["value"] == "unknown"
     assert element["ts"] is None and element["end_ts"] is None
-    assert timed == []
 
 
 def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
@@ -256,3 +257,22 @@ def test_the_recording_consumer_can_publish_contiguous_chunks(monkeypatch):
     result = _recording_run(monkeypatch, 1.0)
     assert len(result.segments) == 2
     assert [chunk.window.start_s for chunk in result.segments] == [0.0, 1.0]
+
+
+def test_a_span_that_collapses_in_recording_time_is_untimed_not_fatal(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """At a large enough offset, float64 cannot hold a short positive span; the
+    placement edge untimes it instead of failing the chunk or inventing one."""
+    alignment = WindowAlignment(
+        PairedWindowAlignment.of(["hello"], [WindowAlignedWord("hello", 0.1, 0.4)]),
+        AudioWindow(1.0),
+    )
+    speech = RecordingChunkSpeech("hello", 1e17, SpokenWindowWords(alignment))
+    collapsed = speech.words[0].timing
+    assert isinstance(collapsed, CollapsedPlacement)
+    assert collapsed.defect.offset_s == 1e17
+    with caplog.at_level("WARNING"):
+        log_placement_defects(speech)
+    assert "lost 1 positive span(s)" in caplog.text
+    assert "is not positive at offset 1e+17 s" in caplog.text

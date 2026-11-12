@@ -211,7 +211,7 @@ impl Job {
             lang: self.dispatch.lang.clone(),
             source_dir: self.source.source_dir.as_str().to_owned(),
             total_files: self.total_files() as i64,
-            completed_files: self.execution.completed_files,
+            completed_files: self.execution.completed_files(),
             current_file: None,
             error: self.execution.error.clone(),
             file_statuses,
@@ -260,7 +260,7 @@ impl Job {
             lang: self.dispatch.lang.clone(),
             source_dir: self.source.source_dir.as_str().to_owned(),
             total_files: self.total_files() as i64,
-            completed_files: self.execution.completed_files,
+            completed_files: self.execution.completed_files(),
             error_files,
             diagnosed_files,
             error: self.execution.error.clone(),
@@ -329,7 +329,6 @@ impl Job {
             },
             cancel_token: self.runtime.cancel_token.clone(),
             pending_files: self.pending_files(),
-            run_generation: self.runtime.run_generation,
         }
     }
 }

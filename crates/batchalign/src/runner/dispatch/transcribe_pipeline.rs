@@ -128,12 +128,8 @@ pub(crate) async fn dispatch_transcribe_infer(
                 // recorded as cancelled rather than silently dropped from
                 // the run: see `record_file_cancelled_before_dispatch`.
                 for skipped in std::iter::once(file).chain(pending_iter.clone()) {
-                    record_file_cancelled_before_dispatch(
-                        sink.as_ref(),
-                        job_id,
-                        skipped.filename.as_ref(),
-                    )
-                    .await;
+                    record_file_cancelled_before_dispatch(sink.as_ref(), skipped.filename.as_ref())
+                        .await;
                 }
                 break;
             }
@@ -161,8 +157,7 @@ pub(crate) async fn dispatch_transcribe_infer(
         ));
     }
 
-    let abnormal_exits =
-        drain_supervised_file_tasks(sink.as_ref(), job_id, &job.cancel_token, tasks).await;
+    let abnormal_exits = drain_supervised_file_tasks(sink.as_ref(), &job.cancel_token, tasks).await;
     if abnormal_exits > 0 {
         warn!(
             job_id = %job_id,
@@ -232,7 +227,7 @@ async fn process_one_transcribe_file(
     let correlation_id = &*job.identity.correlation_id;
     let file_index = file.file_index;
     let filename = file.filename.as_ref();
-    let lifecycle = FileRunTracker::new(sink.as_ref(), job_id, filename);
+    let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
@@ -387,7 +382,6 @@ mod tests {
                 file_statuses,
                 results: Vec::new(),
                 error: None,
-                completed_files: 0,
             },
             schedule: JobScheduleState {
                 submitted_at: crate::unix_time(1.0),
@@ -397,11 +391,7 @@ mod tests {
                 lease: None,
                 last_cancel: None,
             },
-            runtime: JobRuntimeControl {
-                cancel_token: CancellationToken::new(),
-                runner_active: false,
-                run_generation: crate::store::RunGeneration::FIRST,
-            },
+            runtime: JobRuntimeControl::unclaimed(),
             execution_plan: None,
         }
     }
@@ -445,7 +435,7 @@ mod tests {
             .await
             .expect("open cache");
         let services = PipelineServices::new(&pool, &cache);
-        let sink = StoreRunnerEventSink::wrap(store.clone());
+        let sink = StoreRunnerEventSink::wrap(store.clone(), &snapshot.identity.job_id);
         let mut opts = crate::transcribe::TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                 crate::transcribe::TranscribeAsrPlan::from_request(

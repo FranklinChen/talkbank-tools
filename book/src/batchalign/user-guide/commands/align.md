@@ -661,10 +661,12 @@ raw evidence identity so several windows cannot overwrite one another.
 ### Bounded recovery inside a supplied bullet
 
 With `--main-bullets keep` or `exact`, a contextual model answer can point to
-nearby speech outside the supplied utterance interval. If fitting the primary
-answer leaves positive word timing missing, Batchalign may try that utterance
-once over its **complete original words and exact supplied interval**, with no
-trailing padding or neighbouring audio. Only missing word slots can be filled;
+nearby speech outside the supplied utterance interval. After projecting the
+primary answer and restoring kept bullets, Batchalign checks the actual missing
+word slots. Only a missing slot permits an alternative for that utterance once,
+over its **complete original words and exact supplied interval**, with no
+trailing padding or neighbouring audio. Complete output grants no retry
+preparation or inference, including with gap healing. Only missing slots can be filled;
 accepted timings are retained. A recovered timing must fit the source interval
 and retained neighbours. Unsuccessful recovery leaves an honest missing timing.
 
@@ -676,8 +678,12 @@ an optional retry cache miss preserves the accepted primary partial output.
 Empty, out-of-record and absent source bullets provide no retry authority; a
 UTR-generated working bullet cannot substitute for an original supplied one.
 Full and incremental alignment share this behavior. Durable timing-provenance
-decisions record the exact window, terminal outcome and filled slots. Primary
-group evidence remains the primary pre-injection snapshot.
+decisions record the exact window, terminal outcome and filled slots. Schema-13
+timeline evidence retains actual retry observations, including unsuccessful
+ones or answers that fill no admissible slot. Complete primary output creates
+no retry observation.
+Primary group evidence remains the primary pre-injection snapshot; final
+selection still follows the existing sequential policy.
 
 ### How utterance bullet times are set
 

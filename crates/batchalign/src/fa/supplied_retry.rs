@@ -2,7 +2,7 @@
 
 use crate::chat_ops::fa::resource_partition::ResourceProbeOutcome;
 use crate::chat_ops::fa::supplied_retry::{
-    SuppliedRetryAnswer, SuppliedRetrySession, SuppliedRetryStep,
+    AwaitingSuppliedRetry, SuppliedRetryAnswer, SuppliedRetrySession, SuppliedRetryStep,
 };
 use crate::chat_ops::fa::{BulletRepairPolicy, FaApplied, FaFinalized, SuppliedRetrySource};
 use crate::error::ServerError;
@@ -14,9 +14,7 @@ use super::preparation::{
     SourceRetryPreparation, materialize_once,
 };
 use super::transport::{FaWorkerSingle, FaWorkerTransport, OptionalFaInference};
-use super::units::{
-    CandidateCacheReceipts, CandidateCacheState, DispatchUnit, store_unit_evidence,
-};
+use super::units::{CandidateCacheReceipts, CandidateCacheState, DispatchUnit};
 
 pub(super) struct FaRetryInputs<'a> {
     pub(super) preparation: FaPreparationContext<'a>,
@@ -25,24 +23,35 @@ pub(super) struct FaRetryInputs<'a> {
 }
 
 impl FaRetryInputs<'_> {
+    /// Primary projection and kept-bullet imposition happen exactly once.
+    /// Only their actual missing slots can release a retry's retained input.
     pub(super) async fn finalize(
         mut self,
         applied: FaApplied,
         chat: &mut crate::chat_ops::ChatFile,
         repair: BulletRepairPolicy,
         progress: Option<&ProgressSender>,
-    ) -> Result<(FaFinalized, Vec<FaFallbackEventTrace>), ServerError> {
+    ) -> Result<
+        (
+            FaFinalized,
+            Vec<FaFallbackEventTrace>,
+            Vec<crate::types::traces::FaSuppliedRetryTrace>,
+        ),
+        ServerError,
+    > {
         let imposed = applied
             .then_impose(chat)
             .map_err(super::kept_bullets_failed)?;
-        let mut session = SuppliedRetrySession::new(imposed, chat, self.retry.into_scoped());
+        let mut session = SuppliedRetrySession::new(imposed, chat, self.retry.into_scoped())
+            .map_err(super::kept_bullets_failed)?;
         let mut fallbacks = Vec::new();
+        let mut evidence = Vec::new();
         loop {
             match session.next() {
-                SuppliedRetryStep::Complete(imposed) => {
-                    return imposed
-                        .then_finalize(chat, repair)
-                        .map(|finalized| (finalized, fallbacks))
+                SuppliedRetryStep::Complete(completed) => {
+                    return completed
+                        .then_finalize(repair)
+                        .map(|finalized| (finalized, fallbacks, evidence))
                         .map_err(super::kept_bullets_failed);
                 }
                 SuppliedRetryStep::Pending(pending) => {
@@ -54,27 +63,90 @@ impl FaRetryInputs<'_> {
                         ));
                     }
                     let (pending, claim) = pending.start();
-                    let answer = match resolve_attempt(
-                        pending.source(),
+                    let observed = resolve_attempt(
+                        pending,
                         claim,
                         self.preparation,
                         &mut self.cached,
                         &mut fallbacks,
                         progress,
                     )
-                    .await
-                    {
-                        Ok(answer) => answer,
-                        Err(error) => optional_failure(error)?,
-                    };
-                    session = pending.complete(answer);
+                    .await?;
+                    session = observed.retain(&mut evidence);
                 }
             }
         }
     }
 }
 
-async fn resolve_attempt(
+/// An actual missing-slot attempt has been observed once. The next session
+/// cannot be recovered until its observation is retained beside it.
+struct ObservedRetry<'document> {
+    session: SuppliedRetrySession<'document, RetainedPreparation<PreparedFaInput>>,
+    trace: crate::types::traces::FaSuppliedRetryTrace,
+}
+
+impl<'document> ObservedRetry<'document> {
+    /// Only retaining this observation releases the next session.
+    fn retain(
+        self,
+        evidence: &mut Vec<crate::types::traces::FaSuppliedRetryTrace>,
+    ) -> SuppliedRetrySession<'document, RetainedPreparation<PreparedFaInput>> {
+        evidence.push(self.trace);
+        self.session
+    }
+}
+
+/// Consume the actual missing-slot capability. A source reference alone grants
+/// no route through this producer, and an attempt cannot be invoked twice.
+async fn resolve_attempt<'document>(
+    pending: AwaitingSuppliedRetry<'document, RetainedPreparation<PreparedFaInput>>,
+    claim: RetainedPreparation<PreparedFaInput>,
+    context: FaPreparationContext<'_>,
+    cached: &mut CandidateCacheReceipts,
+    fallbacks: &mut Vec<FaFallbackEventTrace>,
+    progress: Option<&ProgressSender>,
+) -> Result<ObservedRetry<'document>, ServerError> {
+    use crate::types::traces::{FaSuppliedRetryOutcomeTrace, FaSuppliedRetryTrace, TimingTrace};
+    let source = pending.source();
+    let answer =
+        match infer_missing_input(source, claim, context, cached, fallbacks, progress).await {
+            Ok(answer) => answer,
+            Err(error) => optional_failure(error)?,
+        };
+    let trace = FaSuppliedRetryTrace {
+        utterance: source.index().raw(),
+        words: source
+            .words()
+            .iter()
+            .map(|word| word.text.clone())
+            .collect(),
+        start_ms: source.window().audio_start().get(),
+        end_ms: source.window().end().get(),
+        outcome: match &answer {
+            SuppliedRetryAnswer::Timings { timings, source } => {
+                FaSuppliedRetryOutcomeTrace::Timings {
+                    timings: timings
+                        .iter()
+                        .map(|timing| timing.as_ref().map(TimingTrace::from_word_timing))
+                        .collect(),
+                    source: source.clone(),
+                }
+            }
+            SuppliedRetryAnswer::Unresolved { reason } => FaSuppliedRetryOutcomeTrace::Unresolved {
+                reason: reason.clone(),
+            },
+        },
+    };
+    Ok(ObservedRetry {
+        session: pending.complete(answer),
+        trace,
+    })
+}
+
+// The producer above consumes the missing-slot owner and its unique input
+// claim. This inner boundary retains cache-only and worker admission policy.
+async fn infer_missing_input(
     source: &SuppliedRetrySource,
     claim: RetainedPreparation<PreparedFaInput>,
     context: FaPreparationContext<'_>,
@@ -156,7 +228,12 @@ async fn resolve_attempt(
         fallbacks.push(event);
     }
     if let Some(raw) = projection.raw_evidence {
-        store_unit_evidence(context.services, key, &projection.timings, raw).await;
+        super::cache_storage::store_unit_evidence(
+            context.services.pipeline.cache,
+            &projection.timings,
+            raw,
+        )
+        .await;
     }
     Ok(SuppliedRetryAnswer::Timings {
         timings: projection.timings,

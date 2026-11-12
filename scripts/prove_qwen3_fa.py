@@ -81,7 +81,6 @@ def main(argv: list[str] | None = None) -> int:
         QwenAlignmentMismatch,
         QwenSegmentationDrift,
         QwenSegmentationNotDecomposable,
-        QwenUnitNotTimed,
         TimedChatWord,
         UntimedChatWord,
         load_qwen_fa,
@@ -98,7 +97,6 @@ def main(argv: list[str] | None = None) -> int:
         QwenAlignmentMismatch,
         QwenSegmentationDrift,
         QwenSegmentationNotDecomposable,
-        QwenUnitNotTimed,
     ) as refusal:
         # A refusal is a RESULT: the engine declines rather than padding, and
         # that is the documented behaviour. It still means this clip is not

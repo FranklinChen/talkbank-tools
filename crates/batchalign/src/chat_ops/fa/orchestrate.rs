@@ -831,11 +831,9 @@ pub fn apply_fa_results_with_projection_policy(
 
     // 1. Strip InternalBullet tokens left over from parsing.
     //
-    // When the FA pipeline receives CHAT text that already has UTR-injected
-    // bullets, the parser creates InternalBullet content items. FA then
-    // sets word inline_bullet + utterance .bullet via update_utterance_bullet.
-    // Without stripping, both the old InternalBullet AND the new .bullet
-    // are serialized, producing "two timestamps on the main line".
+    // FA writes canonical timestamps into word and utterance bullet fields.
+    // Any parser-internal bullet tokens left in the content would serialize
+    // alongside those fields and produce duplicate timestamps.
     for (group, _) in groups.iter().zip(responses.iter()) {
         for utt_idx in group.utterance_indices() {
             if let Some(utt) = get_utterance_mut(chat_file, utt_idx) {

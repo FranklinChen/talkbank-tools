@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::api::{JobId, MachineTime};
+use crate::api::MachineTime;
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
 use crate::store::FileCompletion;
 
@@ -18,7 +18,6 @@ use super::event_sink::RunnerEventSink;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordedProgress {
-    pub(crate) job_id: JobId,
     pub(crate) filename: String,
     pub(crate) stage: FileStage,
     pub(crate) current: Option<i64>,
@@ -32,6 +31,26 @@ pub(crate) struct RecordedAttempt {
     pub(crate) work_unit_kind: WorkUnitKind,
 }
 
+/// How one file's completion was recorded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RecordedCompletion {
+    /// Finished without diagnostics.
+    Done { filename: String },
+    /// Written with diagnostics.
+    Diagnosed {
+        filename: String,
+        diagnostics: crate::api::FileOutputDiagnostics,
+    },
+}
+
+impl RecordedCompletion {
+    fn filename(&self) -> &str {
+        match self {
+            Self::Done { filename } | Self::Diagnosed { filename, .. } => filename,
+        }
+    }
+}
+
 /// One terminal file error the sink was asked to record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecordedError {
@@ -40,13 +59,17 @@ pub(crate) struct RecordedError {
     pub(crate) category: FailureCategory,
 }
 
+/// Records what the runner reported. Like the store's sink it stands for
+/// one run of one job, so no method names the job.
 #[derive(Default)]
 pub(crate) struct RecordingSink {
     progress: Mutex<Vec<RecordedProgress>>,
     worker_waits: Mutex<Vec<(String, crate::store::WorkerWaitChange)>>,
     attempts: Mutex<Vec<RecordedAttempt>>,
     errors: Mutex<Vec<RecordedError>>,
-    completed_files: Mutex<Vec<String>>,
+    completions: Mutex<Vec<RecordedCompletion>>,
+    retries: Mutex<Vec<String>>,
+    finished_attempts: Mutex<Vec<AttemptOutcome>>,
 }
 
 #[async_trait]
@@ -55,30 +78,32 @@ impl RunnerEventSink for RecordingSink {
         crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0))
     }
 
-    async fn mark_file_processing(
-        &self,
-        _job_id: &JobId,
-        _filename: &str,
-        _started_at: crate::store::EventTime,
-    ) {
-    }
+    async fn mark_file_processing(&self, _filename: &str, _started_at: crate::store::EventTime) {}
 
     async fn mark_file_done(
         &self,
-        _job_id: &JobId,
         filename: &str,
         _finished_at: crate::store::EventTime,
-        _completion: FileCompletion,
+        completion: FileCompletion,
     ) {
-        self.completed_files
+        let filename = filename.to_owned();
+        let recorded = match completion {
+            FileCompletion::Diagnosed { diagnostics, .. } => RecordedCompletion::Diagnosed {
+                filename,
+                diagnostics,
+            },
+            FileCompletion::Clean(_) | FileCompletion::WithoutResult => {
+                RecordedCompletion::Done { filename }
+            }
+        };
+        self.completions
             .lock()
-            .expect("completed files lock")
-            .push(filename.to_owned());
+            .expect("completions lock")
+            .push(recorded);
     }
 
     async fn mark_file_error(
         &self,
-        _job_id: &JobId,
         filename: &str,
         error: &str,
         category: FailureCategory,
@@ -96,7 +121,6 @@ impl RunnerEventSink for RecordingSink {
 
     async fn start_file_attempt(
         &self,
-        _job_id: &JobId,
         filename: &str,
         work_unit_kind: WorkUnitKind,
         _started_at: crate::store::EventTime,
@@ -112,31 +136,36 @@ impl RunnerEventSink for RecordingSink {
 
     async fn finish_file_attempt(
         &self,
-        _job_id: &JobId,
         _filename: &str,
-        _outcome: AttemptOutcome,
+        outcome: AttemptOutcome,
         _failure_category: Option<FailureCategory>,
         _disposition: RetryDisposition,
         _finished_at: crate::store::EventTime,
     ) {
+        self.finished_attempts
+            .lock()
+            .expect("finished attempts lock")
+            .push(outcome);
     }
 
     async fn mark_file_retry_pending(
         &self,
-        _job_id: &JobId,
-        _filename: &str,
+        filename: &str,
         _retry_at: MachineTime,
         _category: FailureCategory,
         _message: &str,
         _finished_at: crate::store::EventTime,
     ) {
+        self.retries
+            .lock()
+            .expect("retries lock")
+            .push(filename.to_owned());
     }
 
-    async fn clear_file_retry_state(&self, _job_id: &JobId, _filename: &str) {}
+    async fn clear_file_retry_state(&self, _filename: &str) {}
 
     async fn set_file_progress(
         &self,
-        job_id: &JobId,
         filename: &str,
         stage: FileStage,
         current: Option<i64>,
@@ -146,7 +175,6 @@ impl RunnerEventSink for RecordingSink {
             .lock()
             .expect("progress lock")
             .push(RecordedProgress {
-                job_id: job_id.clone(),
                 filename: filename.to_string(),
                 stage,
                 current,
@@ -154,25 +182,18 @@ impl RunnerEventSink for RecordingSink {
             });
     }
 
-    async fn set_file_worker_wait(
-        &self,
-        _job_id: &JobId,
-        filename: &str,
-        change: crate::store::WorkerWaitChange,
-    ) {
+    async fn set_file_worker_wait(&self, filename: &str, change: crate::store::WorkerWaitChange) {
         self.worker_waits
             .lock()
             .expect("worker waits lock")
             .push((filename.to_owned(), change));
     }
 
-    async fn fail_job(&self, _job_id: &JobId, _error: &str) {}
+    async fn mark_job_running(&self) {}
 
-    async fn mark_job_running(&self, _job_id: &JobId) {}
+    async fn record_job_worker_count(&self, _worker_count: usize) {}
 
-    async fn record_job_worker_count(&self, _job_id: &JobId, _worker_count: usize) {}
-
-    async fn requeue_job_after_memory_gate(&self, _job_id: &JobId, _retry_at: MachineTime) {}
+    async fn requeue_job_after_memory_gate(&self, _retry_at: MachineTime) {}
 
     async fn bump_deferred_work_units(&self) {}
 
@@ -180,11 +201,51 @@ impl RunnerEventSink for RecordingSink {
 }
 
 impl RecordingSink {
-    /// Files whose successful completion was recorded, in order.
+    /// Files whose completion was recorded, done or diagnosed, in order.
     pub(crate) fn completed_files(&self) -> Vec<String> {
-        self.completed_files
+        self.completions()
+            .iter()
+            .map(|completion| completion.filename().to_owned())
+            .collect()
+    }
+
+    /// Every completion, with how it was recorded, in order.
+    pub(crate) fn completions(&self) -> Vec<RecordedCompletion> {
+        self.completions.lock().expect("completions lock").clone()
+    }
+
+    /// The diagnostics of every file recorded as written with diagnostics.
+    pub(crate) fn diagnosed(&self) -> Vec<crate::api::FileOutputDiagnostics> {
+        self.completions()
+            .into_iter()
+            .filter_map(|completion| match completion {
+                RecordedCompletion::Diagnosed { diagnostics, .. } => Some(diagnostics),
+                RecordedCompletion::Done { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Files recorded as finished without diagnostics, in order.
+    pub(crate) fn done_files(&self) -> Vec<String> {
+        self.completions()
+            .into_iter()
+            .filter_map(|completion| match completion {
+                RecordedCompletion::Done { filename } => Some(filename),
+                RecordedCompletion::Diagnosed { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Files scheduled for a retry, once per retry, in order.
+    pub(crate) fn retries(&self) -> Vec<String> {
+        self.retries.lock().expect("retries lock").clone()
+    }
+
+    /// The outcome of every attempt the sink was asked to finish, in order.
+    pub(crate) fn finished_attempts(&self) -> Vec<AttemptOutcome> {
+        self.finished_attempts
             .lock()
-            .expect("completed files lock")
+            .expect("finished attempts lock")
             .clone()
     }
 

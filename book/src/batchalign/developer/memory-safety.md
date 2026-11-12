@@ -1,7 +1,7 @@
 # Memory Safety: Preventing Kernel OOM Crashes
 
 **Status:** Current
-**Last updated:** 2026-11-06 11:56 EST
+**Last updated:** 2026-11-10 16:43 EST
 
 ## The Problem
 
@@ -172,12 +172,100 @@ and memory go with it, and the request is tried again at once; when nothing
 is idle it polls. A process with no pool (a one-off `replay`) passes
 `NoIdleWorkers`. Every route to a queued wait names its reclaim: the model
 load through `LoadAdmission`, the startup lease through
-`WorkerHandle::spawn` and `spawn_tcp_daemon`. Only a request larger
-than the host can ever grant (its total less `memory_gate_mb`) is refused,
-at once, as `MemoryGuardError::ExceedsHost`, which is final (classified as a
-bootstrap failure, never retried). Job execution plans and the test lock
-keep a bounded wait (`LeaseWait::Bounded`); a job that cannot fit is
-re-queued by the runner.
+`WorkerHandle::spawn` and `spawn_tcp_daemon`.
+
+**What can never fit.** A wait is only worth having for memory that can be
+released. Two quantities, each computed in one place, decide it:
+
+- `HostCeiling` (`HostReadings::ceiling`): the most this host can ever offer.
+  A live machine's total RAM, since other processes can free what they hold;
+  a declared machine's available RAM, since an idle declared host never frees
+  more.
+- The request's irreducible demand: the request plus every lease its own
+  worker already holds. Those leases (its loaded models) cannot release while
+  one of its requests waits on them.
+
+`try_acquire_lease` refuses a request whose irreducible demand, with
+`memory_gate_mb` kept free, exceeds the ceiling as `HostMemoryError::NeverFits`.
+Anything else that does not fit now is congestion (`CapacityRejected`, a busy
+startup slot, a held test lock) and waits. A wait can only stop on a
+`FinalRefusal` (`NeverFits`, a bounded wait's `TimedOut`, or an unusable host
+or ledger), a separate closed type, so a congestion can never be reported as
+a stop. The guard turns `NeverFits` into `MemoryGuardError::ExceedsHost`,
+which is final (a bootstrap failure, never retried) and names what is needed
+and what the host can offer.
+
+```mermaid
+flowchart TD
+    request["lease request"] --> needed["irreducible demand:<br/>request + its worker's leases"]
+    needed --> ceiling{"needed + reserve<br/>within HostCeiling?"}
+    ceiling -->|no| never["NeverFits: FinalRefusal,<br/>file fails with the numbers"]
+    ceiling -->|yes| now{"fits now beside<br/>every other lease?"}
+    now -->|yes| granted["granted"]
+    now -->|no| congested["CapacityRejected: congestion,<br/>queue and retry"]
+    congested --> now
+```
+
+FA request feasibility (`FaPhysicalCapacity`) reads the same `HostCeiling`,
+so a request it judges feasible is one the queue can eventually grant. Before
+this, feasibility used total RAM while the queue granted against available
+RAM, and a request between the two waited for ever while logging that it
+would fail "only if it can never fit".
+
+**When FA cannot fit: the piece, or the file.** A host-memory refusal of one
+FA request is either about the engine or about that request, and the two are
+told apart where the demand is judged (`FaProjectedDemand::assess`, returning
+`FaCapacityRefusal`):
+
+- `ModelNeverFits`: the model and the worker baseline alone, before any
+  workspace, exceed the ceiling. Every request needs at least that, so no
+  request of any shape fits. The probe refuses at once with the numbers
+  (`MemoryGuardError::ExceedsHost`) and the file fails; no cut is probed.
+- `RequestTooLarge`: the model fits and this request's workspace takes it
+  over. A smaller cut may fit, so the partitioner cuts. A piece refused at its
+  smallest admissible cut is a local refusal like any other: its words stay
+  in the file untimed, with the constraint and its numbers in the file's
+  untimed account, and the file is written with diagnostics (the project's
+  standing rule: a localized problem never fails a whole file).
+
+A model can fit while no piece does: Whisper pads every window to 30 s, so
+its workspace has a floor of about 6 GB whatever the words. Whether that is
+so for a file is a fact about the whole file, decided once its groups are
+planned (`FilePlan::finish`): when the host admitted nothing of the file (no
+group kept with timing it already has, no request planned) and host memory
+refused some of it, the file fails with the least demand any of its pieces
+had (`HostTooSmall`). Writing an untimed copy reported as diagnosed would
+present a refusal as an alignment. In every case no lighter engine is
+substituted. Measured on an Apple Silicon development machine (2026-11-10,
+`measure_model_residency.py
+whisper-fa`): Whisper FA large-v2 holds 12.9 to 13.7 GB at peak for one
+30 s window (5.9 GB of weights, read on first use, plus 6.3 to 7.1 GB of
+workspace), and the worker's projection is about 4% above the measured
+working set. A 16 GB laptop cannot hold it with the default reserve: the
+model fits, no window does, and the file fails, naming the least demand
+(13,759 MB against 14,000 MB with 2,048 MB kept free, in the live test
+`cli_align_live_whisper_fa_on_a_host_too_small_fails_with_the_numbers`). That
+verdict comes after every window is probed; a worker-declared workspace floor
+would let the coordinator decide it from the first.
+
+```mermaid
+flowchart TD
+    probe["probe one FA request"] --> fits{"model + baseline<br/>within the ceiling?"}
+    fits -->|no| model["ModelNeverFits:<br/>file fails at once"]
+    fits -->|yes| whole{"request within<br/>the ceiling?"}
+    whole -->|yes| planned["planned"]
+    whole -->|no| cut{"a smaller cut left?"}
+    cut -->|yes| probe
+    cut -->|no| untimed["piece untimed,<br/>constraint recorded"]
+    planned --> verdict{"FilePlan::finish:<br/>host admitted anything?"}
+    untimed --> verdict
+    verdict -->|yes| written["written, diagnosed<br/>for the untimed spots"]
+    verdict -->|no| fails["HostTooSmall:<br/>file fails, least demand"]
+```
+
+Job execution plans and the test lock keep a bounded wait
+(`LeaseWait::Bounded`); a job plan that times out is re-queued by the runner,
+while one that can never fit, or a host that cannot be used, fails the job.
 
 **File progress.** Worker preparation is a scoped observation, separate from
 the pipeline's stage and item counts. Startup on the pool's runtime captures
@@ -448,8 +536,9 @@ host. What the tier changes is around them:
   4096 MB.
 - **Fleet (>= 128 GB)**: in practice nothing queues for memory; the leases
   still name every model a worker holds in the ledger's labels.
-- On every tier a load larger than total memory less `memory_gate_mb` is
-  refused at once, never queued.
+- On every tier a load that, with its worker's resident models and
+  `memory_gate_mb` kept free, exceeds the host's ceiling (see "What can never
+  fit" above) is refused at once, never queued.
 
 Layer 0's Mode A projection (`engine_aware_startup_reservation_mb`, the tier
 envelope or the engine's footprint) is unchanged: it is back-pressure for an

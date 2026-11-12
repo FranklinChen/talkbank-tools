@@ -84,11 +84,7 @@ impl ExecutionKernel {
         let mut consolidated_rows = Vec::new();
 
         for file in &ctx.job.pending_files {
-            let lifecycle = FileRunTracker::new(
-                sink.as_ref(),
-                &ctx.job.identity.job_id,
-                file.filename.as_ref(),
-            );
+            let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename.as_ref());
             lifecycle
                 .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Comparing)
                 .await;
@@ -145,11 +141,7 @@ pub(crate) async fn dispatch_compare_job(
         Err(error) => {
             let sink = host.sink().clone();
             for file in &job.pending_files {
-                let lifecycle = FileRunTracker::new(
-                    sink.as_ref(),
-                    &job.identity.job_id,
-                    file.filename.as_ref(),
-                );
+                let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename.as_ref());
                 if is_gold_file(file.filename.as_ref()) {
                     lifecycle.complete_without_result().await;
                     continue;
@@ -205,7 +197,6 @@ impl CompareExecutionState {
     fn lifecycle<'a>(&'a self, ctx: &'a ExecutionContext<'_>) -> FileRunTracker<'a> {
         FileRunTracker::new(
             ctx.host.sink().as_ref(),
-            &ctx.job.identity.job_id,
             self.unit.main.display_path.as_ref(),
         )
     }
@@ -489,7 +480,6 @@ mod tests {
 
     fn compare_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
         RunnerJobSnapshot {
-            run_generation: crate::store::RunGeneration::FIRST,
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-compare-kernel"),
                 correlation_id: CorrelationId::from("corr-compare-kernel"),
@@ -622,7 +612,7 @@ mod tests {
             _tx,
             std::sync::Arc::new(crate::clock::SystemClock),
         ));
-        let host = DispatchHostContext::from_store(store);
+        let host = DispatchHostContext::from_store(store, &snapshot.identity.job_id);
         let gateway = FakeGateway::default();
         let ctx = ExecutionContext {
             job: &snapshot,

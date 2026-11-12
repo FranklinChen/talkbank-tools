@@ -1,7 +1,7 @@
 # Job State Machine
 
 **Status:** Current
-**Last updated:** 2026-11-09 12:34 EST
+**Last updated:** 2026-11-10 16:04 EST
 
 ## Overview
 
@@ -225,6 +225,81 @@ claim cannot sweep or finalize a restarted population (the failure mode was: res
 runner force-fails them as "did not reach terminal status" and finalizes
 the job `failed` over the healthy new run). Contract test:
 `tests/restart_handoff.rs`.
+
+**How a claimed run ends.** `RunScope::execute` races execution against the
+job's cancel token and returns the claim with one `ClaimedRunEnd`, and
+`run_hosted_job` turns each into exactly one store transition on that claim.
+Execution itself returns an `ExecutionEnd`, which has no cancelled ending, so
+only the scope can say a run was cancelled:
+
+| `ClaimedRunEnd` | Transition |
+| --- | --- |
+| `Executed(ExecutionEnd::Dispatched)` | `complete_run`: files recorded their own terminal states |
+| `Cancelled` (made only by `RunScope`) | `complete_run`: the registry reads the job's cancellation |
+| `Executed(ExecutionEnd::Requeued { retry_at })` | `release_run`, then a delayed retry |
+| `Executed(ExecutionEnd::Refused(JobRefusal))` | `fail_run` with the refusal's reason |
+
+A job-level refusal (a command that needs CHAT input, a worker probe
+refusal, a language with no route) is a value that dispatch returns as
+`DispatchEnd::Refused`, built only by `runner::refuse`. Nothing in dispatch
+can mark the job failed on its own: there is no claimless `fail_job` route.
+So the refusal's reason lands on the job and on every file the run left
+unfinished, rather than a generic "did not reach terminal status". Contract
+test: `a_refused_job_fails_its_run_with_the_refusal_reason` in
+`runner/execution.rs`.
+
+**File writes belong to their run.** Cancelling a run drops its dispatch
+future and requests abort of its file tasks, but Tokio's abort is
+asynchronous: a task mid-step on another worker thread finishes that step,
+and a write it makes there could land after the run has finished or on the
+files of the run that replaced it. So file writes are bound to the run that
+owns them:
+
+- A `RunBinding` names one run of one job: the job id and its
+  `RunGeneration`, as one value with private fields. The claim holds it and
+  `RunnerClaim::binding()` is the only production route to one, so no caller
+  can pair a job id with a generation it chose.
+- `DispatchHostContext::for_run(store, &claim)` is the only production way to
+  get a dispatch context, and its `StoreRunnerEventSink` holds the claim's
+  binding. No sink method names a job: the sink, the `FileRunTracker` and the
+  helpers around them name only the file. The claimless constructors are
+  test-only.
+- Every store write from a run, per file and job-level alike (marking the
+  job running, recording its worker count, requeueing it after the memory
+  gate), takes `&RunBinding`. The registry asks `RunBinding::is_current_for`,
+  the only reading of a generation, before it applies one. Attempt-id
+  bookkeeping is checked the same way, so a stale run cannot close the
+  attempt of the run that replaced it.
+- A refused file write says why, as a `RefusedFileWrite`: `NoSuchJob`,
+  `StaleRun`, or the job's own `FileWriteRefusal` (`UnknownFile`,
+  `AlreadyTerminal`). The store logs the expected ones (a stale run, an
+  already finished file) at debug and the two that mean runner and store
+  disagree at warning, so no refusal is discarded silently.
+- Within a run a terminal file stays terminal: every `Job::mark_file_*`
+  transition that moves or redraws a file admits it through one function,
+  `open_file`, which refuses a terminal phase. Only a restart, which starts a
+  new generation, reopens a file.
+- An attempt row is inserted before the registry holds its id, so the run
+  can be superseded in between. When the attach is refused the row is closed
+  at once (`Cancelled`, `Defer`), since nothing else knows its id.
+- A job's completed count is derived from its file phases
+  (`JobExecutionState::completed_files`), never stored, so no write can
+  count a file twice.
+
+```mermaid
+flowchart LR
+    claim["RunnerClaim"] -->|"binding()"| bind["RunBinding<br/>(job, generation)"]
+    bind --> sink["StoreRunnerEventSink"]
+    sink --> store["JobStore writes<br/>take &RunBinding"]
+    store --> reg["registry: is_current_for?"]
+    reg -->|no| stale["RefusedFileWrite::StaleRun"]
+    reg -->|yes| job["Job transition<br/>open_file"]
+    job -->|terminal| term["FileWriteRefusal::AlreadyTerminal"]
+    job -->|applied| proj["file update projection"]
+```
+
+Contract tests: `a_superseded_run_cannot_write_a_file` and
+`a_finished_file_is_not_finished_again` in `store/queries/file_state.rs`.
 
 `job_task` is a **non-recursive function returning `Pin<Box<dyn Future>>`**
 (not `async fn`). This is deliberate: the `Requeued` branch spawns a fresh

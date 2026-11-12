@@ -11,7 +11,7 @@
 
 use crate::chat_ops::fa::{
     BulletRepairPolicy, FaGroup, RecordingPresence, WordTiming, collect_existing_fa_word_timings,
-    expand_bullets_for_edge_fillers, group_utterances, refresh_existing_alignment_for_utterance,
+    expand_bullets_for_edge_fillers, refresh_existing_alignment_for_utterance,
     strip_wor_from_monotonicity_stripped_utterances,
 };
 use crate::chat_ops::{ChatFile, Line, Utterance};
@@ -115,6 +115,7 @@ pub(crate) fn process_fa_incremental<'run>(
             admission,
             main_bullets,
             anchors,
+            recovery,
         } = active;
 
         // The same pairing the full path makes. The "after" document is this
@@ -140,15 +141,9 @@ pub(crate) fn process_fa_incremental<'run>(
         let recording = audio.recording().await?;
         // The anchors describe the "after" document's words, which the reuse
         // above copied `%wor` onto without changing a word.
-        let (admission, grouping) = admission.admit_grouping(
-            group_utterances(
-                &chat_file,
-                fa_params.aggregation_target(),
-                &recording,
-                anchors,
-            ),
-            &chat_file,
-        )?;
+        let grouping = chat_file.group(fa_params.aggregation_target(), &recording, anchors)?;
+        let mut chat_file = chat_file.into_document();
+        let (admission, grouping) = admission.admit_grouping(grouping, &chat_file)?;
         let Grouping {
             groups,
             decisions: grouping_decisions,
@@ -194,6 +189,7 @@ pub(crate) fn process_fa_incremental<'run>(
                     // group was answered from the prior's `%wor`.
                     RecordingRead::Read,
                 )
+                .with_recovery(recovery)
                 .with_written_decisions(written),
             );
         }
@@ -241,6 +237,7 @@ pub(crate) fn process_fa_incremental<'run>(
             population,
             chat_file: &chat_file,
             reusable_utterances: &reusable_after_indices,
+            recovery,
             progress,
             context: "incremental forced alignment",
         })
@@ -250,6 +247,7 @@ pub(crate) fn process_fa_incremental<'run>(
             evidence: group_evidence,
             mut fallback_events,
             retry,
+            recovery,
         } = resolved.inject(
             &mut chat_file,
             projection,
@@ -263,7 +261,7 @@ pub(crate) fn process_fa_incremental<'run>(
         // the output (APROCSA 2256_T4.cha, 2026-04-09). Consuming `FaApplied` is
         // now the only way to reach the injection records, so the comment is a
         // signature.
-        let (finalized, retry_fallbacks) = retry
+        let (finalized, retry_fallbacks, supplied_retries) = retry
             .finalize(
                 applied.also_touched(reusable_after_touched),
                 &mut chat_file,
@@ -308,6 +306,8 @@ pub(crate) fn process_fa_incremental<'run>(
             timing_decisions,
             gap_healing: fa_params.gap_healing,
             fallback_events,
+            supplied_retries: Some(supplied_retries),
+            recovery,
             recording: RecordingRead::Read,
         })
     })
@@ -444,6 +444,127 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn incremental_reuse_retains_the_after_sources_recovery_evidence() {
+        use crate::api::LanguageCode3;
+        use crate::cache::UtteranceCache;
+        use crate::chat_ops::fa::utr::AsrTimingToken;
+        use crate::chat_ops::fa::{
+            AudioIdentity, EndOverlapPolicy, ExistingWorBoundaryPolicy, MainBulletPolicy,
+            ReviewLevel, WhisperTextMode,
+        };
+        use crate::params::{CachePolicy, WorTierPolicy};
+        use crate::pipeline::PipelineServices;
+        use crate::types::engines::FaEngineName;
+        use crate::worker::pool::{GpuModelPlan, PoolConfig, WorkerPool};
+
+        let before = chat_with_wor(
+            "hello world . \u{15}100_1000\u{15}",
+            "goodbye . \u{15}1500_2000\u{15}",
+        )
+        .replacen("*CHI:", "@Media:\ttest, audio\n*CHI:", 1);
+        let prior = RetainedFaPrior::admit(&before).unwrap();
+        let after = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n@Media:\ttest, audio\n*CHI:\thello world .\n*CHI:\tgoodbye .\n@End\n";
+        let mut working = super::super::read_fa_source(after).unwrap();
+        let tokens = vec![
+            AsrTimingToken {
+                text: "hello".into(),
+                start_ms: 100,
+                end_ms: 500,
+            },
+            AsrTimingToken {
+                text: "world".into(),
+                start_ms: 600,
+                end_ms: 1000,
+            },
+            AsrTimingToken {
+                text: "goodbye".into(),
+                start_ms: 1500,
+                end_ms: 2000,
+            },
+        ];
+        working
+            .active_mut()
+            .unwrap()
+            .recover_timing(crate::api::UtrPass::Initial, async |chat| {
+                Ok(crate::provenance::UtrPassOutcome::Recovered(
+                    crate::runner::CompletedRecognition::synthetic(
+                        crate::chat_ops::fa::utr::observe_spaced(chat, &tokens),
+                        crate::provenance::UtrProducer::new(
+                            &crate::options::UtrEngine::Whisper,
+                            crate::provenance::UtrModels::Unreported,
+                        ),
+                    ),
+                ))
+            })
+            .await
+            .unwrap();
+        let super::super::FaInputDocument::Active(active) = working.attempt() else {
+            panic!("active source")
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let audio_path = directory.path().join("sample.mp3");
+        crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
+        let identity = AudioIdentity::from_metadata("sample.mp3", 0, 0);
+        let audio = AudioContext {
+            audio_path: &audio_path,
+            audio_identity: &identity,
+            audio_duration: None,
+        };
+        let pool = WorkerPool::new(PoolConfig::for_tests());
+        let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))
+            .await
+            .unwrap();
+        let namespace = crate::engine_reports::FaCacheNamespace::for_test("test-fa");
+        let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
+        let services = super::super::FaServices {
+            pipeline: PipelineServices::new(&pool, &cache),
+            cache_namespace: &namespace,
+            gpu: &gpu,
+            attention_capture_dir: None,
+        };
+        let params = FaParams {
+            gap_healing: WordGapHealing::PreserveMeasured,
+            whisper_text: WhisperTextMode::SpaceJoined,
+            existing_wor_boundaries: ExistingWorBoundaryPolicy::Preserve,
+            end_overlap_policy: EndOverlapPolicy::PreserveCrossSpeaker,
+            main_bullets: MainBulletPolicy::DeriveFromWords,
+            engine: FaEngineName::Wave2Vec,
+            cache_policy: CachePolicy::RequireCache,
+            wor_tier: WorTierPolicy::Include,
+            bullet_repair: false,
+            review_level: ReviewLevel::None,
+        };
+        let result = process_fa_incremental(
+            &prior,
+            active,
+            &audio,
+            &LanguageCode3::eng(),
+            services,
+            &params,
+            None,
+        )
+        .await
+        .unwrap();
+        let (output, _, recovery) = result.into_document_timeline_and_recovery();
+        let output = output.document.as_str();
+        assert!(output.contains("%wor:\thello"));
+        assert!(output.contains("%wor:\tgoodbye"));
+        assert_eq!(recovery.len(), 1);
+        let evidence = serde_json::to_value(recovery[0].as_ref()).unwrap();
+        assert_eq!(evidence["pass"], "initial");
+        assert_eq!(evidence["tokens"], serde_json::to_value(&tokens).unwrap());
+        assert_eq!(evidence["result"]["alignment"]["strategy"], "global");
+        let dumper = crate::runner::debug_dumper::DebugDumper::new(Some(directory.path()));
+        dumper.dump_utr_evidence("test.cha", &recovery).unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("test_utr_evidence.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted["completed_passes"][0], evidence);
+        pool.shutdown().await;
+    }
+
     #[test]
     fn prior_admission_retains_valid_timing_and_refuses_corrupt_tiers() {
         let valid = chat_with_wor("hello world .", "goodbye .").replacen(
@@ -488,7 +609,7 @@ mod tests {
             "goodbye . \u{15}1500_2000\u{15}",
         );
         let given = parse_chat(&edited);
-        let mut after = parse_chat(&edited);
+        let mut after = crate::chat_ops::fa::SourceBoundDocument::capture(parse_chat(&edited));
         let projection = FaProjection::new(
             FaProjectionPolicy::new(
                 WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
@@ -502,6 +623,28 @@ mod tests {
         let deltas = diff_chat(&before, &after);
         let reused = reuse_stable_wor_timing_from_before(&before, &mut after, &deltas);
         assert!(reused.contains(&0), "a timing-only edit is reused");
+        let grouping = after
+            .group(
+                crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+                &crate::chat_ops::fa::coordinates::Recording::of_duration(
+                    crate::chat_ops::fa::coordinates::Ms(3_000),
+                )
+                .unwrap(),
+                &crate::chat_ops::fa::AnchorIndex::not_observed(),
+            )
+            .unwrap();
+        let windows: Vec<_> = grouping
+            .groups
+            .iter()
+            .flat_map(|group| group.source_windows().unwrap())
+            .collect();
+        assert_eq!(
+            windows[0].original_bullet,
+            crate::types::traces::FaOriginalBulletTrace::Parsed {
+                start_ms: 300,
+                end_ms: 900,
+            }
+        );
         let finalized = projection_without_injection_with_touched(
             projection,
             true,

@@ -93,7 +93,6 @@ async fn events_inside_a_file_task_name_the_file() {
     });
     let abnormal = drain_supervised_file_tasks(
         &RecordingSink::default(),
-        &JobId::from("job-span"),
         &CancellationToken::new(),
         vec![task],
     )
@@ -167,7 +166,6 @@ fn make_job(id: &str) -> Job {
             file_statuses,
             results: Vec::new(),
             error: None,
-            completed_files: 0,
         },
         schedule: JobScheduleState {
             submitted_at: MachineTime::now(),
@@ -177,11 +175,7 @@ fn make_job(id: &str) -> Job {
             lease: None,
             last_cancel: None,
         },
-        runtime: JobRuntimeControl {
-            cancel_token: CancellationToken::new(),
-            runner_active: false,
-            run_generation: crate::store::RunGeneration::FIRST,
-        },
+        runtime: JobRuntimeControl::unclaimed(),
         execution_plan: None,
     }
 }
@@ -189,9 +183,8 @@ fn make_job(id: &str) -> Job {
 #[tokio::test]
 async fn progress_forwarder_routes_updates_through_sink_boundary() {
     let sink = Arc::new(RecordingSink::default());
-    let job_id = JobId::from("job-progress");
     let (tx, _observer, _forwarder) =
-        spawn_observed_progress_forwarder(sink.clone(), job_id.clone(), "a.cha".to_string());
+        spawn_observed_progress_forwarder(sink.clone(), "a.cha".to_string());
 
     tx.send(ProgressUpdate::new(FileStage::Writing, Some(1), Some(3)))
         .expect("send progress update");
@@ -212,7 +205,6 @@ async fn progress_forwarder_routes_updates_through_sink_boundary() {
     assert_eq!(
         progress.as_slice(),
         &[RecordedProgress {
-            job_id,
             filename: "a.cha".to_string(),
             stage: FileStage::Writing,
             current: Some(1),
@@ -229,11 +221,8 @@ async fn forwarder_drains_queued_wait_changes_before_finishing() {
     use crate::store::PoolWait::HostMemory;
     use crate::store::WorkerWaitChange::{Ended, Started};
     let sink = Arc::new(RecordingSink::default());
-    let (tx, observer, forwarder) = spawn_observed_progress_forwarder(
-        sink.clone(),
-        JobId::from("job-waits"),
-        "a.cha".to_string(),
-    );
+    let (tx, observer, forwarder) =
+        spawn_observed_progress_forwarder(sink.clone(), "a.cha".to_string());
     observer.waiting(HostMemory);
     drop(tx);
     observer.resumed(HostMemory);
@@ -259,12 +248,11 @@ async fn supervised_task_marks_panic_as_error() {
         tx,
         std::sync::Arc::new(crate::clock::SystemClock),
     ));
-    let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-2");
+    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-2")).await.unwrap();
 
-    sink.mark_file_processing(&job_id, "a.cha", sink.now())
-        .await;
+    sink.mark_file_processing("a.cha", sink.now()).await;
 
     let tasks = vec![spawn_supervised_file_task(
         DisplayPath::from("a.cha"),
@@ -275,7 +263,7 @@ async fn supervised_task_marks_panic_as_error() {
     )];
 
     let abnormal =
-        drain_supervised_file_tasks(sink.as_ref(), &job_id, &CancellationToken::new(), tasks).await;
+        drain_supervised_file_tasks(sink.as_ref(), &CancellationToken::new(), tasks).await;
     assert_eq!(abnormal, 1);
 
     let detail = store.get_job_detail(&job_id).await.unwrap();
@@ -309,11 +297,11 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
         tx,
         clock.clone(),
     ));
-    let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-tracker");
+    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-tracker")).await.unwrap();
 
-    let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, "a.cha");
+    let lifecycle = FileRunTracker::new(sink.as_ref(), "a.cha");
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Reading)
         .await;
@@ -391,11 +379,11 @@ async fn file_run_tracker_records_setup_failure() {
         tx,
         std::sync::Arc::new(crate::clock::SystemClock),
     ));
-    let sink = StoreRunnerEventSink::wrap(store.clone());
     let job_id = JobId::from("job-setup-failure");
+    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-setup-failure")).await.unwrap();
 
-    let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, "a.cha");
+    let lifecycle = FileRunTracker::new(sink.as_ref(), "a.cha");
     lifecycle
         .record_setup_failure("media preflight failed", FailureCategory::Validation)
         .await;

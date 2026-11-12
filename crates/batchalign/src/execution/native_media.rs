@@ -120,28 +120,27 @@ pub(crate) async fn dispatch_audio_export(
     host: &DispatchHostContext,
     files: &[PendingJobFile],
     slots: NumWorkers,
-) {
+) -> crate::runner::DispatchEnd {
     let work = match admit_work(job, files) {
         Ok(work) => work,
         Err(error) => {
-            host.sink()
-                .fail_job(&job.identity.job_id, &error.to_string())
-                .await;
-            return;
+            return crate::runner::DispatchEnd::Refused(crate::runner::refuse(
+                job,
+                error.to_string(),
+            ));
         }
     };
     let limit = Arc::new(tokio::sync::Semaphore::new(slots.0.max(1)));
     let mut tasks = Vec::with_capacity(work.len());
     for work in work {
         let sink = host.sink().clone();
-        let job_id = job.identity.job_id.clone();
         let limit = limit.clone();
         tasks.push(spawn_supervised_file_task(
             work.file.filename.clone(),
             "native export file task",
             async move {
                 let filename = work.file.filename.clone();
-                let lifecycle = FileRunTracker::new(sink.as_ref(), &job_id, filename.as_ref());
+                let lifecycle = FileRunTracker::new(sink.as_ref(), filename.as_ref());
                 let Ok(_slot) = limit.acquire_owned().await else {
                     return lifecycle
                         .record_setup_failure(
@@ -170,13 +169,8 @@ pub(crate) async fn dispatch_audio_export(
             },
         ));
     }
-    drain_supervised_file_tasks(
-        host.sink().as_ref(),
-        &job.identity.job_id,
-        &job.cancel_token,
-        tasks,
-    )
-    .await;
+    drain_supervised_file_tasks(host.sink().as_ref(), &job.cancel_token, tasks).await;
+    crate::runner::DispatchEnd::Dispatched
 }
 
 impl NativeExportWork {

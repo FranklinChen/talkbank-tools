@@ -63,13 +63,12 @@ pub(crate) async fn dispatch_morphotag_job(
     let file_parallelism = num_workers.0.max(1);
     let file_sem = Arc::new(tokio::sync::Semaphore::new(file_parallelism));
     let mut joinset: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-    let job_id = job.identity.job_id.clone();
 
     // One reporter for the whole job: it owns the ledger and the publishing
     // cadence, and each per-file task gets a cheap port into it. Restored
     // 2026-07-29 after three months with no producer; see
     // `progress::BatchProgressReporter`.
-    let reporter = BatchProgressReporter::spawn(Arc::clone(&sink), job_id.clone());
+    let reporter = BatchProgressReporter::spawn(Arc::clone(&sink));
 
     for file_input in inputs.file_texts {
         if job.cancel_token.is_cancelled() {
@@ -89,7 +88,6 @@ pub(crate) async fn dispatch_morphotag_job(
         let job_for_task = job.clone();
         let plan_for_task = Arc::clone(&plan);
         let sink_for_task = Arc::clone(&sink);
-        let job_id_for_task = job_id.clone();
         let before_text = inputs
             .before_texts
             .get(file_input.filename.as_ref())
@@ -115,11 +113,8 @@ pub(crate) async fn dispatch_morphotag_job(
                 // sequence inside `process_one_align_file`, and
                 // `runner/dispatch/media_analysis_v2.rs:116-125` for the
                 // media-analysis equivalent.
-                let lifecycle = FileRunTracker::new(
-                    sink_for_task.as_ref(),
-                    &job_id_for_task,
-                    file_input.filename.as_ref(),
-                );
+                let lifecycle =
+                    FileRunTracker::new(sink_for_task.as_ref(), file_input.filename.as_ref());
                 // Parsing is the file's first real work, so it is the stage the
                 // attempt opens in. `FileProgressStage::Parsing` existed in the API
                 // enum with no producer anywhere until 2026-07-30; reporting it here
@@ -136,7 +131,6 @@ pub(crate) async fn dispatch_morphotag_job(
                 // A saturated checkout shows on this file's progress.
                 let result = crate::runner::util::observing_file_waits(
                     &sink_for_task,
-                    &job_id_for_task,
                     [file_input.filename.to_string()],
                     gateway_for_task.morphotag_single(
                         &file_input.chat_text,

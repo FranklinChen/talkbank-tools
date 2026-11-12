@@ -586,6 +586,14 @@ export interface components {
             /** @enum {string} */
             kind: "model";
         } | {
+            /**
+             * Format: int64
+             * @description The most this host can ever offer (its total RAM when read live,
+             *     its declared available RAM when declared), independent of
+             *     transient memory pressure: the bound the request was judged
+             *     against, the same one host-memory admission refuses against.
+             */
+            ceiling_mb: number;
             /** @description The loaded model that projected this request. */
             engine: string;
             /** @enum {string} */
@@ -600,11 +608,6 @@ export interface components {
              * @description Capacity unavailable to model requests by host policy.
              */
             reserve_mb: number;
-            /**
-             * Format: int64
-             * @description Physical capacity, independent of transient memory pressure.
-             */
-            total_mb: number;
         };
         /**
          * @description Broad classification for failures seen by the control plane.

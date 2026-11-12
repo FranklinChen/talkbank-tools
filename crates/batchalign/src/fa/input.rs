@@ -302,9 +302,35 @@ enum FaWorkingDisposition {
 /// Constructible only from Chatter's source-bound admission. Outside callers
 /// cannot pair an unchecked model with a free-standing admission token.
 pub(crate) struct ActiveFaDocument {
-    file: ChatFile,
+    file: crate::chat_ops::fa::SourceBoundDocument,
     admission: FaAdmission,
     anchors: crate::chat_ops::fa::AnchorIndex,
+    recovery: Vec<std::sync::Arc<RetainedUtrPass>>,
+}
+
+/// One recognizer pass retained with the source that it observed.
+#[derive(Debug)]
+pub(crate) struct RetainedUtrPass {
+    pub(super) pass: crate::api::UtrPass,
+    pub(super) observation: crate::chat_ops::fa::utr::UtrObservation,
+    pub(super) producer: crate::provenance::UtrProducer,
+    pub(super) inputs: crate::provenance::UtrRecognitionEvidence,
+}
+
+impl serde::Serialize for RetainedUtrPass {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use crate::options::EngineBackend;
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("RetainedUtrPass", 7)?;
+        state.serialize_field("pass", &self.pass)?;
+        state.serialize_field("engine", self.producer.engine().wire_name())?;
+        state.serialize_field("models", self.producer.models())?;
+        state.serialize_field("lexical_units", &self.observation.tokens().units())?;
+        state.serialize_field("tokens", self.observation.tokens().tokens())?;
+        state.serialize_field("result", self.observation.result())?;
+        state.serialize_field("inputs", &self.inputs)?;
+        state.end()
+    }
 }
 
 impl FaWorkingDocument {
@@ -346,6 +372,7 @@ impl FaWorkingDocument {
                 admission: active.admission.clone(),
                 main_bullets: self.main_bullets.clone(),
                 anchors: &active.anchors,
+                recovery: &active.recovery,
             }),
         }
     }
@@ -356,16 +383,46 @@ impl ActiveFaDocument {
         &self.file
     }
 
-    /// UTR mutates this admitted working model and supplies its own anchors.
-    /// This transition is unavailable on the preserved-source payload.
+    /// UTR observes this admitted model and supplies its own anchors without
+    /// changing the source. This transition is unavailable on the preserved
+    /// payload.
     pub(crate) async fn recover_timing(
         &mut self,
-        run: impl AsyncFnOnce(&mut ChatFile) -> Result<crate::provenance::UtrPassOutcome, ServerError>,
-    ) -> Result<crate::provenance::UtrPassOutcome, ServerError> {
-        let mut outcome = run(&mut self.file).await?;
-        self.anchors
-            .superseded_by(outcome.result_mut().take_anchors());
-        Ok(outcome)
+        pass: crate::api::UtrPass,
+        run: impl AsyncFnOnce(
+            &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
+        ) -> Result<crate::provenance::UtrPassOutcome, ServerError>,
+    ) -> Result<crate::provenance::UtrPassReport, ServerError> {
+        use crate::provenance::{UtrPassOutcome, UtrPassReport};
+        let source = self.file.utr_input();
+        match run(&source).await? {
+            UtrPassOutcome::NothingUntimed(mut result) => {
+                self.anchors.superseded_by(result.take_anchors());
+                Ok(UtrPassReport::NothingUntimed)
+            }
+            UtrPassOutcome::Recovered(completed) => {
+                let (observation, producer, inputs) = completed.into_parts();
+                if !observation.belongs_to(source.identity()) {
+                    return Err(
+                        crate::error::AlignmentSourceBindingFailure::UtrEvidenceFromDifferentSource
+                            .into(),
+                    );
+                }
+                self.anchors.superseded_by(observation.anchors());
+                let unmatched = observation.result().unmatched();
+                let report = UtrPassReport::Recovered {
+                    unmatched,
+                    producer: producer.clone(),
+                };
+                self.recovery.push(std::sync::Arc::new(RetainedUtrPass {
+                    pass,
+                    observation,
+                    producer,
+                    inputs,
+                }));
+                Ok(report)
+            }
+        }
     }
 }
 
@@ -482,6 +539,7 @@ impl CompleteWor {
             admission: self.document.admission.clone(),
             main_bullets: self.main_bullets.clone(),
             anchors: &self.document.anchors,
+            recovery: &self.document.recovery,
         }
     }
 }
@@ -524,6 +582,7 @@ impl ActiveAlignment {
             admission: self.document.admission.clone(),
             main_bullets: self.main_bullets.clone(),
             anchors: &self.document.anchors,
+            recovery: &self.document.recovery,
         }
     }
 }
@@ -571,7 +630,7 @@ pub(crate) fn read_fa_source_named(
             AdmittedAlignmentSource::NeverTimed(admit_never_timed(failure, &name, text)?)
         }
     };
-    let (mut file, pending_timing) = match source {
+    let (file, pending_timing) = match source {
         AdmittedAlignmentSource::Planned(AdmittedDisposition::Preserved(source)) => {
             let source = AdmittedSourceChat::from_preservation(source);
             if batchalign_transform::parse::is_no_align(source.document())
@@ -634,6 +693,7 @@ pub(crate) fn read_fa_source_named(
         .map_err(|error| ServerError::Validation(error.to_string()))?;
     let required_timing = super::completion::RequiredFaTiming::bind(&file, &main_bullets)
         .map_err(super::kept_bullets_failed)?;
+    let mut file = crate::chat_ops::fa::SourceBoundDocument::capture(file);
     // Then the working model forgets every timing an utterance not in the
     // recording carried, so no stage reads it as an anchor, a window or
     // reusable word timing. `keep` and `exact` restore its given bullet from
@@ -675,6 +735,7 @@ pub(crate) fn read_fa_source_named(
             file,
             admission,
             anchors: crate::chat_ops::fa::AnchorIndex::not_observed(),
+            recovery: Vec::new(),
         }),
         main_bullets,
     })
@@ -798,6 +859,499 @@ mod tests {
 %wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} .\n\
 @End\n";
 
+    #[tokio::test]
+    async fn recovery_passes_keep_their_own_tokens_correspondence_and_producer() {
+        use crate::api::AudioPositionSeconds;
+        use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
+        use crate::chat_ops::fa::utr::AsrTimingToken;
+        use crate::options::UtrEngine;
+        use crate::provenance::UtrPassOutcome;
+
+        let mut working = read_named(&never_aligned("@Media:\tsample, audio\n")).unwrap();
+        let initial = vec![
+            AsrTimingToken {
+                text: "hello".into(),
+                start_ms: 100,
+                end_ms: 200,
+            },
+            AsrTimingToken {
+                text: "world".into(),
+                start_ms: 200,
+                end_ms: 300,
+            },
+            AsrTimingToken {
+                text: "tail".into(),
+                start_ms: 1100,
+                end_ms: 1200,
+            },
+        ];
+        let fallback = vec![
+            AsrTimingToken {
+                text: "more".into(),
+                start_ms: 600,
+                end_ms: 700,
+            },
+            AsrTimingToken {
+                text: "words".into(),
+                start_ms: 700,
+                end_ms: 800,
+            },
+            AsrTimingToken {
+                text: "tail".into(),
+                start_ms: 1100,
+                end_ms: 1200,
+            },
+        ];
+        for (pass, engine, tokens, model) in [
+            (
+                crate::api::UtrPass::Initial,
+                UtrEngine::Whisper,
+                &initial,
+                crate::worker::asr_result_v2::test_fixtures::test_identity(),
+            ),
+            (
+                crate::api::UtrPass::Fallback,
+                UtrEngine::RevAi,
+                &fallback,
+                crate::model_manifest::rev_loaded_identity(),
+            ),
+        ] {
+            let response = crate::transcribe::AsrResponse {
+                tokens: tokens
+                    .iter()
+                    .take(2)
+                    .map(|token| crate::transcribe::AsrToken {
+                        text: token.text.clone(),
+                        start_s: Some(
+                            AudioPositionSeconds::try_from(token.start_ms as f64 / 1000.0).unwrap(),
+                        ),
+                        end_s: Some(
+                            AudioPositionSeconds::try_from(token.end_ms as f64 / 1000.0).unwrap(),
+                        ),
+                        speaker: None,
+                        confidence: None,
+                    })
+                    .chain(std::iter::once(crate::transcribe::AsrToken {
+                        text: "unplaced".into(),
+                        start_s: None,
+                        end_s: None,
+                        speaker: None,
+                        confidence: None,
+                    }))
+                    .collect(),
+                lang: crate::api::LanguageCode3::eng(),
+                seam_ambiguities: Vec::new(),
+                source_monologues: None,
+                model: Some(model),
+            };
+            let recording = Recording::of_duration(Ms(2000)).unwrap();
+            let first_window =
+                FaWindow::within(&recording, FileMs::new(0), FileMs::new(1000)).unwrap();
+            let first = crate::runner::convert_utr_for_test(response, first_window);
+            let second_window =
+                FaWindow::within(&recording, FileMs::new(1000), FileMs::new(2000)).unwrap();
+            let second = crate::runner::convert_utr_for_test(
+                crate::transcribe::AsrResponse {
+                    tokens: vec![crate::transcribe::AsrToken {
+                        text: "tail".into(),
+                        start_s: Some(AudioPositionSeconds::try_from(0.1).unwrap()),
+                        end_s: Some(AudioPositionSeconds::try_from(0.2).unwrap()),
+                        speaker: None,
+                        confidence: None,
+                    }],
+                    lang: crate::api::LanguageCode3::eng(),
+                    seam_ambiguities: Vec::new(),
+                    source_monologues: None,
+                    model: None,
+                },
+                second_window,
+            );
+            let prepared = crate::runner::PreparedRecognition::partial_for_test(
+                first,
+                vec![second],
+                &engine,
+                &crate::api::LanguageCode3::eng(),
+            )
+            .unwrap();
+            working
+                .active_mut()
+                .unwrap()
+                .recover_timing(pass, async |chat| {
+                    Ok(UtrPassOutcome::Recovered(
+                        prepared
+                            .run(chat, Box::new(crate::chat_ops::fa::GlobalUtr), None)
+                            .await?,
+                    ))
+                })
+                .await
+                .unwrap();
+        }
+        let FaInputDocument::Active(active) = working.attempt() else {
+            panic!("active")
+        };
+        assert_eq!(active.recovery.len(), 2);
+        for (pass, engine, tokens, retained) in [
+            ("initial", "whisper_utr", &initial, &active.recovery[0]),
+            ("fallback", "rev_utr", &fallback, &active.recovery[1]),
+        ] {
+            let evidence = serde_json::to_value(retained.as_ref()).unwrap();
+            assert_eq!(evidence["pass"], pass);
+            assert_eq!(evidence["engine"], engine);
+            assert_eq!(evidence["models"]["status"], "unreported");
+            assert_eq!(evidence["tokens"], serde_json::to_value(tokens).unwrap());
+            assert_eq!(evidence["result"]["alignment"]["strategy"], "global");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let dumper = crate::runner::debug_dumper::DebugDumper::new(Some(directory.path()));
+        dumper
+            .dump_utr_evidence("sample.cha", active.recovery)
+            .unwrap();
+        let artifact: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("sample_utr_evidence.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(artifact["schema_version"], 3);
+        assert_eq!(artifact["completed_passes"].as_array().unwrap().len(), 2);
+        assert_eq!(artifact["completed_passes"][0]["pass"], "initial");
+        assert_eq!(artifact["completed_passes"][1]["pass"], "fallback");
+        let windows = &artifact["completed_passes"][0]["inputs"];
+        assert_eq!(windows["kind"], "observed");
+        assert_eq!(
+            windows["first"]["response"]["tokens"][2]["text"],
+            "unplaced"
+        );
+        assert_eq!(windows["first"]["rejections"][0]["index"], 2);
+        assert_eq!(
+            windows["first"]["rejections"][0]["reason"]["kind"],
+            "untimed"
+        );
+        assert!(windows["first"]["response"]["model"].is_object());
+        assert_eq!(windows["remaining"][0]["start_ms"], 1000);
+        assert_eq!(
+            windows["remaining"][0]["response"]["tokens"][0]["text"],
+            "tail"
+        );
+        assert!(windows["remaining"][0]["response"].get("model").is_none());
+        assert_eq!(
+            artifact["completed_passes"][1]["tokens"],
+            serde_json::to_value(&fallback).unwrap()
+        );
+        let not_directory = directory.path().join("file");
+        std::fs::write(&not_directory, b"not a directory").unwrap();
+        let refused = crate::runner::debug_dumper::DebugDumper::new(Some(&not_directory));
+        assert!(
+            refused
+                .dump_utr_evidence("sample.cha", active.recovery)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_partial_recognition_survives_full_recovery_and_sidecar() {
+        use crate::api::AudioPositionSeconds;
+        use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Ms, Recording};
+        use crate::transcribe::{AsrResponse, AsrToken};
+
+        let token = |text: &str, start: Option<f64>, end: Option<f64>| AsrToken {
+            text: text.into(),
+            start_s: start.map(|value| AudioPositionSeconds::try_from(value).unwrap()),
+            end_s: end.map(|value| AudioPositionSeconds::try_from(value).unwrap()),
+            speaker: None,
+            confidence: None,
+        };
+        let response = |tokens| AsrResponse {
+            tokens,
+            lang: crate::api::LanguageCode3::eng(),
+            seam_ambiguities: Vec::new(),
+            source_monologues: None,
+            model: None,
+        };
+        let recording = Recording::of_duration(Ms(2000)).unwrap();
+        let first = FaWindow::within(&recording, FileMs::new(0), FileMs::new(1000)).unwrap();
+        let failed = FaWindow::within(&recording, FileMs::new(1000), FileMs::new(2000)).unwrap();
+        let whole = FaWindow::within(&recording, FileMs::new(0), FileMs::new(2000)).unwrap();
+        let partial = crate::runner::convert_utr_for_test(
+            response(vec![
+                token("partial", Some(0.1), Some(0.2)),
+                token("untimed", None, None),
+            ]),
+            first,
+        );
+        let full = crate::runner::convert_utr_for_test(
+            response(vec![
+                token("hello", Some(0.3), Some(0.4)),
+                token("world", Some(0.5), Some(0.6)),
+            ]),
+            whole,
+        );
+        let prepared = crate::runner::prepare_after_partial_failure_for_test(
+            &[first, failed],
+            partial,
+            failed,
+            full,
+        )
+        .unwrap();
+        let mut working = read_named(&never_aligned("@Media:\tsample, audio\n")).unwrap();
+        working
+            .active_mut()
+            .unwrap()
+            .recover_timing(crate::api::UtrPass::Initial, async |chat| {
+                Ok(crate::provenance::UtrPassOutcome::Recovered(
+                    prepared
+                        .run(chat, Box::new(crate::chat_ops::fa::GlobalUtr), None)
+                        .await?,
+                ))
+            })
+            .await
+            .unwrap();
+        let FaInputDocument::Active(active) = working.attempt() else {
+            panic!("active")
+        };
+        let directory = tempfile::tempdir().unwrap();
+        crate::runner::debug_dumper::DebugDumper::new(Some(directory.path()))
+            .dump_utr_evidence("sample.cha", active.recovery)
+            .unwrap();
+        let artifact: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("sample_utr_evidence.json")).unwrap(),
+        )
+        .unwrap();
+        let pass = &artifact["completed_passes"][0];
+        let route = &pass["inputs"]["route"];
+        assert_eq!(artifact["schema_version"], 3);
+        assert_eq!(route["kind"], "full_after_partial");
+        assert_eq!(route["abandoned"]["state"], "execution_stopped");
+        assert_eq!(
+            route["abandoned"]["planned_windows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(route["abandoned"]["reason"]["kind"], "recognition");
+        assert_eq!(route["abandoned"]["reason"]["window"]["start_ms"], 1000);
+        assert_eq!(route["abandoned"]["reason"]["error"], "recognition failed");
+        let retained = &route["abandoned"]["completed_windows"][0];
+        assert_eq!(retained["accepted_tokens"][0]["text"], "partial");
+        assert_eq!(
+            retained["evidence"]["response"]["tokens"][1]["text"],
+            "untimed"
+        );
+        assert_eq!(
+            retained["evidence"]["rejections"][0]["reason"]["kind"],
+            "untimed"
+        );
+        assert_eq!(pass["tokens"][0]["text"], "hello");
+        assert_eq!(pass["tokens"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_utr_evidence_from_a_different_source_identity() {
+        let mut working = read_named(&never_aligned("@Media:\tsample, audio\n"))
+            .expect("admitted untimed source");
+        let error = working
+            .active_mut()
+            .expect("active source")
+            .recover_timing(crate::api::UtrPass::Initial, async |source| {
+                let foreign = crate::chat_ops::fa::SourceBoundUtrInput::for_test(source.document());
+                Ok(crate::provenance::UtrPassOutcome::Recovered(
+                    crate::runner::CompletedRecognition::synthetic(
+                        crate::chat_ops::fa::utr::observe_spaced(&foreign, &[]),
+                        crate::provenance::UtrProducer::new(
+                            &crate::options::UtrEngine::Whisper,
+                            crate::provenance::UtrModels::Unreported,
+                        ),
+                    ),
+                ))
+            })
+            .await
+            .expect_err("foreign evidence must not enter the recovery record");
+        assert!(matches!(
+            &error,
+            ServerError::AlignmentSourceBinding(
+                crate::error::AlignmentSourceBindingFailure::UtrEvidenceFromDifferentSource
+            )
+        ));
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+        assert!(matches!(
+            crate::provenance::UtrRecovery::from_initial(
+                &crate::options::UtrEngine::Whisper,
+                Err(error),
+            ),
+            Err(crate::provenance::UtrRecoveryStop::Failed(
+                crate::provenance::UtrRecoveryFailure::SourceBinding(
+                    crate::error::AlignmentSourceBindingFailure::UtrEvidenceFromDifferentSource
+                )
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn source_bullets_survive_recovery_and_missing_utterances_are_refused() {
+        use crate::chat_ops::fa::coordinates::{Ms, Recording};
+        use crate::chat_ops::fa::utr::AsrTimingToken;
+        use crate::types::traces::FaOriginalBulletTrace;
+
+        let input = never_aligned("@Media:\tsample, audio\n");
+        let mut working = read_named(&input).expect("admitted untimed source");
+        let before = batchalign_transform::serialize::to_chat_string(working.document());
+        let tokens: Vec<_> = ["hello", "world", "more", "words"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| AsrTimingToken {
+                text: text.to_owned(),
+                start_ms: index as u64 * 200,
+                end_ms: index as u64 * 200 + 100,
+            })
+            .collect();
+        working
+            .active_mut()
+            .expect("active")
+            .recover_timing(crate::api::UtrPass::Initial, async |chat| {
+                Ok(crate::provenance::UtrPassOutcome::Recovered(
+                    crate::runner::CompletedRecognition::synthetic(
+                        crate::chat_ops::fa::utr::observe_spaced(chat, &tokens),
+                        crate::provenance::UtrProducer::new(
+                            &crate::options::UtrEngine::Whisper,
+                            crate::provenance::UtrModels::Unreported,
+                        ),
+                    ),
+                ))
+            })
+            .await
+            .expect("UTR");
+        let FaInputDocument::Active(active) = working.attempt() else {
+            panic!("active")
+        };
+        assert_eq!(
+            batchalign_transform::serialize::to_chat_string(&active.chat_file),
+            before
+        );
+        let recording = Recording::of_duration(Ms(2_000)).unwrap();
+        let grouping = active
+            .chat_file
+            .group(
+                crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+                &recording,
+                active.anchors,
+            )
+            .unwrap();
+        let windows: Vec<_> = grouping
+            .groups
+            .iter()
+            .flat_map(|group| group.source_windows().unwrap())
+            .collect();
+        assert_eq!(windows.len(), 2);
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.original_bullet == FaOriginalBulletTrace::Absent)
+        );
+        assert!(windows.iter().all(|window| matches!(
+            window.localization,
+            crate::types::traces::FaSourceLocalizationTrace::UtrCandidates
+        )));
+
+        let mut missing = active.chat_file.clone();
+        let last = missing
+            .lines
+            .iter()
+            .rposition(|line| matches!(line, talkbank_model::Line::Utterance(_)))
+            .unwrap();
+        missing.lines.remove(last);
+        let Err(failure) = missing.group(
+            crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+            &recording,
+            active.anchors,
+        ) else {
+            panic!("missing working utterance must be refused");
+        };
+        assert_eq!(
+            failure,
+            crate::error::AlignmentSourceBindingFailure::MissingWorkingUtterance {
+                utterance: talkbank_model::UtteranceIdx::new(1),
+            }
+        );
+        let error = ServerError::from(failure);
+        assert_eq!(
+            crate::runner::util::classify_server_error(&error),
+            crate::scheduling::FailureCategory::System
+        );
+    }
+
+    #[test]
+    fn original_supplied_bullet_is_not_replaced_by_the_working_window() {
+        use crate::chat_ops::fa::coordinates::{Ms, Recording};
+        use crate::types::traces::FaOriginalBulletTrace;
+
+        let working = read_named(SOURCE).unwrap();
+        let FaInputDocument::Active(mut active) = working.attempt() else {
+            panic!("active")
+        };
+        for line in &mut active.chat_file.lines {
+            if let talkbank_model::Line::Utterance(utterance) = line {
+                utterance
+                    .main
+                    .content
+                    .bullet
+                    .as_mut()
+                    .and_then(talkbank_model::BulletState::as_parsed_mut)
+                    .unwrap()
+                    .timing
+                    .end_ms = 750;
+            }
+        }
+        let grouping = active
+            .chat_file
+            .group(
+                crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+                &Recording::of_duration(Ms(2_000)).unwrap(),
+                active.anchors,
+            )
+            .unwrap();
+        let windows = grouping.groups[0].source_windows().unwrap();
+        assert_eq!(windows[0].end_ms, 750);
+        assert_eq!(
+            windows[0].original_bullet,
+            FaOriginalBulletTrace::Parsed {
+                start_ms: 0,
+                end_ms: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn identical_words_in_independent_sources_keep_their_own_bullets() {
+        use crate::chat_ops::fa::coordinates::{Ms, Recording};
+        use crate::types::traces::FaOriginalBulletTrace;
+
+        let changed = SOURCE.replace("0_500", "1_501");
+        for (source, start, end) in [(SOURCE, 0, 500), (changed.as_str(), 1, 501)] {
+            let working = read_named(source).unwrap();
+            let FaInputDocument::Active(active) = working.attempt() else {
+                panic!("active");
+            };
+            let grouping = active
+                .chat_file
+                .group(
+                    crate::types::engines::FaEngineName::Wave2Vec.aggregation_target(),
+                    &Recording::of_duration(Ms(2_000)).unwrap(),
+                    active.anchors,
+                )
+                .unwrap();
+            let windows = grouping.groups[0].source_windows().unwrap();
+            assert_eq!(
+                windows[0].original_bullet,
+                FaOriginalBulletTrace::Parsed {
+                    start_ms: start,
+                    end_ms: end,
+                }
+            );
+        }
+    }
+
     #[test]
     fn pending_timing_reports_missing_localization_without_write_authority() {
         use crate::chat_ops::fa::AnchorIndex;
@@ -886,7 +1440,7 @@ mod tests {
             .admit_grouping(grouping, &active.chat_file)
             .expect("restored timing is not still absent");
         let output = crate::types::results::FaResult::without_groups(
-            active.chat_file,
+            active.chat_file.into_document(),
             crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             "test",
             &crate::engine_reports::FaCacheNamespace::for_test("test"),
@@ -922,7 +1476,7 @@ mod tests {
             };
             assert!(active.admission.pending_timing.is_some());
             let output = crate::types::results::FaResult::without_groups(
-                active.chat_file,
+                active.chat_file.into_document(),
                 crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
                 "test",
                 &crate::engine_reports::FaCacheNamespace::for_test("test"),
@@ -1291,7 +1845,7 @@ mod tests {
             panic!("an ordinary source is aligned")
         };
         let output = crate::types::results::FaResult::without_groups(
-            active.chat_file,
+            active.chat_file.into_document(),
             crate::chat_ops::fa::WordGapHealing::PreserveMeasured,
             "test",
             &crate::engine_reports::FaCacheNamespace::for_test("test"),

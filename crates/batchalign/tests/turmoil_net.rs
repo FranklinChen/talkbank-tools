@@ -250,6 +250,10 @@ fn create_real_test_app(python_path: &str) -> RealAppHandle {
             ..Default::default()
         };
         let pool_config = PoolConfig {
+            // The pool runs on the host this test app is built on.
+            runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(
+                &batchalign::host_facts::HostSnapshot::for_tests(&config),
+            ),
             python_path: python_path.into(),
             test_echo: true,
             health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),

@@ -697,4 +697,25 @@ mod tests {
             assert_lockstep(body);
         }
     }
+
+    /// An annotated or replaced item that is not a `%mor` word counts none
+    /// on either side. Until Chatter 0.34.3 these shapes never reached the
+    /// rebuild: BA3's second run walk counted them and refused the file
+    /// first. With that walk deleted the rebuild sees them, so its counter
+    /// must skip them exactly as the extractor does, or every later word in
+    /// the utterance would take the wrong `%mor` entry.
+    #[test]
+    fn word_counter_matches_the_extractor_on_annotated_non_words() {
+        for body in [
+            "a &+b [=! laughs] .",
+            "a &+b [=! laughs] c d .",
+            "a b xxx [*] .",
+            "a xxx [*] b c .",
+            "a &-um [=! shrugs] b .",
+            "a <b &+c [=! laughs]> [!] d .",
+            "a &+b [: c] d .",
+        ] {
+            assert_lockstep(body);
+        }
+    }
 }

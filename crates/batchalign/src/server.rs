@@ -117,9 +117,8 @@ pub async fn create_app_with_runtime(
     build_hash: Option<String>,
     clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
-    let workers = prepare_workers(pool_config, RegistryDiscovery::Adopt).await?;
-    create_app_with_prepared_workers(config, host, layout, storage, build_hash, workers, clock)
-        .await
+    let workers = prepare_workers(host, pool_config, RegistryDiscovery::Adopt).await?;
+    create_app_with_prepared_workers(config, layout, storage, build_hash, workers, clock).await
 }
 
 /// Create the application with test-echo workers and the lightweight
@@ -136,7 +135,12 @@ pub async fn create_test_app(
     clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
     let layout = RuntimeLayout::from_env();
-    let workers = prepare_workers(pool_config, RegistryDiscovery::Adopt).await?;
+    // Test apps run against a declared host, never this machine, and adopt
+    // no registered daemon: discovery reads the registry the pool resolves,
+    // which is the machine's own unless the caller named another, and it
+    // may adopt, reap or de-register what it finds there.
+    let host = Arc::new(crate::host_facts::HostSnapshot::for_tests(&config));
+    let workers = prepare_workers(host, pool_config, RegistryDiscovery::Ignore).await?;
     create_test_app_with_prepared_workers(
         config,
         layout,
@@ -176,13 +180,16 @@ pub struct AppStorageOverrides {
 /// cache directory.
 pub async fn create_app_with_prepared_workers(
     config: ServerConfig,
-    host: Arc<crate::host_facts::HostSnapshot>,
     layout: RuntimeLayout,
     storage: AppStorageOverrides,
     build_hash: Option<String>,
     workers: PreparedWorkers,
     clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
+    // The host first, before any side effect: a configuration the workers
+    // cannot follow is refused before the job database is migrated or
+    // pruned and before the cache is opened.
+    let host = workers.host_for(&config)?;
     let AppStorageOverrides {
         jobs_dir,
         db_dir,
@@ -203,7 +210,7 @@ pub async fn create_app_with_prepared_workers(
     info!("Backend: local");
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
-        host,
+        host.clone(),
         db,
         execution_runtime.engine,
         jobs_dir.clone(),
@@ -267,6 +274,10 @@ pub async fn create_test_app_with_prepared_workers(
     workers: PreparedWorkers,
     clock: Arc<dyn Clock>,
 ) -> Result<(Router, Arc<AppState>), error::ServerError> {
+    // The host first, before any side effect: a configuration the workers
+    // cannot follow is refused before the job database is migrated or
+    // pruned and before the cache is opened.
+    let host = workers.host_for(&config)?;
     let AppStorageOverrides {
         jobs_dir,
         db_dir,
@@ -284,8 +295,7 @@ pub async fn create_test_app_with_prepared_workers(
     let execution_runtime = workers.resolve_execution_runtime(cache.clone());
     let backend_bootstrap: ServerBackendBootstrap = bootstrap_local_server_backend(
         config.clone(),
-        // Test apps run against a declared host, never this machine.
-        Arc::new(crate::host_facts::HostSnapshot::for_tests(&config)),
+        host.clone(),
         db,
         execution_runtime.engine,
         jobs_dir.clone(),

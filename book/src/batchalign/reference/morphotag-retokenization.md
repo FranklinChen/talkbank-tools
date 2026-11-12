@@ -1,7 +1,7 @@
 # Morphotag Retokenization
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-11 22:44 EST
 
 ## Purpose and audience
 
@@ -124,9 +124,15 @@ each UD word is its own CHAT word, and each UD word gets its own MOR item.
   bracket edges end a run; an annotated word, each word of a replacement and
   a tag separator stand alone. Cantonese retokenize hands PyCantonese one run
   at a time, so `a b [/] b c` can never segment as a token over `a` and `b c`.
-  The run walk counts words by the rebuild's own rules and must agree with
-  Chatter's extracted word list; a disagreement stops the file as an
-  internal fault (`ServerError::WordRunsDisagree`), never a quiet fallback.
+  Chatter decides the runs (`talkbank_transform::extract::collect_mor_runs`,
+  Chatter 0.34.3) in the same walk that decides which items are `%mor`
+  words, and BA3 takes both the words and the run lengths from that one
+  value (`WordRuns::from(&MorRuns)`), so the runs partition the words by
+  construction. Until 2026-11-11 BA3 walked the main tier a second time with
+  its own copy of the word rules and stopped the file when the two counts
+  disagreed; that second walk counted an annotated non-word such as
+  `&+w [=! laughs]` or `xxx [*]` and refused every file holding one.
+  The walk, its refusal and `ServerError::WordRunsDisagree` are deleted.
   Items with no authority to retokenize (secondary-language spans) send
   every word as its own run.
 - A token the `--lexicon` MWT lexicon names becomes the lexicon's pieces,

@@ -9,8 +9,11 @@ use talkbank_model::alignment::helpers::{
 use talkbank_model::model::{ChatFile, Utterance};
 
 use super::injection::{TimingCursor, project_timing_for_word};
-use super::orchestrate::FaImposed;
-use super::{SuppliedRetrySource, WordTiming, get_word_timing, utterances_indexed_mut};
+use super::orchestrate::{FaFinalized, FaImposed};
+use super::{
+    BulletRepairPolicy, KeptBulletError, SuppliedRetrySource, WordTiming, get_word_timing,
+    utterances_indexed, utterances_indexed_mut,
+};
 
 /// A terminal result. No result has a transition back to a request.
 pub(crate) enum SuppliedRetryAnswer {
@@ -29,28 +32,40 @@ struct MissingSlot {
     upper_ms: u64,
 }
 
-struct MissingUtterance<'a> {
+struct MissingUtterance {
     line: usize,
-    utterance: &'a mut Utterance,
     source: SuppliedRetrySource,
     slots: Vec<MissingSlot>,
 }
 
-/// Exclusive utterance borrows keep the admitted slot addresses stable across
-/// async inference. Accepted slots grant no writing capability.
+/// The exclusive document borrow keeps admitted slot addresses stable across
+/// async inference and binds finalization to that same document.
 pub(crate) struct SuppliedRetrySession<'a, P> {
     imposed: FaImposed,
-    pending: std::vec::IntoIter<(MissingUtterance<'a>, P)>,
+    chat: &'a mut ChatFile,
+    pending: std::vec::IntoIter<(MissingUtterance, P)>,
+    resolved: Vec<ResolvedSuppliedRetry>,
 }
 
 pub(crate) enum SuppliedRetryStep<'a, P> {
-    Complete(FaImposed),
+    Complete(CompletedSuppliedRetries<'a>),
     Pending(PendingSuppliedRetry<'a, P>),
+}
+
+struct ResolvedSuppliedRetry {
+    target: MissingUtterance,
+    answer: SuppliedRetryAnswer,
+}
+
+pub(crate) struct CompletedSuppliedRetries<'a> {
+    imposed: FaImposed,
+    chat: &'a mut ChatFile,
+    resolved: Vec<ResolvedSuppliedRetry>,
 }
 
 pub(crate) struct PendingSuppliedRetry<'a, P> {
     preparation: P,
-    current: MissingUtterance<'a>,
+    current: MissingUtterance,
     session: SuppliedRetrySession<'a, P>,
 }
 
@@ -59,12 +74,12 @@ impl<'a, P> SuppliedRetrySession<'a, P> {
         imposed: FaImposed,
         chat: &'a mut ChatFile,
         sources: impl Iterator<Item = (SuppliedRetrySource, P)>,
-    ) -> Self {
+    ) -> Result<Self, KeptBulletError> {
         let mut sources: BTreeMap<_, _> = sources
             .map(|(source, preparation)| (source.index(), (source, preparation)))
             .collect();
         let mut pending = Vec::new();
-        for (line, index, utterance) in utterances_indexed_mut(chat) {
+        for (line, index, utterance) in utterances_indexed(chat) {
             let Some((source, preparation)) = sources.remove(&index) else {
                 continue;
             };
@@ -101,7 +116,6 @@ impl<'a, P> SuppliedRetrySession<'a, P> {
                 pending.push((
                     MissingUtterance {
                         line,
-                        utterance,
                         source,
                         slots,
                     },
@@ -109,10 +123,15 @@ impl<'a, P> SuppliedRetrySession<'a, P> {
                 ));
             }
         }
-        Self {
-            imposed,
-            pending: pending.into_iter(),
+        if let Some((utterance, _)) = sources.into_iter().next() {
+            return Err(KeptBulletError::RetrySourceMissing { utterance });
         }
+        Ok(Self {
+            imposed,
+            chat,
+            pending: pending.into_iter(),
+            resolved: Vec::new(),
+        })
     }
 
     pub(crate) fn next(mut self) -> SuppliedRetryStep<'a, P> {
@@ -122,7 +141,11 @@ impl<'a, P> SuppliedRetrySession<'a, P> {
                 preparation,
                 session: self,
             }),
-            None => SuppliedRetryStep::Complete(self.imposed),
+            None => SuppliedRetryStep::Complete(CompletedSuppliedRetries {
+                imposed: self.imposed,
+                chat: self.chat,
+                resolved: self.resolved,
+            }),
         }
     }
 }
@@ -142,7 +165,7 @@ impl<'a, P> PendingSuppliedRetry<'a, P> {
 }
 
 pub(crate) struct AwaitingSuppliedRetry<'a, P> {
-    current: MissingUtterance<'a>,
+    current: MissingUtterance,
     session: SuppliedRetrySession<'a, P>,
 }
 
@@ -151,62 +174,104 @@ impl<'a, P> AwaitingSuppliedRetry<'a, P> {
         &self.current.source
     }
 
-    /// Only missing slots can be written. A candidate must fit the source and
-    /// retained neighbours without moving either. Every outcome is terminal.
+    /// Retain the answer with its exclusively borrowed document. No retry writes
+    /// timing while other retry observations are still being collected.
     pub(crate) fn complete(mut self, answer: SuppliedRetryAnswer) -> SuppliedRetrySession<'a, P> {
-        let target = self.current;
-        let requested = target.slots.len();
-        let mut filled = Vec::new();
-        let detail = match answer {
-            SuppliedRetryAnswer::Unresolved { reason } => reason,
-            SuppliedRetryAnswer::Timings { timings, source }
-                if timings.len() == target.source.words().len() =>
-            {
-                let mut slots = target.slots.into_iter().peekable();
-                let mut cursor = TimingCursor::with_offset(&timings, 0);
-                let mut ordinal = 0;
-                let mut last_filled_end = target.source.window().audio_start().get();
-                walk_words_mut(
-                    target.utterance.main.content.content.as_mut_slice(),
-                    None,
-                    &mut |item| {
-                        let word = match item {
-                            WordItemMut::Word(word) => word,
-                            WordItemMut::ReplacedWord(replaced) => &mut replaced.word,
-                            WordItemMut::Separator(_) => return,
-                        };
-                        let projected = project_timing_for_word(word, &mut cursor);
-                        if slots.peek().is_some_and(|slot| slot.ordinal == ordinal)
-                            && let Some(slot) = slots.next()
-                            && let Some(timing) = projected
-                            && timing.start_ms >= slot.lower_ms.max(last_filled_end)
-                            && timing.end_ms <= slot.upper_ms
-                        {
-                            word.inline_bullet = Some(timing.bullet());
-                            last_filled_end = timing.end_ms;
-                            filled.push(format!("word {ordinal}: {timing:?}"));
-                        }
-                        ordinal += 1;
-                    },
-                );
-                source
-            }
-            SuppliedRetryAnswer::Timings { .. } => "refused mismatched reply population".into(),
-        };
-        let index = target.source.index();
-        if !filled.is_empty() {
-            self.session.imposed.retry_touched(index);
-        }
-        self.session.imposed.postprocess.push(DecisionRecord::new_and_trace(
-            target.line,
-            target.utterance.main.speaker.as_str().to_owned(),
-            DecisionStrategy::Fa(FaStrategy::TimingProvenance),
-            format!("terminal supplied-window retry u{} {}..{}ms: filled {}/{} missing AST slots; {}; {}",
-                index.raw(), target.source.window().audio_start().get(), target.source.window().end().get(), filled.len(), requested, detail, filled.join("; ")),
-            filled.len() != requested,
-        ));
+        self.session.resolved.push(ResolvedSuppliedRetry {
+            target: self.current,
+            answer,
+        });
         self.session
     }
+}
+
+impl CompletedSuppliedRetries<'_> {
+    /// Apply the collected answers and finalize the same borrowed document.
+    pub(crate) fn then_finalize(
+        mut self,
+        repair: BulletRepairPolicy,
+    ) -> Result<FaFinalized, KeptBulletError> {
+        let mut resolved: BTreeMap<_, _> = self
+            .resolved
+            .into_iter()
+            .map(|answer| (answer.target.source.index(), answer))
+            .collect();
+        for (_, index, utterance) in utterances_indexed_mut(self.chat) {
+            if let Some(answer) = resolved.remove(&index) {
+                apply_answer(&mut self.imposed, utterance, answer);
+            }
+        }
+        if let Some((index, _)) = resolved.into_iter().next() {
+            return Err(KeptBulletError::RetrySourceMissing { utterance: index });
+        }
+        self.imposed.then_finalize(self.chat, repair)
+    }
+}
+
+fn apply_answer(
+    imposed: &mut FaImposed,
+    utterance: &mut Utterance,
+    resolved: ResolvedSuppliedRetry,
+) {
+    let ResolvedSuppliedRetry { target, answer } = resolved;
+    let requested = target.slots.len();
+    let mut filled = Vec::new();
+    let detail = match answer {
+        SuppliedRetryAnswer::Unresolved { reason } => reason,
+        SuppliedRetryAnswer::Timings { timings, source }
+            if timings.len() == target.source.words().len() =>
+        {
+            let mut slots = target.slots.into_iter().peekable();
+            let mut cursor = TimingCursor::with_offset(&timings, 0);
+            let mut ordinal = 0;
+            let mut last_filled_end = target.source.window().audio_start().get();
+            walk_words_mut(
+                utterance.main.content.content.as_mut_slice(),
+                None,
+                &mut |item| {
+                    let word = match item {
+                        WordItemMut::Word(word) => word,
+                        WordItemMut::ReplacedWord(replaced) => &mut replaced.word,
+                        WordItemMut::Separator(_) => return,
+                    };
+                    let projected = project_timing_for_word(word, &mut cursor);
+                    if slots.peek().is_some_and(|slot| slot.ordinal == ordinal)
+                        && let Some(slot) = slots.next()
+                        && let Some(timing) = projected
+                        && timing.start_ms >= slot.lower_ms.max(last_filled_end)
+                        && timing.end_ms <= slot.upper_ms
+                    {
+                        word.inline_bullet = Some(timing.bullet());
+                        last_filled_end = timing.end_ms;
+                        filled.push(format!("word {ordinal}: {timing:?}"));
+                    }
+                    ordinal += 1;
+                },
+            );
+            source
+        }
+        SuppliedRetryAnswer::Timings { .. } => "refused mismatched reply population".into(),
+    };
+    let index = target.source.index();
+    if !filled.is_empty() {
+        imposed.retry_touched(index);
+    }
+    imposed.postprocess.push(DecisionRecord::new_and_trace(
+        target.line,
+        utterance.main.speaker.as_str().to_owned(),
+        DecisionStrategy::Fa(FaStrategy::TimingProvenance),
+        format!(
+            "terminal supplied-window retry u{} {}..{}ms: filled {}/{} missing AST slots; {}; {}",
+            index.raw(),
+            target.source.window().audio_start().get(),
+            target.source.window().end().get(),
+            filled.len(),
+            requested,
+            detail,
+            filled.join("; ")
+        ),
+        filled.len() != requested,
+    ));
 }
 
 #[cfg(test)]

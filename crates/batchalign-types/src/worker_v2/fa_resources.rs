@@ -251,9 +251,9 @@ pub enum FaResourceConstraintV2 {
         /// The original quantities, model identity and diagnostic.
         cause: FaPreparationRefusalV2,
     },
-    /// Full request demand exceeds total usable physical host capacity.
+    /// Full request demand exceeds the most this host can ever offer.
     #[error(
-        "FA model {engine} needs {required_mb} MiB including its request; host has {total_mb} MiB with {reserve_mb} MiB reserved"
+        "FA model {engine} needs {required_mb} MiB including its request; this host can ever offer {ceiling_mb} MiB with {reserve_mb} MiB kept free"
     )]
     HostMemory {
         /// The loaded model that projected this request.
@@ -263,8 +263,11 @@ pub enum FaResourceConstraintV2 {
         required_mb: u64,
         /// Capacity unavailable to model requests by host policy.
         reserve_mb: u64,
-        /// Physical capacity, independent of transient memory pressure.
-        total_mb: u64,
+        /// The most this host can ever offer (its total RAM when read live,
+        /// its declared available RAM when declared), independent of
+        /// transient memory pressure: the bound the request was judged
+        /// against, the same one host-memory admission refuses against.
+        ceiling_mb: u64,
     },
 }
 

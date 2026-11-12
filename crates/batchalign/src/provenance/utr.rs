@@ -2,7 +2,8 @@
 //!
 //! A provider failure is recorded before FA may continue. Successful earlier
 //! recovery and failed later attempts are independent evidence; neither erases
-//! the other. Only cancellation escapes as a stop rather than a shortfall.
+//! the other. Cancellation and failure to retain requested evidence stop the
+//! file rather than becoming shortfalls.
 //!
 //! A pass that ran records its PRODUCER: the engine and the models every ASR
 //! response it used reported ([`UtrModels`]), which the align stamp writes as
@@ -13,7 +14,7 @@
 //! requested.
 
 use crate::api::{OutputShortfallRecord, StampJoiner, StampSafeText, UtrPass};
-use crate::chat_ops::fa::utr::{UtrCancelled, UtrResult};
+use crate::chat_ops::fa::utr::UtrResult;
 use crate::error::ServerError;
 use crate::options::UtrEngine;
 use crate::scheduling::FailureCategory;
@@ -29,25 +30,96 @@ pub(crate) enum UtrPassOutcome {
     /// No utterance lacked timing, so no recognition was asked for.
     NothingUntimed(UtrResult),
     /// Recognition ran and its tokens were matched to the transcript.
-    Recovered {
-        /// The matching result.
-        result: UtrResult,
-        /// The models the responses reported.
-        models: UtrModels,
-    },
+    Recovered(crate::runner::CompletedRecognition),
 }
 
-impl UtrPassOutcome {
-    /// The matching result, whichever state produced it.
-    pub(crate) fn result_mut(&mut self) -> &mut UtrResult {
-        match self {
-            Self::NothingUntimed(result) | Self::Recovered { result, .. } => result,
-        }
+/// One refused response token, addressed within its own retained response.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub(crate) struct UtrTokenRejection {
+    pub(crate) index: usize,
+    pub(crate) reason: UtrTokenRejectionReason,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum UtrTokenRejectionReason {
+    Untimed,
+    NoExtent,
+    InvertedInterval,
+    InvertedSpan,
+    NotFinite,
+    Negative,
+    OutOfRange,
+    OffsetOverflow,
+    OutsideWindow { overshoot_ms: u64 },
+}
+
+/// A response and the admitted audio window it described.
+#[derive(Debug)]
+pub(crate) struct UtrRecognitionWindow {
+    window: crate::chat_ops::fa::coordinates::FaWindow,
+    response: crate::transcribe::AsrResponse,
+    rejections: Vec<UtrTokenRejection>,
+}
+
+impl UtrRecognitionWindow {
+    pub(crate) fn from_conversion(
+        conversion: crate::runner::UtrTokenConversion,
+    ) -> (Vec<crate::chat_ops::fa::utr::AsrTimingToken>, Self) {
+        let (window, response, tokens, rejections) = conversion.into_parts();
+        (
+            tokens,
+            Self {
+                window,
+                response,
+                rejections,
+            },
+        )
+    }
+
+    pub(crate) fn response(&self) -> &crate::transcribe::AsrResponse {
+        &self.response
     }
 }
 
+impl serde::Serialize for UtrRecognitionWindow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UtrRecognitionWindow", 4)?;
+        state.serialize_field("start_ms", &self.window.audio_start().get())?;
+        state.serialize_field("end_ms", &self.window.end().get())?;
+        state.serialize_field("response", &self.response)?;
+        state.serialize_field("rejections", &self.rejections)?;
+        state.end()
+    }
+}
+
+/// A completed recognizer pass always has at least one source response.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum UtrRecognitionEvidence {
+    Observed {
+        first: Box<UtrRecognitionWindow>,
+        remaining: Vec<UtrRecognitionWindow>,
+        route: crate::runner::UtrRecognitionRoute,
+    },
+    #[cfg(test)]
+    Synthetic,
+}
+
+/// The accounting projection of an outcome retained by its source owner.
+#[derive(Debug)]
+pub(crate) enum UtrPassReport {
+    NothingUntimed,
+    Recovered {
+        unmatched: usize,
+        producer: UtrProducer,
+    },
+}
+
 /// The models the ASR responses of one recovery pass reported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", content = "identity", rename_all = "snake_case")]
 pub(crate) enum UtrModels {
     /// Every response reported these models. Boxed: an identity is large and
     /// the other states carry nothing.
@@ -98,9 +170,20 @@ pub(crate) struct UtrProducer {
 }
 
 impl UtrProducer {
+    pub(crate) fn new(engine: &UtrEngine, models: UtrModels) -> Self {
+        Self {
+            engine: engine.clone(),
+            models,
+        }
+    }
+
     /// The engine, written as `utr=`.
     pub(crate) fn engine(&self) -> &UtrEngine {
         &self.engine
+    }
+
+    pub(crate) fn models(&self) -> &UtrModels {
+        &self.models
     }
 
     /// The models, written as `utr_model=` when they can be named.
@@ -128,6 +211,22 @@ pub(crate) struct PendingUtrFallback<'a> {
     permit: UtrFallbackPermit,
 }
 
+#[derive(Debug)]
+pub(crate) enum UtrRecoveryStop {
+    Cancelled,
+    Failed(UtrRecoveryFailure),
+}
+
+/// Internal recovery faults cannot become provider shortfalls. Callers handle
+/// this family as one terminal system failure, preserving its typed cause.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UtrRecoveryFailure {
+    #[error(transparent)]
+    EvidenceRetention(crate::error::UtrEvidenceRetentionFailure),
+    #[error(transparent)]
+    SourceBinding(crate::error::AlignmentSourceBindingFailure),
+}
+
 impl UtrRecovery {
     pub(crate) fn not_run() -> Self {
         Self {
@@ -138,8 +237,8 @@ impl UtrRecovery {
 
     pub(crate) fn from_initial(
         engine: &UtrEngine,
-        result: Result<UtrPassOutcome, ServerError>,
-    ) -> Result<Self, UtrCancelled> {
+        result: Result<UtrPassReport, ServerError>,
+    ) -> Result<Self, UtrRecoveryStop> {
         let mut contribution = UtrContribution::NotRun;
         let fallback = contribution.record_initial(engine, result)?;
         Ok(Self {
@@ -167,8 +266,8 @@ impl PendingUtrFallback<'_> {
 
     pub(crate) fn record(
         self,
-        result: Result<UtrPassOutcome, ServerError>,
-    ) -> Result<(), UtrCancelled> {
+        result: Result<UtrPassReport, ServerError>,
+    ) -> Result<(), UtrRecoveryStop> {
         self.contribution.record_fallback(self.permit, result)
     }
 }
@@ -335,8 +434,8 @@ impl UtrContribution {
     fn record_initial(
         &mut self,
         engine: &UtrEngine,
-        result: Result<UtrPassOutcome, ServerError>,
-    ) -> Result<UtrFallback, UtrCancelled> {
+        result: Result<UtrPassReport, ServerError>,
+    ) -> Result<UtrFallback, UtrRecoveryStop> {
         Ok(match self.record(engine, UtrPass::Initial, result)? {
             RecoveryNeed::Satisfied => UtrFallback::Unavailable,
             RecoveryNeed::Withheld(reason) => {
@@ -359,8 +458,8 @@ impl UtrContribution {
     fn record_fallback(
         &mut self,
         permit: UtrFallbackPermit,
-        result: Result<UtrPassOutcome, ServerError>,
-    ) -> Result<(), UtrCancelled> {
+        result: Result<UtrPassReport, ServerError>,
+    ) -> Result<(), UtrRecoveryStop> {
         self.record(&permit.engine, UtrPass::Fallback, result)?;
         Ok(())
     }
@@ -369,34 +468,36 @@ impl UtrContribution {
         &mut self,
         engine: &UtrEngine,
         pass: UtrPass,
-        result: Result<UtrPassOutcome, ServerError>,
-    ) -> Result<RecoveryNeed, UtrCancelled> {
+        result: Result<UtrPassReport, ServerError>,
+    ) -> Result<RecoveryNeed, UtrRecoveryStop> {
         match result {
             Ok(outcome) => {
-                let unmatched = match &outcome {
-                    UtrPassOutcome::NothingUntimed(result)
-                    | UtrPassOutcome::Recovered { result, .. } => result.unmatched(),
-                };
-                match outcome {
-                    UtrPassOutcome::NothingUntimed(_) => {}
-                    UtrPassOutcome::Recovered { models, .. } => {
-                        let producer = UtrProducer {
-                            engine: engine.clone(),
-                            models,
-                        };
+                let unmatched = match outcome {
+                    UtrPassReport::NothingUntimed => 0,
+                    UtrPassReport::Recovered {
+                        unmatched,
+                        producer,
+                    } => {
                         match self {
                             Self::Unavailable(failures) => failures.completed = Some(producer),
                             Self::NotRun | Self::Ran(_) => *self = Self::Ran(producer),
                         }
+                        unmatched
                     }
-                }
+                };
                 Ok(if unmatched > 0 {
                     RecoveryNeed::Remaining
                 } else {
                     RecoveryNeed::Satisfied
                 })
             }
-            Err(ServerError::Cancelled) => Err(UtrCancelled),
+            Err(ServerError::Cancelled) => Err(UtrRecoveryStop::Cancelled),
+            Err(ServerError::UtrEvidenceRetention(failure)) => Err(UtrRecoveryStop::Failed(
+                UtrRecoveryFailure::EvidenceRetention(failure),
+            )),
+            Err(ServerError::AlignmentSourceBinding(failure)) => Err(UtrRecoveryStop::Failed(
+                UtrRecoveryFailure::SourceBinding(failure),
+            )),
             Err(error) => {
                 let category = crate::runner::util::classify_server_error(&error);
                 let need = fallback_after(category);

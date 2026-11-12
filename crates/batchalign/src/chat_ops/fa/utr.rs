@@ -129,6 +129,77 @@ pub trait UtrStrategy: Send + Sync {
     ) -> Result<UtrResult, UtrCancelled>;
 }
 
+/// The correspondence and the timed recognizer tokens it was computed from.
+#[derive(Debug)]
+pub(crate) struct UtrObservation {
+    result: UtrResult,
+    tokens: PreparedUtrTokens,
+    source: crate::chat_ops::fa::SourceIdentity,
+}
+
+/// Mutable UTR working copy, constructed only by cloning an admitted source.
+pub(crate) struct UtrCandidate {
+    file: ChatFile,
+    source: crate::chat_ops::fa::SourceIdentity,
+}
+
+impl UtrCandidate {
+    pub(crate) fn from_source(source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>) -> Self {
+        Self {
+            file: source.document().clone(),
+            source: source.identity().clone(),
+        }
+    }
+}
+
+impl UtrObservation {
+    pub(crate) fn result(&self) -> &UtrResult {
+        &self.result
+    }
+
+    pub(crate) fn anchors(&self) -> anchors::AnchorIndex {
+        self.result.anchors.clone()
+    }
+
+    pub(crate) fn tokens(&self) -> &PreparedUtrTokens {
+        &self.tokens
+    }
+
+    pub(crate) fn belongs_to(&self, source: &crate::chat_ops::fa::SourceIdentity) -> bool {
+        self.source.same_source(source)
+    }
+}
+
+/// Run correspondence with the very token population retained in its result.
+pub(crate) fn observe_controlled(
+    strategy: &dyn UtrStrategy,
+    mut candidate: UtrCandidate,
+    tokens: PreparedUtrTokens,
+    control: &dyn WorkControl<Error = UtrCancelled>,
+) -> Result<UtrObservation, UtrCancelled> {
+    let result = strategy.inject_controlled(&mut candidate.file, &tokens, control)?;
+    Ok(UtrObservation {
+        result,
+        tokens,
+        source: candidate.source,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn observe_spaced(
+    source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
+    tokens: &[AsrTimingToken],
+) -> UtrObservation {
+    let tokens = PreparedUtrTokens::spaced(tokens);
+    let mut candidate = UtrCandidate::from_source(source);
+    let result = GlobalUtr.inject(&mut candidate.file, &tokens);
+    UtrObservation {
+        result,
+        tokens,
+        source: candidate.source,
+    }
+}
+
 /// Cancellation is neither failed lexical evidence nor a budget refusal.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("utterance timing recovery cancelled")]

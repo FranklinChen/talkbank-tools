@@ -20,6 +20,7 @@ mod types;
 pub(crate) mod test_support;
 
 pub use conflict::*;
+pub(crate) use file_status::FileWriteRefusal;
 pub(crate) use projections::{JobStatusColumns, Stop};
 pub use types::*;
 
@@ -34,7 +35,6 @@ mod tests {
     use crate::scheduling::LeaseRecord;
     use crate::store::{FileResultEntry, FileStatus};
     use std::collections::{BTreeMap, HashMap};
-    use tokio_util::sync::CancellationToken;
 
     /// Build a small queued job for projection and conflict tests.
     fn sample_job(job_id: &str, filenames: &[&str]) -> Job {
@@ -91,7 +91,6 @@ mod tests {
                 file_statuses,
                 results: Vec::new(),
                 error: None,
-                completed_files: 0,
             },
             schedule: JobScheduleState {
                 submitted_at: crate::unix_time(100.0),
@@ -101,11 +100,7 @@ mod tests {
                 lease: None,
                 last_cancel: None,
             },
-            runtime: JobRuntimeControl {
-                cancel_token: CancellationToken::new(),
-                runner_active: false,
-                run_generation: crate::store::RunGeneration::FIRST,
-            },
+            runtime: JobRuntimeControl::unclaimed(),
             execution_plan: None,
         }
     }
@@ -214,7 +209,7 @@ mod tests {
 
         assert_eq!(job.execution.status, JobStatus::Queued);
         assert_eq!(job.execution.error, None);
-        assert_eq!(job.execution.completed_files, 1);
+        assert_eq!(job.execution.completed_files(), 1);
         assert_eq!(job.execution.results.len(), 1);
         assert_eq!(
             job.execution.file_statuses["a.cha"].status(),
@@ -320,7 +315,7 @@ mod tests {
 
         assert_eq!(disposition, RecoveryDisposition::Completed);
         assert_eq!(job.execution.status, JobStatus::Completed);
-        assert_eq!(job.execution.completed_files, 2);
+        assert_eq!(job.execution.completed_files(), 2);
         assert!(job.schedule.next_eligible_at.is_none());
         assert!(job.schedule.lease.is_none());
     }
@@ -395,35 +390,41 @@ mod tests {
     fn a_restart_keeps_a_diagnosed_file_and_requeues_only_the_failure() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
         let t = crate::unix_time;
-        assert!(job.mark_file_processing("a.cha", t(1.0)));
-        assert!(job.mark_file_done(
-            "a.cha",
-            t(2.0),
-            FileCompletion::Diagnosed {
-                result: CompletedFileOutput {
-                    exclusions: Vec::new(),
-                    filename: DisplayPath::from("a.cha"),
-                    content_type: ContentType::Chat,
-                    stamp: crate::api::FileStampOutcome::Unrecorded,
+        assert_eq!(job.mark_file_processing("a.cha", t(1.0)), Ok(()));
+        assert_eq!(
+            job.mark_file_done(
+                "a.cha",
+                t(2.0),
+                FileCompletion::Diagnosed {
+                    result: CompletedFileOutput {
+                        exclusions: Vec::new(),
+                        filename: DisplayPath::from("a.cha"),
+                        content_type: ContentType::Chat,
+                        stamp: crate::api::FileStampOutcome::Unrecorded,
+                    },
+                    diagnostics: crate::api::FileOutputDiagnostics::of_findings(
+                        vec![crate::api::FileOutputDiagnostics::coded_finding(
+                            "E241",
+                            "reserved marker",
+                        )],
+                        Vec::new(),
+                    ),
                 },
-                diagnostics: crate::api::FileOutputDiagnostics::of_findings(
-                    vec![crate::api::FileOutputDiagnostics::coded_finding(
-                        "E241",
-                        "reserved marker",
-                    )],
-                    Vec::new(),
-                ),
-            },
-        ));
-        assert!(job.mark_file_processing("b.cha", t(1.0)));
-        assert!(job.mark_file_error(
-            "b.cha",
-            &FileFailureRecord {
-                message: "worker crashed".into(),
-                category: crate::scheduling::FailureCategory::WorkerCrash,
-                finished_at: crate::store::EventTime::fixed(t(3.0)),
-            },
-        ));
+            ),
+            Ok(())
+        );
+        assert_eq!(job.mark_file_processing("b.cha", t(1.0)), Ok(()));
+        assert_eq!(
+            job.mark_file_error(
+                "b.cha",
+                &FileFailureRecord {
+                    message: "worker crashed".into(),
+                    category: crate::scheduling::FailureCategory::WorkerCrash,
+                    finished_at: crate::store::EventTime::fixed(t(3.0)),
+                },
+            ),
+            Ok(())
+        );
         assert!(job.any_terminal_files_failed(), "the error is a failure");
 
         job.execution.status = crate::api::JobStatus::Failed;
@@ -435,31 +436,35 @@ mod tests {
             job.execution.file_statuses["b.cha"].status(),
             FileStatusKind::Queued
         );
-        assert_eq!(job.execution.completed_files, 1);
+        assert_eq!(job.execution.completed_files(), 1);
     }
 
     /// File completion mutates file state and appends a success result.
     #[test]
     fn mark_file_done_updates_file_state() {
         let mut job = sample_job("job-1", &["a.cha"]);
-        assert!(job.mark_file_retry_pending(
-            "a.cha",
-            &FileRetryRecord {
-                message: "stale".into(),
-                category: crate::scheduling::FailureCategory::WorkerTimeout,
-                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
-                retry_at: crate::unix_time(11.5),
-            }
-        ));
+        assert_eq!(
+            job.mark_file_retry_pending(
+                "a.cha",
+                &FileRetryRecord {
+                    message: "stale".into(),
+                    category: crate::scheduling::FailureCategory::WorkerTimeout,
+                    finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                    retry_at: crate::unix_time(11.5),
+                }
+            ),
+            Ok(())
+        );
 
-        assert!(job.mark_file_done(
-            "a.cha",
-            crate::unix_time(12.0),
-            FileCompletion::Clean(CompletedFileOutput {
-                exclusions: vec![crate::api::OutputExclusionRecord::NotInRecording {
-                    excluded_utterances: 1,
-                    excluded_words: 3,
-                    first_excluded: vec![crate::api::ExcludedUtteranceRecord {
+        assert_eq!(
+            job.mark_file_done(
+                "a.cha",
+                crate::unix_time(12.0),
+                FileCompletion::Clean(CompletedFileOutput {
+                    exclusions: vec![crate::api::OutputExclusionRecord::NotInRecording {
+                        excluded_utterances: 1,
+                        excluded_words: 3,
+                        first_excluded: vec![crate::api::ExcludedUtteranceRecord {
                             location: crate::api::UtteranceLocator::for_test(
                                 2,
                                 "*PAR:\tdiary note . [+ diary]"
@@ -468,12 +473,14 @@ mod tests {
                             words: 3,
                             postcode: crate::api::OffRecordPostcode::Diary,
                         }],
-                }],
-                filename: DisplayPath::from("a.cha"),
-                content_type: ContentType::Chat,
-                stamp: crate::api::FileStampOutcome::Unrecorded,
-            })
-        ));
+                    }],
+                    filename: DisplayPath::from("a.cha"),
+                    content_type: ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                })
+            ),
+            Ok(())
+        );
 
         let entry = job.execution.file_statuses["a.cha"].to_entry();
         assert_eq!(entry.status, FileStatusKind::Done);
@@ -486,7 +493,7 @@ mod tests {
         assert_eq!(entry.finished_at, Some(crate::unix_time(12.0)));
         assert!(entry.error.is_none(), "the retry's error is gone");
         assert!(entry.error_category.is_none());
-        assert_eq!(job.execution.completed_files, 1);
+        assert_eq!(job.execution.completed_files(), 1);
         assert_eq!(job.execution.results.len(), 1);
     }
 
@@ -495,15 +502,18 @@ mod tests {
     fn mark_file_retry_pending_sets_retry_metadata() {
         let mut job = sample_job("job-1", &["a.cha"]);
 
-        assert!(job.mark_file_retry_pending(
-            "a.cha",
-            &FileRetryRecord {
-                message: "retry".into(),
-                category: crate::scheduling::FailureCategory::WorkerTimeout,
-                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
-                retry_at: crate::unix_time(20.0),
-            }
-        ));
+        assert_eq!(
+            job.mark_file_retry_pending(
+                "a.cha",
+                &FileRetryRecord {
+                    message: "retry".into(),
+                    category: crate::scheduling::FailureCategory::WorkerTimeout,
+                    finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                    retry_at: crate::unix_time(20.0),
+                }
+            ),
+            Ok(())
+        );
 
         let entry = job.execution.file_statuses["a.cha"].to_entry();
         assert_eq!(entry.status, FileStatusKind::Processing);
@@ -521,17 +531,20 @@ mod tests {
     #[test]
     fn clear_file_retry_state_clears_retry_error_metadata() {
         let mut job = sample_job("job-1", &["a.cha"]);
-        assert!(job.mark_file_retry_pending(
-            "a.cha",
-            &FileRetryRecord {
-                message: "retry".into(),
-                category: crate::scheduling::FailureCategory::WorkerTimeout,
-                finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
-                retry_at: crate::unix_time(20.0),
-            }
-        ));
+        assert_eq!(
+            job.mark_file_retry_pending(
+                "a.cha",
+                &FileRetryRecord {
+                    message: "retry".into(),
+                    category: crate::scheduling::FailureCategory::WorkerTimeout,
+                    finished_at: crate::store::EventTime::fixed(crate::unix_time(11.0)),
+                    retry_at: crate::unix_time(20.0),
+                }
+            ),
+            Ok(())
+        );
 
-        assert!(job.clear_file_retry_state("a.cha"));
+        assert_eq!(job.clear_file_retry_state("a.cha"), Ok(()));
         let entry = job.execution.file_statuses["a.cha"].to_entry();
         assert!(entry.error.is_none());
         assert!(entry.error_category.is_none());

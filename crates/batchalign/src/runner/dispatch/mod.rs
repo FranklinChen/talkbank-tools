@@ -60,6 +60,13 @@ mod plan;
 pub(crate) mod speaker_identity_pipeline;
 mod transcribe_pipeline;
 mod utr;
+pub(crate) use utr::{
+    AbandonedPartialAttempt, CompletedRecognition, UtrRecognitionRoute, UtrTokenConversion,
+};
+#[cfg(test)]
+pub(crate) use utr::{
+    PreparedRecognition, convert_utr_for_test, prepare_after_partial_failure_for_test,
+};
 
 pub(crate) use benchmark_pipeline::{BenchmarkDispatchRuntime, dispatch_benchmark_infer};
 pub(crate) use fa_admission::FaWorkerAdmission;

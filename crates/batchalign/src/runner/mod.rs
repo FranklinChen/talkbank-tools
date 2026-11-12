@@ -21,6 +21,13 @@
 mod context;
 pub(crate) mod debug_dumper;
 mod dispatch;
+pub(crate) use dispatch::{
+    AbandonedPartialAttempt, CompletedRecognition, UtrRecognitionRoute, UtrTokenConversion,
+};
+#[cfg(test)]
+pub(crate) use dispatch::{
+    PreparedRecognition, convert_utr_for_test, prepare_after_partial_failure_for_test,
+};
 mod execution;
 mod job_scope;
 pub(crate) use job_scope::current_file_span;
@@ -33,9 +40,13 @@ pub(crate) mod util;
 
 // Types and traits from context
 pub(crate) use context::{
-    DirectExecutionHost, DispatchHostContext, ExecutionEngine, MemoryGateRejectionDisposition,
-    QueuedJobOrchestrator, RunnerExecutionContext, ServerExecutionHost,
+    DirectExecutionHost, DispatchEnd, DispatchHostContext, ExecutionEngine,
+    MemoryGateRejectionDisposition, QueuedJobOrchestrator, RunnerExecutionContext,
+    ServerExecutionHost,
 };
+
+// The one constructor of a job-level refusal, for dispatchers outside the router.
+pub(crate) use routing::refuse;
 
 // Job lifecycle entry points from execution
 pub(crate) use execution::{job_task, run_direct_job};

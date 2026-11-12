@@ -18,8 +18,6 @@ use crate::store::{
     },
 };
 
-use tokio_util::sync::CancellationToken;
-
 /// Build a minimal `Job` whose `execution.status = Running`.
 ///
 /// Used by lifecycle unit tests that need an in-flight job to
@@ -76,7 +74,6 @@ pub(crate) fn running_job_fixture() -> Job {
             file_statuses,
             results: Vec::new(),
             error: None,
-            completed_files: 0,
         },
         schedule: JobScheduleState {
             submitted_at: crate::unix_time(1_000_000.0),
@@ -87,9 +84,8 @@ pub(crate) fn running_job_fixture() -> Job {
             last_cancel: None,
         },
         runtime: JobRuntimeControl {
-            cancel_token: CancellationToken::new(),
             runner_active: true,
-            run_generation: crate::store::RunGeneration::FIRST,
+            ..JobRuntimeControl::unclaimed()
         },
         execution_plan: None,
     }

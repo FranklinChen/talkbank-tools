@@ -33,8 +33,7 @@ fn params() -> FaParams {
 }
 
 #[tokio::test]
-async fn worker_roundtrip_retained_preparation_survives_removal_of_the_original_media_until_dispatch()
- {
+async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_reopening_media() {
     let directory = tempfile::tempdir().unwrap();
     let audio_path = directory.path().join("sample.wav");
     crate::media::probe::fixtures::write_pcm_wav(&audio_path, 1);
@@ -73,26 +72,94 @@ async fn worker_roundtrip_retained_preparation_survives_removal_of_the_original_
     };
     let language = LanguageCode3::eng();
     let outcome = async {
-        let population = prepare_population(groups, crate::chat_ops::fa::MainBulletAuthority::DeriveFromWords.supplied_retry_sources(&chat, &Recording::of_duration(Ms(100)).unwrap()).unwrap(), &chat, &HashSet::new(), &anchors,
-            FaPreparationContext { audio: &audio, worker_lang: &language, services, params: &params }, None).await?;
-        let plan = super::super::units::DispatchPlan::build(&population.groups, &identity, params.whisper_text, params.engine);
-        let unit = plan.units().next().expect("one prepared request");
-        let super::super::transport::FaInferencePlan::Authorized(authorization) =
-            super::super::transport::plan_fa_inference(CachePolicy::SkipCache, vec![unit])?
-        else { panic!("one missed request") };
-        let mut dispatches = population.requests.bind(authorization)?;
-        let prepared = dispatches.pop().unwrap().prepared;
-        let prepared_root = prepared.inputs.artifacts.root().to_path_buf();
+        let population = prepare_population(
+            groups,
+            crate::chat_ops::fa::MainBulletAuthority::DeriveFromWords
+                .supplied_retry_sources(&chat, &Recording::of_duration(Ms(100)).unwrap())
+                .unwrap(),
+            &chat,
+            &HashSet::new(),
+            &anchors,
+            FaPreparationContext {
+                audio: &audio,
+                worker_lang: &language,
+                services,
+                params: &params,
+            },
+            None,
+        )
+        .await?;
+        let keys = {
+            let plan = super::super::units::DispatchPlan::build(
+                &population.groups,
+                &identity,
+                params.whisper_text,
+                params.engine,
+            );
+            plan.units()
+                .map(|unit| unit.cache_key().as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let prepared_root = population
+            .requests
+            .entries
+            .values()
+            .next()
+            .unwrap()
+            .inputs
+            .artifacts
+            .root()
+            .to_path_buf();
         assert!(prepared_root.is_dir(), "prepared inputs are still owned");
-        assert!(prepared_root.join("audio").read_dir().unwrap().next().is_some());
+        assert!(
+            prepared_root
+                .join("audio")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_some()
+        );
         std::fs::remove_file(&audio_path).unwrap();
-        let response = prepared.execute(services, WorkerLanguage::from(language.clone())).await?;
-        assert!(prepared_root.exists(), "response admission still owns fallback inputs");
-        assert!(matches!(&response, PreparedFaExecution::Direct { response, .. } if matches!(response.read(), ExecuteOutcomeRef::Success(TaskResultV2::IndexedWordTimingResult(_)))));
-        drop(response);
-        assert!(!prepared_root.exists(), "terminal admission releases its owned artifacts");
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let reusable = HashSet::new();
+        let error =
+            super::super::units::resolve_group_timings(super::super::units::FaDispatchInputs {
+                population,
+                chat_file: &chat,
+                reusable_utterances: &reusable,
+                recovery: &[],
+                progress: Some(&progress),
+                context: "retained preparation roundtrip",
+            })
+            .await
+            .err()
+            .expect("echo placeholders cannot become real FA evidence");
+        assert!(
+            matches!(error, ServerError::Worker(WorkerError::Protocol(ref message))
+            if message.contains("contains 0 timings for 2 request words"))
+        );
+        // The real stream reaches reply admission without decoding the deleted
+        // source again. Echo deliberately supplies only an empty placeholder;
+        // it must not complete a slot or publish that placeholder as evidence.
+        assert!(
+            !prepared_root.exists(),
+            "terminal admission releases its owned artifacts"
+        );
+        let mut completions = Vec::new();
+        while let Ok(update) = updates.try_recv() {
+            if matches!(update.label, FileStage::Aligning) {
+                completions.push((update.current, update.total));
+            }
+        }
+        assert_eq!(completions, [(Some(0), Some(1))]);
+        let (derived, raw) = super::super::cache_storage::read_values(&keys, services).await;
+        assert!(
+            derived.is_empty() && raw.is_empty(),
+            "a refused placeholder is not cache evidence"
+        );
         Ok::<_, ServerError>(())
-    }.await;
+    }
+    .await;
     pool.shutdown().await;
     outcome.expect("no media decode after preparation");
 }
@@ -432,8 +499,9 @@ async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_o
         let units: Vec<_> = plan.units().collect();
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].words(), units[1].words());
+        let frame = super::super::units::UnitLedger::open(&plan, |_| None);
         let super::super::transport::FaInferencePlan::Authorized(authorization) =
-            super::super::transport::plan_fa_inference(CachePolicy::SkipCache, units.clone())?
+            super::super::transport::plan_fa_inference(CachePolicy::SkipCache, frame.replies)?
         else {
             panic!("two missed projections")
         };
@@ -445,7 +513,7 @@ async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_o
         );
         let dispatch = dispatches.pop().unwrap();
         assert_eq!(dispatch.aliases.len(), 1);
-        assert_eq!(dispatch.aliases[0].ordinal(), units[1].ordinal());
+        assert_eq!(dispatch.aliases[0].unit().ordinal(), units[1].ordinal());
         let root = dispatch.prepared.inputs.artifacts.root().to_path_buf();
         let execution = dispatch
             .prepared

@@ -321,7 +321,6 @@ mod tests {
 
     use crate::api::{JobStatus, ReleasedCommand};
     use tokio::sync::broadcast;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::api::{DisplayPath, MachineTime};
@@ -419,10 +418,12 @@ mod tests {
             .await
             .expect("submit");
         let claim = claim_runner(&store, &job_id).await;
-        store.mark_job_running(&job_id).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
+            .await;
         store
             .start_file_attempt(
-                &job_id,
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
                 "a.cha",
                 crate::scheduling::WorkUnitKind::FileProcess,
                 store.event_time(),
@@ -523,7 +524,9 @@ mod tests {
             ))
             .await
             .expect("submit");
-        store.mark_job_running(&job_id).await;
+        store
+            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
+            .await;
         let diagnostics = crate::api::FileOutputDiagnostics::of_findings(
             vec![crate::api::FileOutputDiagnostics::coded_finding(
                 "E220",
@@ -535,12 +538,16 @@ mod tests {
         );
         for filename in ["a.cha", "b.cha"] {
             store
-                .mark_file_processing(&job_id, filename, EventTime::fixed(crate::unix_time(1.0)))
+                .mark_file_processing(
+                    &crate::store::RunBinding::first_run_of(job_id.clone()),
+                    filename,
+                    EventTime::fixed(crate::unix_time(1.0)),
+                )
                 .await;
         }
         store
             .mark_file_done(
-                &job_id,
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
                 "a.cha",
                 EventTime::fixed(crate::unix_time(2.0)),
                 FileCompletion::Diagnosed {
@@ -556,7 +563,7 @@ mod tests {
             .await;
         store
             .mark_file_done(
-                &job_id,
+                &crate::store::RunBinding::first_run_of(job_id.clone()),
                 "b.cha",
                 EventTime::fixed(crate::unix_time(3.0)),
                 FileCompletion::Clean(CompletedFileOutput {
@@ -710,7 +717,6 @@ mod tests {
                 file_statuses,
                 results: Vec::new(),
                 error: None,
-                completed_files: 0,
             },
             schedule: JobScheduleState {
                 submitted_at: MachineTime::now(),
@@ -720,11 +726,7 @@ mod tests {
                 lease: None,
                 last_cancel: None,
             },
-            runtime: JobRuntimeControl {
-                cancel_token: CancellationToken::new(),
-                runner_active: false,
-                run_generation: crate::store::RunGeneration::FIRST,
-            },
+            runtime: JobRuntimeControl::unclaimed(),
             execution_plan: None,
         }
     }

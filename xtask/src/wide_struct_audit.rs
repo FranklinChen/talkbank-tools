@@ -86,6 +86,41 @@ struct NamedStructInfo {
 /// task stopped carrying the no-recording paths.
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
+        path: "crates/batchalign/src/host_memory.rs",
+        struct_name: "HostMemorySnapshot",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "status projection of one host reading and the ledger; the tenth field is \
+                 the HostCeiling physical feasibility is judged against. Its public fields let \
+                 a caller pair a ceiling and reserve that no reading produced, and \
+                 FaPhysicalCapacity is built from it: split the reading (total, ceiling, \
+                 available) from the ledger state behind private fields, and build capacity \
+                 from the coordinator rather than this projection",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/fa/mod.rs",
+        struct_name: "FaGroupingInput",
+        max_fields: 10,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RefactorTarget,
+        reason: "private consuming source-preparation phase; retained recovery observations \
+                 add one immutable source-bound evidence channel, not a policy flag; bind the \
+                 document, admission, anchors and recovery slice into one admitted source owner \
+                 before changing this phase again",
+    },
+    WideStructAllowance {
+        path: "crates/batchalign/src/types/results.rs",
+        struct_name: "FaResult",
+        max_fields: 11,
+        max_bool_fields: 0,
+        disposition: WideStructDisposition::RealAggregate,
+        reason: "one typed CHAT output with independent grouping, policy, decision, fallback \
+                 and recovery evidence; the output parameter records draft/reconciled state, \
+                 retained UTR passes share immutable observations through Arc, and supplied \
+                 retries retain actual terminal observations rather than another execution plan",
+    },
+    WideStructAllowance {
         path: "crates/batchalign/src/cli/eval_cmd/utr_alignment.rs",
         struct_name: "UtrAlignmentReport",
         max_fields: 10,
@@ -168,11 +203,12 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/runner/dispatch/utr.rs",
         struct_name: "UtrPassContext",
-        max_fields: 11,
+        max_fields: 12,
         max_bool_fields: 0,
         disposition: WideStructDisposition::RefactorTarget,
-        reason: "immutable UTR inputs still carry audio path and audio identity separately; \
-                 a bound audio owner should replace the independently supplied recording facts",
+        reason: "immutable UTR inputs include a closed initial/fallback pass identity and \
+                 retain audio path, identity and optional duration separately; a bound audio owner \
+                 should replace the independently supplied recording facts",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/worker/pool/mod.rs",
@@ -479,14 +515,15 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/types/traces.rs",
         struct_name: "FaTimelineTrace",
-        max_fields: 12,
+        max_fields: 13,
         max_bool_fields: 0,
         disposition: WideStructDisposition::TransportRecord,
         reason: "versioned forced-alignment evidence transport preserving independent grouping, \
                  cache, timing, decision, violation, and fallback facts for offline analysis; \
                  schema 4 adds the flat dropped_word_timings section derived from the decisions; \
                  schema 5 adds refused_window to window_refused decisions; schema 6 moves each \
-                 request's evidence source and cache key into its group's span",
+                 request's evidence source and cache key into its group's span; schema 13 adds \
+                 optional terminal supplied-retry observations while older records retain absence",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/worker/handle/config.rs",

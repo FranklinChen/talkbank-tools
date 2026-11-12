@@ -68,6 +68,10 @@ pub(crate) struct FaResult<O = FaOutput> {
     pub(crate) gap_healing: WordGapHealing,
     /// Engine fallback events captured during worker inference.
     pub(crate) fallback_events: Vec<FaFallbackEventTrace>,
+    /// Retry observations, absent on routes that did not collect retries.
+    pub(crate) supplied_retries: Option<Vec<super::traces::FaSuppliedRetryTrace>>,
+    /// Source-bound recognizer observations retained for this alignment.
+    pub(crate) recovery: Vec<std::sync::Arc<crate::fa::RetainedUtrPass>>,
     /// Whether this run opened the recording at all.
     pub(crate) recording: RecordingRead,
 }
@@ -115,6 +119,7 @@ pub(crate) struct FaGroupContents {
     pub(crate) utterances: Vec<talkbank_model::UtteranceIdx>,
     pub(crate) words: Vec<String>,
     pub(crate) word_ids: Vec<String>,
+    pub(crate) source_windows: Option<Vec<crate::types::traces::FaSourceWindowTrace>>,
     /// How the group was executed, with each request's evidence.
     pub(crate) span: crate::types::traces::FaGroupSpanTrace,
 }
@@ -128,6 +133,7 @@ impl FaGroupContents {
             utterance_indices: self.utterances.iter().map(|idx| idx.raw()).collect(),
             words: self.words,
             word_ids: self.word_ids,
+            source_windows: self.source_windows,
             span: self.span,
         }
     }
@@ -155,12 +161,22 @@ impl FaResult<ChatFile> {
             timing_decisions: Vec::new(),
             gap_healing,
             fallback_events: Vec::new(),
+            supplied_retries: None,
+            recovery: Vec::new(),
             recording,
         }
     }
 }
 
 impl<O> FaResult<O> {
+    pub(crate) fn with_recovery(
+        mut self,
+        recovery: &[std::sync::Arc<crate::fa::RetainedUtrPass>],
+    ) -> Self {
+        self.recovery = recovery.to_vec();
+        self
+    }
+
     /// Replace the document, keeping every piece of evidence with it. The
     /// phase transition `FaAdmission::finish` is written with this, so no
     /// evidence field can be dropped on the way from draft to output.
@@ -177,6 +193,8 @@ impl<O> FaResult<O> {
             timing_decisions: self.timing_decisions,
             gap_healing: self.gap_healing,
             fallback_events: self.fallback_events,
+            supplied_retries: self.supplied_retries,
+            recovery: self.recovery,
             recording: self.recording,
         })
     }
@@ -232,6 +250,7 @@ impl<O> FaResult<O> {
             // and this is the one place that has to say so.
             violations: Vec::new(),
             fallback_events: self.fallback_events,
+            supplied_retries: self.supplied_retries,
         }
     }
 }

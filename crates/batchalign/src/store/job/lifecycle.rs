@@ -257,12 +257,6 @@ impl Job {
             self.schedule.completed_at = Some(completed_at);
             self.schedule.next_eligible_at = None;
         }
-        self.execution.completed_files = self
-            .execution
-            .file_statuses
-            .values()
-            .filter(|file_status| file_status.status().is_terminal())
-            .count() as i64;
         applied
     }
 
@@ -351,12 +345,6 @@ impl Job {
         // still alive; the restarted runner waits on it via
         // `begin_runner` before taking over.
         self.runtime.run_generation = self.runtime.run_generation.next();
-        self.execution.completed_files = self
-            .execution
-            .file_statuses
-            .values()
-            .filter(|file_status| file_status.status().wrote_output())
-            .count() as i64;
         self.execution
             .results
             .retain(|result| result.error.is_none());
@@ -403,7 +391,6 @@ impl Job {
             if all_errored {
                 self.set_failure_reason_from_files();
             }
-            self.execution.completed_files = self.total_files() as i64;
             self.schedule.next_eligible_at = None;
             self.clear_lease();
             if all_errored {
@@ -512,25 +499,31 @@ mod tests {
 
         // 60home-3.cha succeeds (the only file with an actual output
         // on disk after the incident).
-        assert!(job.mark_file_processing("60home-3.cha", started));
-        assert!(job.mark_file_done(
-            "60home-3.cha",
-            finished_done,
-            super::super::FileCompletion::WithoutResult
-        ));
+        assert_eq!(job.mark_file_processing("60home-3.cha", started), Ok(()));
+        assert_eq!(
+            job.mark_file_done(
+                "60home-3.cha",
+                finished_done,
+                super::super::FileCompletion::WithoutResult
+            ),
+            Ok(())
+        );
 
         // 65-3.cha and 65home-3.cha both terminal-error with worker
         // protocol mismatches.
         for filename in ["65-3.cha", "65home-3.cha"] {
-            assert!(job.mark_file_processing(filename, started));
-            assert!(job.mark_file_error(
-                filename,
-                &FileFailureRecord {
-                    message: "worker protocol error".into(),
-                    category: FailureCategory::ProviderTerminal,
-                    finished_at: crate::store::EventTime::fixed(finished_error),
-                },
-            ));
+            assert_eq!(job.mark_file_processing(filename, started), Ok(()));
+            assert_eq!(
+                job.mark_file_error(
+                    filename,
+                    &FileFailureRecord {
+                        message: "worker protocol error".into(),
+                        category: FailureCategory::ProviderTerminal,
+                        finished_at: crate::store::EventTime::fixed(finished_error),
+                    },
+                ),
+                Ok(())
+            );
         }
 
         assert!(
@@ -583,15 +576,18 @@ mod tests {
         let mut job = running_job_fixture();
         let started = crate::unix_time(1_778_517_900.0);
         let finished = crate::unix_time(1_778_518_000.0);
-        assert!(job.mark_file_processing("job-file.cha", started));
-        assert!(job.mark_file_error(
-            "job-file.cha",
-            &FileFailureRecord {
-                message: "worker bootstrap error: md5 mismatch".into(),
-                category: FailureCategory::WorkerBootstrap,
-                finished_at: crate::store::EventTime::fixed(finished),
-            },
-        ));
+        assert_eq!(job.mark_file_processing("job-file.cha", started), Ok(()));
+        assert_eq!(
+            job.mark_file_error(
+                "job-file.cha",
+                &FileFailureRecord {
+                    message: "worker bootstrap error: md5 mismatch".into(),
+                    category: FailureCategory::WorkerBootstrap,
+                    finished_at: crate::store::EventTime::fixed(finished),
+                },
+            ),
+            Ok(())
+        );
         assert!(
             job.execution.error.is_none(),
             "precondition: job-level error unset before recovery"

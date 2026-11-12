@@ -187,7 +187,10 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
                 FailureCategory::System
             }
         },
-        ServerError::UtteranceLocation(_) => FailureCategory::System,
+        ServerError::AlignmentSourceBinding(_)
+        | ServerError::UtrEvidenceRetention(_)
+        | ServerError::AlignmentReplyDelivery(_)
+        | ServerError::UtteranceLocation(_) => FailureCategory::System,
         ServerError::AnalysisUnavailable(_) => FailureCategory::AnalysisUnavailable,
         // Deterministic across retries: the same recording yields the same
         // silence, so this must never be retried. `Validation` is chosen for
@@ -202,7 +205,6 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // every declaration its transition refuses (`AlignmentMedia`, above),
         // so only an alignment that changed the header can reach it.
         ServerError::AdmissionDisagreement
-        | ServerError::WordRunsDisagree(_)
         | ServerError::UnexpectedMorphologyReport
         | ServerError::UtrTask(_)
         | ServerError::ReplacementPlanContradicted { .. }
@@ -397,7 +399,6 @@ pub(crate) fn user_facing_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host_memory::HostMemoryError;
 
     /// A refused worker reservation is final either way: one the host can
     /// never fit is a bootstrap failure (actionable, never retried), and a
@@ -408,15 +409,17 @@ mod tests {
         let classify =
             |guard| classify_server_error(&ServerError::Worker(WorkerError::MemoryGuard(guard)));
         assert_eq!(
-            classify(MemoryGuardError::ExceedsHost {
-                label: "model-load:fa".into(),
-                requested_mb: 80_000,
-                reserve_mb: 2_000,
-                total_mb: 64_000,
-            }),
+            classify(MemoryGuardError::ExceedsHost(
+                crate::host_memory::NeverFits {
+                    label: "model-load:fa".into(),
+                    needed_mb: 80_000,
+                    ceiling_mb: 64_000,
+                    reserve_mb: 2_000,
+                }
+            )),
             FailureCategory::WorkerBootstrap
         );
-        let ledger = HostMemoryError::Io {
+        let ledger = crate::host_memory::UnusableHost::Io {
             path: "ledger.json".into(),
             source: std::io::Error::other("read-only file system"),
         };

@@ -29,7 +29,7 @@
 //! when the lease is granted, when the request is refused for good (one larger
 //! than the machine, an unreadable host or ledger), or when its future is
 //! dropped (a cancelled job). Real-model test locks and job execution plans
-//! keep a bounded wait ([`LeaseWait::Bounded`]); a job that cannot fit is
+//! keep a bounded wait ([`BoundedWait`]); a job that cannot fit is
 //! re-queued by the runner rather than waiting inside it.
 
 use std::fs::OpenOptions;
@@ -83,7 +83,45 @@ pub enum HostReadings {
     Declared(DeclaredHost),
 }
 
+/// The most memory this host can ever offer a reservation, before its
+/// reserve is kept free: the one bound that both "could this request ever
+/// fit" decisions read (worker lease admission and FA request feasibility),
+/// so they cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCeiling(MemoryMb);
+
+impl HostCeiling {
+    /// A stated ceiling, for tests of the decisions that read one.
+    #[cfg(test)]
+    pub(crate) const fn for_tests(mb: u64) -> Self {
+        Self(MemoryMb(mb))
+    }
+
+    /// The bound in MB.
+    pub fn mb(self) -> MemoryMb {
+        self.0
+    }
+
+    /// Whether `needed` can ever be granted here with `reserve` kept free.
+    pub fn admits(self, needed: MemoryMb, reserve: MemoryMb) -> bool {
+        needed.0.saturating_add(reserve.0) <= self.0.0
+    }
+}
+
 impl HostReadings {
+    /// The most this host can ever offer: a live machine's total RAM, since
+    /// other processes can free what they hold, and a declared machine's
+    /// available RAM, since an idle declared host never frees more.
+    ///
+    /// Taken from the same reading the decision uses, so the ceiling and the
+    /// available figure beside it describe one moment.
+    pub fn ceiling_of(&self, memory: SystemMemory) -> HostCeiling {
+        HostCeiling(match self {
+            Self::Live => memory.total_mb,
+            Self::Declared(_) => memory.available_mb,
+        })
+    }
+
     /// Total and available RAM, as this source reports them now.
     pub fn memory(&self) -> Result<SystemMemory, HostUnreadable> {
         match self {
@@ -250,6 +288,9 @@ fn fresh_private_ledger(purpose: &str) -> PathBuf {
 pub struct HostMemorySnapshot {
     /// Total physical memory observed by the OS.
     pub total_mb: MemoryMb,
+    /// The most this host can ever offer ([`HostCeiling`]): what physical
+    /// feasibility is judged against.
+    pub ceiling: HostCeiling,
     /// Currently available memory observed by the OS.
     pub available_mb: MemoryMb,
     /// Reserved low-water-mark that the coordinator keeps free.
@@ -344,7 +385,7 @@ impl HostMemoryLease {
         let lease_id = self.lease_id.clone();
         let _ = with_locked_ledger(&path, |ledger| {
             ledger.leases.retain(|lease| lease.id != lease_id);
-            Ok(())
+            Ok::<(), UnusableHost>(())
         });
         self.released = true;
     }
@@ -392,7 +433,7 @@ pub struct MachineMlTestLock {
 impl MachineMlTestLock {
     /// Acquire the machine-wide ML test lock, waiting until other local test
     /// binaries release it.
-    pub fn acquire(label: &str) -> Result<Self, HostMemoryError> {
+    pub fn acquire(label: &str) -> Result<Self, BoundedRefusal> {
         // Live: ML tests load real models, so the lock is taken on the
         // machine that has to hold them.
         let coordinator = HostMemoryCoordinator::new(
@@ -423,27 +464,9 @@ pub struct JobExecutionPlan {
 /// Errors raised by the host-memory coordinator.
 #[derive(Debug, thiserror::Error)]
 pub enum HostMemoryError {
-    /// The operating system would not report this host's memory or processes,
-    /// so no admission decision can be made from it.
+    /// The host or the ledger cannot be used for any decision.
     #[error(transparent)]
-    Unreadable(#[from] HostUnreadable),
-    /// Failed to read or write the machine-local ledger.
-    #[error("host-memory ledger I/O failed at {path}: {source}")]
-    Io {
-        /// Path to the shared ledger file.
-        path: PathBuf,
-        /// Underlying filesystem error.
-        #[source]
-        source: std::io::Error,
-    },
-    /// The ledger file exists but cannot be parsed.
-    #[error("host-memory ledger is corrupt at {path}: {message}")]
-    CorruptLedger {
-        /// Path to the shared ledger file.
-        path: PathBuf,
-        /// Human-readable parse failure.
-        message: String,
-    },
+    Unusable(#[from] UnusableHost),
     /// The host reserve would be exceeded by the requested reservation.
     #[error(
         "host-memory reserve would be exceeded for {label}: {available_mb} MB available, \
@@ -482,19 +505,98 @@ pub enum HostMemoryError {
         /// Configured host-wide startup slot limit.
         max_slots: usize,
     },
-    /// A bounded wait for capacity (a real-model test lock, a job execution
-    /// plan) exceeded its timeout. Worker startups and model loads queue
-    /// instead and never time out.
-    #[error(
-        "timed out waiting for host-memory capacity for {label} after {waited_s}s: {last_reason}"
-    )]
-    TimedOut {
-        /// Human-readable request label.
-        label: String,
-        /// Timeout window in seconds.
-        waited_s: u64,
-        /// Last rejection reason observed while waiting.
-        last_reason: String,
+    /// The request can never fit this host ([`NeverFits`]).
+    #[error(transparent)]
+    NeverFits(NeverFits),
+}
+
+/// A request that, with the models its own worker keeps resident, is more
+/// than this host can ever offer with its reserve kept free. Those models
+/// cannot be freed while it waits, so no wait fits it. One record, carried
+/// by every type that reports it, so the numbers and their sentence exist
+/// once.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{label} needs {needed_mb} MB of host memory; this host can ever offer {ceiling_mb} MB \
+     with {reserve_mb} MB kept free"
+)]
+pub struct NeverFits {
+    /// Human-readable request label.
+    pub label: String,
+    /// The request plus the models its own worker keeps resident.
+    pub needed_mb: u64,
+    /// The host's ceiling ([`HostCeiling`]).
+    pub ceiling_mb: u64,
+    /// The reserve kept free.
+    pub reserve_mb: u64,
+}
+
+/// Why a queued wait stopped without a grant: no waiting could change it.
+/// A closed type of its own, so a congestion (a full host, a busy startup
+/// slot, a held test lock) cannot be reported as a stop, and a queued wait,
+/// which has no deadline, cannot report a timeout.
+#[derive(Debug, thiserror::Error)]
+pub enum FinalRefusal {
+    /// The request can never fit this host.
+    #[error(transparent)]
+    NeverFits(NeverFits),
+    /// The host or the ledger cannot be read or written.
+    #[error(transparent)]
+    Unusable(UnusableHost),
+}
+
+/// A bounded wait (a real-model test lock, a job execution plan) that ran out
+/// of time while its refusal could still have cleared.
+#[derive(Debug, thiserror::Error)]
+#[error("timed out waiting for host-memory capacity for {label} after {waited_s}s: {last_reason}")]
+pub struct WaitExpired {
+    /// Human-readable request label.
+    pub label: String,
+    /// Timeout window in seconds.
+    pub waited_s: u64,
+    /// Last congestion observed while waiting.
+    pub last_reason: String,
+}
+
+/// Why a bounded wait stopped without a grant.
+#[derive(Debug, thiserror::Error)]
+pub enum BoundedRefusal {
+    /// A refusal no waiting could change.
+    #[error(transparent)]
+    Final(FinalRefusal),
+    /// The wait's deadline passed while it was congested.
+    #[error(transparent)]
+    TimedOut(WaitExpired),
+}
+
+impl From<HostUnreadable> for HostMemoryError {
+    fn from(unreadable: HostUnreadable) -> Self {
+        Self::Unusable(UnusableHost::Unreadable(unreadable))
+    }
+}
+
+/// A host or ledger the coordinator cannot use for any decision.
+#[derive(Debug, thiserror::Error)]
+pub enum UnusableHost {
+    /// The operating system would not report the host's memory.
+    #[error(transparent)]
+    Unreadable(#[from] HostUnreadable),
+    /// The ledger could not be read or written.
+    #[error("host-memory ledger I/O failed at {path}: {source}")]
+    Io {
+        /// Path to the shared ledger file.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The ledger exists but cannot be parsed.
+    #[error("host-memory ledger is corrupt at {path}: {message}")]
+    CorruptLedger {
+        /// Path to the shared ledger file.
+        path: PathBuf,
+        /// Human-readable parse failure.
+        message: String,
     },
 }
 
@@ -535,6 +637,22 @@ impl MemoryLeaseKind {
             Self::JobExecution
             | Self::MlTestExclusive
             | Self::ModelLoad
+            | Self::ModelBatch
+            | Self::ModelRequest => false,
+        }
+    }
+
+    /// Whether a lease of this kind stays held for as long as its worker
+    /// waits for more: a loaded model is resident until the worker lets it
+    /// go, while a startup ends at ready and a batch or request lease ends
+    /// with its own work. Only these count against a request as memory that
+    /// can never be freed for it ([`HostMemoryError::NeverFits`]).
+    fn held_while_worker_waits(self) -> bool {
+        match self {
+            Self::ModelLoad => true,
+            Self::WorkerStartup
+            | Self::JobExecution
+            | Self::MlTestExclusive
             | Self::ModelBatch
             | Self::ModelRequest => false,
         }
@@ -915,7 +1033,7 @@ impl HostMemoryCoordinator {
     }
 
     /// Return the current host-memory snapshot for health/status reporting.
-    pub fn snapshot(&self) -> Result<HostMemorySnapshot, HostMemoryError> {
+    pub fn snapshot(&self) -> Result<HostMemorySnapshot, UnusableHost> {
         with_locked_ledger(&self.config.coordinator_path, |ledger| {
             let system = self.readings.memory()?;
             let active_reserved_mb =
@@ -942,6 +1060,7 @@ impl HostMemoryCoordinator {
                 .collect();
             Ok(HostMemorySnapshot {
                 total_mb: system.total_mb,
+                ceiling: self.readings.ceiling_of(system),
                 available_mb: system.available_mb,
                 reserve_mb: self.config.reserve_mb,
                 active_reserved_mb: MemoryMb(active_reserved_mb),
@@ -1021,8 +1140,7 @@ impl HostMemoryCoordinator {
                 }
                 Err(error) => error,
             };
-            match after_failed_attempt(error, &request.label, &LeaseWait::Queued, &mut last_reason)
-            {
+            match after_queued_attempt(error, &mut last_reason) {
                 LeaseStep::Retry => {
                     if queued.is_none() {
                         tracing::info!(
@@ -1064,7 +1182,7 @@ impl HostMemoryCoordinator {
         label: &str,
         timeout: Duration,
         poll_interval: Duration,
-    ) -> Result<HostMemoryLease, HostMemoryError> {
+    ) -> Result<HostMemoryLease, BoundedRefusal> {
         let request = MemoryLeaseRequest {
             kind: MemoryLeaseKind::MlTestExclusive,
             reserved_mb: MemoryMb(0),
@@ -1086,8 +1204,8 @@ impl HostMemoryCoordinator {
         label: &str,
         timeout: Duration,
         poll_interval: Duration,
-    ) -> Result<JobExecutionPlan, QueuedLeaseFailure> {
-        let wait = LeaseWait::bounded(timeout);
+    ) -> Result<JobExecutionPlan, PlanFailure> {
+        let wait = BoundedWait::new(timeout);
         let mut last_reason = String::from("no capacity decision yet");
         loop {
             let coordinator = self.clone();
@@ -1096,15 +1214,15 @@ impl HostMemoryCoordinator {
                 coordinator.try_plan_job_execution(command, requested_workers, &attempt_label)
             })
             .await
-            .map_err(QueuedLeaseFailure::AttemptDidNotFinish)?;
+            .map_err(LeaseFailure::AttemptDidNotFinish)?;
             match attempt {
                 Ok(plan) => return Ok(plan),
-                Err(error) => match after_failed_attempt(error, label, &wait, &mut last_reason) {
+                Err(error) => match after_bounded_attempt(error, label, &wait, &mut last_reason) {
                     // Dropping the admission future stops polling. At most
                     // one ledger transaction remains; it cannot start a
                     // worker, and an unreceived plan releases its lease.
                     LeaseStep::Retry => tokio::time::sleep(poll_interval).await,
-                    LeaseStep::Stop(error) => return Err(QueuedLeaseFailure::Refused(error)),
+                    LeaseStep::Stop(error) => return Err(LeaseFailure::Refused(error)),
                 },
             }
         }
@@ -1141,6 +1259,22 @@ impl HostMemoryCoordinator {
                 // is no fictitious model-startup envelope to clamp against.
                 None => worst_case,
             };
+            // One worker is the least a job can run with. It can never fit
+            // exactly when the planner itself would refuse one worker on
+            // this host idle at its ceiling: the planner's own reserve
+            // policy, not a second formula that could refuse for good a job
+            // the planner would grant.
+            let ceiling = self.readings.ceiling_of(system).mb().0;
+            if plan_job_reservation(1, per_worker_budget.0, ceiling, self.config.reserve_mb.0, 0)
+                .is_none()
+            {
+                return Err(HostMemoryError::NeverFits(NeverFits {
+                    label: label.to_owned(),
+                    needed_mb: per_worker_budget.0,
+                    ceiling_mb: ceiling,
+                    reserve_mb: effective_reserve_mb(self.config.reserve_mb.0, ceiling),
+                }));
+            }
             let pending_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             let Some((granted_workers, reserved_mb)) = plan_job_reservation(
@@ -1188,14 +1322,14 @@ impl HostMemoryCoordinator {
         request: MemoryLeaseRequest,
         timeout: Duration,
         poll_interval: Duration,
-    ) -> Result<HostMemoryLease, HostMemoryError> {
-        let wait = LeaseWait::bounded(timeout);
+    ) -> Result<HostMemoryLease, BoundedRefusal> {
+        let wait = BoundedWait::new(timeout);
         let mut last_reason = String::from("no capacity decision yet");
         loop {
             match self.try_acquire_lease(request.clone()) {
                 Ok(lease) => return Ok(lease),
                 Err(error) => {
-                    match after_failed_attempt(error, &request.label, &wait, &mut last_reason) {
+                    match after_bounded_attempt(error, &request.label, &wait, &mut last_reason) {
                         LeaseStep::Retry => std::thread::sleep(poll_interval),
                         LeaseStep::Stop(error) => return Err(error),
                     }
@@ -1237,6 +1371,39 @@ impl HostMemoryCoordinator {
             }
 
             let system = self.readings.memory()?;
+            // What this request can never be granted without: itself and the
+            // models its own worker keeps resident, which cannot be freed
+            // while it waits. A wait for more than the host can ever offer
+            // would never end, so it is refused here, with the numbers. A
+            // request that reserves nothing (the test lock) asks for no
+            // memory, so it cannot be too large.
+            let needed_mb = request.reserved_mb.0.saturating_add(
+                request
+                    .worker_pid
+                    .map(|worker| {
+                        ledger
+                            .leases
+                            .iter()
+                            .filter(|lease| {
+                                lease.worker_pid == Some(worker)
+                                    && lease.kind.held_while_worker_waits()
+                            })
+                            .map(|lease| lease.reserved_mb.0)
+                            .sum::<u64>()
+                    })
+                    .unwrap_or(0),
+            );
+            let ceiling = self.readings.ceiling_of(system);
+            if request.reserved_mb.0 > 0
+                && !ceiling.admits(MemoryMb(needed_mb), self.config.reserve_mb)
+            {
+                return Err(HostMemoryError::NeverFits(NeverFits {
+                    label: request.label.clone(),
+                    needed_mb,
+                    ceiling_mb: ceiling.mb().0,
+                    reserve_mb: self.config.reserve_mb.0,
+                }));
+            }
             let pending_reserved_mb =
                 effective_reserved_mb(ledger.leases.iter().map(MemoryLeaseRecord::reservation));
             // What `effective_reserved_mb` would be AFTER admitting the
@@ -1291,12 +1458,12 @@ impl HostMemoryCoordinator {
     }
 }
 
-fn with_locked_ledger<T>(
+fn with_locked_ledger<T, E: From<UnusableHost>>(
     path: &Path,
-    action: impl FnOnce(&mut MemoryLedger) -> Result<T, HostMemoryError>,
-) -> Result<T, HostMemoryError> {
+    action: impl FnOnce(&mut MemoryLedger) -> Result<T, E>,
+) -> Result<T, E> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| HostMemoryError::Io {
+        std::fs::create_dir_all(parent).map_err(|source| UnusableHost::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -1308,19 +1475,19 @@ fn with_locked_ledger<T>(
         .create(true)
         .truncate(false)
         .open(path)
-        .map_err(|source| HostMemoryError::Io {
+        .map_err(|source| UnusableHost::Io {
             path: path.to_path_buf(),
             source,
         })?;
 
-    file.lock().map_err(|source| HostMemoryError::Io {
+    file.lock().map_err(|source| UnusableHost::Io {
         path: path.to_path_buf(),
         source,
     })?;
 
     let mut raw = String::new();
     file.read_to_string(&mut raw)
-        .map_err(|source| HostMemoryError::Io {
+        .map_err(|source| UnusableHost::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -1328,15 +1495,13 @@ fn with_locked_ledger<T>(
     let mut ledger = if raw.trim().is_empty() {
         MemoryLedger::default()
     } else {
-        serde_json::from_str::<MemoryLedger>(&raw).map_err(|error| {
-            HostMemoryError::CorruptLedger {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            }
+        serde_json::from_str::<MemoryLedger>(&raw).map_err(|error| UnusableHost::CorruptLedger {
+            path: path.to_path_buf(),
+            message: error.to_string(),
         })?
     };
 
-    let pruned = prune_stale_leases(&mut ledger)?;
+    let pruned = prune_stale_leases(&mut ledger).map_err(UnusableHost::from)?;
 
     let result = action(&mut ledger);
     // An action that refuses changes nothing (every refusal returns before
@@ -1348,27 +1513,26 @@ fn with_locked_ledger<T>(
         return result;
     }
 
-    file.set_len(0).map_err(|source| HostMemoryError::Io {
+    file.set_len(0).map_err(|source| UnusableHost::Io {
         path: path.to_path_buf(),
         source,
     })?;
     file.seek(SeekFrom::Start(0))
-        .map_err(|source| HostMemoryError::Io {
+        .map_err(|source| UnusableHost::Io {
             path: path.to_path_buf(),
             source,
         })?;
     serde_json::to_writer_pretty(&mut file, &ledger).map_err(|error| {
-        HostMemoryError::CorruptLedger {
+        UnusableHost::CorruptLedger {
             path: path.to_path_buf(),
             message: error.to_string(),
         }
     })?;
-    file.write_all(b"\n")
-        .map_err(|source| HostMemoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.sync_all().map_err(|source| HostMemoryError::Io {
+    file.write_all(b"\n").map_err(|source| UnusableHost::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.sync_all().map_err(|source| UnusableHost::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -1564,6 +1728,14 @@ fn pressure_level_for(available_mb: MemoryMb, reserve_mb: MemoryMb) -> HostMemor
 /// doesn't lock out admission on a 16 GB laptop.
 const RESERVE_HEADROOM_FRACTION_DENOM: u64 = 4;
 
+/// The headroom a job plan keeps free with `available_mb` available: the
+/// configured reserve, capped at a quarter of what is available. The one
+/// statement of the job reserve policy, for the planner and its never-fits
+/// check alike.
+fn effective_reserve_mb(reserve_mb: u64, available_mb: u64) -> u64 {
+    reserve_mb.min(available_mb / RESERVE_HEADROOM_FRACTION_DENOM)
+}
+
 fn plan_job_reservation(
     requested_workers: usize,
     per_worker_budget_mb: u64,
@@ -1571,7 +1743,7 @@ fn plan_job_reservation(
     reserve_mb: u64,
     pending_reserved_mb: u64,
 ) -> Option<(usize, u64)> {
-    let effective_reserve_mb = reserve_mb.min(available_mb / RESERVE_HEADROOM_FRACTION_DENOM);
+    let effective_reserve_mb = effective_reserve_mb(reserve_mb, available_mb);
     for workers in (1..=requested_workers).rev() {
         let requested_mb = per_worker_budget_mb.saturating_mul(workers as u64);
         let projected_available_mb = available_mb
@@ -1584,103 +1756,101 @@ fn plan_job_reservation(
     None
 }
 
-/// What a failed lease attempt leads to.
-enum LeaseStep {
+/// What a failed lease attempt leads to: try again, or stop with `R`, the
+/// stop type of the wait that is asking.
+enum LeaseStep<R> {
     /// The refusal may clear (and a bounded wait is inside its window): wait
     /// and try again.
     Retry,
-    /// Stop with this error.
-    Stop(HostMemoryError),
+    /// Stop: no further waiting can change the outcome.
+    Stop(R),
 }
 
-/// How long a lease wait may go on.
-enum LeaseWait {
-    /// Until `deadline` (`timeout` after it began); a zero timeout is one
-    /// attempt. Real-model test locks and job execution plans.
-    Bounded {
-        timeout: Duration,
-        deadline: Instant,
-    },
-    /// Until granted or refused for good: worker startups and model loads,
-    /// which queue ([`HostMemoryCoordinator::queue_for_lease`]).
-    Queued,
+/// A wait with a deadline: real-model test locks and job execution plans. A
+/// zero timeout is one attempt.
+struct BoundedWait {
+    timeout: Duration,
+    deadline: Instant,
 }
 
-impl LeaseWait {
+impl BoundedWait {
     /// A bounded wait of `timeout`, starting now.
-    fn bounded(timeout: Duration) -> Self {
-        Self::Bounded {
+    fn new(timeout: Duration) -> Self {
+        Self {
             timeout,
             deadline: Instant::now() + timeout,
         }
     }
 }
 
-/// The one rule for a failed attempt, shared by every wait: a retryable
-/// refusal is retried (and remembered as the last reason) while the wait
-/// allows; a bounded wait past its window is a timeout naming that reason;
-/// anything else stops with its own error, which is how a request larger
-/// than the machine is refused at once even by a queued wait.
-fn after_failed_attempt(
-    error: HostMemoryError,
-    label: &str,
-    wait: &LeaseWait,
-    last_reason: &mut String,
-) -> LeaseStep {
-    if !retryable_error(&error) {
-        return LeaseStep::Stop(error);
+/// The one classification of a failed attempt, by the refusal's own type:
+/// final (no waiting changes it), or a congestion the caller may wait out.
+fn final_or_congestion(error: HostMemoryError) -> Result<FinalRefusal, HostMemoryError> {
+    match error {
+        HostMemoryError::NeverFits(never) => Ok(FinalRefusal::NeverFits(never)),
+        HostMemoryError::Unusable(unusable) => Ok(FinalRefusal::Unusable(unusable)),
+        congestion @ (HostMemoryError::CapacityRejected { .. }
+        | HostMemoryError::MlTestLockBusy { .. }
+        | HostMemoryError::StartupSlotsBusy { .. }) => Err(congestion),
     }
-    match wait {
-        LeaseWait::Queued => {
-            *last_reason = error.to_string();
+}
+
+/// A queued wait (worker startups and model loads) retries every congestion
+/// for as long as it is asked to wait, and stops only on a final refusal.
+fn after_queued_attempt(
+    error: HostMemoryError,
+    last_reason: &mut String,
+) -> LeaseStep<FinalRefusal> {
+    match final_or_congestion(error) {
+        Ok(refusal) => LeaseStep::Stop(refusal),
+        Err(congestion) => {
+            *last_reason = congestion.to_string();
             LeaseStep::Retry
         }
-        LeaseWait::Bounded { timeout, .. } if timeout.is_zero() => LeaseStep::Stop(error),
-        LeaseWait::Bounded { timeout, deadline } => {
-            if Instant::now() < *deadline {
-                *last_reason = error.to_string();
+    }
+}
+
+/// A bounded wait retries a congestion inside its window and then stops
+/// with the last one it saw; a final refusal stops it at once.
+fn after_bounded_attempt(
+    error: HostMemoryError,
+    label: &str,
+    wait: &BoundedWait,
+    last_reason: &mut String,
+) -> LeaseStep<BoundedRefusal> {
+    match final_or_congestion(error) {
+        Ok(refusal) => LeaseStep::Stop(BoundedRefusal::Final(refusal)),
+        Err(congestion) => {
+            *last_reason = congestion.to_string();
+            if !wait.timeout.is_zero() && Instant::now() < wait.deadline {
                 LeaseStep::Retry
             } else {
-                LeaseStep::Stop(HostMemoryError::TimedOut {
+                LeaseStep::Stop(BoundedRefusal::TimedOut(WaitExpired {
                     label: label.to_owned(),
-                    waited_s: timeout.as_secs(),
+                    waited_s: wait.timeout.as_secs(),
                     last_reason: std::mem::take(last_reason),
-                })
+                }))
             }
         }
     }
 }
 
-/// Why [`HostMemoryCoordinator::queue_for_lease`] returned no lease.
+/// Why an asynchronous wait returned no lease or plan: its wait's own
+/// refusal `R`, or an attempt that never finished.
 #[derive(Debug)]
-pub enum QueuedLeaseFailure {
-    /// The host refused the reservation for good: larger than the machine
-    /// can ever fit, or a host or ledger it cannot read.
-    Refused(HostMemoryError),
+pub enum LeaseFailure<R> {
+    /// The host refused for good, as the wait's stop type says.
+    Refused(R),
     /// The blocking task taking one attempt panicked or was cancelled.
     AttemptDidNotFinish(tokio::task::JoinError),
 }
 
-fn retryable_error(error: &HostMemoryError) -> bool {
-    match error {
-        HostMemoryError::CapacityRejected {
-            total_mb,
-            requested_mb,
-            reserve_mb,
-            ..
-        } => capacity_rejection_is_retryable(*total_mb, *requested_mb, *reserve_mb),
-        HostMemoryError::MlTestLockBusy { .. } | HostMemoryError::StartupSlotsBusy { .. } => true,
-        // Waiting for capacity cannot make the operating system report it.
-        HostMemoryError::Unreadable(_)
-        | HostMemoryError::Io { .. }
-        | HostMemoryError::CorruptLedger { .. }
-        | HostMemoryError::TimedOut { .. } => false,
-    }
-}
+/// Why [`HostMemoryCoordinator::queue_for_lease`] returned no lease: a
+/// queued wait has no deadline, so it never times out.
+pub type QueuedLeaseFailure = LeaseFailure<FinalRefusal>;
 
-fn capacity_rejection_is_retryable(total_mb: u64, requested_mb: u64, reserve_mb: u64) -> bool {
-    requested_mb.saturating_add(reserve_mb) <= total_mb
-}
+/// Why a job execution plan was not granted.
+pub type PlanFailure = LeaseFailure<BoundedRefusal>;
 
 fn host_ledger_suffix() -> String {
     let raw = std::env::var("USER")
@@ -1705,7 +1875,7 @@ mod tests {
         HostMemoryCoordinator, HostMemoryError, HostMemoryLease, HostMemoryPressureLevel,
         HostMemoryRuntimeConfig, HostReadings, MemoryLeaseKind, MemoryLeaseRecord,
         MemoryLeaseRequest, MemoryLedger, NoIdleWorkers, plan_job_reservation, pressure_level_for,
-        retryable_error, with_locked_ledger,
+        with_locked_ledger,
     };
     use crate::api::MachineTime;
 
@@ -1782,6 +1952,17 @@ mod tests {
         )
     }
 
+    /// A load for another live worker (this test's parent process, so the
+    /// ledger's dead-owner pruning keeps it): memory held by a different
+    /// worker is congestion that can clear, unlike the requester's own.
+    fn other_worker_load(reserved_mb: u64) -> super::WorkerLeaseRequest {
+        super::WorkerLeaseRequest::model_load(
+            WorkerPid(std::os::unix::process::parent_id()),
+            "fa:wav2vec",
+            MemoryMb(reserved_mb),
+        )
+    }
+
     /// Poll and report intervals short enough for a test.
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -1794,7 +1975,7 @@ mod tests {
         let (_dir, config) = test_runtime_config();
         let coordinator = HostMemoryCoordinator::new(config, test_readings());
         let held = coordinator
-            .try_acquire_lease(model_load(5_000).0)
+            .try_acquire_lease(other_worker_load(5_000).0)
             .expect("the first lease fits");
         let observer = RecordingObserver::default();
         let waiting = coordinator.queue_for_lease_every(
@@ -1849,7 +2030,7 @@ mod tests {
         let coordinator = HostMemoryCoordinator::new(config, test_readings());
         let idle = OneIdleWorker(std::sync::Mutex::new(Some(
             coordinator
-                .try_acquire_lease(model_load(5_000).0)
+                .try_acquire_lease(other_worker_load(5_000).0)
                 .expect("the idle worker's lease fits"),
         )));
         let observer = RecordingObserver::default();
@@ -1876,7 +2057,7 @@ mod tests {
         let (_dir, config) = test_runtime_config();
         let coordinator = HostMemoryCoordinator::new(config, test_readings());
         let held = coordinator
-            .try_acquire_lease(model_load(5_000).0)
+            .try_acquire_lease(other_worker_load(5_000).0)
             .expect("the first lease fits");
         let observer = RecordingObserver::default();
         let waited = tokio::time::timeout(
@@ -1921,11 +2102,14 @@ mod tests {
             .queue_for_lease_every(model_load(20_000), &observer, &NoIdleWorkers, POLL, POLL)
             .await;
         match outcome {
-            Err(super::QueuedLeaseFailure::Refused(HostMemoryError::CapacityRejected {
-                requested_mb,
-                ..
-            })) => assert_eq!(requested_mb, 20_000),
-            Err(other) => panic!("expected a capacity refusal, got {other:?}"),
+            Err(super::QueuedLeaseFailure::Refused(super::FinalRefusal::NeverFits(
+                super::NeverFits {
+                    needed_mb,
+                    ceiling_mb,
+                    ..
+                },
+            ))) => assert_eq!((needed_mb, ceiling_mb), (20_000, 14_000)),
+            Err(other) => panic!("expected a never-fits refusal, got {other:?}"),
             Ok(_) => panic!("a load larger than the machine was granted"),
         }
         assert!(
@@ -1962,8 +2146,8 @@ mod tests {
             panic!("a load that raises the owner's demand past the host was admitted");
         };
         assert!(
-            matches!(refused, HostMemoryError::CapacityRejected { .. }),
-            "{refused:?}"
+            matches!(refused, HostMemoryError::NeverFits { .. }),
+            "a load the host can never offer is refused for good: {refused:?}"
         );
         inside.release();
     }
@@ -2042,7 +2226,7 @@ mod tests {
                 label: label.to_owned(),
                 created_at: MachineTime::now(),
             });
-            Ok(())
+            Ok::<(), super::UnusableHost>(())
         })
         .expect("inject lease");
     }
@@ -2117,7 +2301,7 @@ mod tests {
                 label: "test-startup-lease".to_owned(),
                 created_at: MachineTime::now(),
             });
-            Ok(())
+            Ok::<(), super::UnusableHost>(())
         })
         .expect("inject startup lease");
 
@@ -2172,20 +2356,16 @@ mod tests {
         let refused = coordinator
             .try_acquire_lease(request(6_001))
             .expect_err("one megabyte past the reserve was admitted");
-        let HostMemoryError::CapacityRejected {
-            available_mb,
-            requested_mb,
+        let HostMemoryError::NeverFits(super::NeverFits {
+            needed_mb,
+            ceiling_mb,
             reserve_mb,
-            total_mb,
             ..
-        } = refused
+        }) = refused
         else {
-            panic!("expected a capacity rejection, got {refused:?}");
+            panic!("expected a never-fits refusal, got {refused:?}");
         };
-        assert_eq!(
-            (available_mb, requested_mb, reserve_mb, total_mb),
-            (14_000, 6_001, 8_000, 15_989)
-        );
+        assert_eq!((needed_mb, ceiling_mb, reserve_mb), (6_001, 14_000, 8_000));
 
         let admitted = coordinator
             .try_acquire_lease(request(6_000))
@@ -2351,7 +2531,7 @@ mod tests {
             for lease in ledger.leases.iter_mut() {
                 lease.created_at = MachineTime::from_timestamp(jiff::Timestamp::constant(1, 0));
             }
-            Ok(())
+            Ok::<(), super::UnusableHost>(())
         })
         .unwrap();
 
@@ -2522,35 +2702,182 @@ mod tests {
         assert!(plan_job_reservation(2, 8_000, 6_000, 8_192, 1_000).is_none());
     }
 
+    /// The declared test host can ever offer 14,000 MB, and keeps 8,000 MB
+    /// free, so one worker can ever hold 6,000 MB.
+    fn worker_request(worker: u32, reserved_mb: u64) -> MemoryLeaseRequest {
+        MemoryLeaseRequest {
+            kind: MemoryLeaseKind::ModelRequest,
+            reserved_mb: MemoryMb(reserved_mb),
+            label: format!("model-request:fa:pid {worker}"),
+            worker_pid: Some(WorkerPid(worker)),
+        }
+    }
+
+    /// A request that, with what its own worker already holds, exceeds what
+    /// the host can ever offer is refused for good. Those leases cannot
+    /// release while it waits on them: before, the request alone was judged
+    /// against total RAM and it waited for ever on its own worker.
     #[test]
-    fn impossible_capacity_rejection_is_not_retryable() {
-        let error = HostMemoryError::CapacityRejected {
-            label: String::from("impossible"),
-            available_mb: 32_000,
-            pending_reserved_mb: 0,
-            requested_mb: 80_000,
-            reserve_mb: 8_192,
-            total_mb: 64_000,
+    fn a_request_blocked_only_by_its_own_worker_never_fits() {
+        let (_dir, config) = test_runtime_config();
+        let own = std::process::id();
+        inject_lease(
+            &config,
+            MemoryLeaseKind::ModelLoad,
+            own,
+            Some(own),
+            4_000,
+            "load",
+        );
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        match coordinator.try_acquire_lease(worker_request(own, 3_000)) {
+            Err(HostMemoryError::NeverFits(super::NeverFits {
+                needed_mb,
+                ceiling_mb,
+                reserve_mb,
+                ..
+            })) => assert_eq!((needed_mb, ceiling_mb, reserve_mb), (7_000, 14_000, 8_000)),
+            other => panic!("expected never-fits, got {other:?}"),
+        }
+    }
+
+    /// The same request is only congestion when another worker holds the
+    /// memory: that lease can release, so the request waits rather than
+    /// failing.
+    #[test]
+    fn a_request_blocked_by_another_worker_is_congestion() {
+        let (_dir, config) = test_runtime_config();
+        let other = std::os::unix::process::parent_id();
+        inject_lease(
+            &config,
+            MemoryLeaseKind::ModelLoad,
+            other,
+            Some(other),
+            4_000,
+            "load",
+        );
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        match coordinator.try_acquire_lease(worker_request(std::process::id(), 3_000)) {
+            Err(HostMemoryError::CapacityRejected { requested_mb, .. }) => {
+                assert_eq!(requested_mb, 3_000);
+            }
+            other => panic!("expected congestion, got {other:?}"),
+        }
+    }
+
+    /// The ceiling is what the host can ever offer: a live machine's total
+    /// RAM, a declared machine's available RAM.
+    #[test]
+    fn a_declared_host_can_never_offer_more_than_it_declares_available() {
+        let readings = test_readings();
+        let ceiling = readings.ceiling_of(readings.memory().expect("declared host"));
+        assert_eq!(ceiling.mb(), MemoryMb(14_000));
+        assert!(ceiling.admits(MemoryMb(6_000), MemoryMb(8_000)));
+        assert!(!ceiling.admits(MemoryMb(6_001), MemoryMb(8_000)));
+    }
+
+    /// A request that reserves nothing (the machine-wide test lock) asks for
+    /// no memory, so it is never refused as too large, even on a host whose
+    /// reserve exceeds what it can offer.
+    #[test]
+    fn a_request_for_no_memory_is_never_refused_as_too_large() {
+        let dir = TempDir::new().expect("tmp dir");
+        let config = HostMemoryRuntimeConfig::from_sources(
+            dir.path().join("ledger.json"),
+            MemoryMb(20_000),
+            crate::config::WorkerStartupLimit::literal::<4>(),
+        );
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let lock = MemoryLeaseRequest {
+            kind: MemoryLeaseKind::MlTestExclusive,
+            reserved_mb: MemoryMb(0),
+            label: "test lock".to_owned(),
+            worker_pid: None,
         };
         assert!(
-            !retryable_error(&error),
-            "impossible reservations should fail immediately"
+            !matches!(
+                coordinator.try_acquire_lease(lock),
+                Err(HostMemoryError::NeverFits { .. })
+            ),
+            "a zero-MB lock cannot be too large for any host"
         );
     }
 
+    /// Another request's workspace on the same worker ends with that request,
+    /// so it is congestion: only the worker's resident models count as memory
+    /// a waiting request can never get.
     #[test]
-    fn capacity_rejection_stays_retryable_when_it_can_fit_later() {
-        let error = HostMemoryError::CapacityRejected {
-            label: String::from("contended"),
-            available_mb: 6_000,
-            pending_reserved_mb: 20_000,
-            requested_mb: 16_000,
-            reserve_mb: 8_192,
-            total_mb: 64_000,
-        };
-        assert!(
-            retryable_error(&error),
-            "requests that could fit later should keep retry semantics"
+    fn a_sibling_requests_lease_on_the_same_worker_is_congestion() {
+        let (_dir, config) = test_runtime_config();
+        let own = std::process::id();
+        inject_lease(
+            &config,
+            MemoryLeaseKind::ModelRequest,
+            own,
+            Some(own),
+            4_000,
+            "sibling",
         );
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        match coordinator.try_acquire_lease(worker_request(own, 3_000)) {
+            Err(HostMemoryError::CapacityRejected { .. }) => {}
+            other => panic!("expected congestion, got {other:?}"),
+        }
+    }
+
+    /// A job whose single worker can never fit is refused for good: before,
+    /// it waited out its bounded wait and was requeued, for ever.
+    #[test]
+    fn a_job_plan_that_can_never_fit_one_worker_is_refused() {
+        // A machine smaller than one morphotag worker's budget: even idle,
+        // the planner cannot grant one worker, so waiting cannot help.
+        let dir = TempDir::new().expect("tmp dir");
+        let config = HostMemoryRuntimeConfig::from_sources(
+            dir.path().join("ledger.json"),
+            MemoryMb(512),
+            crate::config::WorkerStartupLimit::literal::<4>(),
+        );
+        let mut facts = crate::host_facts::test_helpers::laptop_16gb();
+        facts.ram_total_mb = 256;
+        facts.ram_available_mb = 256;
+        let tiny = super::HostReadings::Declared(super::DeclaredHost::from_facts(&facts));
+        let coordinator = HostMemoryCoordinator::new(config, tiny);
+        match coordinator.try_plan_job_execution(
+            crate::api::ReleasedCommand::Morphotag,
+            crate::api::NumWorkers(1),
+            "plan",
+        ) {
+            Err(HostMemoryError::NeverFits(super::NeverFits {
+                ceiling_mb,
+                reserve_mb,
+                ..
+            })) => assert_eq!((ceiling_mb, reserve_mb), (256, 64)),
+            other => panic!(
+                "expected never-fits, got {:?}",
+                other.map(|plan| plan.reserved_mb)
+            ),
+        }
+    }
+
+    /// A large configured reserve does not refuse for good a job the
+    /// planner would grant: the planner caps the reserve at a quarter of
+    /// what is available, and the never-fits check uses the same policy.
+    #[test]
+    fn a_large_reserve_does_not_refuse_a_job_the_planner_would_grant() {
+        let dir = TempDir::new().expect("tmp dir");
+        let config = HostMemoryRuntimeConfig::from_sources(
+            dir.path().join("ledger.json"),
+            MemoryMb(13_900),
+            crate::config::WorkerStartupLimit::literal::<4>(),
+        );
+        let coordinator = HostMemoryCoordinator::new(config, test_readings());
+        let plan = coordinator
+            .try_plan_job_execution(
+                crate::api::ReleasedCommand::Morphotag,
+                crate::api::NumWorkers(1),
+                "plan",
+            )
+            .expect("the planner grants one worker on the idle declared host");
+        assert_eq!(plan.granted_workers.0, 1);
     }
 }

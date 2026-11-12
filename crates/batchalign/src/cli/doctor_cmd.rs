@@ -1345,8 +1345,7 @@ fn smoke_batch_items(
         talkbank_model::DeclaredLanguagesRef::new(std::slice::from_ref(lang))
             .map_err(|error| format!("doctor language context: {error}"))?,
         crate::chat_ops::morphosyntax_ops::MultilingualPolicy::ProcessAll,
-    )
-    .map_err(|error| format!("doctor payload collection: {error}"))?;
+    );
     if collection.batch_items.is_empty() {
         return Err(
             "the probe transcript produced no batch items; the payload builder \
