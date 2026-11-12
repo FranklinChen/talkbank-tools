@@ -165,6 +165,9 @@ use crate::cli::discover::PassthroughMode;
 pub(super) async fn dispatch_single_server(
     client: &BatchalignClient,
     target: &ServerTarget,
+    // This CLI's state folder: where a server of this account on this
+    // machine publishes its same-user key.
+    state_dir: &std::path::Path,
     lang: &LanguageSpec,
     num_speakers: u32,
     input_kind: InputKind,
@@ -202,7 +205,7 @@ pub(super) async fn dispatch_single_server(
     // The transport was decided when the origin was parsed and alone decides
     // path versus content submission. Producer selection was already resolved
     // by dispatch.
-    let (submission, destinations) = match target.transport {
+    let (submission, destinations, own_server) = match target.transport {
         ServerTransport::SharedFilesystem => {
             let Some(prepared) = prepare_paths_submission(
                 options,
@@ -228,8 +231,23 @@ pub(super) async fn dispatch_single_server(
             eprintln!(
                 "note: the server must be able to read these input paths. Successful outputs will also be copied back to this machine.\n"
             );
+            // When this URL names this account's own server (its handshake
+            // in this state folder), the job is proved as this account and
+            // may use any path the account can; it is then sent to that
+            // server's own address from the handshake. Any other listener
+            // gets an unproved request, judged by its configured folders.
+            let own = match crate::same_user_key::OwnServer::read(
+                state_dir,
+                crate::server_handshake::HandshakeSlot::Main,
+            ) {
+                Ok(own) => own.filter(|own| own.is_named_by(server_url)),
+                Err(error) => {
+                    eprintln!("warning: {error}");
+                    None
+                }
+            };
 
-            (prepared.submission, prepared.destinations)
+            (prepared.submission, prepared.destinations, own)
         }
         ServerTransport::Content | ServerTransport::ContentResolvingAudio => {
             let Some(prepared) = prepare_content_submission(
@@ -259,11 +277,14 @@ pub(super) async fn dispatch_single_server(
                 );
             }
 
-            (prepared.submission, prepared.destinations)
+            (prepared.submission, prepared.destinations, None)
         }
     };
 
-    let info = client.submit_job(server_url, &submission).await?;
+    let info = match &own_server {
+        Some(own) => client.submit_job_as_own(own, &submission).await?,
+        None => client.submit_job(server_url, &submission).await?,
+    };
     let job_id = &info.job_id;
     let total_files = info.total_files;
     eprintln!("Job {job_id} submitted ({total_files} file(s))");

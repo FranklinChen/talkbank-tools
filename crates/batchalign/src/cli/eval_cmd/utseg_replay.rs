@@ -1023,7 +1023,7 @@ fn replay_pre_asr(args: &UtsegPreAsrReplayArgs) -> Result<UtsegReplayReport, Uts
         .map_err(|unplaced| UtsegReplayRefusal::Rebuild(unplaced.to_string()))?;
 
     let transcript = build_chat::NamedAsrUtterances::numbered(&utterances)
-        .into_transcript(&[lang.to_string()], args.media_name.as_deref(), args.wor)
+        .into_transcript(&[lang.to_string()], args.media_name.clone(), args.wor)
         .map_err(|error| UtsegReplayRefusal::Rebuild(error.to_string()))?;
     let language_invalid_words = transcript.language_invalid.len();
     // The replay compares documents, and a document cannot say how an

@@ -11,7 +11,7 @@ use crate::options::{CommandOptions, CommonOptions, OpensmileOptions};
 use crate::scheduling::{AttemptOutcome, FailureCategory, WorkUnitKind};
 use crate::store::{
     FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-    JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore, PendingJobFile,
+    JobRuntimeControl, JobScheduleState, JobSourceContext, JobStore,
 };
 use crate::ws::BROADCAST_CAPACITY;
 
@@ -51,19 +51,25 @@ fn make_media_job(job_id: &str, source_path: &str) -> Job {
             source_dir: Default::default(),
         },
         filesystem: JobFilesystemConfig {
-            filenames: vec![DisplayPath::from(filename)],
-            has_chat: vec![false],
             staging_dir: Default::default(),
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(source_path)],
-            output_paths: vec![Default::default()],
-            before_paths: Vec::new(),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
-            source_dir: Default::default(),
         },
         execution: JobExecutionState {
-            status: JobStatus::Queued,
+            lifecycle: crate::store::JobLifecycle::for_test(
+                JobStatus::Queued,
+                crate::store::test_support::inputs_from_parts(
+                    vec![DisplayPath::from(filename)],
+                    vec![false],
+                    true,
+                    vec![batchalign_types::paths::ClientPath::new(source_path)],
+                    // A paths-mode file always has somewhere to write.
+                    vec![batchalign_types::paths::ClientPath::new(format!(
+                        "{source_path}.csv"
+                    ))],
+                    Vec::new(),
+                ),
+            ),
             file_statuses,
             results: Vec::new(),
             error: None,
@@ -121,19 +127,13 @@ async fn preflight_media_failure_records_setup_attempt() {
         tx,
         std::sync::Arc::new(crate::clock::SystemClock),
     ));
-    store
-        .submit(make_media_job(
-            "job-media-preflight",
-            &missing_path.display().to_string(),
-        ))
-        .await
-        .expect("submit job");
+    let job = make_media_job("job-media-preflight", &missing_path.display().to_string());
+    // The runner's pending files, as the submitted job projects them.
+    let file_list = job
+        .pending_files()
+        .expect("a submitted job's inputs are admitted");
+    store.submit(job).await.expect("submit job");
 
-    let file_list = vec![PendingJobFile {
-        file_index: 0,
-        filename: DisplayPath::from("missing.wav"),
-        has_chat: false,
-    }];
     let failures = HashMap::from([(0usize, String::from("Media file not found"))]);
     let sink = StoreRunnerEventSink::wrap(store.clone(), &JobId::from("job-media-preflight"));
 

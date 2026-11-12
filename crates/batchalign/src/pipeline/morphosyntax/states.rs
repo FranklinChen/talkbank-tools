@@ -475,7 +475,12 @@ impl<D: AnalysisScope> Analysis<Inferred, D> {
                     .map_err(ServerError::MorphosyntaxInjection)?;
                 // The `@s` positions come from the analysis injection mapped,
                 // in the items it wrote.
-                let (retokenization_traces, l2) = injection.into_parts();
+                let batchalign_transform::morphosyntax::InjectionParts {
+                    retokenization_traces,
+                    l2,
+                    declined,
+                } = injection.into_parts();
+                applied.declined_primary(declined);
                 let deferred = if options.l2.should_analyze() {
                     applied.secondary_positions(l2)
                 } else {
@@ -558,7 +563,7 @@ impl<D: AnalysisScope> Analysis<Applied, D> {
         Ok(PostChecked {
             output: crate::morphosyntax::report::MorphosyntaxOutput::new(
                 output,
-                self.state.applied.into_secondary(),
+                self.state.applied.into_reports(),
             ),
         })
     }

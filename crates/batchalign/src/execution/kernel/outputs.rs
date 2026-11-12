@@ -61,7 +61,7 @@ impl WrittenComparison {
 
 pub(super) async fn write_outputs(
     filesystem: &RunnerFilesystemConfig,
-    file_index: usize,
+    location: &crate::store::InputLocation,
     artifacts: &PlannedArtifactSet,
     outputs: CompareMaterializedOutputs,
 ) -> Result<WrittenComparison, ServerError> {
@@ -88,7 +88,7 @@ pub(super) async fn write_outputs(
         ServerError::Persistence(format!("compare CSV serialization failed: {error}"))
     })?;
     let row = ConsolidatedCompareMetricsRow::from_source(&artifacts.source_display_path, metrics)?;
-    let target = ChatOutputTarget::new(filesystem, file_index, &primary.display_path);
+    let target = ChatOutputTarget::new(filesystem, location, &primary.display_path);
     write_text_output_artifact(&target, chat_output.as_str())
         .await
         .map_err(|error| {
@@ -97,7 +97,7 @@ pub(super) async fn write_outputs(
                 primary.display_path
             ))
         })?;
-    let csv_target = ChatOutputTarget::new(filesystem, file_index, &sidecar.display_path);
+    let csv_target = ChatOutputTarget::new(filesystem, location, &sidecar.display_path);
     write_text_output_artifact(&csv_target, &metrics_csv)
         .await
         .map_err(|error| {

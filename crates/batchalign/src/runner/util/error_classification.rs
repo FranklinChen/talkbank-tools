@@ -161,7 +161,11 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // invariants) are infrastructure: deterministic per attempt, so the
         // orchestrator must not retry them as if transient.
         ServerError::WhisperEngine(_) => FailureCategory::System,
-        ServerError::Validation(_) => FailureCategory::Validation,
+        ServerError::Validation(_)
+        | ServerError::PathRefused(_)
+        | ServerError::InputsOverlap(_)
+        | ServerError::ForeignSameUserKey(_) => FailureCategory::Validation,
+        ServerError::SameUserNonces(_) => FailureCategory::System,
         // The transcript's own `@Media` header, decided before any work: the
         // message names the header change, and a restart cannot help.
         ServerError::AlignmentMedia(_) | ServerError::KeptOffRecordBulletConflict { .. } => {
@@ -206,6 +210,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
         // so only an alignment that changed the header can reach it.
         ServerError::AdmissionDisagreement
         | ServerError::UnexpectedMorphologyReport
+        | ServerError::PathsModeRoot(_)
         | ServerError::UtrTask(_)
         | ServerError::ReplacementPlanContradicted { .. }
         | ServerError::Database(_)

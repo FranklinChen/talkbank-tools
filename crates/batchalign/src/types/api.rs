@@ -278,10 +278,6 @@ mod tests {
         assert!(JobStatus::Queued.can_cancel());
         assert!(JobStatus::Running.can_cancel());
         assert!(!JobStatus::Completed.can_cancel());
-
-        assert!(!JobStatus::Queued.can_restart());
-        assert!(JobStatus::Cancelled.can_restart());
-        assert!(JobStatus::Failed.can_restart());
     }
 
     #[test]

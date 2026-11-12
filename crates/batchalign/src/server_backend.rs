@@ -108,7 +108,12 @@ pub trait ServerBackend: Send + Sync {
     async fn delete_job(&self, job_id: &JobId) -> Result<(), ServerError>;
 
     /// Re-queue a restartable job and wake the dispatcher.
-    async fn restart_job(&self, job_id: &JobId) -> Result<JobInfo, ServerError>;
+    /// Every restart admits the job's inputs again under `authority`.
+    async fn restart_job(
+        &self,
+        job_id: &JobId,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<JobInfo, ServerError>;
 
     /// Interrupt all active jobs as part of graceful server shutdown.
     ///
@@ -141,6 +146,8 @@ pub(crate) struct ServerBackendBootstrap {
     pub loaded_jobs: usize,
     /// Number of queued jobs eligible for dispatch resume.
     pub queued_jobs: usize,
+    /// The admitted `paths_mode_roots`, resolved once, here.
+    pub allowed_roots: batchalign_types::paths::AllowedRoots,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,29 +230,21 @@ impl ServerBackend for LocalServerBackend {
         // local media that isn't visible on the fleet server, stage it.
         // If no fleet_target is configured (external users), always local.
         if let Some(fleet) = &self.config.fleet_target
-            && job.filesystem.paths_mode
+            && let Some(crate::store::JobInputs::Paths { files, .. }) = job.admitted_inputs()
         {
             // Check if media is local-only (not NFS-visible on the fleet server).
             // For now, any paths-mode job on a machine with fleet_target configured
             // gets staged: the fleet server is always faster.
             // TODO: probe whether source_paths are NFS-visible and skip staging
             // for those (an operator's workflow where data is already on NFS).
-            let source_paths: Vec<std::path::PathBuf> = job
-                .filesystem
-                .source_paths
+            let source_paths: Vec<std::path::PathBuf> = files
                 .iter()
-                .map(|p| std::path::PathBuf::from(p.as_str()))
+                .map(|file| file.source.server().as_path().to_owned())
                 .collect();
-            let output_dir = job
-                .filesystem
-                .output_paths
+            let output_dir = files
                 .first()
-                .map(|p| {
-                    std::path::PathBuf::from(p.as_str())
-                        .parent()
-                        .unwrap_or(std::path::Path::new("."))
-                        .to_path_buf()
-                })
+                .and_then(|file| file.output.server().as_path().parent())
+                .map(std::path::Path::to_path_buf)
                 .unwrap_or_else(|| self.jobs_dir.clone());
 
             let Some(hostname) = self.hostname.clone() else {
@@ -361,8 +360,12 @@ impl ServerBackend for LocalServerBackend {
         self.store.delete(job_id).await
     }
 
-    async fn restart_job(&self, job_id: &JobId) -> Result<JobInfo, ServerError> {
-        let info = self.store.restart(job_id).await?;
+    async fn restart_job(
+        &self,
+        job_id: &JobId,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<JobInfo, ServerError> {
+        let info = self.store.restart(job_id, authority).await?;
         let host = self.host.clone();
         let restart_job_id = job_id.clone();
         self.runtime.spawn_detached(job_task(restart_job_id, host));
@@ -407,6 +410,11 @@ pub(crate) async fn bootstrap_local_server_backend(
     jobs_dir: std::path::PathBuf,
     clock: Arc<dyn crate::clock::Clock>,
 ) -> Result<ServerBackendBootstrap, ServerError> {
+    // Admitted before anything else starts: a root that cannot be resolved
+    // stops the server with the reason, rather than leaving paths mode in an
+    // unknown state.
+    let allowed_roots =
+        batchalign_types::paths::AllowedRoots::admit_roots(&config.paths_mode_roots)?;
     let (ws_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
     let store = Arc::new(JobStore::new(
         config.clone(),
@@ -415,7 +423,7 @@ pub(crate) async fn bootstrap_local_server_backend(
         ws_tx.clone(),
         clock,
     ));
-    let loaded_jobs = store.load_from_db().await?;
+    let loaded_jobs = store.load_from_db(&allowed_roots).await?;
 
     // Collect queued job IDs before consuming store/host/runtime into the backend struct.
     // These are jobs that were Queued at shutdown or requeued by crash recovery; they have
@@ -463,6 +471,7 @@ pub(crate) async fn bootstrap_local_server_backend(
         backend,
         loaded_jobs,
         queued_jobs,
+        allowed_roots,
     })
 }
 
@@ -545,19 +554,22 @@ mod tests {
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
-                filenames: vec![DisplayPath::from(filename)],
-                has_chat: vec![true],
                 staging_dir: Default::default(),
-                paths_mode: false,
-                source_paths: Vec::new(),
-                output_paths: Vec::new(),
-                before_paths: Vec::new(),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
-                source_dir: Default::default(),
             },
             execution: JobExecutionState {
-                status: JobStatus::Queued,
+                lifecycle: crate::store::JobLifecycle::for_test(
+                    JobStatus::Queued,
+                    crate::store::test_support::inputs_from_parts(
+                        vec![DisplayPath::from(filename)],
+                        vec![true],
+                        false,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ),
                 file_statuses,
                 results: Vec::new(),
                 error: None,

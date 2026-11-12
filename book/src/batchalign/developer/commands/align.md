@@ -698,8 +698,18 @@ holds each group's resolution in the same shape: a `%wor`-reused group has no
 request slots, and every slot is paired with the unit it awaits, so there are
 no parallel vectors to keep the same length. `UnitLedger::assemble` is the one
 place resolutions become group timings, concatenated in word order, refusing a
-group with a missing request or a request that answered for the wrong number
-of words. Each `FaGroupEvidence` is built there from one group, its units'
+group with a missing request. It has no refusal path for a bad answer,
+because none can reach it. `bind_timings` (`fa/units/resolution.rs`) is the
+one check that an answer fits its request: one timing slot per request word,
+every timing inside the request window. A `UnitResolution`, the only thing
+`assemble` receives, is built only by a reply ticket (`fa/units/replies.rs`),
+which binds against its own unit, so an answer bound for one request cannot
+be delivered for another. Cached answers travel unbound (`UnitAnswer`) until
+then. A cached answer that does not bind hands its ticket back as a miss, so
+the request is aligned again; a worker reply that does not bind is delivered
+with every one of its words untimed and its evidence source recorded as
+`refused`, and the file is not failed for one window. The supplied-retry path
+binds a cached answer against its own request with the same check. Each `FaGroupEvidence` is built there from one group, its units'
 sources and keys, and the pre-injection snapshot of the same timings, so a
 trace cannot pair one group's timings with another's provenance.
 

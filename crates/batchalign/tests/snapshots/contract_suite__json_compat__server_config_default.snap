@@ -4,11 +4,12 @@ expression: cfg
 ---
 {
   "media_roots": [],
+  "paths_mode_roots": [],
   "media_mappings": {},
   "verbose": 0,
   "default_lang": "eng",
   "port": 8000,
-  "host": "0.0.0.0",
+  "host": "127.0.0.1",
   "allow_mps": null,
   "job_ttl_days": 7,
   "auto_daemon": true,

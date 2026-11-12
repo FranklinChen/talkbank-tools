@@ -136,7 +136,11 @@ async fn cancel_over_http_stops_a_file_held_in_a_worker_dispatch() {
     .await
     .expect("echo workers behind the live runner");
     let (router, _state) = batchalign::create_test_app_with_prepared_workers(
-        ServerConfig::default(),
+        ServerConfig {
+            // The cancelled job's files live under the system temporary folder.
+            paths_mode_roots: vec![std::env::temp_dir()],
+            ..ServerConfig::default()
+        },
         RuntimeLayout::from_state_dir(state_dir.clone()),
         batchalign::AppStorageOverrides {
             jobs_dir: Some(scratch.path().join("jobs").display().to_string()),

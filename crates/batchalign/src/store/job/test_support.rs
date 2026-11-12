@@ -58,19 +58,22 @@ pub(crate) fn running_job_fixture() -> Job {
             source_dir: Default::default(),
         },
         filesystem: JobFilesystemConfig {
-            filenames: vec![filename],
-            has_chat: vec![true],
             staging_dir: Default::default(),
-            paths_mode: false,
-            source_paths: Vec::new(),
-            output_paths: Vec::new(),
-            before_paths: Vec::new(),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
-            source_dir: Default::default(),
         },
         execution: JobExecutionState {
-            status: JobStatus::Running,
+            lifecycle: crate::store::JobLifecycle::for_test(
+                JobStatus::Running,
+                crate::store::job::test_support::inputs_from_parts(
+                    vec![filename],
+                    vec![true],
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ),
             file_statuses,
             results: Vec::new(),
             error: None,
@@ -100,15 +103,111 @@ pub(crate) fn three_file_job_fixture() -> Job {
     let mut job = running_job_fixture();
     let names = ["65-3.cha", "60home-3.cha", "65home-3.cha"];
     job.execution.file_statuses.clear();
-    job.filesystem.filenames.clear();
-    job.filesystem.has_chat.clear();
+    let mut files = Vec::with_capacity(names.len());
     for name in names {
         let path = DisplayPath::from(name);
         job.execution
             .file_statuses
             .insert(String::from(path.clone()), FileStatus::new(path.clone()));
-        job.filesystem.filenames.push(path);
-        job.filesystem.has_chat.push(true);
+        files.push(crate::store::ContentInput {
+            display: path,
+            kind: crate::store::InputKind::Chat,
+        });
     }
+    job.execution
+        .lifecycle
+        .replace_inputs_for_test(crate::store::JobInputs::Content(files));
     job
+}
+
+/// Fixture inputs from the old parallel parts, every paths-mode path admitted
+/// through real admission as the user's own process (fixtures name paths
+/// like `/src/a.cha` that need not exist). Display names come from
+/// `filenames`, or, when it is empty, from each source's file name.
+pub(crate) fn inputs_from_parts(
+    filenames: Vec<DisplayPath>,
+    has_chat: Vec<bool>,
+    paths_mode: bool,
+    source_paths: Vec<batchalign_types::paths::ClientPath>,
+    output_paths: Vec<batchalign_types::paths::ClientPath>,
+    before_paths: Vec<Option<batchalign_types::paths::ClientPath>>,
+) -> crate::store::JobInputs {
+    use crate::store::{ContentInput, InputKind, JobInputs, PathsInput};
+    let kind = |index: usize, name: &str| match has_chat.get(index) {
+        Some(true) => InputKind::Chat,
+        Some(false) => InputKind::Media,
+        None => InputKind::of_source_name(name),
+    };
+    match paths_mode {
+        true => JobInputs::Paths {
+            files: crate::store::PathsFiles::admit(
+                source_paths
+                    .iter()
+                    .zip(&output_paths)
+                    .enumerate()
+                    .map(|(index, (source, output))| {
+                        let display = filenames.get(index).cloned().unwrap_or_else(|| {
+                            DisplayPath::from(
+                                std::path::Path::new(source.as_str())
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            )
+                        });
+                        PathsInput {
+                            kind: kind(index, display.as_ref()),
+                            display,
+                            source: admitted(source.as_str()),
+                            output: admitted(output.as_str()),
+                            before: before_paths
+                                .get(index)
+                                .cloned()
+                                .flatten()
+                                .map(|before| admitted(before.as_str())),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .expect("fixture files that do not collide"),
+            source_dir: None,
+        },
+        false => JobInputs::Content(
+            filenames
+                .iter()
+                .enumerate()
+                .map(|(index, display)| ContentInput {
+                    kind: kind(index, display.as_ref()),
+                    display: display.clone(),
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// A fixture path admitted as the user's own process admits it.
+pub(crate) fn admitted(path: &str) -> batchalign_types::paths::AdmittedPath {
+    batchalign_types::paths::AllowedRoots::same_user()
+        .admit(&batchalign_types::paths::ClientPath::new(path))
+        .expect("an absolute fixture path")
+}
+
+/// Every file of `inputs` as pending runner work: what a fresh job's
+/// snapshot carries.
+pub(crate) fn pending_files(inputs: &crate::store::JobInputs) -> Vec<crate::store::PendingJobFile> {
+    inputs.entries(|_| true).collect()
+}
+
+/// A snapshot whose pending files are every file of its own inputs, as a
+/// fresh job's projection gives.
+pub(crate) fn with_pending(
+    mut snapshot: crate::store::RunnerJobSnapshot,
+) -> crate::store::RunnerJobSnapshot {
+    snapshot.pending_files = pending_files(&snapshot.filesystem.inputs);
+    snapshot
+}
+
+/// The location of a one-file job's only input.
+pub(crate) fn only_location(inputs: &crate::store::JobInputs) -> crate::store::InputLocation {
+    let [file] = pending_files(inputs).try_into().expect("a one-file job");
+    file.location().clone()
 }

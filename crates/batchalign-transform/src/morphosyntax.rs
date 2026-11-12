@@ -92,7 +92,10 @@ mod ud_types;
 
 pub use evidence::{UtteranceEvidence, WordIsolation};
 pub use gra_validate::validate_generated_gra;
-pub use injection::{InjectionError, InjectionResult, RetokenizationInfo, inject_results};
+pub use injection::{
+    DeclineCause, DeclinedUtterance, InjectionError, InjectionParts, InjectionResult,
+    RetokenizationInfo, inject_results,
+};
 pub use invariants::*;
 pub use lang_en::is_irregular;
 pub use lang_fr::{FrenchPronounCase, french_pronoun_case, is_apm_noun};

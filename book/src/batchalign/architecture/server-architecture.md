@@ -446,9 +446,10 @@ Special cases:
 - `transcribe`, `transcribe_s`, `benchmark`, and `avqi` prefer local-daemon
   dispatch when `auto_daemon` is enabled; if that daemon path is unavailable,
   the router still falls back to the explicit `--server`
-- explicit `--server` always stays on content mode, even for `localhost`
-- local daemons and auto-detected loopback servers use shared-filesystem
-  `paths_mode` for local-audio commands
+- an explicit `--server` on another host gets content mode; one naming a
+  loopback address, local daemons and auto-detected loopback servers use
+  shared-filesystem `paths_mode`, admitted only inside the server's
+  `paths_mode_roots` folders
 - multi-server `--server URL1,URL2` is rejected in the current release
 - `daemon.rs` still contains sidecar lifecycle helpers, but the current
   dispatch path does not auto-select a sidecar yet
@@ -830,9 +831,11 @@ than ad hoc map mutation.
    disk. The jobs directory stays a `PathBuf` from the layout
    onward, never re-encoded through `to_string_lossy`.
 2. `JobStore::load_from_db()` rebuilds each `Job` value from persisted rows.
-3. `Job::reconcile_recovered_runtime_state()` decides the canonical next state:
-   requeue unfinished work or promote all-terminal jobs to `Completed` /
-   `Failed`.
+3. `Job::recover()` decides the canonical next state:
+   requeue unfinished work on inputs admitted under the current rules (or
+   fail it, closing its open files, when they are refused), or promote
+   all-terminal jobs to `Failed` if any file failed and `Completed` if none
+   did.
 4. The reconciled status and cleared lease metadata are written back to SQLite
    before normal queue dispatch resumes.
 
@@ -854,9 +857,10 @@ stateDiagram-v2
     Running --> Failed: any file errored
     Running --> Cancelled: user cancel
     Running --> Interrupted: server shutdown
-    Interrupted --> Queued: recovery (resumable files)
-    Interrupted --> Completed: recovery (all files done)
-    Interrupted --> Failed: recovery (any file errored)
+    Interrupted --> Queued: recovery (resumable files, inputs admitted)
+    Interrupted --> Failed: recovery (inputs refused)
+    Interrupted --> Completed: recovery (all files done, none failed)
+    Interrupted --> Failed: recovery (all files done, one failed)
 ```
 
 Two things distinguish this from a flat "every terminal looks the same"

@@ -219,7 +219,7 @@ pub(super) fn prepare_paths_submission(
             files: vec![],
             media_files: vec![],
             media_mapping: mapping_key.into(),
-            media_subdir: mapping_subdir.into(),
+            media_subdir: mapping_subdir,
             source_dir: base_dir.to_string_lossy().to_string().into(),
             options: opts,
             paths_mode: true,
@@ -241,9 +241,10 @@ pub(super) fn prepare_paths_submission(
 fn detect_media_mapping(
     in_dir: &Path,
     mapping_keys: &[String],
-) -> Result<(String, String), CliError> {
+) -> Result<(String, batchalign_types::paths::RepoRelativePath), CliError> {
+    use batchalign_types::paths::RepoRelativePath;
     if mapping_keys.is_empty() {
-        return Ok((String::new(), String::new()));
+        return Ok((String::new(), RepoRelativePath::default()));
     }
 
     let abs = std::fs::canonicalize(in_dir).map_err(CliError::Io)?;
@@ -254,16 +255,14 @@ fn detect_media_mapping(
 
     for key in mapping_keys {
         if let Some(idx) = parts.iter().position(|p| p == key) {
-            let subdir = if idx + 1 < parts.len() {
-                parts[idx + 1..].join("/")
-            } else {
-                String::new()
-            };
+            // Folder names of a canonical path: always plain names.
+            let subdir = RepoRelativePath::new(parts[idx + 1..].join("/"))
+                .map_err(|refusal| CliError::InvalidArgument(refusal.to_string()))?;
             return Ok((key.clone(), subdir));
         }
     }
 
-    Ok((String::new(), String::new()))
+    Ok((String::new(), RepoRelativePath::default()))
 }
 
 #[cfg(test)]
@@ -325,20 +324,17 @@ mod tests {
                 request.validate().unwrap();
                 assert_eq!(request.before_paths.len(), request.source_paths.len());
                 for (source, prior) in request.source_paths.iter().zip(&request.before_paths) {
-                    let candidate = priors.join(
-                        source
-                            .assume_shared_filesystem()
-                            .as_path()
-                            .file_name()
-                            .unwrap(),
-                    );
+                    // The CLI and the files are on one machine here, so a
+                    // wire path is read as a local one.
+                    let candidate =
+                        priors.join(std::path::Path::new(source.as_str()).file_name().unwrap());
                     let expected = candidate
                         .exists()
                         .then(|| std::fs::canonicalize(candidate).unwrap());
                     assert_eq!(
                         prior
                             .as_ref()
-                            .map(|path| path.assume_shared_filesystem().as_path().to_owned()),
+                            .map(|path| std::path::PathBuf::from(path.as_str())),
                         expected
                     );
                 }
@@ -445,7 +441,7 @@ mod tests {
 
         let (key, subdir) = detect_media_mapping(&dir, &["slabank-data".to_string()]).unwrap();
         assert_eq!(key, "slabank-data");
-        assert_eq!(subdir, "French/Newcastle/Discussion/12");
+        assert_eq!(subdir.as_str(), "French/Newcastle/Discussion/12");
     }
 
     #[test]

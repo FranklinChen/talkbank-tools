@@ -860,6 +860,32 @@ pub enum ServerError {
     )]
     UnexpectedMorphologyReport,
 
+    /// A configured `paths_mode_roots` entry cannot be admitted: the server
+    /// does not start with a paths-mode folder it cannot resolve.
+    #[error("server configuration: {0}")]
+    PathsModeRoot(#[from] batchalign_types::paths::RootRefusal),
+
+    /// A submitted paths-mode path was not admitted by this server's folders.
+    /// The submitter's to fix: a 400, rendered as the validation refusal it
+    /// is, with the reason kept typed.
+    #[error("validation error: {0}")]
+    PathRefused(#[from] batchalign_types::paths::PathRefusal),
+
+    /// A paths-mode job's files collide (one output for two files, or one
+    /// file's output another's input): the submitter's to fix, a 400.
+    #[error("validation error: {0}")]
+    InputsOverlap(#[from] crate::store::PathsOverlap),
+
+    /// The request carried a same-user key that is not this server's: its
+    /// client belongs to another account. A 403.
+    #[error("{0}")]
+    ForeignSameUserKey(#[from] crate::same_user_key::KeyRefusal),
+
+    /// No same-user nonce can be issued now: too many are outstanding. A
+    /// 503; the client retries.
+    #[error("{0}")]
+    SameUserNonces(#[from] crate::same_user_key::NoncesExhausted),
+
     /// UTR's owned blocking task failed; never invalid CHAT or worker failure.
     #[error("utterance timing recovery task failed: {0}")]
     UtrTask(#[source] tokio::task::JoinError),
@@ -1619,6 +1645,7 @@ impl ServerError {
             }
             Self::AdmissionDisagreement
             | Self::UnexpectedMorphologyReport
+            | Self::PathsModeRoot(_)
             | Self::UtrTask(_)
             | Self::ReplacementPlanContradicted { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::MediaTiming(_)
@@ -1649,7 +1676,14 @@ impl ServerError {
             Self::FileNotFound(_) => StatusCode::NOT_FOUND,
             Self::FileNotReady(_) => StatusCode::CONFLICT,
             Self::UnknownCommand(_) => StatusCode::BAD_REQUEST,
-            Self::Validation(_) => StatusCode::BAD_REQUEST,
+            Self::Validation(_) | Self::PathRefused(_) | Self::InputsOverlap(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::ForeignSameUserKey(crate::same_user_key::KeyRefusal::Malformed) => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::ForeignSameUserKey(_) => StatusCode::FORBIDDEN,
+            Self::SameUserNonces(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::MergeVerification(error) => refusal_status(error.fault()),
             Self::SpeakerIdentity(_) => {
                 // One policy owner also drives the task's retry decision.
@@ -1721,6 +1755,16 @@ impl IntoResponse for ServerError {
             _ => serde_json::json!({ "detail": self.to_string() }),
         };
         (status, axum::Json(body)).into_response()
+    }
+}
+
+/// A refusal to admit inputs is the submitter's to fix, kept typed.
+impl From<crate::store::InputsRefusal> for ServerError {
+    fn from(refusal: crate::store::InputsRefusal) -> Self {
+        match refusal {
+            crate::store::InputsRefusal::Path(refusal) => Self::PathRefused(refusal),
+            crate::store::InputsRefusal::Overlap(overlap) => Self::InputsOverlap(overlap),
+        }
     }
 }
 

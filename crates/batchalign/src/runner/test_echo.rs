@@ -31,7 +31,7 @@ pub(super) async fn dispatch_test_echo_files(
             tokio::time::sleep(std::time::Duration::from_millis(test_delay_ms)).await;
         }
 
-        let filename = file.filename.as_ref();
+        let filename = file.filename().as_ref();
         let lifecycle = FileRunTracker::new(sink, filename);
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
@@ -54,37 +54,25 @@ pub(super) async fn dispatch_test_echo_files(
             }
         };
 
-        let output_text = if file.has_chat {
-            let read_path: std::path::PathBuf = if job.filesystem.paths_mode
-                && file.file_index < job.filesystem.source_paths.len()
-            {
-                job.filesystem.source_paths[file.file_index]
-                    .assume_shared_filesystem()
-                    .as_path()
-                    .to_owned()
-            } else {
-                job.filesystem
-                    .staging_dir
-                    .join("input")
-                    .join(filename)
-                    .as_path()
-                    .to_owned()
-            };
-            match tokio::fs::read_to_string(&read_path).await {
-                Ok(content) => content,
-                Err(error) => {
-                    let err_msg = format!("Failed to read input for test-echo dispatch: {error}");
-                    lifecycle
-                        .fail(&err_msg, FailureCategory::InputMissing)
-                        .await;
-                    continue;
+        let output_text = match file.kind() {
+            crate::store::InputKind::Chat => {
+                let read_path = file.input_path(&job.filesystem.staging_dir);
+                match tokio::fs::read_to_string(&read_path).await {
+                    Ok(content) => content,
+                    Err(error) => {
+                        let err_msg =
+                            format!("Failed to read input for test-echo dispatch: {error}");
+                        lifecycle
+                            .fail(&err_msg, FailureCategory::InputMissing)
+                            .await;
+                        continue;
+                    }
                 }
             }
-        } else {
-            "@UTF8\n@Begin\n@End\n".to_string()
+            crate::store::InputKind::Media => "@UTF8\n@Begin\n@End\n".to_string(),
         };
 
-        let target = ChatOutputTarget::new(&job.filesystem, file.file_index, &result_display_path);
+        let target = ChatOutputTarget::new(&job.filesystem, file.location(), &result_display_path);
         if let Err(error) = write_text_output_artifact(&target, &output_text).await {
             let err_msg = format!("Failed to write test-echo output: {error}");
             lifecycle.fail(&err_msg, FailureCategory::Validation).await;

@@ -166,9 +166,9 @@ impl StorageAdmittedLiteralProof<'_, '_> {
             let start = (end - 1) / stride * stride;
             let mut reconstructed = checkpoints[start / stride].resume();
             let mut prefixes = Vec::with_capacity(end - start);
-            for p in start..end {
+            for item in &input.payload[start..end] {
                 prefixes.push(reconstructed.prefixes());
-                reconstructed = reconstructed.extend(&input.payload[p], control)?;
+                reconstructed = reconstructed.extend(item, control)?;
             }
             for p in (start..end).rev() {
                 control.check()?;

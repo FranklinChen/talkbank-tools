@@ -38,8 +38,14 @@ document from command-specific CHAT admission.
 The paths-mode request represents this as `before_paths: [null, "/prior/b.cha"]`.
 An empty list means no priors; a nonempty list must still have exactly one slot
 per `source_paths` entry. Existing lists containing only strings retain their
-wire representation. Rust request and runner fields now use
-`Vec<Option<ClientPath>>`, and the runner owns the shared per-file lookup.
+wire representation. The Rust request field is `Vec<Option<ClientPath>>`; in
+the job, each file's prior is part of that file's own input entry
+(`PathsInput::before: Option<AdmittedPath>`), admitted like its source and
+output, so no lookup by position can reach a neighbour's prior. It is stored
+in the job row's `before_paths` column (a JSON array parallel to
+`source_paths`, empty when no file has a prior), so a restart or a recovered
+job admits and uses the same priors; rows from before that column read as
+having none.
 Clients using null entries require a server supporting this request extension.
 Alignment provenance marks incremental processing per file, not per batch.
 
@@ -186,7 +192,8 @@ the file contains edits elsewhere.
 
 ### Layer 3: Dispatch Integration (`runner/dispatch/`)
 
-The dispatch layer reads optional `before_paths` from the job. The route is
+The dispatch layer reads each file's optional prior from its own input entry
+(`PathsInput::before`, admitted like the source). The route is
 decided first (`AlignRoute::decide`); on the `NeedsAudio` route alone, active
 alignment admits the declared prior once (`ActiveAlignment::with_prior`),
 before media preparation or UTR, retains it across retries, and refuses

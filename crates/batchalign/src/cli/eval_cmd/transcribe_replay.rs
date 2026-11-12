@@ -104,11 +104,14 @@ async fn run_manifests(args: &TranscribeReplayRunArgs) -> Result<(), CliError> {
     for replay in admitted {
         let recording_id = replay.recording_id().to_owned();
         let manifest_blake3 = replay.manifest_blake3().to_owned();
-        let media_name = replay
-            .media_path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned);
+        // The stem `@Media` writes, derived as live transcribe derives it.
+        let media_name =
+            crate::runner::preserved_media_name_for_chat(replay.media_path(), replay.media_path())
+                .map(|name| talkbank_model::model::MediaFilename::parse(&name))
+                .transpose()
+                .map_err(|error| {
+                    CliError::InvalidArgument(format!("replay media name: {error}"))
+                })?;
         let opts = TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                 crate::transcribe::ReplayAsrPlan::for_legacy_replay(&lang)?,

@@ -322,8 +322,12 @@ pub(crate) struct RequestCoverage {
     /// Requests left unaligned: no worker evidence was obtained (a
     /// request-local failure, or audio that decoded to no sample).
     unaligned: u64,
+    /// Requests whose answer was refused: a timing outside the request
+    /// window, or timings for another number of words.
+    refused: u64,
     /// Word ranges grouping left unrequested: an anchored piece whose
-    /// window could not be sent.
+    /// window could not be sent. A range of a group reused whole from `%wor`
+    /// is not one: it was answered by the reuse.
     unrequested: u64,
 }
 
@@ -332,6 +336,7 @@ impl RequestCoverage {
     fn add(&mut self, group: Self) {
         self.answered += group.answered;
         self.unaligned += group.unaligned;
+        self.refused += group.refused;
         self.unrequested += group.unrequested;
     }
 
@@ -347,7 +352,16 @@ impl RequestCoverage {
                 for piece in pieces {
                     self.count_request(piece.source);
                 }
-                self.unrequested += unrequested.len() as u64;
+                // Each range by what became of it: one this run could not
+                // request is unrequested; one in a group reused whole from
+                // `%wor` was answered by the reuse.
+                for range in unrequested {
+                    use crate::types::traces::UnrequestedRangeSource;
+                    match range.source {
+                        UnrequestedRangeSource::Unaligned => self.unrequested += 1,
+                        UnrequestedRangeSource::WorReuse => self.answered += 1,
+                    }
+                }
             }
         }
     }
@@ -360,6 +374,7 @@ impl RequestCoverage {
             | FaEvidenceSourceTrace::RawEvidenceReplay
             | FaEvidenceSourceTrace::Inference => self.answered += 1,
             FaEvidenceSourceTrace::Unaligned => self.unaligned += 1,
+            FaEvidenceSourceTrace::Refused => self.refused += 1,
         }
     }
 }
@@ -478,6 +493,7 @@ impl UntimedUtterance {
                 UntimedCause::Requested(coverage) => crate::api::UntimedCauseRecord::Requested {
                     answered: coverage.answered,
                     unaligned: coverage.unaligned,
+                    refused: coverage.refused,
                     unrequested: coverage.unrequested,
                 },
                 UntimedCause::Unrecorded => crate::api::UntimedCauseRecord::Unrecorded,
@@ -524,8 +540,8 @@ impl std::fmt::Display for UntimedAccount {
                 }
                 UntimedCause::Requested(coverage) => write!(
                     f,
-                    " (requested: {} answered, {} unaligned, {} unrequested)",
-                    coverage.answered, coverage.unaligned, coverage.unrequested
+                    " (requested: {} answered, {} unaligned, {} refused, {} unrequested)",
+                    coverage.answered, coverage.unaligned, coverage.refused, coverage.unrequested
                 )?,
                 UntimedCause::Unrecorded => f.write_str(" (no cause recorded)")?,
             }

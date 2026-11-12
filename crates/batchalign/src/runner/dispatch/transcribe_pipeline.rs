@@ -23,7 +23,6 @@ use super::super::util::{
 use super::TranscribeDispatchPlan;
 use super::asr_media::{
     PreparedAsrMediaInput, prepare_asr_media_input, preserved_media_name_for_chat,
-    resolve_paths_mode_or_staging_input,
 };
 use super::audio_output::{ChatOutput, FileOutput};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
@@ -128,8 +127,11 @@ pub(crate) async fn dispatch_transcribe_infer(
                 // recorded as cancelled rather than silently dropped from
                 // the run: see `record_file_cancelled_before_dispatch`.
                 for skipped in std::iter::once(file).chain(pending_iter.clone()) {
-                    record_file_cancelled_before_dispatch(sink.as_ref(), skipped.filename.as_ref())
-                        .await;
+                    record_file_cancelled_before_dispatch(
+                        sink.as_ref(),
+                        skipped.filename().as_ref(),
+                    )
+                    .await;
                 }
                 break;
             }
@@ -144,7 +146,7 @@ pub(crate) async fn dispatch_transcribe_infer(
         let job = job.clone();
         let mut opts = base_options.clone();
         let file = file.clone();
-        let filename = file.filename.clone();
+        let filename = file.filename().clone();
 
         tasks.push(spawn_supervised_file_task(
             filename,
@@ -169,10 +171,13 @@ pub(crate) async fn dispatch_transcribe_infer(
 
 async fn prepare_transcribe_media_input(
     filesystem: &crate::store::RunnerFilesystemConfig,
-    file_index: usize,
+    file: &crate::store::PendingJobFile,
     filename: &str,
 ) -> Result<PreparedAsrMediaInput, crate::error::ServerError> {
-    let original_audio_path = resolve_paths_mode_or_staging_input(filesystem, file_index, filename);
+    let original_audio_path = file
+        .input_path(&filesystem.staging_dir)
+        .as_path()
+        .to_owned();
     let media_name = preserved_media_name_for_chat(&original_audio_path, &original_audio_path);
     prepare_asr_media_input(original_audio_path, media_name, filename).await
 }
@@ -225,25 +230,24 @@ async fn process_one_transcribe_file(
 ) -> FileTaskOutcome {
     let job_id = &job.identity.job_id;
     let correlation_id = &*job.identity.correlation_id;
-    let file_index = file.file_index;
-    let filename = file.filename.as_ref();
+    let filename = file.filename().as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
-    let prepared_media =
-        match prepare_transcribe_media_input(&job.filesystem, file_index, filename).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let err_msg = error.to_string();
-                return lifecycle
-                    .fail(&err_msg, FailureCategory::Validation)
-                    .await
-                    .into();
-            }
-        };
+    let prepared_media = match prepare_transcribe_media_input(&job.filesystem, file, filename).await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let err_msg = error.to_string();
+            return lifecycle
+                .fail(&err_msg, FailureCategory::Validation)
+                .await
+                .into();
+        }
+    };
     let PreparedAsrMediaInput {
         original_audio_path: _,
         inference_audio_path: audio_path,
@@ -362,23 +366,26 @@ mod tests {
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
-                filenames: vec![DisplayPath::from(filename)],
-                has_chat: vec![false],
                 staging_dir: Default::default(),
-                paths_mode: true,
-                source_paths: vec![batchalign_types::paths::ClientPath::new(
-                    source_path.to_string_lossy().to_string(),
-                )],
-                output_paths: vec![batchalign_types::paths::ClientPath::new(
-                    output_path.to_string_lossy().to_string(),
-                )],
-                before_paths: Vec::new(),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
-                source_dir: Default::default(),
             },
             execution: JobExecutionState {
-                status: JobStatus::Queued,
+                lifecycle: crate::store::JobLifecycle::for_test(
+                    JobStatus::Queued,
+                    crate::store::test_support::inputs_from_parts(
+                        vec![DisplayPath::from(filename)],
+                        vec![false],
+                        true,
+                        vec![batchalign_types::paths::ClientPath::new(
+                            source_path.to_string_lossy().to_string(),
+                        )],
+                        vec![batchalign_types::paths::ClientPath::new(
+                            output_path.to_string_lossy().to_string(),
+                        )],
+                        Vec::new(),
+                    ),
+                ),
                 file_statuses,
                 results: Vec::new(),
                 error: None,

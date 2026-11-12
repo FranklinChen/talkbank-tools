@@ -300,8 +300,10 @@ construction, was their only producer. Inside `findings`:
   `yielded_to_kept_end_leading_words_dropped`, with the boundary it enforced
   and the line index that supplied it; each `measured` entry is a
   `{word_index, tier, start_ms, end_ms}` interval the effect removed),
-  `{"kind": "requested", "answered", "unaligned", "unrequested"}` counting
-  what the requests covering it yielded, or `{"kind": "unrecorded"}` when
+  `{"kind": "requested", "answered", "unaligned", "refused", "unrequested"}`
+  counting what the requests covering it yielded (`refused` counts replies
+  that did not answer for exactly their request; records written before it
+  existed read it as 0, because such a reply then failed the file), or `{"kind": "unrecorded"}` when
   nothing the run recorded explains it; `{"kind": "no_usable_timing"}` is
   read from older records only). The complete account, every untimed word, is logged once.
 

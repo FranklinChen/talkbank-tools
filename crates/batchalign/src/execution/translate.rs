@@ -49,7 +49,7 @@ pub(crate) async fn dispatch_translate_job(
     let sink = host.sink().clone();
 
     for file in &job.pending_files {
-        FileRunTracker::new(sink.as_ref(), file.filename.as_ref())
+        FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
             .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Translating)
             .await;
     }
@@ -128,7 +128,6 @@ mod tests {
     };
     use crate::execution::worker_gateway::MorphotagRuntimeOptions;
     use crate::options::{CommandOptions, CommonOptions, TranslateOptions};
-    use crate::store::PendingJobFile;
     use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
 
     #[derive(Default)]
@@ -215,7 +214,7 @@ mod tests {
         std::fs::create_dir_all(&input_dir).unwrap();
         std::fs::write(input_dir.join("a.cha"), text).unwrap();
         std::fs::write(input_dir.join("b.cha"), text).unwrap();
-        RunnerJobSnapshot {
+        crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: crate::store::RunnerJobIdentity {
                 job_id: JobId::from("job-translate"),
                 correlation_id: CorrelationId::from("corr-translate"),
@@ -235,10 +234,14 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: crate::store::RunnerFilesystemConfig {
-                paths_mode: false,
-                source_paths: Vec::new(),
-                output_paths: Vec::new(),
-                before_paths: Vec::new(),
+                inputs: crate::store::test_support::inputs_from_parts(
+                    vec![DisplayPath::from("a.cha"), DisplayPath::from("b.cha")],
+                    vec![true, true],
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 staging_dir: batchalign_types::paths::ServerPath::new(
                     staging_dir.display().to_string(),
                 ),
@@ -249,19 +252,8 @@ mod tests {
                 ),
             },
             cancel_token: CancellationToken::new(),
-            pending_files: vec![
-                PendingJobFile {
-                    file_index: 0,
-                    filename: DisplayPath::from("a.cha"),
-                    has_chat: true,
-                },
-                PendingJobFile {
-                    file_index: 1,
-                    filename: DisplayPath::from("b.cha"),
-                    has_chat: true,
-                },
-            ],
-        }
+            pending_files: Vec::new(),
+        })
     }
 
     fn host() -> DispatchHostContext {

@@ -501,11 +501,11 @@ pub async fn require_live_direct_warmed_many(
 }
 
 async fn collect_direct_content_results(detail: &batchalign::store::JobDetail) -> Vec<FileResult> {
-    if detail.paths_mode
-        && detail
-            .results
-            .iter()
-            .all(|result| !result.content_type.is_binary())
+    // A direct run always reads and writes in place (paths mode).
+    if detail
+        .results
+        .iter()
+        .all(|result| !result.content_type.is_binary())
     {
         return detail
             .results

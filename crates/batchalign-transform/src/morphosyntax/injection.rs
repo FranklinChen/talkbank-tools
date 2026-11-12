@@ -5,7 +5,7 @@ use std::ops::Range;
 use talkbank_model::alignment::MorItemIndex;
 use talkbank_model::model::dependent_tier::GrammaticalRelation;
 use talkbank_model::model::dependent_tier::mor::Mor;
-use talkbank_model::model::{GrammaticalRelationType, LanguageCode, Line};
+use talkbank_model::model::{GrammaticalRelationType, LanguageCode};
 
 use super::alignment::{UdAlignment, UdAlignmentError, UdTokens};
 use super::l2::{ItemPlacement, L2Extraction, RetokenizedItems};
@@ -16,18 +16,6 @@ use super::{
     MatchedMorphosyntaxResponses, MisalignmentDiagnostic, MwtDict, TokenizationMode, UdResponse,
     WordRole, apply_grammatical_invariants, map_tokens,
 };
-use crate::decisions::{DecisionRecord, DecisionStrategy, MorphosyntaxStrategy};
-
-/// Which path produced a misalignment, which decides the decision strategy
-/// it is recorded under.
-enum RetokenizationContext {
-    /// Non-retokenize path: Stanza was told to realign to CHAT
-    /// boundaries. A mismatch here means realignment did not hold.
-    Preserve,
-    /// `StanzaRetokenize` mode was used; CHAT was rewritten to match
-    /// Stanza's own tokenization.
-    StanzaRetokenize,
-}
 
 /// Fill in the Stanza tokens an inner [`MisalignmentDiagnostic`] did not
 /// have.
@@ -66,6 +54,58 @@ pub struct InjectionResult {
     /// walk of the same (invariant-rewritten) analysis that was mapped to
     /// `%mor`, and named in the item space injection wrote.
     l2: L2Extraction,
+    /// Utterances whose morphology was declined, each left exactly as it
+    /// was, in batch order.
+    declined: Vec<DeclinedUtterance>,
+}
+
+/// A completed injection's parts, by name.
+#[derive(Debug)]
+pub struct InjectionParts {
+    /// Per-utterance retokenization traces for debugging.
+    pub retokenization_traces: Vec<RetokenizationInfo>,
+    /// The `@s` positions of the injected utterances.
+    pub l2: L2Extraction,
+    /// Utterances whose morphology was declined, each left as it was.
+    pub declined: Vec<DeclinedUtterance>,
+}
+
+/// Why one utterance's morphology was declined. The utterance is left exactly
+/// as it was (admission precedes its one write), and the rest of the batch is
+/// injected: a problem confined to one utterance never fails the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineCause {
+    /// The model returned no analysis for an utterance with words to analyse.
+    NoAnalysis,
+    /// The analysis is not valid UD, or does not map to `%mor`.
+    MappingFailed,
+    /// The mapped items do not align one-to-one with the utterance's words.
+    Misaligned,
+    /// The model's tokens could not be written back onto the utterance's words.
+    RetokenizationFailed,
+}
+
+impl DeclineCause {
+    /// Stable label for tracing and records.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoAnalysis => "no_analysis",
+            Self::MappingFailed => "mapping_failed",
+            Self::Misaligned => "misaligned",
+            Self::RetokenizationFailed => "retokenization_failed",
+        }
+    }
+}
+
+/// One utterance whose morphology was declined, where it is, and why.
+#[derive(Debug, Clone)]
+pub struct DeclinedUtterance {
+    /// The utterance's line and its position among utterances.
+    pub address: super::payload::UtteranceAddress,
+    /// Why.
+    pub cause: DeclineCause,
+    /// The producer's structured explanation.
+    pub reason: String,
 }
 
 impl InjectionResult {
@@ -80,9 +120,14 @@ impl InjectionResult {
         &self.l2
     }
 
-    /// Consume completed injection into its trace and secondary-language data.
-    pub fn into_parts(self) -> (Vec<RetokenizationInfo>, L2Extraction) {
-        (self.retokenization_traces, self.l2)
+    /// Consume completed injection into its traces, secondary-language data
+    /// and declined utterances.
+    pub fn into_parts(self) -> InjectionParts {
+        InjectionParts {
+            retokenization_traces: self.retokenization_traces,
+            l2: self.l2,
+            declined: self.declined,
+        }
     }
 }
 
@@ -92,6 +137,7 @@ impl InjectionResult {
 struct InjectionProgress {
     retokenization_traces: Vec<RetokenizationInfo>,
     l2: L2Extraction,
+    declined: Vec<DeclinedUtterance>,
 }
 
 /// A batch cannot establish completed morphology for its destination.
@@ -115,9 +161,6 @@ pub enum InjectionError {
         /// Collected line that no longer names an utterance.
         index: usize,
     },
-    /// Model analysis or injection failed for required lexical content.
-    #[error("Incomplete morphology: {}", .0.evidence_summary())]
-    Incomplete(Box<DecisionRecord>),
 }
 
 impl From<ResponseAdmissionError> for InjectionError {
@@ -131,7 +174,15 @@ impl From<ResponseAdmissionError> for InjectionError {
     }
 }
 
-type UtteranceCompletion = Result<(), Box<DecisionRecord>>;
+/// One utterance's injection: written, or declined with the utterance left
+/// as it was.
+type UtteranceCompletion = Result<(), Declined>;
+
+/// Why one utterance was declined, before it is placed in the batch.
+struct Declined {
+    cause: DeclineCause,
+    reason: String,
+}
 
 /// Retokenization info collected during injection, for trace visualization.
 #[derive(Debug, Clone)]
@@ -293,8 +344,11 @@ pub fn inject_results(
 impl MatchedMorphosyntaxResponses {
     /// Inject an admitted response batch, consuming its payload/response ownership.
     ///
-    /// Failure to cover any requested utterance refuses the batch. The caller
-    /// must discard the partially modified destination on error, not publish it.
+    /// An utterance whose morphology cannot be admitted is declined, left
+    /// exactly as it was, and named in the result's `declined`; the rest of
+    /// the batch is injected. An error means the batch itself could not be
+    /// bound to the document (wrong response count, a line that is not an
+    /// utterance), and nothing was written.
     pub fn inject(
         self,
         parser: &talkbank_parser::TreeSitterParser,
@@ -315,30 +369,43 @@ impl BoundMorphosyntaxResponses<'_> {
         tokenization_mode: TokenizationMode,
         mwt: &MwtDict,
     ) -> Result<InjectionResult, InjectionError> {
-        let (chat_file, batch) = self.into_parts();
         let mut result = InjectionProgress::default();
-        for (ud_resp, collected) in batch.into_pairs() {
-            let line_idx = collected.line().raw();
-            let utt = match &mut chat_file.lines.as_mut_slice()[line_idx] {
-                Line::Utterance(u) => u,
-                _ => {
-                    return Err(InjectionError::InvalidPosition { index: line_idx });
-                }
-            };
-            UtteranceInjection {
+        for bound in self.into_pairs() {
+            let super::responses::BoundUtterance {
+                utterance: utt,
+                response: ud_resp,
+                collected,
+            } = bound;
+            let address = collected.address();
+            let outcome = UtteranceInjection {
                 parser,
                 utt,
-                address: collected.address(),
+                address,
                 item: collected.item(),
                 words: collected.words(),
                 result: &mut result,
             }
-            .inject(ud_resp, tokenization_mode, mwt)
-            .map_err(InjectionError::Incomplete)?;
+            .inject(ud_resp, tokenization_mode, mwt);
+            // A declined utterance is left exactly as it was; the rest of the
+            // batch is still injected.
+            if let Err(Declined { cause, reason }) = outcome {
+                tracing::warn!(
+                    line = address.line().raw(),
+                    cause = cause.as_str(),
+                    %reason,
+                    "morphology declined for one utterance; it is left as it was"
+                );
+                result.declined.push(DeclinedUtterance {
+                    address,
+                    cause,
+                    reason,
+                });
+            }
         }
         Ok(InjectionResult {
             retokenization_traces: result.retokenization_traces,
             l2: result.l2,
+            declined: result.declined,
         })
     }
 }
@@ -357,14 +424,11 @@ struct UtteranceInjection<'a, 'u> {
 }
 
 impl UtteranceInjection<'_, '_> {
-    fn mapping_failure(&self, error: MappingError) -> Box<DecisionRecord> {
-        Box::new(DecisionRecord::new_and_trace(
-            self.address.line().raw(),
-            self.utt.main.speaker.as_str().to_string(),
-            DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
-            format!("ud_to_chat_error={error}"),
-            true,
-        ))
+    fn mapping_failure(&self, error: MappingError) -> Declined {
+        Declined {
+            cause: DeclineCause::MappingFailed,
+            reason: format!("ud_to_chat_error={error}"),
+        }
     }
 
     /// Inject one response: rewrite the analysis by the grammatical
@@ -415,7 +479,7 @@ impl UtteranceInjection<'_, '_> {
                 self.item.terminator.clone(),
                 gras,
             ) {
-                Err(diag) => self.misalignment(diag, &[], RetokenizationContext::Preserve),
+                Err(diag) => self.misalignment(diag, &[], DeclineCause::Misaligned),
                 Ok(()) => {
                     // The `@s` words still take their primary structure from
                     // the model's analysis, when there is one.
@@ -436,13 +500,10 @@ impl UtteranceInjection<'_, '_> {
         let Some((raw, rescued)) = analysed else {
             // The model returned nothing for an utterance with words it
             // must analyse: record it and leave the utterance untouched.
-            return Err(Box::new(DecisionRecord::new_and_trace(
-                self.address.line().raw(),
-                self.utt.main.speaker.as_str().to_string(),
-                DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::NlpNoSentences),
-                "stanza_returned_empty_response".into(),
-                true,
-            )));
+            return Err(Declined {
+                cause: DeclineCause::NoAnalysis,
+                reason: "stanza_returned_empty_response".into(),
+            });
         };
 
         // The one walk. A malformed analysis, or one that does not map, is
@@ -461,13 +522,10 @@ impl UtteranceInjection<'_, '_> {
         let (tokens, mapped) = match walked {
             Ok(walked) => walked,
             Err(e) => {
-                return Err(Box::new(DecisionRecord::new_and_trace(
-                    self.address.line().raw(),
-                    self.utt.main.speaker.as_str().to_string(),
-                    DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
-                    format!("ud_to_chat_error={e}"),
-                    true,
-                )));
+                return Err(Declined {
+                    cause: DeclineCause::MappingFailed,
+                    reason: format!("ud_to_chat_error={e}"),
+                });
             }
         };
         match mode {
@@ -479,20 +537,17 @@ impl UtteranceInjection<'_, '_> {
                 let surface = match surface_tokens(raw, self.item, self.words) {
                     Ok(surface) => surface,
                     Err(SurfaceError::Walk(e)) => {
-                        return Err(Box::new(DecisionRecord::new_and_trace(
-                            self.address.line().raw(),
-                            self.utt.main.speaker.as_str().to_string(),
-                            DecisionStrategy::Morphosyntax(MorphosyntaxStrategy::MappingFailed),
-                            format!("ud_to_chat_error={e}"),
-                            true,
-                        )));
+                        return Err(Declined {
+                            cause: DeclineCause::MappingFailed,
+                            reason: format!("ud_to_chat_error={e}"),
+                        });
                     }
                     Err(SurfaceError::Unplaced(refused)) => {
                         let tokens = refused.stanza_tokens_after_mapping.clone();
                         return self.misalignment(
                             refused,
                             &tokens,
-                            RetokenizationContext::StanzaRetokenize,
+                            DeclineCause::RetokenizationFailed,
                         );
                     }
                 };
@@ -530,7 +585,7 @@ impl UtteranceInjection<'_, '_> {
             // Per-utterance injection failure: the 1-to-1 invariant (CHAT
             // alignable-word count == Mor count after mapping) was violated.
             // Refuse the file rather than publishing missing annotations.
-            Err(diag) => self.misalignment(diag, &[], RetokenizationContext::Preserve),
+            Err(diag) => self.misalignment(diag, &[], DeclineCause::Misaligned),
             Ok(()) => {
                 self.result.l2.defer_utterance(
                     self.address,
@@ -571,11 +626,7 @@ impl UtteranceInjection<'_, '_> {
             Err(ExpansionFailure::Relation(error)) => return Err(self.mapping_failure(error)),
             Err(ExpansionFailure::Geometry(refused)) => {
                 let tokens = refused.stanza_tokens_after_mapping.clone();
-                return self.misalignment(
-                    refused,
-                    &tokens,
-                    RetokenizationContext::StanzaRetokenize,
-                );
+                return self.misalignment(refused, &tokens, DeclineCause::RetokenizationFailed);
             }
         };
 
@@ -598,8 +649,11 @@ impl UtteranceInjection<'_, '_> {
         )
         .map_err(|error| self.mapping_failure(error))?;
 
-        // Collect retokenization trace info before modifying the AST.
-        self.result.retokenization_traces.push(RetokenizationInfo {
+        // The trace describes the rewrite, so it is read from the original
+        // words before the utterance changes and kept only if the rewrite
+        // lands: a refused utterance leaves no trace of a retokenization that
+        // never happened.
+        let trace = RetokenizationInfo {
             utterance_ordinal: self.address.utterance().raw(),
             original_words: self
                 .words
@@ -610,7 +664,7 @@ impl UtteranceInjection<'_, '_> {
             mapping: (0..self.words.len())
                 .map(|i| by_text.tokens_for_word(i).to_vec())
                 .collect(),
-        });
+        };
 
         match crate::retokenize::retokenize_utterance(
             self.parser,
@@ -625,8 +679,9 @@ impl UtteranceInjection<'_, '_> {
             // File-level absorption: the typed diagnostic becomes a
             // `MisalignmentBug` outcome with its own strategy label, loud
             // rather than silently absorbed.
-            Err(diag) => self.misalignment(diag, &tokens, RetokenizationContext::StanzaRetokenize),
+            Err(diag) => self.misalignment(diag, &tokens, DeclineCause::RetokenizationFailed),
             Ok(()) => {
+                self.result.retokenization_traces.push(trace);
                 let placement = ItemPlacement::Retokenized(RetokenizedItems {
                     mapped: &token_items,
                     expansion: &expansion,
@@ -643,25 +698,18 @@ impl UtteranceInjection<'_, '_> {
         }
     }
 
-    /// Record a misalignment the injector reported, with the caller's
-    /// context, as a `MisalignmentBug` outcome. Retokenization failures share
-    /// the outcome class but have their own stable strategy label.
+    /// Decline the utterance for a misalignment the injector reported, with
+    /// the model's tokens where the caller has them.
     fn misalignment(
         self,
         diag: crate::inject::MisalignmentDiagnostic,
         tokens: &[String],
-        context: RetokenizationContext,
+        cause: DeclineCause,
     ) -> UtteranceCompletion {
-        let strategy = match context {
-            RetokenizationContext::Preserve => MorphosyntaxStrategy::MisalignmentBug,
-            RetokenizationContext::StanzaRetokenize => MorphosyntaxStrategy::RetokenizationFailed,
-        };
         let diag = enrich_diagnostic(diag, tokens);
-        Err(Box::new(DecisionRecord::new_and_trace(
-            self.address.line().raw(),
-            self.utt.main.speaker.as_str().to_string(),
-            DecisionStrategy::Morphosyntax(strategy),
-            format!(
+        Err(Declined {
+            cause,
+            reason: format!(
                 "class={} expected={} actual={} chat_words={:?} stanza_tokens={:?}",
                 diag.suspected_class.as_str(),
                 diag.expected,
@@ -669,8 +717,7 @@ impl UtteranceInjection<'_, '_> {
                 diag.chat_words,
                 diag.stanza_tokens_after_mapping,
             ),
-            true,
-        )))
+        })
     }
 }
 

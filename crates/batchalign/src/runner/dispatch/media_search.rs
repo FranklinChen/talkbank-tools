@@ -477,7 +477,8 @@ pub(crate) async fn resolve_transcript_media(
     // the transcript's stem, which valid CHAT requires to equal the @Media
     // basename (chatter reports a mismatch as an error). Search order:
     //   1. explicit --media-dir root replacement using the known corpus subdir
-    //   2. paths_mode adjacency (or content-mode source_dir when shared)
+    //   2. a paths-mode job: beside its transcript, then in its admitted
+    //      submitted folder
     //   3. local media_mappings root replacement on the execution host
     //   4. media mapping INFERRED from the client's source path
     //   5. server media_roots fallback
@@ -516,7 +517,9 @@ pub(crate) async fn resolve_transcript_media(
         }
     }
 
-    if original_audio_path.is_none() && job.filesystem.paths_mode {
+    if original_audio_path.is_none()
+        && matches!(job.filesystem.inputs, crate::store::JobInputs::Paths { .. })
+    {
         original_audio_path = search
             .try_place(SearchedPlace::TranscriptAdjacent {
                 transcript: read_path.to_path_buf(),
@@ -525,14 +528,20 @@ pub(crate) async fn resolve_transcript_media(
             .await?;
     }
 
-    if original_audio_path.is_none() && !source_dir.is_empty() {
-        // paths_mode is active here, convert to a ServerPath for I/O.
-        let server_source_dir = source_dir.assume_shared_filesystem();
+    // The submitted folder, searched only when this server admitted it (a
+    // paths-mode job): a content-mode client's folder is on another machine.
+    if original_audio_path.is_none()
+        && let crate::store::JobInputs::Paths {
+            source_dir: Some(admitted),
+            ..
+        } = &job.filesystem.inputs
+    {
+        let server_source_dir = admitted.server().clone();
         let source_path =
             server_source_dir.join(Path::new(filename).file_name().unwrap_or_default());
         original_audio_path = search
             .try_place(SearchedPlace::ClientSourceDir {
-                source_dir: source_dir.to_string(),
+                source_dir: admitted.client().to_string(),
                 transcript: source_path.as_path().to_path_buf(),
                 media_dir: media_dir_path.map(Path::to_path_buf),
             })
@@ -540,7 +549,7 @@ pub(crate) async fn resolve_transcript_media(
         if original_audio_path.is_some() {
             info!(
                 filename,
-                source_dir = %source_dir,
+                source_dir = %admitted.client(),
                 "Resolved audio via client source directory"
             );
         }
@@ -587,7 +596,7 @@ pub(crate) async fn resolve_transcript_media(
                 Some(parent) => source_dir.join(parent),
                 None => source_dir.clone(),
             })
-        } else if job.filesystem.paths_mode {
+        } else if matches!(job.filesystem.inputs, crate::store::JobInputs::Paths { .. }) {
             // read_path is server-local; its parent contains the repo key.
             read_path
                 .parent()

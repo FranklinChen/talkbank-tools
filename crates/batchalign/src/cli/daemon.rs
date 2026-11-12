@@ -2088,14 +2088,15 @@ mod tests {
         port: u16,
         recorded: Option<RequestedRuntime>,
     ) -> (DaemonStartLock, String) {
-        let bound = crate::server_handshake::BoundPort::from_listener_addr(
-            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        )
-        .expect("a bound port is never zero");
         // The published record is the test's fixture, kept until the directory
         // goes; it does not need retiring.
-        let _published =
-            ServerHandshake::publish_listening(dir, HandshakeSlot::Main, bound).unwrap();
+        let _published = ServerHandshake::publish_listening(
+            dir,
+            HandshakeSlot::Main,
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            &crate::same_user_key::ServerKey::generate(),
+        )
+        .unwrap();
         let lock = DaemonStartLock::acquire(DaemonProfile::Main, dir).unwrap();
         if let Some(runtime) = recorded {
             lock.write_info(&daemon_info(std::process::id(), NO_DEVICE_FLAGS, runtime))

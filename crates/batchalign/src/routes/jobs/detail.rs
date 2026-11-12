@@ -275,7 +275,7 @@ mod tests {
 
     use super::result_content_path;
 
-    fn job_detail(paths_mode: bool) -> JobDetail {
+    fn job_detail() -> JobDetail {
         JobDetail {
             output_folders: crate::api::JobOutputFolders {
                 job_id: crate::api::JobId::from("job-1"),
@@ -284,7 +284,6 @@ mod tests {
             command: crate::ReleasedCommand::Align,
             options: crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Align),
             status: JobStatus::Completed,
-            paths_mode,
             staging_dir: batchalign_types::paths::ServerPath::new("/tmp/jobs/job-1"),
             results: vec![FileResultEntry {
                 filename: DisplayPath::from("nested/sample.cha"),
@@ -314,7 +313,7 @@ mod tests {
 
     #[test]
     fn result_lookup_keeps_a_planning_failure_distinct_from_io() {
-        let mut detail = job_detail(false);
+        let mut detail = job_detail();
         detail.options =
             crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Benchmark);
         let error = super::primary_result_entry(&detail, "nested/sample.cha")
@@ -355,8 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn result_content_path_uses_staging_output_for_paths_mode() {
-        let detail = job_detail(true);
+    fn result_content_path_is_the_staged_output_in_either_mode() {
+        let detail = job_detail();
         assert_eq!(
             result_content_path(&detail, &DisplayPath::from("nested/sample.cha")),
             PathBuf::from("/tmp/jobs/job-1/output/nested/sample.cha")
@@ -365,7 +364,7 @@ mod tests {
 
     #[test]
     fn runtime_regression_speaker_result_preserves_directory_identity() {
-        let mut detail = job_detail(true);
+        let mut detail = job_detail();
         detail.command = crate::ReleasedCommand::SpeakerIdentify;
         detail.options = crate::recipe_runner::runtime::test_options(detail.command);
         detail.results[0].filename = "nested/sample_speaker_identity.json".into();
@@ -392,7 +391,7 @@ mod tests {
 
     #[test]
     fn runtime_regression_result_preserves_chat_and_media_input_mapping() {
-        let mut detail = job_detail(false);
+        let mut detail = job_detail();
         assert!(
             super::primary_result_entry(&detail, "nested/sample.cha")
                 .unwrap()

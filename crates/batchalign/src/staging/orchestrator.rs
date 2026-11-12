@@ -73,7 +73,7 @@ pub async fn run_staged_remote_job(
     if let Err(e) = result {
         error!(job_id = %job_id, error = %e, "Staged remote job failed");
         store
-            .update_job_status(&job_id, JobStatus::Failed, Some(e.to_string()))
+            .update_job_status(&job_id, crate::store::Outcome::Failed, Some(e.to_string()))
             .await;
     }
 }
@@ -276,7 +276,7 @@ async fn run_inner(
             )
             .await;
             store
-                .update_job_status(job_id, JobStatus::Completed, None)
+                .update_job_status(job_id, crate::store::Outcome::Completed, None)
                 .await;
             Ok(())
         }
@@ -297,7 +297,7 @@ async fn run_inner(
             store
                 .update_job_status(
                     job_id,
-                    JobStatus::WritebackFailed,
+                    crate::store::Outcome::WritebackFailed,
                     Some(format!("copy-back failed: {e}")),
                 )
                 .await;

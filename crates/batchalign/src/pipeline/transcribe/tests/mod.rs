@@ -97,7 +97,9 @@ fn test_transcribe_options_in(
         ),
         write_wor: false,
         merge_abbrev: crate::params::MergeAbbrevPolicy::Keep,
-        media_name: Some("sample".into()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("sample").expect("fixture media name"),
+        ),
         engine_extras: std::collections::BTreeMap::new(),
     }
 }

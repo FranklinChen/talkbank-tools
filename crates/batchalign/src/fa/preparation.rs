@@ -277,7 +277,7 @@ struct LiveResourceProbe<'a> {
 }
 
 pub(super) enum PreparedFaInput {
-    Cached(super::units::UnitResolution),
+    Cached(super::units::UnitAnswer),
     Inference(Box<PreparedFaRequest>),
 }
 

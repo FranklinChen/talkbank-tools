@@ -10,20 +10,31 @@ transitions, and validation rules for jobs managed by the batchalign3 server.
 
 ## Current Implementation
 
-Every job status change goes through one gate, and legality is checked
-against an explicit table:
+A job's status and its inputs are one value, and every status change is an
+event on it, legal only from the states that event leaves:
 
 | Piece | Where | Role |
 |---|---|---|
-| `Job::set_status` | `store/job/lifecycle.rs` | The ONLY place `execution.status` is assigned outside test fixtures |
-| `JobStatus::can_transition_to` | `types/status.rs` | The transition table below, in code |
-| `StatusChange` | `types/status.rs` | Why the change is happening |
+| `JobLifecycle` | `store/job/types.rs` | `Active { ActiveStatus, JobInputs }` for queued and running jobs, on inputs this process admitted; `Finished { FinishedStatus, StoredInputs }` for the rest, on inputs as stored (admitted or recorded) |
+| `JobStatus::kind` | `types/status.rs` | The one classification of `JobStatus` into `ActiveStatus` and `FinishedStatus`; `is_active` and `is_terminal` are defined from it |
+| the event methods | `store/job/types.rs` | `dispatch`, `memory_requeue`, `stop`, `finish`, `restart`, `resume`, `settle`: each matches the states it leaves exhaustively, and refuses the rest with `Refused { from, event }` |
+| the `Job` transitions | `store/job/lifecycle.rs` | `mark_running`, `requeue_after_memory_gate`, `request_cancellation`, `interrupt_for_shutdown`, `finalize`, `fail`, `prepare_for_restart`, `recover`: each applies one event plus the timestamps, lease and failure reason it owns |
 
-The table is keyed by the REASON, not by the from/to pair alone, because the
-same pair can be legal or illegal depending on what caused it: `Cancelled ->
-Queued` is legal as an operator `Restart` and illegal as a `MemoryRequeue`.
-Conflating those is what allowed the memory gate to resurrect a cancelled
-job (2026-07-29).
+There is no transition table beside the code: the legality of a move is the
+match in the event that makes it. The event names the cause, not only the
+target, because the same from/to pair can be legal or illegal depending on
+what caused it: `Cancelled -> Queued` is a `restart` and no other event
+produces it, so the memory gate (`memory_requeue`, which leaves only active
+states) cannot resurrect a cancelled job, the defect of 2026-07-29.
+
+A job that cannot run can never be queued: "active on unadmitted inputs" is
+not a value `JobLifecycle` has. The two events that leave a finished state,
+`restart` (cancelled, failed, writeback failed) and `resume` (interrupted, at
+startup), check the state, then admit the stored inputs under the rules in
+force now, and only then move; a refused admission changes nothing. A job
+read back from the database is always `Finished` (an active stored status
+loads as `Interrupted`): nothing runs it in this process yet. Moving from
+active to finished hands the admitted inputs over as the stored ones.
 
 A writer whose transition is refused must persist nothing. Both the registry
 wrappers and the store-level helpers propagate the refusal for exactly this
@@ -48,9 +59,9 @@ specified new job; this behavior does not provide an automatic repair command.
 ## State Diagram
 
 `Running --> Interrupted` is the GRACEFUL path, where `interrupt_for_shutdown`
-runs. A hard crash never reaches it, so the row is still `Running` when
-recovery finds it and is reconciled straight from there; that is why
-`JobStatus::is_recoverable` accepts both.
+runs. A hard crash never reaches it, so the row is still `Running` (or
+`Queued`) when the server next starts; the startup rewrite marks such rows
+`Interrupted` before they are loaded, so recovery sees one state either way.
 
 ```mermaid
 stateDiagram-v2
@@ -71,13 +82,17 @@ stateDiagram-v2
     Running --> WritebackFailed: remote copy failed\nfinalize()
     Running --> Interrupted: graceful shutdown\ninterrupt_for_shutdown()
 
-    Interrupted --> Queued: reconcile (resumable)
-    Interrupted --> Failed: reconcile (any errored)
-    Interrupted --> Completed: reconcile (all done)
+    Running --> Interrupted: hard crash
+startup rewrite
+    Queued --> Interrupted: hard crash
+startup rewrite
 
-    Running --> Queued: hard crash, reconcile (resumable)
-    Running --> Failed: hard crash, reconcile (any errored)
-    Running --> Completed: hard crash, reconcile (all done)
+    Interrupted --> Queued: recover, resume
+(resumable, inputs admitted)
+    Interrupted --> Failed: recover, settle
+(inputs refused, or a file failed)
+    Interrupted --> Completed: recover, settle
+(all files done, none failed)
 
     Completed --> [*]
     Failed --> [*]
@@ -99,9 +114,11 @@ stateDiagram-v2
 
 ## Status transition gate
 
-`JobStatus::can_transition_to`, `StatusChange` and `Job::set_status` define
-which lifecycle transitions are legal. Timestamps, lease clearing and failure
-reasons remain owned by the corresponding `Job` method. A declined transition
+The `JobLifecycle` event methods define which transitions are legal; one
+`Job` helper (`accepted`) logs a refusal, so no transition has to remember.
+Timestamps, lease clearing and failure reasons remain owned by the
+corresponding `Job` method, and a requeue (restart or resume) clears the
+previous run's error, completion time, retry time and lease in one place. A declined transition
 keeps the status already accepted by cancellation or shutdown.
 
 Runner completion has a narrower owning boundary: the caller supplies its
@@ -200,9 +217,9 @@ itself inside `tokio::spawn`. The explicit boxed return type breaks the cycle:
 
 | File | Role |
 |------|------|
-| `types/status.rs` | `JobStatus`, `StatusChange`, `can_transition_to` (the table) |
-| `store/job/types.rs` | `Job` struct |
-| `store/job/lifecycle.rs` | `Job::set_status` (the gate) and the transition methods |
+| `types/status.rs` | `JobStatus`, `kind`, `ActiveStatus`, `FinishedStatus` |
+| `store/job/types.rs` | `Job` struct, `JobLifecycle` and its events |
+| `store/job/lifecycle.rs` | The `Job` transition methods and `Job::recover` |
 | `runner/execution.rs` | Claimed dispatch and consuming run completion |
 | `routes/jobs/lifecycle.rs` | Cancel/restart requests |
 | `store/queries/recovery.rs` | Crash recovery |
@@ -341,9 +358,12 @@ rejection that lost its runner.
    `interrupted` rows and does NOT requeue.
 2. `store.load_from_db()` (`store/queries/recovery.rs`) reads each row
    back into memory. For any job with `status ∈ {Interrupted, Running}`,
-   it calls `Job::reconcile_recovered_runtime_state()`: which transitions
+   it calls `Job::reconcile_recovered_runtime_state()`, which transitions
    the in-memory job (and writes back to the DB) to `Queued` if any file
-   is resumable, or to a terminal state otherwise.
+   is resumable and its inputs are admitted under the current rules; to
+   `Failed`, with its unfinished files closed, if they are refused; and
+   otherwise to `Failed` if any file failed, `Completed` if none did. The
+   disposition it returns names every file whose row changed.
 
 If the daemon stays alive across CLI sessions, neither step runs: the
 bootstrap spawn after `load_from_db()` is the only mechanism that rescues

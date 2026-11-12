@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
 use async_trait::async_trait;
@@ -74,21 +73,21 @@ impl ExecutionKernel {
         plan: &JobPlan,
         ctx: &ExecutionContext<'_>,
     ) -> Result<(), crate::error::ServerError> {
-        let file_index_by_display: HashMap<DisplayPath, usize> = ctx
+        let location_by_display: HashMap<DisplayPath, &crate::store::InputLocation> = ctx
             .job
             .pending_files
             .iter()
-            .map(|file| (file.filename.clone(), file.file_index))
+            .map(|file| (file.filename().clone(), file.location()))
             .collect();
         let sink = ctx.host.sink().clone();
         let mut consolidated_rows = Vec::new();
 
         for file in &ctx.job.pending_files {
-            let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename.as_ref());
+            let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());
             lifecycle
                 .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Comparing)
                 .await;
-            if is_gold_file(file.filename.as_ref()) {
+            if is_gold_file(file.filename().as_ref()) {
                 lifecycle.complete_without_result().await;
             }
         }
@@ -97,11 +96,10 @@ impl ExecutionKernel {
             let PlannedWorkUnit::Compare(unit) = work_unit else {
                 continue;
             };
-            let Some(file_index) = file_index_by_display.get(&unit.main.display_path).copied()
-            else {
+            let Some(location) = location_by_display.get(&unit.main.display_path).copied() else {
                 continue;
             };
-            let mut state = CompareExecutionState::new(unit.clone(), file_index);
+            let mut state = CompareExecutionState::new(unit.clone(), location.clone());
             let stage_result = async {
                 for stage in plan.spec.recipe.stages {
                     self.stage_executor
@@ -141,8 +139,8 @@ pub(crate) async fn dispatch_compare_job(
         Err(error) => {
             let sink = host.sink().clone();
             for file in &job.pending_files {
-                let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename.as_ref());
-                if is_gold_file(file.filename.as_ref()) {
+                let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());
+                if is_gold_file(file.filename().as_ref()) {
                     lifecycle.complete_without_result().await;
                     continue;
                 }
@@ -170,7 +168,8 @@ pub(crate) async fn dispatch_compare_job(
 
 struct CompareExecutionState {
     unit: CompareWorkUnit,
-    file_index: usize,
+    /// Where the main transcript is read and its outputs are written.
+    location: crate::store::InputLocation,
     main_text: Option<String>,
     reference: Option<crate::compare::AdmittedComparisonReference>,
     /// Morphotag's PROOF of the main transcript, carried between the two
@@ -182,10 +181,10 @@ struct CompareExecutionState {
 }
 
 impl CompareExecutionState {
-    fn new(unit: CompareWorkUnit, file_index: usize) -> Self {
+    fn new(unit: CompareWorkUnit, location: crate::store::InputLocation) -> Self {
         Self {
             unit,
-            file_index,
+            location,
             main_text: None,
             reference: None,
             morphotagged_main: None,
@@ -340,7 +339,7 @@ impl StageExecutor for CompareStageExecutor {
                 };
                 let written = write_outputs(
                     &ctx.job.filesystem,
-                    state.file_index,
+                    &state.location,
                     artifacts,
                     CompareMaterializedOutputs {
                         chat_output,
@@ -358,25 +357,15 @@ impl StageExecutor for CompareStageExecutor {
     }
 }
 
-fn compare_output_root(filesystem: &crate::store::RunnerFilesystemConfig) -> PathBuf {
-    if filesystem.paths_mode && !filesystem.output_paths.is_empty() {
-        let first_output = filesystem.output_paths[0].assume_shared_filesystem();
-        return Path::new(first_output.as_str())
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-    }
-
-    filesystem.staging_dir.join("output").as_path().to_owned()
-}
-
 async fn write_consolidated_compare_csv(
     filesystem: &crate::store::RunnerFilesystemConfig,
     rows: &[ConsolidatedCompareMetricsRow],
 ) -> Result<(), crate::error::ServerError> {
     let output = format_consolidated_csv(rows)?;
 
-    let primary_path = compare_output_root(filesystem).join("compare.csv");
+    let primary_path = filesystem
+        .inputs
+        .job_level_output(&filesystem.staging_dir, "compare.csv");
     publish_text(&primary_path, &output)
         .await
         .map_err(|error| {
@@ -409,9 +398,7 @@ mod tests {
     use crate::api::{CorrelationId, JobId, LanguageSpec, NumSpeakers};
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
     use crate::planning::build_job_plan;
-    use crate::store::{
-        PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
-    };
+    use crate::store::{RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity};
 
     #[derive(Default)]
     struct FakeGateway {
@@ -479,7 +466,7 @@ mod tests {
     }
 
     fn compare_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
-        RunnerJobSnapshot {
+        crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-compare-kernel"),
                 correlation_id: CorrelationId::from("corr-compare-kernel"),
@@ -497,22 +484,22 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                paths_mode: false,
-                source_paths: Vec::new(),
-                output_paths: Vec::new(),
-                before_paths: Vec::new(),
+                inputs: crate::store::test_support::inputs_from_parts(
+                    vec![DisplayPath::from("sample.cha")],
+                    vec![true],
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
                 staging_dir: batchalign_types::paths::ServerPath::new(staging_dir),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
                 source_dir: batchalign_types::paths::ClientPath::new("/source"),
             },
             cancel_token: CancellationToken::new(),
-            pending_files: vec![PendingJobFile {
-                file_index: 0,
-                filename: DisplayPath::from("sample.cha"),
-                has_chat: true,
-            }],
-        }
+            pending_files: Vec::new(),
+        })
     }
 
     const VALID_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -595,13 +582,19 @@ mod tests {
             }
             OutputFixture::Paths => {
                 let destination = tempdir.path().join("requested").join("sample.cha");
-                snapshot.filesystem.paths_mode = true;
-                snapshot.filesystem.source_paths = vec![batchalign_types::paths::ClientPath::new(
-                    input_dir.join("sample.cha").to_str().unwrap(),
-                )];
-                snapshot.filesystem.output_paths = vec![batchalign_types::paths::ClientPath::new(
-                    destination.to_str().unwrap(),
-                )];
+                snapshot.filesystem.inputs = crate::store::test_support::inputs_from_parts(
+                    vec![DisplayPath::from("sample.cha")],
+                    vec![true],
+                    true,
+                    vec![batchalign_types::paths::ClientPath::new(
+                        input_dir.join("sample.cha").to_str().unwrap(),
+                    )],
+                    vec![batchalign_types::paths::ClientPath::new(
+                        destination.to_str().unwrap(),
+                    )],
+                    vec![],
+                );
+                snapshot = crate::store::test_support::with_pending(snapshot);
             }
         }
         let plan = build_job_plan(&snapshot).expect("plan");

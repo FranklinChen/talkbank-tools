@@ -45,6 +45,9 @@
 //! - `crate::execution` implements the recipe-owned text orchestrators.
 
 mod asr_media;
+/// The one rule for the `@Media` name of a recording (its stem), shared with
+/// the replay paths so they derive it as live transcribe does.
+pub(crate) use asr_media::preserved_media_name_for_chat;
 mod audio_output;
 mod audio_task;
 mod benchmark_pipeline;

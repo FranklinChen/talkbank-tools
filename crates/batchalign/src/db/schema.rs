@@ -147,6 +147,12 @@ pub struct JobRow {
     /// Parallel to `filenames`.
     pub output_paths: Vec<String>,
 
+    /// Column `before_paths TEXT NOT NULL DEFAULT '[]'`: each file's earlier
+    /// version for incremental processing (`null` for none), parallel to
+    /// `source_paths`, or empty when the job had none (and for rows written
+    /// before the column existed).
+    pub before_paths: Vec<Option<String>>,
+
     /// Eagerly loaded from the `file_statuses` table (one row per filename).
     /// Not a column on the `jobs` table itself, populated by a second query
     /// in [`JobDB::load_all_jobs`].

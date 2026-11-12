@@ -54,6 +54,6 @@ mod tests {
 
         assert_eq!(snapshot.dispatch.command.as_ref(), "morphotag");
         assert_eq!(snapshot.pending_files.len(), 1);
-        assert_eq!(snapshot.pending_files[0].filename.as_ref(), "b.cha");
+        assert_eq!(snapshot.pending_files[0].filename().as_ref(), "b.cha");
     }
 }

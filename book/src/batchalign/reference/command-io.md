@@ -589,10 +589,11 @@ destination contract, not a substitute for command-specific CHAT admission.
 | Direction | `paths_mode=true` (local daemon) | `paths_mode=false` (remote `--server`) |
 |-----------|----------------------------------|----------------------------------------|
 | **Request body** | `JobSubmission { paths_mode: true, source_paths, output_paths, before_paths, display_names, ... }`: path lists only (~KB) | `JobSubmission { paths_mode: false, files: [FilePayload { filename, content }], ... }`: full file bytes inline (can be 100+ MB) |
-| **Server read** | Runner opens each `source_paths[i]` directly via `tokio::fs::read_to_string` (see `crates/batchalign/src/execution/text_io.rs`) | Runner reads the staged copy from `staging_dir/input/<filename>` that the POST handler wrote before returning 202 |
+| **Admission** | Every `source_paths`, `output_paths` and `before_paths` entry, and `source_dir`, must be absolute and inside a folder of the server's `paths_mode_roots`; with none configured the job is refused at submission ([path provenance](../architecture/path-provenance.md#paths-mode-admission-by-configured-folders)) | File names must be plain relative names; no server-side paths are named |
+| **Server read** | Runner opens each file's admitted source directly via `tokio::fs::read_to_string` (see `crates/batchalign/src/execution/text_io.rs`) | Runner reads the staged copy from `staging_dir/input/<filename>` that the POST handler wrote before returning 202 |
 | **Server write** | Runner writes command-named artifacts under the admitted `output_paths[i]` parent; CLI copy-back uses those same destinations | Runner writes to `staging_dir/output/`; CLI copy-back uses the source-bound destination plan |
 | **Body limit (`max_body_bytes_mb`)** | Not a factor, body is a path list | Structural ceiling; operators raise `max_body_bytes_mb` for large remote payloads |
-| **Where `DirectHost` fits in** | `DirectHost` is a further optimization used when the CLI falls back to inline in-process execution (no HTTP). It uses the same `source_paths` / `output_paths` convention the local daemon uses, just without the HTTP hop | n/a |
+| **Where `DirectHost` fits in** | `DirectHost` is a further optimization used when the CLI falls back to inline in-process execution (no HTTP). It uses the same `source_paths` / `output_paths` convention the local daemon uses, just without the HTTP hop, and admits any absolute path as the user's own process (`AllowedRoots::same_user`), with no folder list | n/a |
 
 ### Request/response sequence
 

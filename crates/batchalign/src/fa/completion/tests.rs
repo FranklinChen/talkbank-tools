@@ -172,6 +172,7 @@ fn requested_untimed_words_count_what_their_requests_yielded() {
               "kind": "requested",
               "answered": 1,
               "unaligned": 1,
+              "refused": 0,
               "unrequested": 0
             }
           }

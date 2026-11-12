@@ -57,6 +57,9 @@ pub struct NewJobRecord {
     pub source_paths: Vec<String>,
     /// Absolute output paths for paths mode.
     pub output_paths: Vec<String>,
+    /// Each file's earlier version for paths mode (`None` for none), or
+    /// empty when the job has none.
+    pub before_paths: Vec<Option<String>>,
 }
 
 impl JobDB {
@@ -77,6 +80,8 @@ impl JobDB {
             serialize_job_field(&job.job_id, "source_paths", &job.source_paths)?;
         let output_paths_json =
             serialize_job_field(&job.job_id, "output_paths", &job.output_paths)?;
+        let before_paths_json =
+            serialize_job_field(&job.job_id, "before_paths", &job.before_paths)?;
         let paths_mode_int = job.paths_mode as i32;
         let (submitted_by, submitted_by_name) = Submitter::columns(job.submitter.as_ref());
 
@@ -89,9 +94,9 @@ impl JobDB {
                 options, engine_overrides,
                 media_mapping, media_subdir, source_dir,
                 submitted_by, submitted_by_name, submitted_at,
-                paths_mode, source_paths, output_paths, correlation_id,
+                paths_mode, source_paths, output_paths, before_paths, correlation_id,
                 leased_by_node, lease_expires_at, lease_heartbeat_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
         )
         .bind(&job.job_id)
         .bind(&job.command)
@@ -112,6 +117,7 @@ impl JobDB {
         .bind(paths_mode_int)
         .bind(&source_paths_json)
         .bind(&output_paths_json)
+        .bind(&before_paths_json)
         .bind(&job.correlation_id)
         .execute(&mut *tx)
         .await?;

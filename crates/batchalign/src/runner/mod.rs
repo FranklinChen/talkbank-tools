@@ -21,6 +21,7 @@
 mod context;
 pub(crate) mod debug_dumper;
 mod dispatch;
+pub(crate) use dispatch::preserved_media_name_for_chat;
 pub(crate) use dispatch::{
     AbandonedPartialAttempt, CompletedRecognition, UtrRecognitionRoute, UtrTokenConversion,
 };

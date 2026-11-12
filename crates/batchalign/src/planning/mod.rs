@@ -63,10 +63,9 @@ pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, Plannin
         spec,
         work_units,
         artifacts,
-        io_mode: if job.filesystem.paths_mode {
-            IoMode::Paths
-        } else {
-            IoMode::Content
+        io_mode: match job.filesystem.inputs {
+            crate::store::JobInputs::Paths { .. } => IoMode::Paths,
+            crate::store::JobInputs::Content(_) => IoMode::Content,
         },
     })
 }
@@ -108,12 +107,10 @@ mod tests {
     use super::*;
     use crate::api::{CorrelationId, JobId, LanguageSpec, NumSpeakers, ReleasedCommand};
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
-    use crate::store::{
-        PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
-    };
+    use crate::store::{RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity};
 
     fn compare_snapshot(paths_mode: bool) -> RunnerJobSnapshot {
-        RunnerJobSnapshot {
+        crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-plan"),
                 correlation_id: CorrelationId::from("corr-plan"),
@@ -130,35 +127,31 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                paths_mode,
-                source_paths: vec![
-                    batchalign_types::paths::ClientPath::from("/src/nested/sample.cha"),
-                    batchalign_types::paths::ClientPath::from("/src/nested/sample.gold.cha"),
-                ],
-                output_paths: vec![
-                    batchalign_types::paths::ClientPath::from("/out/nested/sample.cha"),
-                    batchalign_types::paths::ClientPath::from("/out/nested/sample.gold.cha"),
-                ],
-                before_paths: Vec::new(),
+                inputs: crate::store::test_support::inputs_from_parts(
+                    vec![
+                        DisplayPath::from("nested/sample.cha"),
+                        DisplayPath::from("nested/sample.gold.cha"),
+                    ],
+                    vec![true, true],
+                    paths_mode,
+                    vec![
+                        batchalign_types::paths::ClientPath::from("/src/nested/sample.cha"),
+                        batchalign_types::paths::ClientPath::from("/src/nested/sample.gold.cha"),
+                    ],
+                    vec![
+                        batchalign_types::paths::ClientPath::from("/out/nested/sample.cha"),
+                        batchalign_types::paths::ClientPath::from("/out/nested/sample.gold.cha"),
+                    ],
+                    Vec::new(),
+                ),
                 staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
                 source_dir: batchalign_types::paths::ClientPath::new("/src"),
             },
             cancel_token: CancellationToken::new(),
-            pending_files: vec![
-                PendingJobFile {
-                    file_index: 0,
-                    filename: DisplayPath::from("nested/sample.cha"),
-                    has_chat: true,
-                },
-                PendingJobFile {
-                    file_index: 1,
-                    filename: DisplayPath::from("nested/sample.gold.cha"),
-                    has_chat: true,
-                },
-            ],
-        }
+            pending_files: Vec::new(),
+        })
     }
 
     #[test]

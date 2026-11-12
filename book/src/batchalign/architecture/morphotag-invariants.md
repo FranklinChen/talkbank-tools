@@ -214,7 +214,7 @@ silent `%mor` loss.
 | --- | --- | --- |
 | `NotApplicable { reason }` | The utterance had zero Mor-alignable words. No `%mor` is produced, and that is correct. Reasons: `FillerOnly`, `FragmentOnly`, `NonwordOnly`, `UntranscribedOnly`, `AllRetraced`, `MixedNonLinguistic`, `Empty`. | Typed `morphosyntax:not_applicable` record. |
 | `Aligned { n_words }` | `N` CHAT words, `N` `%mor` items; happy path. | No anomaly record. |
-| `MisalignmentBug(diag)` | `|mors| ≠ N` after mapping. A bug in extract, realign, or project. Carries a typed diagnostic with `chat_words`, `stanza_tokens_after_mapping`, `expected`, `actual`, and a best-effort `suspected_class`. | Traced `morphosyntax:misalignment_bug` record with `needs_review=true`. |
+| `MisalignmentBug(diag)` | `|mors| ≠ N` after mapping. A bug in extract, realign, or project. Carries a typed diagnostic with `chat_words`, `stanza_tokens_after_mapping`, `expected`, `actual`, and a best-effort `suspected_class`. | The utterance is declined (`DeclineCause::Misaligned`): left as it was, and named in the file's `PrimaryMorphologyIncomplete` shortfall. |
 
 No `review_level` value writes `%xalign` or `%xrev`. The typed outcomes exist
 and anomaly records are traced, but morphotag does not yet persist the collected

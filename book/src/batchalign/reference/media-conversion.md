@@ -447,6 +447,10 @@ via `paths_mode`:
 - `source_paths`: absolute input paths the server must be able to read
 - `output_paths`: absolute output paths the server must be able to write
 
+Both must lie inside a folder the server's `server.yaml` lists under
+`paths_mode_roots`; with none listed, the server refuses the job at
+submission (see [server mode](../user-guide/server-mode.md#paths-mode-folders)).
+
 Media is resolved from the execution host's own view, as above.
 
 ### `--server` on another host (content mode)

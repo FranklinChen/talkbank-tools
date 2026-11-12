@@ -30,7 +30,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
         options: &crate::options::CommandOptions,
         sink: &'a dyn RunnerEventSink,
     ) -> Result<Self, ServerError> {
-        if file.filename != unit.audio().display_path {
+        if *file.filename() != unit.audio().display_path {
             return Err(ServerError::Validation(
                 "benchmark output plan belongs to a different source".into(),
             ));
@@ -66,7 +66,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
 
     /// Persistence failures are terminal; they must not repeat paid inference.
     pub(super) async fn persist(self, outputs: BenchmarkOutputs) -> FileTaskOutcome {
-        let lifecycle = FileRunTracker::new(self.sink, self.file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(self.sink, self.file.filename().as_ref());
         match self.write(outputs).await {
             Ok(written) => written.complete().await,
             Err(error) => lifecycle
@@ -82,7 +82,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
         })?;
         let chat_target = ChatOutputTarget::new(
             self.filesystem,
-            self.file.file_index,
+            self.file.location(),
             &self.primary.display_path,
         );
         write_text_output_artifact(&chat_target, outputs.annotated_main_chat.as_str())
@@ -95,7 +95,7 @@ impl<'a> BenchmarkOutputPlan<'a> {
             })?;
         let csv_target = ChatOutputTarget::new(
             self.filesystem,
-            self.file.file_index,
+            self.file.location(),
             &self.sidecar.display_path,
         );
         write_text_output_artifact(&csv_target, &metrics_csv)
@@ -124,7 +124,7 @@ struct WrittenBenchmark<'a> {
 
 impl WrittenBenchmark<'_> {
     async fn complete(self) -> FileTaskOutcome {
-        FileRunTracker::new(self.sink, self.file.filename.as_ref())
+        FileRunTracker::new(self.sink, self.file.filename().as_ref())
             .complete_with_result(self.primary.display_path, self.primary.content_type)
             .await
             .into()
@@ -171,29 +171,37 @@ mod tests {
         }
     }
 
-    fn filesystem(root: &std::path::Path) -> RunnerFilesystemConfig {
+    /// The one-recording benchmark job: paths mode (read in place, written
+    /// to `requested/`) or staged, with `display` as its name.
+    fn filesystem_named(
+        root: &std::path::Path,
+        paths_mode: bool,
+        display: &str,
+    ) -> RunnerFilesystemConfig {
+        let client = |relative: &str| ClientPath::new(root.join(relative).to_str().expect("UTF-8"));
         RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![ClientPath::new(
-                root.join("input/clip.wav").to_str().expect("UTF-8"),
-            )],
-            output_paths: vec![ClientPath::new(
-                root.join("requested/clip.cha").to_str().expect("UTF-8"),
-            )],
-            before_paths: vec![],
+            inputs: crate::store::test_support::inputs_from_parts(
+                vec![display.into()],
+                vec![false],
+                paths_mode,
+                vec![client("input/clip.wav")],
+                vec![client("requested/clip.cha")],
+                vec![],
+            ),
             staging_dir: ServerPath::new(root.join("staging").to_str().expect("UTF-8")),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
-            source_dir: ClientPath::new(root.join("input").to_str().expect("UTF-8")),
+            source_dir: client("input"),
         }
     }
 
-    fn file() -> PendingJobFile {
-        PendingJobFile {
-            file_index: 0,
-            filename: "nested/clip.wav".into(),
-            has_chat: false,
-        }
+    fn filesystem(root: &std::path::Path) -> RunnerFilesystemConfig {
+        filesystem_named(root, true, "nested/clip.wav")
+    }
+
+    /// The job's one pending file, as its own inputs give it.
+    fn file_of(filesystem: &RunnerFilesystemConfig) -> PendingJobFile {
+        crate::store::test_support::pending_files(&filesystem.inputs).remove(0)
     }
 
     #[test]
@@ -201,7 +209,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temporary directory");
         let filesystem = filesystem(temp.path());
         let unit = unit(&temp.path().join("input/clip.wav"));
-        let file = file();
+        let file = file_of(&filesystem);
         let sink = RecordingSink::default();
         let options = crate::recipe_runner::runtime::test_options(ReleasedCommand::Align);
         let Err(error) = BenchmarkOutputPlan::admit(&filesystem, &file, &unit, &options, &sink)
@@ -234,7 +242,7 @@ mod tests {
                 .expect("block destination with directory");
             let filesystem = filesystem(temp.path());
             let unit = unit(&temp.path().join("input/clip.wav"));
-            let file = file();
+            let file = file_of(&filesystem);
             let sink = RecordingSink::default();
             let plan = BenchmarkOutputPlan::admit(
                 &filesystem,
@@ -271,10 +279,9 @@ mod tests {
     async fn benchmark_writes_complete_pairs_in_paths_and_staged_modes() {
         for paths_mode in [true, false] {
             let temp = tempfile::tempdir().expect("temporary directory");
-            let mut filesystem = filesystem(temp.path());
-            filesystem.paths_mode = paths_mode;
+            let filesystem = filesystem_named(temp.path(), paths_mode, "nested/clip.wav");
             let unit = unit(&temp.path().join("input/clip.wav"));
-            let file = file();
+            let file = file_of(&filesystem);
             let sink = RecordingSink::default();
             let outputs = outputs();
             let expected_csv = outputs.metrics.to_csv_string().expect("CSV");
@@ -317,10 +324,9 @@ mod tests {
     #[test]
     fn benchmark_output_plan_rejects_a_different_source_file() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let filesystem = filesystem(temp.path());
+        let filesystem = filesystem_named(temp.path(), true, "other.wav");
         let unit = unit(&temp.path().join("input/clip.wav"));
-        let mut file = file();
-        file.filename = "other.wav".into();
+        let file = file_of(&filesystem);
         let sink = RecordingSink::default();
         assert!(matches!(
             BenchmarkOutputPlan::admit(

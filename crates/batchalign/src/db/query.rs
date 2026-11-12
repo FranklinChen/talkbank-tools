@@ -29,6 +29,7 @@ impl JobDB {
                     COALESCE(paths_mode, 0) as paths_mode,
                     COALESCE(source_paths, '[]') as source_paths,
                     COALESCE(output_paths, '[]') as output_paths,
+                    COALESCE(before_paths, '[]') as before_paths,
                     COALESCE(correlation_id, '') as correlation_id
              FROM jobs
              ORDER BY submitted_at DESC",
@@ -43,6 +44,7 @@ impl JobDB {
             let options_json: String = row.try_get("options")?;
             let source_paths_json: String = row.try_get("source_paths")?;
             let output_paths_json: String = row.try_get("output_paths")?;
+            let before_paths_json: String = row.try_get("before_paths")?;
             let paths_mode_int: i32 = row.try_get("paths_mode")?;
 
             let job_id: String = row.try_get("job_id")?;
@@ -62,6 +64,7 @@ impl JobDB {
             let has_chat = deserialize_job_field(&job_id, "has_chat", &has_chat_json)?;
             let source_paths = deserialize_job_field(&job_id, "source_paths", &source_paths_json)?;
             let output_paths = deserialize_job_field(&job_id, "output_paths", &output_paths_json)?;
+            let before_paths = deserialize_job_field(&job_id, "before_paths", &before_paths_json)?;
 
             let job = JobRow {
                 job_id,
@@ -92,6 +95,7 @@ impl JobDB {
                 paths_mode: paths_mode_int != 0,
                 source_paths,
                 output_paths,
+                before_paths,
                 file_statuses: Vec::new(),
             };
             jobs.push(job);

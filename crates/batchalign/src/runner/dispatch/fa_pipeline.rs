@@ -683,11 +683,10 @@ pub(crate) async fn dispatch_fa_infer(
         let admission = admission.clone();
         let gpu_models = gpu_models.clone();
         let file = file.clone();
-        let file_index = file.file_index;
-        let before_path = job.filesystem.before_path(file_index);
+        let before_path = file.before_path();
         let utr_engine = utr_engine.clone();
         let utr_strategy = utr_strategy.clone();
-        let filename = file.filename.clone();
+        let filename = file.filename().clone();
 
         tasks.push(spawn_supervised_file_task(
             filename,
@@ -747,8 +746,8 @@ async fn process_one_fa_file(
         media_dir,
     } = context;
     let job_id = &job.identity.job_id;
-    let file_index = file.file_index;
-    let filename = file.filename.as_ref();
+    let file_index = file.file_index();
+    let filename = file.filename().as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
@@ -769,20 +768,7 @@ async fn process_one_fa_file(
     };
 
     // Read the CHAT file
-    let read_path: PathBuf =
-        if job.filesystem.paths_mode && file_index < job.filesystem.source_paths.len() {
-            job.filesystem.source_paths[file_index]
-                .assume_shared_filesystem()
-                .as_path()
-                .to_owned()
-        } else {
-            job.filesystem
-                .staging_dir
-                .join("input")
-                .join(filename)
-                .as_path()
-                .to_owned()
-        };
+    let read_path = file.input_path(&job.filesystem.staging_dir);
     let chat_text = match tokio::fs::read_to_string(&read_path).await {
         Ok(content) => content,
         Err(e) => {

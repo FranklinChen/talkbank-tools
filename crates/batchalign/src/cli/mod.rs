@@ -275,6 +275,7 @@ pub async fn run_command(cli: args::Cli) -> Result<(), error::CliError> {
             }
             args::ServeAction::Stop => serve_cmd::stop().await,
             args::ServeAction::Status(status_args) => serve_cmd::status(status_args).await,
+            args::ServeAction::SignRequest(sign_args) => serve_cmd::sign_request(sign_args).await,
         },
         #[cfg(not(feature = "server"))]
         Commands::Serve(_) => {

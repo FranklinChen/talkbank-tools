@@ -196,6 +196,11 @@ impl PartialEq for DiagnosedOutput {
 }
 
 impl DiagnosedOutput {
+    /// The model as generated, which the bytes are written from.
+    pub(crate) fn document(&self) -> &ChatFile {
+        &self.document.file
+    }
+
     /// The command whose output this is.
     pub(crate) fn command(&self) -> ReleasedCommand {
         self.command
@@ -478,6 +483,14 @@ impl From<PostValidated> for ProducedOutput {
 }
 
 impl ProducedOutput {
+    /// The model the bytes are written from, admitted or diagnosed.
+    pub(crate) fn document(&self) -> &ChatFile {
+        match self {
+            Self::Admitted(admitted) => admitted.document(),
+            Self::Diagnosed(diagnosed) => diagnosed.document(),
+        }
+    }
+
     /// The command whose output this is.
     pub(crate) fn command(&self) -> ReleasedCommand {
         match self {

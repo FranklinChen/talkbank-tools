@@ -348,7 +348,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
         )
         .unwrap();
-        let (_, deferred) = injection.into_parts();
+        let deferred = injection.into_parts().l2;
         (
             chat,
             super::l2::plan_dispatch_spans(deferred.into_reported_positions()).spans,
@@ -369,7 +369,11 @@ mod tests {
             super::merge_responses(outcome, &mut applied, &mut merged);
             assert!(merged.is_empty());
             assert!(applied.ran_no_model());
-            let (shortfalls, exclusions) = applied.into_secondary().into_records(&chat).unwrap();
+            let (shortfalls, exclusions) = applied
+                .into_reports()
+                .secondary
+                .into_records(&chat)
+                .unwrap();
             assert!(exclusions.is_empty());
             let crate::api::OutputShortfallRecord::SecondaryMorphologyIncomplete {
                 spans,
@@ -418,7 +422,11 @@ mod tests {
         assert!(applied.ran_no_model(), "merge success is not installation");
         super::install_spans(&mut chat, merged, &mut applied);
         assert!(!applied.ran_no_model());
-        let (shortfalls, exclusions) = applied.into_secondary().into_records(&chat).unwrap();
+        let (shortfalls, exclusions) = applied
+            .into_reports()
+            .secondary
+            .into_records(&chat)
+            .unwrap();
         assert!(shortfalls.is_empty());
         assert!(exclusions.is_empty());
         assert!(batchalign_transform::serialize::to_chat_string(&chat).contains("noun|mundo"));

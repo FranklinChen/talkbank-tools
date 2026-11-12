@@ -31,6 +31,13 @@ pub struct ServerConfig {
     /// never while loading configuration.
     #[serde(default)]
     pub media_roots: Vec<batchalign_types::paths::ServerPath>,
+    /// Folders paths-mode jobs may read from and write to. Empty (the
+    /// default) turns paths mode off: the server has no authentication and a
+    /// paths-mode job names files on the server's own disk, so which folders
+    /// a client may name is the server's explicit choice. Each must be an
+    /// absolute, existing folder; the server refuses to start otherwise.
+    #[serde(default)]
+    pub paths_mode_roots: Vec<std::path::PathBuf>,
     /// Named media directory mappings (e.g. `{"childes-data": "/nfs/childes"}`).
     /// Clients reference the key in `JobSubmission.media_mapping`; the server
     /// resolves it to the filesystem root.  Allows stable logical names even
@@ -71,7 +78,10 @@ pub struct ServerConfig {
     /// rather than predicted from here. Default: 8000.
     #[serde(default)]
     pub port: super::PortRequest,
-    /// Bind address for the HTTP server.  Default: `"0.0.0.0"` (all interfaces).
+    /// Bind address for the HTTP server. Default: `"127.0.0.1"` (this machine
+    /// only). The server has no authentication and accepts paths on its own
+    /// filesystem, so serving other machines (`"0.0.0.0"` or an address) is an
+    /// explicit choice for a trusted network.
     #[serde(default = "default_host")]
     pub host: String,
 
@@ -347,7 +357,7 @@ pub(crate) fn default_lang() -> LanguageCode3 {
 }
 
 pub(crate) fn default_host() -> String {
-    "0.0.0.0".to_string()
+    "127.0.0.1".to_string()
 }
 
 pub(crate) fn default_true() -> bool {
@@ -413,11 +423,12 @@ impl Default for ServerConfig {
         Self {
             verbose: 0,
             media_roots: Vec::new(),
+            paths_mode_roots: Vec::new(),
             media_mappings: BTreeMap::new(),
             default_lang: LanguageCode3::eng(),
             max_concurrent_jobs: None,
             port: super::PortRequest::default(),
-            host: "0.0.0.0".to_string(),
+            host: default_host(),
             force_cpu: None,
             allow_mps: None,
             max_workers_per_job: None,

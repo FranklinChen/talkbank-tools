@@ -304,12 +304,7 @@ async fn execute_claimed_job(
     );
 
     // Pre-validate media files (paths_mode only) to fail fast before worker dispatch.
-    let media_failures = preflight_validate_media(
-        &file_list,
-        &job.filesystem.source_paths,
-        job.filesystem.paths_mode,
-    )
-    .await;
+    let media_failures = preflight_validate_media(&file_list).await;
 
     // Mark invalid files as errors immediately and collect the valid file list.
     file_list = if media_failures.is_empty() {
@@ -319,7 +314,7 @@ async fn execute_claimed_job(
             record_preflight_media_failures(sink.as_ref(), &file_list, &media_failures).await;
         file_list
             .into_iter()
-            .filter(|file| !failed_indices.contains(&file.file_index))
+            .filter(|file| !failed_indices.contains(&file.file_index()))
             .collect()
     };
 
@@ -412,8 +407,8 @@ pub(super) async fn record_preflight_media_failures(
 
     for (&idx, err_msg) in media_failures {
         failed_indices.insert(idx);
-        if let Some(file) = file_list.iter().find(|file| file.file_index == idx) {
-            FileRunTracker::new(sink, &file.filename)
+        if let Some(file) = file_list.iter().find(|file| file.file_index() == idx) {
+            FileRunTracker::new(sink, file.filename())
                 .record_setup_failure(err_msg, FailureCategory::Validation)
                 .await;
         }
@@ -513,9 +508,17 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let host = build_empty_host(tempdir.path()).await;
         let mut job = crate::store::test_support::running_job_fixture();
-        job.execution.status = crate::api::JobStatus::Queued;
+        job.execution
+            .lifecycle
+            .force_status_for_test(crate::api::JobStatus::Queued);
         job.runtime.runner_active = false;
-        job.filesystem.has_chat = vec![false];
+        // Its one file becomes a recording: morphotag cannot take it.
+        let crate::store::JobInputs::Content(files) =
+            job.execution.lifecycle.admitted_mut_for_test()
+        else {
+            panic!("the fixture is a content-mode job");
+        };
+        files[0].kind = crate::store::InputKind::Media;
         let job_id = job.identity.job_id.clone();
         host.store.submit(job).await.expect("submit the job");
 

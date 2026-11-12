@@ -223,7 +223,7 @@ fn excluded_scoped_words_and_replacements_consume_no_model_positions() {
 }
 
 #[test]
-fn an_unsafe_expansion_refuses_without_mutating_the_source_or_claiming_completion() {
+fn an_unsafe_expansion_is_declined_without_mutating_the_source_or_claiming_completion() {
     for (body, rows) in [
         ("I can't$n [= cannot] go .", CONTRACTION),
         // Equal cardinality cannot disguise a length-guessed correspondence.
@@ -238,10 +238,12 @@ fn an_unsafe_expansion_refuses_without_mutating_the_source_or_claiming_completio
         ),
     ] {
         let source = parse_chat(&one_utterance(body));
-        let (chat, refused) = inject_case(body, rows, TokenizationMode::StanzaRetokenize);
-        assert!(
-            refused.is_err(),
-            "{body}: no completion for unsafe expansion"
+        let (chat, injected) = inject_case(body, rows, TokenizationMode::StanzaRetokenize);
+        let declined = injected.expect("the batch binds").into_parts().declined;
+        assert_eq!(
+            declined.len(),
+            1,
+            "{body}: the unsafe expansion is declined, not completed"
         );
         let actual = first_utterance(&chat);
         assert_eq!(

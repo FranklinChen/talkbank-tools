@@ -382,7 +382,8 @@ impl StatusTarget {
         }
         match client.health_check(self.url()).await {
             Ok(health) if health.build_hash == crate::build_hash() => ServerObservation::Ready {
-                url: self.url().to_owned(), build_hash: health.build_hash,
+                url: self.url().to_owned(),
+                build_hash: health.build_hash,
             },
             Ok(_) => ServerObservation::Refused {
                 message: "The managed server and installed CLI are different builds. Update/restart the managed service before processing; the desktop will not replace it.".to_owned(),
@@ -396,6 +397,31 @@ impl StatusTarget {
 
 fn print_observation(observation: &ServerObservation) -> Result<(), CliError> {
     println!("{}", serde_json::to_string(observation)?);
+    Ok(())
+}
+
+/// `serve sign-request`: the same-user header value for one request to this
+/// account's own server, for the desktop app, which never holds the key.
+/// The body is read from stdin; only the header value is printed.
+pub async fn sign_request(args: &crate::cli::args::ServeSignRequestArgs) -> Result<(), CliError> {
+    use std::io::Read;
+    let layout = RuntimeLayout::from_env();
+    let Some(own) = crate::same_user_key::OwnServer::read(layout.state_dir(), HandshakeSlot::Main)
+        .map_err(|error| CliError::InvalidArgument(error.to_string()))?
+    else {
+        return Err(CliError::InvalidArgument(
+            "no server of this account has published a same-user key".into(),
+        ));
+    };
+    let mut body = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut body)
+        .map_err(CliError::Io)?;
+    let client = BatchalignClient::new()?;
+    let header = client
+        .sign_for_own(&own, &args.method.to_ascii_uppercase(), &args.path, &body)
+        .await?;
+    println!("{header}");
     Ok(())
 }
 

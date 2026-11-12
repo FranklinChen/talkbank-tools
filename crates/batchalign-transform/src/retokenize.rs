@@ -6,7 +6,6 @@
 //! that decides when and with what payloads to invoke this transform.
 
 use smallvec::SmallVec;
-use talkbank_model::model::TierContentItems;
 use talkbank_model::model::{GrammaticalRelation, Mor, Utterance};
 
 use crate::extract::ExtractedWord;
@@ -219,9 +218,6 @@ pub fn retokenize_utterance(
     terminator: talkbank_model::Terminator,
     gra_relations: Vec<GrammaticalRelation>,
 ) -> Result<(), MisalignmentDiagnostic> {
-    if original_words.is_empty() || stanza_tokens.is_empty() {
-        return Ok(());
-    }
     // Render typed terminator to its CHAT surface form for retokenization
     // diagnostics that compare against the source bytes.
     let terminator_surface = terminator.to_string();
@@ -240,13 +236,12 @@ pub fn retokenize_utterance(
         emitted_tokens: std::collections::HashSet::new(),
     };
 
-    let old_content = utterance.main.content.content.take();
+    // The rebuild reads a copy and the utterance is written once, after
+    // expansion and tier admission have both succeeded: a refused rewrite
+    // leaves the source utterance exactly as it was, with nothing to restore.
+    let old_content: Vec<_> = utterance.main.content.content.iter().cloned().collect();
     let mut new_content = Vec::with_capacity(old_content.len());
-
-    // Retain the source payload until expansion and tier admission both
-    // succeed. A refused rewrite must not turn a clean source into a damaged
-    // intermediate, or certify completion merely because counts still match.
-    rebuild_content(old_content.clone(), &mut ctx, &mut new_content);
+    rebuild_content(old_content, &mut ctx, &mut new_content);
 
     if let Some(first) = ctx.diagnostics.first() {
         // The utterance reports as the first refusal's kind; every refusal
@@ -255,7 +250,6 @@ pub fn retokenize_utterance(
         for warning in &ctx.diagnostics {
             tracing::warn!("retokenize: {warning}");
         }
-        utterance.main.content.content = TierContentItems::new(old_content);
         return Err(MisalignmentDiagnostic {
             chat_words: original_words
                 .iter()
@@ -277,12 +271,10 @@ pub fn retokenize_utterance(
         mor_cursor = ctx.mor_cursor,
         "retokenize_utterance: about to inject"
     );
-    utterance.main.content.content = TierContentItems::new(new_content);
-    let admitted = crate::inject::inject_morphosyntax(utterance, mors, terminator, gra_relations);
-    if admitted.is_err() {
-        utterance.main.content.content = TierContentItems::new(old_content);
-    }
-    admitted
+    // Admitted against the rebuilt content, and written with it: the
+    // content and its tiers are installed together or not at all.
+    crate::inject::admit_rewrite(utterance, new_content, mors, terminator, gra_relations)?.write();
+    Ok(())
 }
 
 #[cfg(test)]

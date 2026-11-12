@@ -51,10 +51,48 @@ pub(crate) struct AppPaths {
 pub(crate) struct AppEnvironment {
     /// Server configuration loaded from the runtime-owned `server.yaml`.
     pub config: ServerConfig,
+    /// The admitted `paths_mode_roots`, resolved once at startup.
+    pub allowed_roots: batchalign_types::paths::AllowedRoots,
+    /// This server's same-user key, published in its handshake: a request
+    /// proved under it is from this server's own account (see
+    /// [`crate::same_user_key`]).
+    pub same_user_key: crate::same_user_key::ServerKey,
+    /// Nonces issued for same-user proofs, each good once.
+    pub same_user_nonces: crate::same_user_key::NonceStore,
     /// Media resolver with a cached view of configured media roots.
     pub media: MediaResolver,
     /// Server-managed filesystem roots.
     pub paths: AppPaths,
+}
+
+impl AppEnvironment {
+    /// The authority a request's paths are admitted under: the user's own
+    /// process for a valid same-user proof from this machine, the configured
+    /// folders for a request with none. A proof that does not hold is
+    /// refused rather than downgraded.
+    pub(crate) fn authority_for(
+        &self,
+        headers: &axum::http::HeaderMap,
+        peer: std::net::SocketAddr,
+        request: &crate::same_user_key::RequestBinding<'_>,
+    ) -> Result<batchalign_types::paths::AllowedRoots, crate::error::ServerError> {
+        use crate::same_user_key::{HEADER, KeyRefusal, PeerLocality, Requester};
+        let presented = match headers.get(HEADER) {
+            None => None,
+            Some(value) => Some(value.to_str().map_err(|_| KeyRefusal::Malformed)?),
+        };
+        Ok(
+            match self.same_user_key.requester(
+                presented,
+                PeerLocality::of(peer),
+                request,
+                &self.same_user_nonces,
+            )? {
+                Requester::SameUser => batchalign_types::paths::AllowedRoots::same_user(),
+                Requester::Unidentified => self.allowed_roots.clone(),
+            },
+        )
+    }
 }
 
 /// Build and version identity surfaced to clients.

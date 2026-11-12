@@ -106,14 +106,13 @@ impl CliHarness {
         std::fs::write(&config_path, "[asr]\nengine = whisper\n")
             .expect("write test .batchalign.ini");
 
-        std::fs::write(state_dir.join("server.yaml"), ISOLATED_SERVER_YAML)
-            .expect("write isolation server.yaml");
-
-        Self {
+        let harness = Self {
             _scratch: scratch,
             home_dir,
             state_dir,
-        }
+        };
+        harness.write_server_config(ISOLATED_SERVER_YAML);
+        harness
     }
 
     /// Create a command bound to this harness's isolated Batchalign home.
@@ -152,14 +151,43 @@ impl CliHarness {
         self.state_dir.join("server.yaml")
     }
 
-    /// Write a `server.yaml` file under this harness.
+    /// Write a `server.yaml` file under this harness: `yaml`, given the one
+    /// paths-mode folder every harness server uses unless `yaml` names its
+    /// own, the system temporary folder, where every fixture's inputs and
+    /// outputs live. A server admits paths-mode paths only inside its
+    /// `paths_mode_roots`, and the CLI uses paths mode for a server on this
+    /// machine. This is the one writer of the harness config, so no test can
+    /// start a server that refuses its files. Parsed and re-serialized, never
+    /// appended to as text.
     pub fn write_server_config(&self, yaml: &str) {
-        std::fs::write(self.server_config_path(), yaml).expect("write server config");
+        let mut config: yaml_serde::Value = if yaml.trim().is_empty() {
+            yaml_serde::Value::Mapping(yaml_serde::Mapping::new())
+        } else {
+            yaml_serde::from_str(yaml).expect("test server.yaml is YAML")
+        };
+        let yaml_serde::Value::Mapping(entries) = &mut config else {
+            panic!("test server.yaml must be a mapping: {yaml}");
+        };
+        let key = yaml_serde::Value::from("paths_mode_roots");
+        if !entries.contains_key(&key) {
+            entries.insert(
+                key,
+                yaml_serde::Value::Sequence(vec![yaml_serde::Value::from(
+                    std::env::temp_dir().to_string_lossy().into_owned(),
+                )]),
+            );
+        }
+        std::fs::write(
+            self.server_config_path(),
+            yaml_serde::to_string(&config).expect("serialize test server.yaml"),
+        )
+        .expect("write server config");
     }
 
     /// Restore this harness's isolation config.
     ///
-    /// Writes [`ISOLATED_SERVER_YAML`], the SAME bytes the constructor does.
+    /// Writes [`ISOLATED_SERVER_YAML`] through the one writer, as the
+    /// constructor does.
     /// It used to write `"auto_daemon: false\n"` by hand, which silently
     /// dropped the `port: 0` half of the isolation for any binary that called
     /// it (`command_matrix.rs` does), leaving those tests probing whatever
@@ -327,6 +355,8 @@ pub async fn start_live_server_on(
         host: "127.0.0.1".into(),
         port: batchalign::config::PortRequest::from_u16(0),
         media_roots,
+        // Every fixture's files live under the system temporary folder.
+        paths_mode_roots: vec![std::env::temp_dir()],
         memory_gate_mb: match headroom {
             LiveHeadroom::None => Some(MemoryMb(0)),
             LiveHeadroom::ProductDefault => None,

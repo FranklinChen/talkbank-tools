@@ -7,7 +7,7 @@ use crate::fa::cache_storage::read_values;
 use crate::fa::preparation::RequestScope;
 
 enum CandidateReceipt {
-    Admitted(UnitResolution),
+    Admitted(UnitAnswer),
     Miss,
 }
 
@@ -16,13 +16,13 @@ pub(in crate::fa) struct CandidateCacheReceipts {
 }
 
 pub(in crate::fa) enum CandidateCacheState<'a> {
-    Admitted(&'a UnitResolution),
+    Admitted(&'a UnitAnswer),
     Miss,
     Unexamined,
 }
 
 pub(in crate::fa) enum CandidateCacheAvailability {
-    Admitted(UnitResolution),
+    Admitted(UnitAnswer),
     Miss,
 }
 
@@ -136,7 +136,7 @@ pub(super) async fn resolve(
     context: FaPreparationContext<'_>,
     raw: Option<&serde_json::Value>,
     derived: Option<&serde_json::Value>,
-) -> Option<UnitResolution> {
+) -> Option<UnitAnswer> {
     resolve_admission(
         FaCacheUnitAdmission::new(
             unit,
@@ -155,7 +155,7 @@ async fn resolve_admission(
     context: FaPreparationContext<'_>,
     raw: Option<&serde_json::Value>,
     derived: Option<&serde_json::Value>,
-) -> Option<UnitResolution> {
+) -> Option<UnitAnswer> {
     if context.services.attention_capture_dir.is_some()
         && context.params.engine == crate::types::engines::FaEngineName::Whisper
         && !crate::fa::attention_capture::cached_available(raw, admission.key.as_str()).await
@@ -166,15 +166,18 @@ async fn resolve_admission(
     for refusal in resolution.refusals {
         warn!(error = %refusal.error, cache_layer = refusal.layer, key = admission.key.as_str(), "Cached FA evidence was refused");
     }
-    match resolution.admitted {
-        AdmittedFaCacheGroup::RawEvidence(evidence) => Some(UnitResolution {
-            timings: evidence.into_timings(),
-            source: FaEvidenceSourceTrace::RawEvidenceReplay,
-        }),
-        AdmittedFaCacheGroup::DerivedTimings(timings) => Some(UnitResolution {
-            timings: timings.into_timings(),
-            source: FaEvidenceSourceTrace::Cache,
-        }),
-        AdmittedFaCacheGroup::Miss => None,
-    }
+    let (timings, source) = match resolution.admitted {
+        AdmittedFaCacheGroup::RawEvidence(evidence) => (
+            evidence.into_timings(),
+            FaEvidenceSourceTrace::RawEvidenceReplay,
+        ),
+        AdmittedFaCacheGroup::DerivedTimings(timings) => {
+            (timings.into_timings(), FaEvidenceSourceTrace::Cache)
+        }
+        AdmittedFaCacheGroup::Miss => return None,
+    };
+    // Unbound: whoever holds the request binds it (the reply ticket, or the
+    // supplied-retry path), and an entry that does not answer its request is
+    // refused there and aligned again.
+    Some(UnitAnswer::new(timings, source))
 }

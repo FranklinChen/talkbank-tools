@@ -95,8 +95,7 @@ where
         command_label,
     } = reporting;
     let job_id = &job.identity.job_id;
-    let filename = file.filename.as_ref();
-    let file_index = file.file_index;
+    let filename = file.filename().as_ref();
     let mut attempts = FileAttempts::begin(lifecycle, work_unit_kind, running_stage).await;
     loop {
         // The observer records each checkout of this attempt that waits on a
@@ -138,7 +137,7 @@ where
                     &job.filesystem,
                     job.dispatch.command,
                     &job.dispatch.options,
-                    file_index,
+                    file.location(),
                     filename,
                     file_output,
                 )
@@ -238,9 +237,7 @@ mod tests {
     };
     use crate::runner::dispatch::audio_output::ChatOutput;
     use crate::scheduling::AttemptOutcome;
-    use crate::store::{
-        PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
-    };
+    use crate::store::{RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity};
     use crate::worker::error::WorkerError;
     use batchalign_types::paths::{ClientPath, ServerPath};
 
@@ -297,7 +294,7 @@ mod tests {
     }
 
     fn fake_job(tmp: &tempfile::TempDir) -> RunnerJobSnapshot {
-        RunnerJobSnapshot {
+        crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("audio-shell"),
                 correlation_id: CorrelationId::from("corr-audio-shell"),
@@ -320,27 +317,27 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                paths_mode: true,
-                source_paths: vec![ClientPath::new("/input/test.mp3")],
-                output_paths: vec![ClientPath::new(
-                    tmp.path()
-                        .join("requested/test.cha")
-                        .to_string_lossy()
-                        .to_string(),
-                )],
-                before_paths: Vec::new(),
+                inputs: crate::store::test_support::inputs_from_parts(
+                    vec![DisplayPath::from("nested/test.mp3")],
+                    vec![false],
+                    true,
+                    vec![ClientPath::new("/input/test.mp3")],
+                    vec![ClientPath::new(
+                        tmp.path()
+                            .join("requested/test.cha")
+                            .to_string_lossy()
+                            .to_string(),
+                    )],
+                    Vec::new(),
+                ),
                 staging_dir: ServerPath::new(tmp.path().join("staging")),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
                 source_dir: ClientPath::new("/input"),
             },
             cancel_token: CancellationToken::new(),
-            pending_files: vec![PendingJobFile {
-                file_index: 0,
-                filename: DisplayPath::from("nested/test.mp3"),
-                has_chat: false,
-            }],
-        }
+            pending_files: Vec::new(),
+        })
     }
 
     #[tokio::test]
@@ -349,7 +346,7 @@ mod tests {
         let job = fake_job(&tmp);
         let file = job.pending_files[0].clone();
         let sink_impl = Arc::new(RecordingSink::default());
-        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename().as_ref());
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
             .await;
@@ -447,7 +444,7 @@ mod tests {
         let job = fake_job(&tmp);
         let file = job.pending_files[0].clone();
         let sink_impl = Arc::new(RecordingSink::default());
-        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename().as_ref());
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
             .await;

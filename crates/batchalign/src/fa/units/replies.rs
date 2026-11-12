@@ -1,5 +1,6 @@
 //! Unique completion rights, minted with their receiving slot and progress.
 
+use super::resolution::{UnitAnswer, bind_timings};
 use super::*;
 use std::sync::{
     Arc,
@@ -38,6 +39,36 @@ impl ReplyProgress {
     pub(super) fn total(&self) -> usize {
         self.0.total
     }
+}
+
+/// One request's timings, bound to that request (one slot per request word,
+/// every timing inside the request window), and where they came from.
+///
+/// Its fields are private to this module and only a [`ReplyTicket`] builds
+/// one, against its own unit, so the ledger can assemble every resolution it
+/// receives without a refusal path: an answer bound for another request, or
+/// not bound at all, cannot reach it.
+#[derive(Debug)]
+pub(in crate::fa) struct UnitResolution {
+    timings: Vec<Option<WordTiming>>,
+    source: FaEvidenceSourceTrace,
+}
+
+impl UnitResolution {
+    /// The timings, one per request word, and their source.
+    pub(super) fn into_parts(self) -> (Vec<Option<WordTiming>>, FaEvidenceSourceTrace) {
+        (self.timings, self.source)
+    }
+}
+
+/// What became of a cached answer offered to a ticket.
+#[must_use = "a refused cache answer leaves its request to be aligned"]
+pub(super) enum CacheDelivery<'unit> {
+    /// The answer fit its request and was delivered.
+    Delivered,
+    /// The answer does not answer its request: corrupt evidence for it, so
+    /// the ticket comes back and the request is aligned again.
+    Refused(ReplyTicket<'unit>),
 }
 
 /// A receiving slot cannot issue a new completion right.
@@ -89,16 +120,52 @@ impl<'unit> ReplyTicket<'unit> {
         self.unit
     }
 
-    pub(super) fn cached(self, answer: UnitResolution) -> Result<(), ServerError> {
-        self.deliver(answer)
+    /// Offer a cached answer, bound to this ticket's own request.
+    pub(super) fn cached(self, answer: UnitAnswer) -> Result<CacheDelivery<'unit>, ServerError> {
+        let (timings, source) = answer.into_parts();
+        match bind_timings(self.unit.input(), timings) {
+            Ok(timings) => {
+                self.deliver(UnitResolution { timings, source })?;
+                Ok(CacheDelivery::Delivered)
+            }
+            Err(refusal) => {
+                tracing::warn!(
+                    %refusal,
+                    request = self.unit.ordinal.0,
+                    group = self.unit.group.0,
+                    "Cached FA evidence does not answer its request; aligning it again"
+                );
+                Ok(CacheDelivery::Refused(self))
+            }
+        }
     }
 
+    /// Deliver a worker's answer, bound to this ticket's own request. A
+    /// reply that does not answer for it leaves only its words untimed,
+    /// recorded as refused: a defect local to one window never fails the
+    /// file.
     pub(in crate::fa) fn observed(
         self,
         timings: Vec<Option<WordTiming>>,
         source: FaEvidenceSourceTrace,
     ) -> Result<(), ServerError> {
-        self.deliver(UnitResolution { timings, source })
+        let request = self.unit.input();
+        let resolution = match bind_timings(request, timings) {
+            Ok(timings) => UnitResolution { timings, source },
+            Err(refusal) => {
+                tracing::warn!(
+                    %refusal,
+                    request = self.unit.ordinal.0,
+                    group = self.unit.group.0,
+                    "FA reply does not answer its request; that request's words stay untimed"
+                );
+                UnitResolution {
+                    timings: vec![None; request.words().len()],
+                    source: FaEvidenceSourceTrace::Refused,
+                }
+            }
+        };
+        self.deliver(resolution)
     }
 
     fn deliver(self, answer: UnitResolution) -> Result<(), ServerError> {

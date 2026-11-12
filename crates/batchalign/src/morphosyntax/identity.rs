@@ -217,6 +217,7 @@ impl MorphosyntaxRepairs {
 pub(crate) struct AppliedAnalyses {
     engines: MorphosyntaxEngines,
     repairs: MorphosyntaxRepairs,
+    primary: super::report::PrimaryReport,
     secondary: super::report::SecondaryReport,
 }
 
@@ -272,7 +273,16 @@ impl AppliedAnalyses {
     pub(crate) fn extend(&mut self, other: Self) {
         self.engines.0.extend(other.engines.0);
         self.repairs.extend(other.repairs);
+        self.primary.extend(other.primary);
         self.secondary.extend(other.secondary);
+    }
+
+    /// Record the utterances an injection declined, each left as it was.
+    pub(crate) fn declined_primary(
+        &mut self,
+        declined: Vec<batchalign_transform::morphosyntax::DeclinedUtterance>,
+    ) {
+        self.primary.declined(declined);
     }
 
     pub(crate) fn annotate_secondary(
@@ -286,8 +296,12 @@ impl AppliedAnalyses {
         &mut self.secondary
     }
 
-    pub(crate) fn into_secondary(self) -> super::report::SecondaryReport {
-        self.secondary
+    /// The analysis reports, both domains together.
+    pub(crate) fn into_reports(self) -> super::report::AnalysisReports {
+        super::report::AnalysisReports {
+            primary: self.primary,
+            secondary: self.secondary,
+        }
     }
 
     /// Preserve pre-dispatch extraction failures before consuming positions.

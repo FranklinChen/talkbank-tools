@@ -175,6 +175,26 @@ struct HandshakeRecord {
     /// type has no public deserializer. `parse` lifts it via
     /// [`BoundPort::reported`].
     port: NonZeroU16,
+    /// The address the server bound: where this account's clients reach
+    /// this server and no other. Absent in records from older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    address: Option<std::net::IpAddr>,
+    /// The server's same-user key (hexadecimal), published and retired with
+    /// the rest of this record, so a key never outlives or precedes its
+    /// server's handshake. The record is owner-only. Absent in records from
+    /// older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
+/// This account's own server as its handshake names it: where it listens and
+/// the key it published. Read only from an owner-only record.
+pub(crate) struct OwnServerRecord {
+    /// The address to reach it at: the bound address, or the loopback
+    /// address of the same family when it bound every interface.
+    pub(crate) address: std::net::SocketAddr,
+    /// Its key, hexadecimal, as published.
+    pub(crate) key: String,
 }
 
 /// What the state directory says about the server process.
@@ -247,6 +267,12 @@ pub enum HandshakeError {
         /// The underlying failure.
         #[source]
         source: std::io::Error,
+    },
+    /// The record is not this account's alone, so its key cannot be trusted.
+    #[error("server handshake at {path} is not private to this account; its key is not used")]
+    NotPrivate {
+        /// The file involved.
+        path: PathBuf,
     },
     /// The file exists but holds neither a bare PID nor a handshake record.
     ///
@@ -363,6 +389,54 @@ impl ServerHandshake {
         Self::parse(text.trim(), &path).map(Some)
     }
 
+    /// This account's own server for `slot`, as its handshake names it: only
+    /// from a record that carries an address and a key, and (on Unix) only
+    /// from a file owned by this account and readable by no one else.
+    /// `Ok(None)` when there is no such record.
+    pub(crate) fn own_server(
+        state_dir: &Path,
+        slot: HandshakeSlot,
+    ) -> Result<Option<OwnServerRecord>, HandshakeError> {
+        let path = Self::path_in(state_dir, slot);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(HandshakeError::Io { path, source }),
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = std::fs::metadata(&path).map_err(|source| HandshakeError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            // `geteuid` has no preconditions and cannot fail.
+            let owner = unsafe { libc::geteuid() };
+            if metadata.uid() != owner || metadata.permissions().mode() & 0o077 != 0 {
+                return Err(HandshakeError::NotPrivate { path });
+            }
+        }
+        let Ok(record) = serde_json::from_str::<HandshakeRecord>(text.trim()) else {
+            return Ok(None);
+        };
+        let (Some(ip), Some(key)) = (record.address, record.key) else {
+            return Ok(None);
+        };
+        let reach = match ip {
+            std::net::IpAddr::V4(v4) if v4.is_unspecified() => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            }
+            std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            }
+            bound => bound,
+        };
+        Ok(Some(OwnServerRecord {
+            address: std::net::SocketAddr::new(reach, record.port.get()),
+            key,
+        }))
+    }
+
     /// Interpret the file's bytes.
     fn parse(text: &str, path: &Path) -> Result<Self, HandshakeError> {
         // Legacy form: a bare PID, written by builds before the port was
@@ -389,14 +463,30 @@ impl ServerHandshake {
     /// while the record still names this process, so a server that is
     /// stopping cannot delete the handshake a replacement server has since
     /// published.
+    ///
+    /// The record carries the bound address and the server's same-user key,
+    /// so both are published, and later retired, in this one write.
     pub fn publish_listening(
         state_dir: &Path,
         slot: HandshakeSlot,
-        port: BoundPort,
+        listening: std::net::SocketAddr,
+        key: &crate::same_user_key::ServerKey,
     ) -> Result<PublishedHandshake, HandshakeError> {
         let pid = std::process::id();
+        let port = BoundPort::from_listener_addr(listening).ok_or_else(|| HandshakeError::Io {
+            path: Self::path_in(state_dir, slot),
+            source: std::io::Error::other(format!("{listening} reports port 0")),
+        })?;
         let lock = HandshakeLock::acquire(state_dir, slot)?;
-        Self::write(&lock, HandshakeRecord { pid, port: port.0 })?;
+        Self::write(
+            &lock,
+            HandshakeRecord {
+                pid,
+                port: port.0,
+                address: Some(listening.ip()),
+                key: Some(key.record_value()),
+            },
+        )?;
         drop(lock);
         Ok(PublishedHandshake {
             state_dir: state_dir.to_path_buf(),
@@ -611,6 +701,8 @@ mod tests {
             HandshakeRecord {
                 pid: 1,
                 port: main_port.0,
+                address: None,
+                key: None,
             },
         )
         .expect("publish main");
@@ -619,6 +711,8 @@ mod tests {
             HandshakeRecord {
                 pid: 2,
                 port: side_port.0,
+                address: None,
+                key: None,
             },
         )
         .expect("publish sidecar");
@@ -645,6 +739,8 @@ mod tests {
             HandshakeRecord {
                 pid: 1,
                 port: port.0,
+                address: None,
+                key: None,
             },
         )
         .expect("publish main");
@@ -653,6 +749,8 @@ mod tests {
             HandshakeRecord {
                 pid: 2,
                 port: port.0,
+                address: None,
+                key: None,
             },
         )
         .expect("publish sidecar");
@@ -675,9 +773,13 @@ mod tests {
     #[test]
     fn retiring_leaves_a_replacement_servers_record() {
         let d = dir();
-        let published =
-            ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, bound(41004))
-                .expect("publish ours");
+        let published = ServerHandshake::publish_listening(
+            d.path(),
+            HandshakeSlot::Main,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 41004)),
+            &crate::same_user_key::ServerKey::generate(),
+        )
+        .expect("publish ours");
         // A replacement server (another process) publishes over it.
         let replacement = std::process::id().wrapping_add(1);
         ServerHandshake::write(
@@ -685,6 +787,8 @@ mod tests {
             HandshakeRecord {
                 pid: replacement,
                 port: bound(41005).0,
+                address: None,
+                key: None,
             },
         )
         .expect("replacement publishes");
@@ -706,9 +810,13 @@ mod tests {
     #[test]
     fn retiring_our_own_record_removes_it() {
         let d = dir();
-        let published =
-            ServerHandshake::publish_listening(d.path(), HandshakeSlot::Main, bound(41006))
-                .expect("publish");
+        let published = ServerHandshake::publish_listening(
+            d.path(),
+            HandshakeSlot::Main,
+            std::net::SocketAddr::from(([127, 0, 0, 1], 41006)),
+            &crate::same_user_key::ServerKey::generate(),
+        )
+        .expect("publish");
         assert_eq!(published.retire().expect("retire"), Removal::Removed);
         assert_eq!(
             ServerHandshake::read(d.path(), HandshakeSlot::Main).expect("read"),
@@ -736,6 +844,8 @@ mod tests {
             HandshakeRecord {
                 pid: 4242,
                 port: port.0,
+                address: None,
+                key: None,
             },
         )
         .expect("publish");

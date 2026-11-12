@@ -1784,7 +1784,21 @@ pub struct FaUnrequestedPieceTrace {
     pub window: RefusedWindowTrace,
     /// No new timing, or existing `%wor` reused for the whole group. A planned
     /// refusal never discards independently admitted retained timing.
-    pub source: FaEvidenceSourceTrace,
+    pub source: UnrequestedRangeSource,
+}
+
+/// What became of a word range no request covered: the only two outcomes an
+/// unrequested range can have, so a count of them is exhaustive. Its wire
+/// names are those of the same outcomes in [`FaEvidenceSourceTrace`], so
+/// stored evidence reads unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum UnrequestedRangeSource {
+    /// Not requested, and no timing came from anywhere: left unaligned.
+    Unaligned,
+    /// The whole group was reused from an existing healthy `%wor` tier.
+    WorReuse,
 }
 
 /// One piece of an anchored group: its request's window, words and evidence.
@@ -1840,6 +1854,11 @@ pub enum FaEvidenceSourceTrace {
     Inference,
     /// No usable worker evidence was obtained; words were left unaligned.
     Unaligned,
+    /// A worker or the cache answered, and the answer was refused: a timing
+    /// outside its request window, or timings for a different number of
+    /// words than the request held. Only that request's words were left
+    /// untimed; the rest of the file kept its timing.
+    Refused,
 }
 
 /// One forced-alignment engine fallback that occurred for a single group.

@@ -566,21 +566,26 @@ mod tests {
 
     /// An utterance whose analysis does not align to its words gets no
     /// `%mor` to splice into, so nothing is deferred: the utterance is
-    /// reported as a misalignment. It used to be deferred anyway, with a
+    /// declined as a misalignment. It used to be deferred anyway, with a
     /// structure invented for the missing UD word (`dep`, no POS, head 0),
     /// which the planner then read as "this word is the utterance root".
     #[test]
     fn a_misaligned_utterance_defers_nothing() {
         // Three UD words for four CHAT words.
-        let refusal = inject(
+        let injection = inject(
             "I took the camino@s:spa .",
             sentence(&[("I", 2, "nsubj"), ("took", 0, "root"), ("the", 2, "obj")]),
         )
-        .expect_err("incomplete morphology cannot admit secondary dispatch");
-        let crate::morphosyntax::InjectionError::Incomplete(decision) = refusal else {
-            panic!("expected an utterance refusal");
+        .expect("one utterance's misalignment is declined, not the batch");
+        assert!(injection.l2().positions().is_empty());
+        let declined = injection.into_parts().declined;
+        let [utterance] = declined.as_slice() else {
+            panic!("one declined utterance: {declined:?}");
         };
-        assert_eq!(decision.strategy.strategy_name(), "misalignment_bug");
+        assert_eq!(
+            utterance.cause,
+            crate::morphosyntax::DeclineCause::Misaligned
+        );
     }
 
     /// An utterance whose every word is code-switched is injected without

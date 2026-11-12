@@ -14,9 +14,7 @@ mod runner;
 pub(crate) use db_helpers::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
 pub(crate) use dispatch::LeaseRenewalOutcome;
 
-use crate::api::{
-    CancellationRequest, JobId, JobInfo, JobListItem, JobStatus, MachineTime, StatusChange,
-};
+use crate::api::{CancellationRequest, JobId, JobInfo, JobListItem, JobStatus, MachineTime};
 
 use tracing::warn;
 
@@ -236,18 +234,14 @@ impl JobStore {
     ///
     /// Used by the staged remote orchestrator to set terminal states
     /// (`Completed`, `Failed`, `WritebackFailed`) after remote execution.
-    pub async fn update_job_status(
+    pub(crate) async fn update_job_status(
         &self,
         job_id: &JobId,
-        status: JobStatus,
+        outcome: crate::store::Outcome,
         error: Option<String>,
     ) {
         let error_clone = error.clone();
-        let completed_at = if status.is_terminal() {
-            Some(self.now())
-        } else {
-            None
-        };
+        let completed_at = self.now();
         // Goes through the state machine like every other writer: a remote
         // result must not overwrite a status the job already reached, such as
         // a user's cancel landing while the remote leg was still running.
@@ -256,14 +250,11 @@ impl JobStore {
         if self
             .registry
             .update_job(job_id.clone(), move |job| {
-                if !job.set_status(status, StatusChange::Finalize) {
+                if !job.finalize(outcome, completed_at) {
                     return false;
                 }
                 if let Some(err) = error_clone {
                     job.execution.error = Some(err);
-                }
-                if let Some(ts) = completed_at {
-                    job.schedule.completed_at = Some(ts);
                 }
                 true
             })
@@ -364,10 +355,17 @@ mod tests {
             crate::ReleasedCommand::Morphotag,
             vec!["one.cha".into(), "nested/two.cha".into()],
         );
-        job.filesystem.paths_mode = true;
         job.source.source_dir = path("misleading-input");
-        job.filesystem.source_paths = vec![path("input/one.cha"), path("input/nested/two.cha")];
-        job.filesystem.output_paths = vec![path("results/one.cha"), path("results/nested/two.cha")];
+        job.execution.lifecycle.replace_inputs_for_test(
+            crate::store::test_support::inputs_from_parts(
+                vec!["one.cha".into(), "nested/two.cha".into()],
+                Vec::new(),
+                true,
+                vec![path("input/one.cha"), path("input/nested/two.cha")],
+                vec![path("results/one.cha"), path("results/nested/two.cha")],
+                Vec::new(),
+            ),
+        );
         let id = JobId::from("persisted-output");
         store.submit(job).await.unwrap();
         let before =
@@ -380,7 +378,25 @@ mod tests {
             tx,
             Arc::new(crate::clock::SystemClock),
         );
-        assert_eq!(recovered.load_from_db().await.unwrap(), 1);
+        // A server with no paths-mode folders: the queued job cannot run,
+        // so it comes back failed with the reason, never dropped, and its
+        // recorded output folders are shown as before.
+        assert_eq!(
+            recovered
+                .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                .await
+                .unwrap(),
+            1
+        );
+        let info = recovered.get(&id).await.unwrap();
+        assert_eq!(info.status, crate::api::JobStatus::Failed);
+        assert!(
+            info.error
+                .as_deref()
+                .is_some_and(|error| error.contains("paths mode is not enabled")),
+            "{:?}",
+            info.error
+        );
         let after =
             serde_json::to_value(recovered.get_job_detail(&id).await.unwrap().output_folders)
                 .unwrap();
@@ -620,7 +636,10 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
         drop(db);
-        restored.load_from_db().await.expect("load");
+        restored
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .expect("load");
         let info = restored.get(&job_id).await.expect("restored job");
         assert_eq!(info.status, JobStatus::Completed);
         let diagnosed = entry(&info, "a.cha");
@@ -701,19 +720,22 @@ mod tests {
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
-                filenames: filenames.into_iter().map(DisplayPath::from).collect(),
-                has_chat,
                 staging_dir: Default::default(),
-                paths_mode: false,
-                source_paths: Vec::new(),
-                output_paths: Vec::new(),
-                before_paths: Vec::new(),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
-                source_dir: Default::default(),
             },
             execution: JobExecutionState {
-                status: JobStatus::Queued,
+                lifecycle: crate::store::JobLifecycle::for_test(
+                    JobStatus::Queued,
+                    crate::store::test_support::inputs_from_parts(
+                        filenames.into_iter().map(DisplayPath::from).collect(),
+                        has_chat,
+                        false,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ),
                 file_statuses,
                 results: Vec::new(),
                 error: None,
@@ -799,7 +821,9 @@ mod tests {
         );
 
         let mut job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        job.execution.status = JobStatus::Completed;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Completed);
         store.submit(job).await.unwrap();
 
         store.delete(&JobId::from("j1")).await.unwrap();
@@ -844,7 +868,9 @@ mod tests {
         std::fs::write(staging_dir.join("artifact.txt"), "artifact").unwrap();
 
         let mut job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        job.execution.status = JobStatus::Completed;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Completed);
         job.filesystem.staging_dir = batchalign_types::paths::ServerPath::from(staging_dir.clone());
         store.submit(job).await.unwrap();
 
@@ -867,12 +893,16 @@ mod tests {
 
         let mut j1 = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
         j1.schedule.submitted_at = crate::unix_time(100.0);
-        j1.execution.status = JobStatus::Completed;
+        j1.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Completed);
         store.submit(j1).await.unwrap();
 
         let mut j2 = make_job("j2", ReleasedCommand::Align, vec!["b.cha".into()]);
         j2.schedule.submitted_at = crate::unix_time(200.0);
-        j2.execution.status = JobStatus::Completed;
+        j2.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Completed);
         store.submit(j2).await.unwrap();
 
         let items = store.list_all().await;

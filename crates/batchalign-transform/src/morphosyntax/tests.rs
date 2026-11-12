@@ -730,7 +730,7 @@ fn ambiguous_inline_language_keeps_surrounding_analysis_and_reports_its_absence(
         "1 hello hello INTJ _ 0 root\n2 mundo mundo NOUN _ 1 obj\n3 . . PUNCT _ 1 punct",
     );
     assert_eq!(mor, "%mor:\tintj|hello L2|xxx .");
-    let (_, extraction) = injection.into_parts();
+    let extraction = injection.into_parts().l2;
     assert_eq!(extraction.unaligned().len(), 1);
     assert_eq!(extraction.unaligned()[0].at_s_words, 1);
     assert!(matches!(

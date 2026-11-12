@@ -24,6 +24,41 @@ HTTP capacity-wait control and persistent shutdown/recovery control qualify
 those boundaries separately from current-candidate CLIARE measurement. See
 the [run ownership flow](../architecture/job-state-machine.md#what-a-cancel-stops).
 
+Network exposure and submission admission (2026-11-12) are deliberate behavior
+changes with unchanged spellings. `serve start --host` and `server.yaml`'s
+`host` keep their forms, and an explicit `0.0.0.0` still serves every
+interface; only the default moved from `0.0.0.0` to `127.0.0.1`, because the
+server has no authentication and accepts server-side paths. Every local
+client already reaches its server at `127.0.0.1`. `POST /jobs` (and the direct
+CLI path) now refuses a content-mode file name that is absolute, contains `.`
+or `..`, repeats another, or needs another file's name to be a folder, with a
+validation error before any staging; ordinary and nested relative names are
+admitted as before. Validation also refuses duplicate output paths, a
+`display_names` list of another length than `source_paths`, and paths-mode
+fields in a content-mode request, and resolves `utseg`'s route itself, so a
+language with no route is refused on every path, not only once a worker
+catalog exists.
+
+Paths-mode admission (2026-11-12) is a deliberate behavior change with
+unchanged spellings. No public flag or argument changed; the submit and
+restart requests gain an optional `x-batchalign-same-user` proof header, the
+server a `POST /same-user/nonce` route, and the CLI a hidden `serve
+sign-request` subcommand for the desktop app. A server admits any path for its
+own account (the CLI and desktop app prove each request with the key in its
+handshake; the key is never sent), and for anyone else only inside
+`server.yaml`'s new `paths_mode_roots` folders; without a proof and with none
+listed, a command is refused at submission with a validation error naming the
+setting, and a proof that does not hold is refused with a 403 naming the
+cause. A real binary run (no folders configured) showed the CLI's `morphotag`
+through a loopback `--server` completing, an unproved request refused, a
+forged proof refused, a proof signed by `serve sign-request` accepted, and its
+replay refused. `--no-server` and `--sequential`
+(direct execution, the user's own process) are unaffected and remain the
+supported legacy pathways. Paths-mode job listings name files relative to the
+submitted folder, and two inputs with one display name are refused. Evidence
+is source review and the library and integration suites on the candidate;
+no CLIARE measurement of this candidate exists yet.
+
 1. Identify the affected CLI contract and its owning types before implementation.
    Decode retained spellings at the boundary into the same typed command intent;
    do not duplicate runtime policy behind an alias.

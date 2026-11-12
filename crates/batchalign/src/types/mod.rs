@@ -80,16 +80,17 @@
 //! Checking job status predicates:
 //!
 //! ```
-//! use batchalign::api::JobStatus;
+//! use batchalign::api::{ActiveStatus, FinishedStatus, JobStatus, StatusKind};
 //!
 //! let status = JobStatus::Running;
 //! assert!(status.is_active());
 //! assert!(status.can_cancel());
 //! assert!(!status.is_terminal());
+//! assert_eq!(status.kind(), StatusKind::Active(ActiveStatus::Running));
 //!
 //! let done = JobStatus::Completed;
 //! assert!(done.is_terminal());
-//! assert!(!done.can_restart());
+//! assert_eq!(done.kind(), StatusKind::Finished(FinishedStatus::Completed));
 //! ```
 //!
 //! Loading server configuration from a YAML string:

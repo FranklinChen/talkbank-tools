@@ -825,7 +825,7 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
         &empty_mwt,
     )
     .expect("primary injection should succeed");
-    let (_, l2) = injection.into_parts();
+    let l2 = injection.into_parts().l2;
     let deferred = l2.into_reported_positions();
     assert_eq!(
         deferred.len(),
@@ -1708,19 +1708,18 @@ fn inject_results_count_mismatch_propagates_error() {
         TokenizationMode::Preserve,
         &empty_mwt,
     )
-    .expect_err("an incomplete utterance must refuse the file");
-    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) = outcome else {
-        panic!("expected an utterance refusal");
+    .expect("the batch binds; the misaligned utterance is declined");
+    let declined = outcome.into_parts().declined;
+    let [decision] = declined.as_slice() else {
+        panic!("one declined utterance: {declined:?}");
     };
-    assert_eq!(decision.strategy.strategy_name(), "misalignment_bug");
-    assert!(decision.needs_review);
+    assert_eq!(
+        decision.cause,
+        batchalign_transform::morphosyntax::DeclineCause::Misaligned
+    );
     let reason = &decision.reason;
     assert!(reason.contains("expected=3"), "got: {reason}");
     assert!(reason.contains("actual=2"), "got: {reason}");
-    assert!(
-        decision.needs_review,
-        "misalignment bugs always require human review"
-    );
 }
 
 /// End-to-end: a mid-utterance comma flows through `collect_payloads` →
@@ -2762,13 +2761,17 @@ fn unsupported_precode_without_analysis_refuses_completion() {
         TokenizationMode::Preserve,
         &empty_mwt,
     )
-    .expect_err("unsupported lexical analysis must refuse the file");
-    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) = refusal else {
-        panic!("expected an utterance refusal");
+    .expect("the batch binds; the unanalysed utterance is declined");
+    let declined = refusal.into_parts().declined;
+    let [decision] = declined.as_slice() else {
+        panic!("one declined utterance: {declined:?}");
     };
-    assert_eq!(decision.strategy.strategy_name(), "nlp_no_sentences");
+    assert_eq!(
+        decision.cause,
+        batchalign_transform::morphosyntax::DeclineCause::NoAnalysis
+    );
 
-    // The rejected destination remains inspectable, but is not publishable.
+    // The declined utterance is left as it was.
     use talkbank_model::model::Line;
     let utt = chat_file
         .lines
@@ -4115,12 +4118,17 @@ fn retokenize_does_not_write_contraction_table_words_into_the_main_tier() {
         &MwtDict::new(),
     );
     assert_eq!(main_tier(&chat_file), "*CHI:\tI hafta go .");
-    let batchalign_transform::morphosyntax::InjectionError::Incomplete(decision) =
-        result.expect_err("unplaceable retokenization must refuse the file")
-    else {
-        panic!("expected an utterance refusal");
+    let declined = result
+        .expect("the batch binds; the unplaceable utterance is declined")
+        .into_parts()
+        .declined;
+    let [decision] = declined.as_slice() else {
+        panic!("one declined utterance: {declined:?}");
     };
-    assert_eq!(decision.strategy.strategy_name(), "retokenization_failed");
+    assert_eq!(
+        decision.cause,
+        batchalign_transform::morphosyntax::DeclineCause::RetokenizationFailed
+    );
 }
 
 /// A token the MWT lexicon expands keeps the utterance's terminator

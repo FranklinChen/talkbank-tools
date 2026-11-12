@@ -5,6 +5,130 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- A server now reads and writes files in place (paths mode, which the CLI
+  and the desktop app use for a server on the same machine) only for its own
+  account, or inside folders listed under `paths_mode_roots` in
+  `server.yaml`. Each time a server starts it puts a private key in its
+  handshake record (readable only by its account). The key is never sent:
+  the CLI and the desktop app of that account prove each job with it (a
+  one-time proof over that exact request, against a fresh code from the
+  server), and then the job may use any absolute path the account can, as
+  before. A request without a proof may use only the listed folders (none by
+  default); a proof that does not hold is refused, which catches a CLI that
+  reached another account's server on the same machine, and a proof is good
+  once, from this machine only. Before, any client that could reach a server
+  could have it read or overwrite any file its account could.
+  **What you will see:** nothing, when you run commands as the account that
+  runs the server, which is how BA3 is used. A job from another account, or
+  from a tool that does not prove itself, is refused with "paths mode is not
+  enabled on this server" until its folders are listed; one that reached
+  another account's server is refused with a message saying so. The desktop
+  app and the CLI must be updated together (the app asks the CLI to sign). A listed folder that is not absolute or does not exist stops the
+  server at startup. After the server restarts, finished jobs are listed as
+  before with no check, and an interrupted job whose files are all done is
+  completed as before; a job that will run again is checked again, and one
+  that is now refused is shown as failed with the reason, its unfinished
+  files closed with it, keeping the results it already wrote. A cancelled
+  job whose files were still open when the server stopped now has them
+  closed as cancelled at the next start, where they used to stay open. Restarting a job checks its paths again, under
+  the authority of whoever restarts it. **What does not change:** commands
+  that send transcripts to a server on another machine, and direct runs.
+
+- A job the server stopped while it ran, found at the next start with every
+  file finished and one of them failed, is now shown as failed with that
+  file's reason. It used to be shown as completed. **What does not change:**
+  such a job with no failed file is completed, as before, and a job with
+  files left to run is resumed, as before.
+
+- A submitted job whose recordings repeat a name, or reuse a transcript's
+  name, is refused at submission: each file is tracked by its name, so the
+  two used to share one status and one's result was lost. Two submitted
+  transcripts whose names this server's disk treats as one file (names that
+  differ only in letter case on a Mac) are refused instead of one silently
+  replacing the other.
+
+- A paths-mode job submitted with `--before` keeps each file's earlier
+  version when it is restarted or resumed after the server restarts. Before,
+  the earlier versions lived only in memory, so a restarted or recovered job
+  silently processed every remaining file from scratch. Jobs stored by an
+  earlier version have no earlier versions recorded and run without them,
+  as before.
+
+- A job's `media_subdir` must be a relative path of plain folder names: an
+  absolute path or one with `..` is refused at submission, since joined to a
+  media root it named a folder outside that root. A media mapping is no
+  longer inferred from a submitted folder whose path climbs with `..`.
+  Ordinary subfolders are unchanged.
+
+- Two files in one paths-mode job that would write one output, or where one
+  file's output is another file's input, are refused when the job is
+  submitted, judged by the file each path names: a symbolic link, a hard
+  link, a letter case or Unicode difference the disk ignores, `.` or a
+  doubled `/` no longer let two outputs that are one file through, which
+  used to overwrite one file's result with another's. On a case-sensitive
+  disk, names that differ only in case remain two files. A file may still be written over its own
+  source. A dangling symbolic link (one whose target does not exist yet)
+  inside an allowed folder is refused. A submitted folder outside the allowed
+  folders no longer refuses the job; it is just not searched for media.
+
+- In job listings, a paths-mode file is named by its path relative to the
+  folder given to the command (`A/01.cha` and `B/01.cha`), where it used to
+  be shown by its file name alone, so two files of the same name in
+  different subfolders merged into one entry and one's progress or error was
+  lost. Two inputs that would still show the same name are refused at
+  submission. Files in one folder show as before.
+
+- `transcribe` now writes the right `@Media` name for a recording whose
+  name has a dot before its extension: `session.2.mp3` is recorded as
+  `session.2`, where it was cut to `session`. Other names are unchanged.
+
+- A stored job whose language the server cannot read is no longer brought
+  back after a restart as an English job. It is left out of recovery with a
+  warning naming its stored value, as a job with an unknown command already
+  was, and its database row is kept unchanged.
+
+- `morphotag` no longer fails a whole file when the model's analysis of one
+  utterance cannot be used (no analysis came back, it does not map to
+  `%mor`, it does not match the utterance's words, or its tokens cannot be
+  placed on them). That utterance is left as it was, with no `%mor` or
+  `%gra`; every other utterance is analysed, and the file is written and
+  reported as needing review, naming each such utterance and why. An
+  utterance with words is also no longer reported as analysed when the
+  model returned no items for it, and an earlier run's `%gra` is no longer
+  left beside a new `%mor` that has none. Files that already worked are
+  unchanged.
+
+- A server now listens only on its own machine unless `server.yaml` (or
+  `serve start --host`) names another address. Before, it listened on every
+  network interface by default, and since it has no authentication and
+  accepts paths on its own filesystem, any machine that could reach it could
+  have it read or write files. Running jobs from the same machine is reached
+  as before (paths mode there now also needs `paths_mode_roots`; see the
+  entry above). A server that other machines should reach must now set
+  `host: "0.0.0.0"` (or an address) explicitly.
+
+- A submitted file whose name is absolute, contains `..` or `.`, repeats
+  another file's name, or needs another file's name to be a folder is now
+  refused when the job is submitted, before anything is written. Before, such
+  a name could place the file outside the job's folder or overwrite another
+  submitted file. Ordinary names, including ones with subfolders, are
+  unchanged.
+
+- More mistakes in a job request are now refused when it is submitted
+  instead of producing a wrong job: two files writing the same output path,
+  a `display_names` list of the wrong length, and paths-mode fields sent with
+  file content. `utseg` in a language with no segmentation route is refused
+  at submission even on a server that has not yet started its workers, and
+  when submitting directly without a server; before, such a job was
+  accepted and failed later.
+
+- `align` no longer fails a whole file when the aligner's answer for one
+  stretch does not fit that stretch (a time outside it, or timings for a
+  different number of words). Only that stretch's words are left without
+  timing; the file is written and its review counts them as `refused`. A
+  cached answer timed outside its stretch is now ignored and that stretch is
+  aligned again. Files that already aligned are unchanged.
+
 - `morphotag` no longer refuses a file whose utterance holds an annotated or
   replaced item that is not a `%mor` word, such as `wait &+w [=! laughs] .`
   or `them xxx [*] .`. Such files used to stop with "the run walk counted N

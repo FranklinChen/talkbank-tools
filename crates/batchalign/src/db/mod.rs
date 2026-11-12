@@ -168,6 +168,7 @@ mod tests {
             paths_mode: false,
             source_paths: Vec::new(),
             output_paths: Vec::new(),
+            before_paths: Vec::new(),
         }
     }
 
@@ -856,6 +857,7 @@ mod tests {
         record.paths_mode = true;
         record.source_paths = vec!["/src/a.cha".into()];
         record.output_paths = vec!["/out/a.cha".into()];
+        record.before_paths = vec![Some("/prior/a.cha".into())];
         record.submitter = Some(crate::store::Submitter::client(
             std::net::Ipv4Addr::LOCALHOST.into(),
             String::new(),
@@ -867,6 +869,7 @@ mod tests {
         assert!(jobs[0].paths_mode);
         assert_eq!(jobs[0].source_paths, vec!["/src/a.cha"]);
         assert_eq!(jobs[0].output_paths, vec!["/out/a.cha"]);
+        assert_eq!(jobs[0].before_paths, vec![Some("/prior/a.cha".to_owned())]);
     }
 
     // -----------------------------------------------------------------------

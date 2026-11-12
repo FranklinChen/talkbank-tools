@@ -1067,7 +1067,7 @@ pub(crate) struct TranscribeOptions<P = TranscribeAsrPlan> {
     /// the recognizer's tokens before CHAT is built (`--merge-abbrev`).
     pub merge_abbrev: crate::params::MergeAbbrevPolicy,
     /// Media filename for the @Media header.
-    pub media_name: Option<String>,
+    pub media_name: Option<talkbank_model::model::MediaFilename>,
     /// Per-engine configuration extras drawn from
     /// `CommonOptions.engine_overrides.extras` (e.g. `qwen_model`,
     /// `qwen_device`, `funaudio_model`). Plumbed through the V2 dispatch

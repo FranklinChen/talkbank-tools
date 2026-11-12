@@ -959,9 +959,12 @@ fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
     }
 }
 
-/// Correct batch counts still cannot certify lexical completion.
+/// Correct batch counts still cannot certify lexical completion: an
+/// utterance the model's analysis does not cover is declined, left without
+/// `%mor`, and named as a shortfall of the written file. One utterance never
+/// fails the file (it did until 2026-11-12).
 #[tokio::test]
-async fn incomplete_model_analysis_cannot_advance_to_applied() {
+async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
     let chat = "@UTF8\n@Begin\n@Languages:\teng\n\
                 @Participants:\tCHI Target_Child\n\
                 @ID:\teng|test|CHI|||||Target_Child|||\n\
@@ -970,14 +973,15 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
+    use crate::api::PrimaryMorphologyDeclineCause as Cause;
     let cases = [
-        ("no sentences", r#"{"sentences":[]}"#, "nlp_no_sentences"),
+        ("no sentences", r#"{"sentences":[]}"#, Cause::NoAnalysis),
         (
             "missing words",
             r#"{"sentences":[{"words":[
                 {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"}
             ]}]}"#,
-            "misalignment_bug",
+            Cause::Misaligned,
         ),
         (
             "malformed dependency",
@@ -986,7 +990,7 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
                 {"id":2,"text":"good","lemma":"good","upos":"ADJ","head":3,"deprel":"amod"},
                 {"id":3,"text":"world","lemma":"world","upos":"NOUN","head":0,"deprel":"root"}
             ]}]}"#,
-            "mapping_failed",
+            Cause::MappingFailed,
         ),
     ];
     // Retokenization can intentionally change the number of main-tier words,
@@ -996,7 +1000,7 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
         TokenizationMode::Preserve,
         TokenizationMode::StanzaRetokenize,
     ] {
-        for (label, wire, strategy) in cases {
+        for (label, wire, cause) in cases {
             if label == "missing words" && mode == TokenizationMode::StanzaRetokenize {
                 continue;
             }
@@ -1016,15 +1020,35 @@ async fn incomplete_model_analysis_cannot_advance_to_applied() {
                     response, "test", "eng",
                 )])
                 .expect("one response for one utterance");
-            let error = match inferred.apply(&options).await {
-                Ok(_) => panic!("{label} in {mode:?} admitted incomplete output"),
-                Err(error) => error,
+            let finished = inferred
+                .apply(&options)
+                .await
+                .unwrap_or_else(|error| panic!("{label} in {mode:?} failed the file: {error}"))
+                .postcheck(&options)
+                .expect("a declined utterance is valid CHAT")
+                .serialize()
+                .finish()
+                .expect("the report locates its utterance");
+            let [
+                crate::api::OutputShortfallRecord::PrimaryMorphologyIncomplete {
+                    utterances: 1,
+                    first_utterances,
+                },
+            ] = finished.shortfalls.as_slice()
+            else {
+                panic!("{label} in {mode:?}: {:?}", finished.shortfalls);
             };
+            assert_eq!(first_utterances[0].cause, cause, "{label} in {mode:?}");
+            let utterance = finished
+                .document
+                .document()
+                .utterances()
+                .next()
+                .expect("utterance");
             assert!(
-                matches!(error, crate::error::ServerError::MorphosyntaxInjection(_)),
-                "{error}"
+                utterance.mor_tier().is_none(),
+                "{label}: no %mor is written"
             );
-            assert!(error.to_string().contains(strategy), "{label}: {error}");
         }
     }
 }

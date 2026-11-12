@@ -129,7 +129,10 @@ fn decode_observation(bytes: &[u8]) -> Result<ServerStatusInfo, ConnectionError>
     let status: ServerStatusInfo =
         serde_json::from_slice(bytes).map_err(ConnectionError::UnsupportedObservation)?;
     // Only local path-mode inputs are supported by this shell.
-    if let ServerStatusInfo::Ready { url, build_hash } = &status {
+    if let ServerStatusInfo::Ready {
+        url, build_hash, ..
+    } = &status
+    {
         let parsed = url::Url::parse(url).map_err(ConnectionError::InvalidUrl)?;
         if parsed.scheme() != "http"
             || parsed.host_str() != Some("127.0.0.1")
@@ -167,6 +170,46 @@ async fn connect() -> Result<ServerStatusInfo, ConnectionError> {
         observed @ (ServerStatusInfo::Ready { .. }
         | ServerStatusInfo::Refused { .. }
         | ServerStatusInfo::MissingBinary) => Ok(observed),
+    }
+}
+
+/// Sign one request to this account's own local service, as the same user:
+/// the installed CLI reads the key from the service's handshake, fetches a
+/// fresh nonce and prints only the header value. The key never reaches this
+/// process or the webview, and the proof is good for this one request.
+#[tauri::command]
+pub async fn sign_same_user(method: String, path: String, body: String) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    let cli = InstalledCli::discover()
+        .ok_or_else(|| "the batchalign3 CLI is not installed".to_owned())?;
+    let mut child = Command::new(&cli.0)
+        .args([
+            "serve",
+            "sign-request",
+            "--method",
+            &method,
+            "--path",
+            &path,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .map_err(|_| "signing the request timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    match output.status.success() {
+        true => Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned()),
+        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
     }
 }
 

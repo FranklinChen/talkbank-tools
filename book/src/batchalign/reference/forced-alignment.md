@@ -345,7 +345,8 @@ mode share the same FA pipeline**.
   or daemon is spawned for that path.
 - With a loopback `--server`, `align` submits a shared-filesystem `paths_mode`
   job: the execution host reads the submitted source path, resolves media from
-  its own filesystem view, and writes the requested output path.
+  its own filesystem view, and writes the requested output path, all inside
+  the folders its `paths_mode_roots` lists.
 - With a `--server` on another host, `align` submits the transcript text
   (content mode) and the server resolves the recording through its own
   `media_mappings` and `media_roots`; see

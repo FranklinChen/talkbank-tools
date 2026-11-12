@@ -102,16 +102,22 @@ impl DirectHost {
     /// Materialize and submit one direct job without running it yet.
     pub async fn submit_submission(&self, submission: JobSubmission) -> Result<JobId, ServerError> {
         self.ensure_supported_command(submission.command)?;
+        let validated = submission
+            .validate()
+            .map_err(|error| ServerError::Validation(error.to_string()))?;
         let job_id = uuid::Uuid::new_v4().to_string()[..12].to_string();
         let correlation_id = CorrelationId::from(job_id.clone());
         let job = materialize_submission_job(
-            &submission,
+            &validated,
             &SubmissionContext {
                 job_id: JobId::from(job_id.clone()),
                 correlation_id,
                 jobs_dir: self.jobs_dir.clone(),
                 submitter: Submitter::direct_cli(),
                 submitted_at: self.store.event_time(),
+                // The user's own process acting on the paths that user gave
+                // it: no other client to keep out, no folder to be inside.
+                allowed_roots: batchalign_types::paths::AllowedRoots::same_user(),
             },
         )
         .await?;
@@ -329,7 +335,6 @@ mod tests {
             outcome.info.error,
             outcome.info.file_statuses
         );
-        assert!(outcome.detail.paths_mode);
         assert_eq!(outcome.detail.results.len(), 1);
         assert_eq!(
             tokio::fs::read_to_string(&output_path)
@@ -393,7 +398,6 @@ mod tests {
         assert_eq!(final_info.completed_files, 1);
 
         let detail = host.job_detail(&job_id).await.expect("job detail");
-        assert!(detail.paths_mode);
         assert_eq!(detail.results.len(), 1);
     }
 

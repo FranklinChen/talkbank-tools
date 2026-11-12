@@ -72,22 +72,25 @@ mod tests {
                 source_dir: "/corpus".into(),
             },
             filesystem: JobFilesystemConfig {
-                filenames: filenames
-                    .iter()
-                    .map(|filename| DisplayPath::from(*filename))
-                    .collect(),
-                has_chat,
                 staging_dir: "/tmp/job".into(),
-                paths_mode: false,
-                source_paths: Vec::new(),
-                output_paths: Vec::new(),
-                before_paths: Vec::new(),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
-                source_dir: Default::default(),
             },
             execution: JobExecutionState {
-                status: JobStatus::Queued,
+                lifecycle: crate::store::JobLifecycle::for_test(
+                    JobStatus::Queued,
+                    crate::store::job::test_support::inputs_from_parts(
+                        filenames
+                            .iter()
+                            .map(|filename| DisplayPath::from(*filename))
+                            .collect(),
+                        has_chat,
+                        false,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                ),
                 file_statuses,
                 results: Vec::new(),
                 error: None,
@@ -116,17 +119,22 @@ mod tests {
                 finished_at: Some(crate::unix_time(5.0)),
             };
 
-        let pending = job.pending_files();
+        let pending = job
+            .pending_files()
+            .expect("content-mode inputs are admitted");
 
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].filename.as_ref(), "b.cha");
+        assert_eq!(pending[0].filename().as_ref(), "b.cha");
     }
 
     /// Conflict detection keys on submitter and source-scoped filename.
     #[test]
     fn find_conflicts_uses_submitter_and_source_scope() {
         let mut active = sample_job("active", &["a.cha"]);
-        active.execution.status = JobStatus::Running;
+        active
+            .execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Running);
 
         let incoming = sample_job("incoming", &["a.cha"]);
         let jobs = HashMap::from([(active.identity.job_id.clone(), active)]);
@@ -145,7 +153,10 @@ mod tests {
     #[test]
     fn find_conflicts_trusts_store_state_and_does_not_reconcile() {
         let mut abandoned = sample_job("abandoned-job", &["020724a.mp3"]);
-        abandoned.execution.status = JobStatus::Queued;
+        abandoned
+            .execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Queued);
         abandoned.schedule.submitted_at =
             MachineTime::now().minus(std::time::Duration::from_secs(3 * 3600));
         abandoned.runtime.runner_active = false;
@@ -168,7 +179,9 @@ mod tests {
     #[test]
     fn prepare_for_restart_resets_unfinished_state() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution.status = JobStatus::Failed;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Failed);
         job.execution.error = Some("failed".into());
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
@@ -205,9 +218,10 @@ mod tests {
         );
         job.runtime.runner_active = true;
 
-        job.prepare_for_restart().expect("admitted restart");
+        job.prepare_for_restart(&batchalign_types::paths::AllowedRoots::same_user())
+            .expect("admitted restart");
 
-        assert_eq!(job.execution.status, JobStatus::Queued);
+        assert_eq!(job.status(), JobStatus::Queued);
         assert_eq!(job.execution.error, None);
         assert_eq!(job.execution.completed_files(), 1);
         assert_eq!(job.execution.results.len(), 1);
@@ -235,9 +249,11 @@ mod tests {
 
     /// Recovery re-queues interrupted jobs when resumable file work remains.
     #[test]
-    fn reconcile_recovered_runtime_state_requeues_resumable_files() {
+    fn recover_requeues_resumable_files() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution.status = JobStatus::Running;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Interrupted);
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
                 exclusions: Vec::new(),
@@ -261,10 +277,20 @@ mod tests {
             .expect("an ordered fixture lease"),
         );
 
-        let disposition = job.reconcile_recovered_runtime_state();
+        let disposition = job.recover(
+            &batchalign_types::paths::AllowedRoots::none(),
+            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
+        );
 
-        assert_eq!(disposition, RecoveryDisposition::Requeued);
-        assert_eq!(job.execution.status, JobStatus::Queued);
+        assert_eq!(
+            disposition,
+            crate::store::Recovered::Rewritten(vec![(
+                "b.cha".to_owned(),
+                crate::store::FilePhase::Queued
+            )]),
+            "the disposition names each file moved back, for the database"
+        );
+        assert_eq!(job.status(), JobStatus::Queued);
         assert_eq!(
             job.status_columns().error,
             None,
@@ -283,11 +309,14 @@ mod tests {
         assert!(job.schedule.lease.is_none());
     }
 
-    /// Recovery promotes all-terminal interrupted jobs to a lease-free final state.
+    /// Recovery promotes all-terminal interrupted jobs to a lease-free final
+    /// state: failed, because a file failed (`Completed` means none did).
     #[test]
-    fn reconcile_recovered_runtime_state_promotes_terminal_jobs() {
+    fn recover_settles_terminal_jobs() {
         let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution.status = JobStatus::Interrupted;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Interrupted);
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
             crate::store::FilePhase::Done {
                 exclusions: Vec::new(),
@@ -311,10 +340,20 @@ mod tests {
             .expect("an ordered fixture lease"),
         );
 
-        let disposition = job.reconcile_recovered_runtime_state();
+        let disposition = job.recover(
+            &batchalign_types::paths::AllowedRoots::none(),
+            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
+        );
 
-        assert_eq!(disposition, RecoveryDisposition::Completed);
-        assert_eq!(job.execution.status, JobStatus::Completed);
+        assert_eq!(disposition, crate::store::Recovered::Rewritten(Vec::new()));
+        assert_eq!(job.status(), JobStatus::Failed);
+        assert!(
+            job.execution
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("boom")),
+            "the failed file's cause is the job's"
+        );
         assert_eq!(job.execution.completed_files(), 2);
         assert!(job.schedule.next_eligible_at.is_none());
         assert!(job.schedule.lease.is_none());
@@ -427,8 +466,11 @@ mod tests {
         );
         assert!(job.any_terminal_files_failed(), "the error is a failure");
 
-        job.execution.status = crate::api::JobStatus::Failed;
-        job.prepare_for_restart().expect("admitted restart");
+        job.execution
+            .lifecycle
+            .force_status_for_test(crate::api::JobStatus::Failed);
+        job.prepare_for_restart(&batchalign_types::paths::AllowedRoots::same_user())
+            .expect("admitted restart");
 
         let a = job.execution.file_statuses["a.cha"].to_entry();
         assert_eq!(a.status, FileStatusKind::Diagnosed, "never retried");

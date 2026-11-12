@@ -25,11 +25,57 @@ What a command's inputs ARE decides where it can run:
   is sent. Run these where the recordings are.
 - A `--server` naming this machine (`localhost` or a loopback address) uses
   the shared filesystem for every command: the CLI submits paths, the
-  server reads the inputs and writes the outputs in place.
+  server reads the inputs and writes the outputs in place, for its own
+  account anywhere that account can, and for anyone else only inside the
+  folders its `server.yaml` lists under `paths_mode_roots` (see
+  [paths-mode folders](#paths-mode-folders)).
 - Without `--server`, `auto_daemon: true` (the default) reuses or starts a
-  loopback daemon on the same shared-filesystem terms before falling back to
-  direct in-process execution. `--no-server` and `--sequential` force direct
-  execution.
+  loopback daemon on the same shared-filesystem terms before falling back
+  to direct in-process execution. `--no-server` and `--sequential` force direct execution, which
+  reads and writes as the user running the command and needs no folder list.
+
+## Paths-mode folders
+
+A server on this machine reads each input and writes each output where it is.
+Your own CLI and desktop app may name any path your account can: each time a
+server starts it puts a private key in its handshake record in
+`~/.batchalign3` (readable only by your account), and they prove each job with
+it (the key itself is never sent), so this works with no configuration. A command that reaches a
+server started by another account on this machine is refused, with a message
+saying so: use your own server.
+
+Anyone else (another account, or a tool that does not prove itself) may use
+only the folders the server's configuration lists, and none by default. To
+let them, list the folders in the server's `~/.batchalign3/server.yaml`:
+
+```yaml
+paths_mode_roots:
+  - /data/corpora
+  - /data/results
+```
+
+Every input, output and `--before` path of a job must lie inside one of these
+folders (a folder itself is never a job's file). The server checks each path
+when the job is submitted, before it creates anything; again for a job that
+will continue after the server restarts (finished jobs are listed as they
+were, with no check); and again whenever a job is restarted. A job refused
+after a restart is shown as failed with the reason and keeps the results it
+already wrote. A refused job names the reason:
+
+| Message begins | Remedy |
+|---|---|
+| `paths mode is not enabled on this server` | add the folders to `paths_mode_roots` and restart the server |
+| `path ... is outside the folders this server allows` | add the path's folder, or move the files; the message lists the folders |
+| `path ... is not absolute` / `has a '.' or '..' component` | give the path in full |
+
+A configured folder that is not absolute or does not exist stops the server at
+startup, naming the entry. A symbolic link inside a folder that points outside
+every folder is treated as outside.
+
+Job listings name each paths-mode file by its path relative to the folder you
+gave the command (`A/01.cha`, `B/01.cha`), so two files with the same name in
+different subfolders stay separate. Two inputs that would show the same name
+are refused when the job is submitted.
 
 ## Build identity check
 
@@ -133,7 +179,8 @@ media_mappings: {}
 Important keys:
 
 - `port`: server listen port
-- `host`: bind address (defaults to `0.0.0.0`)
+- `host`: bind address (defaults to `127.0.0.1`, this machine only; see
+  [server setup](server-setup.md) before serving other machines)
 - `max_concurrent_jobs`: `0` means auto-tune
 - `auto_daemon`: reuse or start a loopback daemon for ordinary CLI processing
 - `media_roots`: directories the execution host searches for a transcript's recording when no mapping matched

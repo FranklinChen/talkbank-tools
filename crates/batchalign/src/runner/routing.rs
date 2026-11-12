@@ -60,7 +60,9 @@ pub(super) async fn dispatch_job_with_execution_context(
     let command = job.dispatch.command;
     let pool = &execution.pool;
     let cache = &execution.cache;
-    let all_chat = file_list.iter().all(|file| file.has_chat);
+    let all_chat = file_list
+        .iter()
+        .all(|file| matches!(file.kind(), crate::store::InputKind::Chat));
 
     // Native work shares the managed runner's admission and supervision, but
     // cannot pass through test echo or probing an invented worker task.
@@ -431,7 +433,8 @@ pub(super) async fn fail_files_for_refused_plan(
         "Command plan refused; failing this job's files"
     );
     for file in &job.pending_files {
-        record_plan_refusal_for_file(host.sink().as_ref(), file.filename.as_ref(), &message).await;
+        record_plan_refusal_for_file(host.sink().as_ref(), file.filename().as_ref(), &message)
+            .await;
     }
 }
 

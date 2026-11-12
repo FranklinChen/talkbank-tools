@@ -648,6 +648,16 @@ pub enum OutputShortfallRecord {
         /// Bounded utterance locations; exact morphology positions are unknown.
         first_utterances: Vec<SecondaryMorphologyUnplacedUtterance>,
     },
+    /// Primary morphology was declined for some utterances: each keeps the
+    /// form it had, with no new `%mor` or `%gra`, and every other utterance is
+    /// analysed. A problem confined to one utterance never fails the file.
+    PrimaryMorphologyIncomplete {
+        /// Number of declined utterances, at least one.
+        utterances: u64,
+        /// The first of them, in transcript order, at most
+        /// [`FileOutputDiagnostics::FIRST_FINDINGS`], with why.
+        first_utterances: Vec<PrimaryMorphologyDeclinedUtterance>,
+    },
     /// Secondary morphology retained placeholders for requested spans.
     SecondaryMorphologyIncomplete {
         /// Number of spans whose requested analysis was not installed.
@@ -743,6 +753,10 @@ impl OutputShortfallRecord {
                 *held_out_utterances,
                 "utterance(s) held out",
             ),
+            Self::PrimaryMorphologyIncomplete {
+                utterances,
+                first_utterances,
+            } => listed(first_utterances, *utterances, "declined utterance(s)"),
             Self::SecondaryMorphologyUnplaced {
                 utterances,
                 first_utterances,
@@ -813,6 +827,70 @@ pub struct SecondaryMorphologyUnplacedUtterance {
     pub cause: SecondaryExtractionFailure,
     /// Bounded producer explanation.
     pub detail: String,
+}
+
+/// One utterance whose primary morphology was declined.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+pub struct PrimaryMorphologyDeclinedUtterance {
+    /// Where the utterance is.
+    #[serde(flatten)]
+    pub location: StoredUtteranceLocation,
+    /// Why it was declined.
+    pub cause: PrimaryMorphologyDeclineCause,
+    /// Bounded producer explanation.
+    pub detail: String,
+}
+
+impl std::fmt::Display for PrimaryMorphologyDeclinedUtterance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}   ({}: {})",
+            self.location,
+            self.cause.describe(),
+            self.detail
+        )
+    }
+}
+
+/// Why an utterance's primary morphology was declined.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryMorphologyDeclineCause {
+    /// The model returned no analysis for an utterance with words.
+    NoAnalysis,
+    /// The analysis was not valid UD, or did not map to `%mor`.
+    MappingFailed,
+    /// The analysis did not align one-to-one with the words.
+    Misaligned,
+    /// The model's tokens could not be written back onto the words.
+    RetokenizationFailed,
+}
+
+impl PrimaryMorphologyDeclineCause {
+    /// Plain words for a reader.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NoAnalysis => "no analysis returned",
+            Self::MappingFailed => "analysis could not be mapped",
+            Self::Misaligned => "analysis does not match the words",
+            Self::RetokenizationFailed => "tokens could not be placed on the words",
+        }
+    }
+}
+
+impl From<batchalign_transform::morphosyntax::DeclineCause> for PrimaryMorphologyDeclineCause {
+    fn from(cause: batchalign_transform::morphosyntax::DeclineCause) -> Self {
+        use batchalign_transform::morphosyntax::DeclineCause;
+        match cause {
+            DeclineCause::NoAnalysis => Self::NoAnalysis,
+            DeclineCause::MappingFailed => Self::MappingFailed,
+            DeclineCause::Misaligned => Self::Misaligned,
+            DeclineCause::RetokenizationFailed => Self::RetokenizationFailed,
+        }
+    }
 }
 
 /// Why secondary positions could not be established from primary injection.
@@ -1214,6 +1292,13 @@ pub enum UntimedCauseRecord {
         answered: u64,
         /// Requests left unaligned: no worker evidence was obtained.
         unaligned: u64,
+        /// Requests whose answer was refused (a timing outside the request
+        /// window, or timings for another number of words), so only their
+        /// words were left untimed. Absent from records written before
+        /// such answers were kept: then a refused answer failed the file
+        /// and left no record, so zero is what those records mean.
+        #[serde(default)]
+        refused: u64,
         /// Word ranges left unrequested: an anchored piece whose window
         /// could not be sent.
         unrequested: u64,
@@ -1466,11 +1551,12 @@ impl std::fmt::Display for UntimedCauseRecord {
             Self::Requested {
                 answered,
                 unaligned,
+                refused,
                 unrequested,
             } => write!(
                 f,
                 "no positive interval in the final output ({answered} answered, {unaligned} \
-                 unaligned, {unrequested} unrequested)"
+                 unaligned, {refused} refused, {unrequested} unrequested)"
             ),
             // Each removal renders itself; several are joined so a reader
             // sees every rule that touched the utterance.
@@ -1538,6 +1624,14 @@ impl std::fmt::Display for OutputShortfallRecord {
             ),
             // The list-carrying shortfalls give counts only: `detail_lines`
             // names their utterances one per line.
+            Self::PrimaryMorphologyIncomplete {
+                utterances,
+                first_utterances: _,
+            } => write!(
+                f,
+                "morphology incomplete: {utterances} utterance(s) were left without %mor and \
+                 %gra; every other utterance is analysed"
+            ),
             Self::SecondaryMorphologyUnplaced {
                 utterances,
                 words,
@@ -1842,6 +1936,7 @@ impl FileOutputDiagnostics {
         for shortfall in &diagnostics.shortfalls {
             match shortfall {
                 OutputShortfallRecord::SecondaryMorphologyIncomplete { .. }
+                | OutputShortfallRecord::PrimaryMorphologyIncomplete { .. }
                 | OutputShortfallRecord::UtrUnavailable { .. }
                 | OutputShortfallRecord::MorphologyProvenanceIncomplete { .. }
                 | OutputShortfallRecord::SecondaryMorphologyUnplaced { .. } => {

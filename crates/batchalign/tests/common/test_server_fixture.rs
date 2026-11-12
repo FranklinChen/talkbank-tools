@@ -469,6 +469,8 @@ fn test_echo_server_config() -> ServerConfig {
         port: batchalign::config::PortRequest::from_u16(0),
         job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
         memory_gate_mb: Some(MemoryMb(0)),
+        // Every fixture's files live under the system temporary folder.
+        paths_mode_roots: vec![std::env::temp_dir()],
         ..Default::default()
     }
 }

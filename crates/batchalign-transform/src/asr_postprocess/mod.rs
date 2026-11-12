@@ -589,7 +589,7 @@ mod integration_tests {
             utterances,
             speakers,
             &[lang.to_string()],
-            Some("clip"),
+            Some(talkbank_model::model::MediaFilename::parse("clip").expect("fixture media name")),
             true,
         )
         .expect("test: transcript_from_asr_utterances should succeed")
@@ -624,7 +624,10 @@ mod integration_tests {
                 &utterances,
                 &["PAR".to_string()],
                 &["eng".to_string()],
-                Some("clip"),
+                Some(
+                    talkbank_model::model::MediaFilename::parse("clip")
+                        .expect("fixture media name"),
+                ),
                 true,
             )
             .expect("test: transcript_from_asr_utterances should succeed")
@@ -678,7 +681,7 @@ mod integration_tests {
             &utterances,
             &["PAR".to_string()],
             &["yue".to_string()],
-            Some("clip"),
+            Some(talkbank_model::model::MediaFilename::parse("clip").expect("fixture media name")),
             true,
         )
         .expect("test: transcript_from_asr_utterances should succeed")

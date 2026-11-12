@@ -2,11 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use batchalign_types::paths::{ClientPath, MediaMappingKey, RepoRelativePath, ServerPath};
+use batchalign_types::paths::{
+    AdmittedPath, ClientPath, MediaMappingKey, RepoRelativePath, ServerPath,
+};
 
 use crate::api::{
-    ContentType, CorrelationId, DisplayPath, FileProgressStage, JobId, JobStatus, LanguageSpec,
-    MachineTime, NumSpeakers, ReleasedCommand,
+    ActiveStatus, ContentType, CorrelationId, DisplayPath, FileProgressStage, FinishedStatus,
+    JobId, JobStatus, LanguageSpec, MachineTime, NumSpeakers, ReleasedCommand, StatusKind,
 };
 use crate::options::CommandOptions;
 use crate::types::execution_plan::ExecutionPlan;
@@ -191,41 +193,979 @@ pub(crate) enum StoredSubmitter {
     },
 }
 
+/// What a job input is: a CHAT transcript, or a recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    /// A CHAT transcript.
+    Chat,
+    /// A media recording.
+    Media,
+}
+
+impl InputKind {
+    /// Whether it is a transcript: the database's `has_chat` column.
+    pub(crate) fn is_chat(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    /// The kind the database's `has_chat` column records.
+    pub(crate) fn from_is_chat(chat: bool) -> Self {
+        match chat {
+            true => Self::Chat,
+            false => Self::Media,
+        }
+    }
+
+    /// The kind of a submitted source, by its name.
+    pub fn of_source_name(name: &str) -> Self {
+        match crate::types::request::is_chat_source_name(name) {
+            true => Self::Chat,
+            false => Self::Media,
+        }
+    }
+}
+
+/// One paths-mode input: where it is read, where its output is written, the
+/// earlier version it may be compared with, and the name the job shows. Every
+/// path was admitted by the server's allowed roots.
+#[derive(Debug, Clone)]
+pub struct PathsInput {
+    /// The name the job shows for it, unique within the job.
+    pub display: DisplayPath,
+    /// Transcript or recording.
+    pub kind: InputKind,
+    /// The source the job reads.
+    pub source: AdmittedPath,
+    /// Where its output is written.
+    pub output: AdmittedPath,
+    /// The earlier version, for incremental processing.
+    pub before: Option<AdmittedPath>,
+}
+
+/// One content-mode input, staged under the job's staging directory.
+#[derive(Debug, Clone)]
+pub struct ContentInput {
+    /// The name the job shows for it, and its staged name.
+    pub display: DisplayPath,
+    /// Transcript or recording.
+    pub kind: InputKind,
+}
+
+/// A paths-mode job's files, in file order, whose names and paths cannot
+/// collide: built only by [`PathsFiles::admit`], which compares the files
+/// the admitted paths name ([`batchalign_types::paths::FileIdentity`]), not
+/// their spellings: a symbolic link, a hard link, or a case or Unicode
+/// difference the volume ignores makes one file, and a case difference on a
+/// case-sensitive volume makes two.
+#[derive(Debug, Clone)]
+pub struct PathsFiles(Vec<PathsInput>);
+
+/// Why a paths-mode job's files cannot run together.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PathsOverlap {
+    /// The job lists no file.
+    #[error("a paths-mode job needs at least one file")]
+    Empty,
+    /// Two files would be shown, and tracked, under one name.
+    #[error("two files would both be shown as {0}; give them distinct display names")]
+    Display(DisplayPath),
+    /// Two files would write one output.
+    #[error("{first} and {second} would both write {output}; each needs its own output")]
+    Output {
+        /// The first file.
+        first: DisplayPath,
+        /// The second file.
+        second: DisplayPath,
+        /// The output they share, as the second named it.
+        output: String,
+    },
+    /// One file's output is another file's source or earlier version, so
+    /// one would be overwritten while the other reads it.
+    #[error("{writer}'s output {output} is an input of {reader}")]
+    OutputIsInput {
+        /// The file whose output it is.
+        writer: DisplayPath,
+        /// The file that reads it.
+        reader: DisplayPath,
+        /// The path, as the writer named it.
+        output: String,
+    },
+}
+
+impl PathsFiles {
+    /// The files, checked as a set. A file may write over its own source
+    /// (in-place processing); never over another file's source or prior.
+    pub(crate) fn admit(files: Vec<PathsInput>) -> Result<Self, PathsOverlap> {
+        use std::collections::HashMap;
+        if files.is_empty() {
+            return Err(PathsOverlap::Empty);
+        }
+        // The file a path names, as the disk tells files apart.
+        let identity = |path: &AdmittedPath| path.identity().clone();
+        let mut displays = std::collections::HashSet::with_capacity(files.len());
+        let mut outputs: HashMap<batchalign_types::paths::FileIdentity, usize> =
+            HashMap::with_capacity(files.len());
+        // Every file that reads each identity: several files may read one
+        // file (a shared prior), and every one of them must be checked.
+        let mut readers: HashMap<batchalign_types::paths::FileIdentity, Vec<usize>> =
+            HashMap::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            if !displays.insert(&file.display) {
+                return Err(PathsOverlap::Display(file.display.clone()));
+            }
+            if let Some(&first) = outputs.get(&identity(&file.output)) {
+                return Err(PathsOverlap::Output {
+                    first: files[first].display.clone(),
+                    second: file.display.clone(),
+                    output: file.output.client().to_string(),
+                });
+            }
+            outputs.insert(identity(&file.output), index);
+            for input in std::iter::once(&file.source).chain(&file.before) {
+                readers.entry(identity(input)).or_default().push(index);
+            }
+        }
+        for (key, &writer) in &outputs {
+            if let Some(&reader) = readers
+                .get(key)
+                .and_then(|readers| readers.iter().find(|&&reader| reader != writer))
+            {
+                return Err(PathsOverlap::OutputIsInput {
+                    writer: files[writer].display.clone(),
+                    reader: files[reader].display.clone(),
+                    output: files[writer].output.client().to_string(),
+                });
+            }
+        }
+        Ok(Self(files))
+    }
+}
+
+impl std::ops::Deref for PathsFiles {
+    type Target = [PathsInput];
+    fn deref(&self) -> &[PathsInput] {
+        &self.0
+    }
+}
+
+/// Why stored or submitted inputs cannot be admitted to run.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InputsRefusal {
+    /// A path is not admitted by the authority.
+    #[error(transparent)]
+    Path(#[from] batchalign_types::paths::PathRefusal),
+    /// The files collide.
+    #[error(transparent)]
+    Overlap(#[from] PathsOverlap),
+}
+
+/// A job's inputs, one entry per file, in file order: read and written in
+/// place on the server's disk (paths mode), or staged from content the client
+/// sent. One value per file, so a file's name, kind and paths cannot disagree
+/// in length or position, and paths-mode paths exist only as admitted ones.
+#[derive(Debug, Clone)]
+pub enum JobInputs {
+    /// Paths mode: every path admitted by the server's allowed roots.
+    Paths {
+        /// The files, in file order, checked as a set.
+        files: PathsFiles,
+        /// The folder the client submitted, admitted, when it sent one: the
+        /// media search looks there.
+        source_dir: Option<AdmittedPath>,
+    },
+    /// Content mode: the files the client sent.
+    Content(Vec<ContentInput>),
+}
+
+impl JobInputs {
+    /// How many files the job has.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Paths { files, .. } => files.len(),
+            Self::Content(files) => files.len(),
+        }
+    }
+
+    /// Whether the job has no files.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The two modes' file lists, exactly one of them non-empty: lets the
+    /// iterators below borrow either without boxing or collecting.
+    fn split(&self) -> (&[PathsInput], &[ContentInput]) {
+        match self {
+            Self::Paths { files, .. } => (&files[..], &[]),
+            Self::Content(files) => (&[], files),
+        }
+    }
+
+    /// The files whose display name `keep` accepts, as runner work, in file
+    /// order: the one constructor of [`PendingJobFile`], so a pending file's
+    /// name, kind and location are always its own input's. The name is
+    /// tested before anything is cloned, so files already done cost nothing.
+    pub(crate) fn entries<'a>(
+        &'a self,
+        keep: impl Fn(&DisplayPath) -> bool + Copy + 'a,
+    ) -> impl Iterator<Item = PendingJobFile> + 'a {
+        let (paths, content) = self.split();
+        let paths = paths
+            .iter()
+            .enumerate()
+            .filter(move |(_, file)| keep(&file.display))
+            .map(|(file_index, file)| PendingJobFile {
+                file_index,
+                filename: file.display.clone(),
+                kind: file.kind,
+                location: InputLocation::Paths(Box::new(PathsLocation {
+                    source: file.source.clone(),
+                    output: file.output.clone(),
+                    before: file.before.clone(),
+                })),
+            });
+        let content = content
+            .iter()
+            .enumerate()
+            .filter(move |(_, file)| keep(&file.display))
+            .map(|(file_index, file)| PendingJobFile {
+                file_index,
+                filename: file.display.clone(),
+                kind: file.kind,
+                location: InputLocation::Staged,
+            });
+        paths.chain(content)
+    }
+
+    /// Every display name, in file order.
+    pub fn displays(&self) -> impl Iterator<Item = &DisplayPath> {
+        let (paths, content) = self.split();
+        paths
+            .iter()
+            .map(|file| &file.display)
+            .chain(content.iter().map(|file| &file.display))
+    }
+
+    /// Where a job-level output named `name` (one file for the whole job,
+    /// such as a consolidated `compare.csv`) is written: beside the first
+    /// file's admitted output in paths mode, else in the staged output.
+    pub fn job_level_output(&self, staging_dir: &ServerPath, name: &str) -> std::path::PathBuf {
+        match self {
+            Self::Paths { files, .. } => match &files[..] {
+                [first, ..] => first.output.server().as_path().with_file_name(name),
+                [] => staging_dir.join("output").join(name).as_path().to_owned(),
+            },
+            Self::Content(_) => staging_dir.join("output").join(name).as_path().to_owned(),
+        }
+    }
+}
+
+/// One paths-mode input as the database recorded it: the client's paths, not
+/// admitted by this server process. History only: it becomes runnable input
+/// solely through [`RecordedInputs::admit`].
+#[derive(Debug, Clone)]
+pub struct RecordedPathsInput {
+    /// The name the job shows for it.
+    pub display: DisplayPath,
+    /// Transcript or recording.
+    pub kind: InputKind,
+    /// The source the client named.
+    pub source: ClientPath,
+    /// The output the client named.
+    pub output: ClientPath,
+    /// The earlier version the client named, for incremental processing.
+    pub before: Option<ClientPath>,
+}
+
+/// A paths-mode job's inputs as stored, read back without touching the
+/// filesystem. A finished job is shown from these; a job that runs again
+/// (recovered mid-run, or restarted) is admitted first.
+#[derive(Debug, Clone)]
+pub struct RecordedInputs {
+    files: Vec<RecordedPathsInput>,
+    source_dir: Option<ClientPath>,
+}
+
+impl RecordedInputs {
+    /// The files, in file order.
+    pub fn files(&self) -> &[RecordedPathsInput] {
+        &self.files
+    }
+
+    /// Admit every recorded path under `authority`: the one route from a
+    /// stored paths-mode job to one that can run, its priors included.
+    pub(crate) fn admit(
+        &self,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<JobInputs, InputsRefusal> {
+        let files = self
+            .files
+            .iter()
+            .map(|file| {
+                Ok(PathsInput {
+                    display: file.display.clone(),
+                    kind: file.kind,
+                    source: authority.admit(&file.source)?,
+                    output: authority.admit(&file.output)?,
+                    before: file
+                        .before
+                        .as_ref()
+                        .map(|before| authority.admit(before))
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, batchalign_types::paths::PathRefusal>>()?;
+        Ok(JobInputs::Paths {
+            files: PathsFiles::admit(files)?,
+            source_dir: self
+                .source_dir
+                .as_ref()
+                .map(|dir| authority.admit_folder(dir))
+                .transpose()?,
+        })
+    }
+}
+
+/// A job's inputs as this server process holds them: admitted, so the job
+/// can run, or recorded, read back from the database for a job that is only
+/// history here. Only [`StoredInputs::Admitted`] reaches a runner.
+#[derive(Debug, Clone)]
+pub enum StoredInputs {
+    /// Admitted by this process: content-mode inputs, or paths admitted by
+    /// the authority the job was submitted, recovered or restarted under.
+    Admitted(JobInputs),
+    /// Paths-mode inputs read back from the database, not admitted.
+    Recorded(RecordedInputs),
+}
+
+impl StoredInputs {
+    /// The inputs borrowed as stored.
+    pub(crate) fn as_ref(&self) -> StoredInputsRef<'_> {
+        match self {
+            Self::Admitted(inputs) => StoredInputsRef::Admitted(inputs),
+            Self::Recorded(recorded) => StoredInputsRef::Recorded(recorded),
+        }
+    }
+}
+
+/// Infallible and invariant-preserving: inputs that were admitted stay so.
+impl From<JobInputs> for StoredInputs {
+    fn from(inputs: JobInputs) -> Self {
+        Self::Admitted(inputs)
+    }
+}
+
+impl<'a> StoredInputsRef<'a> {
+    /// How many files the job has.
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Admitted(inputs) => inputs.len(),
+            Self::Recorded(recorded) => recorded.files.len(),
+        }
+    }
+
+    /// The inputs a runner may use, when this process admitted them.
+    pub(crate) fn admitted(self) -> Option<&'a JobInputs> {
+        match self {
+            Self::Admitted(inputs) => Some(inputs),
+            Self::Recorded(_) => None,
+        }
+    }
+
+    /// Every display name, in file order.
+    pub(crate) fn displays(self) -> Box<dyn Iterator<Item = &'a DisplayPath> + 'a> {
+        match self {
+            Self::Admitted(inputs) => Box::new(inputs.displays()),
+            Self::Recorded(recorded) => Box::new(recorded.files.iter().map(|file| &file.display)),
+        }
+    }
+
+    /// The inputs admitted afresh under `authority`, as a restart needs:
+    /// every run is admitted under the rules in force when it starts, so a
+    /// folder removed from the configuration since submission is honoured.
+    /// Content-mode inputs name no server path and pass unchanged.
+    pub(crate) fn readmit(
+        self,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<JobInputs, InputsRefusal> {
+        match self {
+            Self::Admitted(JobInputs::Content(files)) => Ok(JobInputs::Content(files.clone())),
+            Self::Admitted(JobInputs::Paths { files, source_dir }) => RecordedInputs {
+                files: files
+                    .iter()
+                    .map(|file| RecordedPathsInput {
+                        display: file.display.clone(),
+                        kind: file.kind,
+                        source: file.source.client().clone(),
+                        output: file.output.client().clone(),
+                        before: file.before.as_ref().map(|before| before.client().clone()),
+                    })
+                    .collect(),
+                source_dir: source_dir.as_ref().map(|dir| dir.client().clone()),
+            }
+            .admit(authority),
+            Self::Recorded(recorded) => recorded.admit(authority),
+        }
+    }
+
+    /// The columns the database stores.
+    pub(crate) fn to_columns(self) -> InputColumns {
+        match self {
+            Self::Admitted(inputs) => inputs.to_columns(),
+            Self::Recorded(recorded) => InputColumns {
+                filenames: recorded
+                    .files
+                    .iter()
+                    .map(|file| file.display.to_string())
+                    .collect(),
+                has_chat: recorded
+                    .files
+                    .iter()
+                    .map(|file| file.kind.is_chat())
+                    .collect(),
+                paths_mode: true,
+                source_paths: recorded
+                    .files
+                    .iter()
+                    .map(|file| file.source.as_str().to_owned())
+                    .collect(),
+                output_paths: recorded
+                    .files
+                    .iter()
+                    .map(|file| file.output.as_str().to_owned())
+                    .collect(),
+                before_paths: before_column(recorded.files.iter().map(|file| file.before.as_ref())),
+            },
+        }
+    }
+}
+
+/// Where a job is in its life, with the inputs that state needs: an active
+/// job (queued or running) holds inputs this process admitted, so it can
+/// run; a finished one holds its inputs as stored, admitted or recorded.
+/// "Active with unadmitted inputs" is not a value this type has, so a job
+/// that cannot run can never be queued.
+///
+/// The transitions are one method per event, each legal only from the
+/// states that event leaves, so the state machine is these signatures and
+/// their matches rather than a table beside them. Leaving finished for
+/// active ([`Self::restart`], [`Self::resume`]) admits the inputs first,
+/// under the rules in force now. A refused event changes nothing and says
+/// which status refused it.
+#[derive(Debug, Clone)]
+pub enum JobLifecycle {
+    /// Queued or running, on admitted inputs.
+    Active {
+        /// Which active status.
+        status: ActiveStatus,
+        /// Inputs this process admitted.
+        inputs: JobInputs,
+    },
+    /// Completed, failed, cancelled, interrupted or failed at writeback.
+    Finished {
+        /// Which finished status.
+        status: FinishedStatus,
+        /// Its inputs as stored.
+        inputs: StoredInputs,
+    },
+}
+
+/// An event a job's lifecycle refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobEvent {
+    /// A runner picked a queued job up.
+    Dispatch,
+    /// The memory gate parked an active job.
+    MemoryRequeue,
+    /// A user cancel or a shutdown stopped an active job.
+    Stop,
+    /// An active job ended under its own power.
+    Finish,
+    /// An operator restarted a cancelled or failed job.
+    Restart,
+    /// Startup recovery resumed an interrupted job.
+    Resume,
+    /// Startup recovery settled an interrupted job whose files all ended.
+    Settle,
+}
+
+impl std::fmt::Display for JobEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Dispatch => "be dispatched",
+            Self::MemoryRequeue => "be requeued by the memory gate",
+            Self::Stop => "be stopped",
+            Self::Finish => "finish",
+            Self::Restart => "be restarted",
+            Self::Resume => "be resumed",
+            Self::Settle => "be settled by recovery",
+        })
+    }
+}
+
+/// A lifecycle event refused in the job's current status. Most refusals are
+/// ordinary races (a user cancels while a runner is mid-flight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a {from} job cannot {event}")]
+pub(crate) struct Refused {
+    /// The status the job was in, and stays in.
+    pub(crate) from: JobStatus,
+    /// What was refused.
+    pub(crate) event: JobEvent,
+}
+
+/// Why a finished job did not become active again.
+#[derive(Debug)]
+pub(crate) enum Reactivation<E> {
+    /// Its status does not allow the event; nothing was admitted.
+    Refused(Refused),
+    /// Its inputs were refused under the rules in force now.
+    Admission(E),
+}
+
+/// How an active job finished under its own power.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// Every file ended, none failed.
+    Completed,
+    /// It failed, or a file did.
+    Failed,
+    /// Its cancellation took effect as it finished.
+    Cancelled,
+    /// Its outputs could not be written back.
+    WritebackFailed,
+}
+
+impl From<Outcome> for FinishedStatus {
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Completed => Self::Completed,
+            Outcome::Failed => Self::Failed,
+            Outcome::Cancelled => Self::Cancelled,
+            Outcome::WritebackFailed => Self::WritebackFailed,
+        }
+    }
+}
+
+/// What startup recovery concluded for an interrupted job whose files had
+/// all ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    /// None failed.
+    Completed,
+    /// One failed, or its inputs were refused.
+    Failed,
+}
+
+impl JobLifecycle {
+    /// A job read back from the database. Nothing runs it in this process,
+    /// so a stored active status means the server stopped while it ran: it
+    /// is interrupted (startup marks such rows so first).
+    pub(crate) fn recovered(status: JobStatus, inputs: StoredInputs) -> Self {
+        let status = match status.kind() {
+            StatusKind::Active(_) => FinishedStatus::Interrupted,
+            StatusKind::Finished(status) => status,
+        };
+        Self::Finished { status, inputs }
+    }
+
+    /// The status.
+    pub fn status(&self) -> JobStatus {
+        match self {
+            Self::Active { status, .. } => (*status).into(),
+            Self::Finished { status, .. } => (*status).into(),
+        }
+    }
+
+    /// The admitted inputs a runner may use: an active job's, or a
+    /// finished one's that this process admitted (a cancelled run closing
+    /// its files). `None` for recorded history.
+    pub(crate) fn admitted(&self) -> Option<&JobInputs> {
+        self.stored().admitted()
+    }
+
+    /// The inputs as stored, borrowed whichever state the job is in.
+    pub(crate) fn stored(&self) -> StoredInputsRef<'_> {
+        match self {
+            Self::Active { inputs, .. } => StoredInputsRef::Admitted(inputs),
+            Self::Finished { inputs, .. } => inputs.as_ref(),
+        }
+    }
+
+    /// A refusal of `event` in the current status.
+    fn refused(&self, event: JobEvent) -> Refused {
+        Refused {
+            from: self.status(),
+            event,
+        }
+    }
+
+    /// Queued to running.
+    pub(crate) fn dispatch(&mut self) -> Result<(), Refused> {
+        match self {
+            Self::Active {
+                status: status @ ActiveStatus::Queued,
+                ..
+            } => {
+                *status = ActiveStatus::Running;
+                Ok(())
+            }
+            Self::Active {
+                status: ActiveStatus::Running,
+                ..
+            }
+            | Self::Finished { .. } => Err(self.refused(JobEvent::Dispatch)),
+        }
+    }
+
+    /// Active to queued, for the memory gate. A job that has left the
+    /// active set (cancelled while waiting) stays gone.
+    pub(crate) fn memory_requeue(&mut self) -> Result<(), Refused> {
+        match self {
+            Self::Active { status, .. } => {
+                *status = ActiveStatus::Queued;
+                Ok(())
+            }
+            Self::Finished { .. } => Err(self.refused(JobEvent::MemoryRequeue)),
+        }
+    }
+
+    /// Active to cancelled or interrupted.
+    pub(crate) fn stop(&mut self, stop: super::Stop) -> Result<(), Refused> {
+        self.finish_active(stop.status(), JobEvent::Stop)
+    }
+
+    /// Active to its own `outcome`.
+    pub(crate) fn finish(&mut self, outcome: Outcome) -> Result<(), Refused> {
+        self.finish_active(outcome.into(), JobEvent::Finish)
+    }
+
+    /// Active to `next`, its admitted inputs becoming its stored ones.
+    fn finish_active(&mut self, next: FinishedStatus, event: JobEvent) -> Result<(), Refused> {
+        match self {
+            Self::Active { inputs, .. } => {
+                // Moved out from behind `&mut`; `Content(Vec::new())`
+                // allocates nothing and is dropped as `self` is replaced on
+                // the next line.
+                let inputs = std::mem::replace(inputs, JobInputs::Content(Vec::new()));
+                *self = Self::Finished {
+                    status: next,
+                    inputs: StoredInputs::Admitted(inputs),
+                };
+                Ok(())
+            }
+            Self::Finished { .. } => Err(self.refused(event)),
+        }
+    }
+
+    /// Cancelled, failed or failed at writeback, back to queued on inputs
+    /// `admit` admits now.
+    pub(crate) fn restart<E>(
+        &mut self,
+        admit: impl FnOnce(StoredInputsRef<'_>) -> Result<JobInputs, E>,
+    ) -> Result<(), Reactivation<E>> {
+        let admitted = match self {
+            Self::Finished {
+                status:
+                    FinishedStatus::Cancelled | FinishedStatus::Failed | FinishedStatus::WritebackFailed,
+                inputs,
+            } => admit(inputs.as_ref()),
+            Self::Finished {
+                status: FinishedStatus::Completed | FinishedStatus::Interrupted,
+                ..
+            }
+            | Self::Active { .. } => {
+                return Err(Reactivation::Refused(self.refused(JobEvent::Restart)));
+            }
+        };
+        self.requeue_on(admitted)
+    }
+
+    /// Interrupted, back to queued on inputs `admit` admits now.
+    pub(crate) fn resume<E>(
+        &mut self,
+        admit: impl FnOnce(StoredInputsRef<'_>) -> Result<JobInputs, E>,
+    ) -> Result<(), Reactivation<E>> {
+        let admitted = match self {
+            Self::Finished {
+                status: FinishedStatus::Interrupted,
+                inputs,
+            } => admit(inputs.as_ref()),
+            Self::Finished {
+                status:
+                    FinishedStatus::Completed
+                    | FinishedStatus::Failed
+                    | FinishedStatus::Cancelled
+                    | FinishedStatus::WritebackFailed,
+                ..
+            }
+            | Self::Active { .. } => {
+                return Err(Reactivation::Refused(self.refused(JobEvent::Resume)));
+            }
+        };
+        self.requeue_on(admitted)
+    }
+
+    /// Queued on `admitted`, or unchanged when admission was refused.
+    fn requeue_on<E>(&mut self, admitted: Result<JobInputs, E>) -> Result<(), Reactivation<E>> {
+        let inputs = admitted.map_err(Reactivation::Admission)?;
+        *self = Self::Active {
+            status: ActiveStatus::Queued,
+            inputs,
+        };
+        Ok(())
+    }
+
+    /// Interrupted to `settlement`, for a recovered job that will not run.
+    pub(crate) fn settle(&mut self, settlement: Settlement) -> Result<(), Refused> {
+        match self {
+            Self::Finished {
+                status: status @ FinishedStatus::Interrupted,
+                ..
+            } => {
+                *status = match settlement {
+                    Settlement::Completed => FinishedStatus::Completed,
+                    Settlement::Failed => FinishedStatus::Failed,
+                };
+                Ok(())
+            }
+            Self::Finished {
+                status:
+                    FinishedStatus::Completed
+                    | FinishedStatus::Failed
+                    | FinishedStatus::Cancelled
+                    | FinishedStatus::WritebackFailed,
+                ..
+            }
+            | Self::Active { .. } => Err(self.refused(JobEvent::Settle)),
+        }
+    }
+}
+
+/// Fixture construction: tests set up a job in any state directly.
+#[cfg(test)]
+impl JobLifecycle {
+    /// A fixture's lifecycle: `status` on `inputs`. An active status on
+    /// recorded inputs is a state no job has; asking for one panics.
+    pub(crate) fn for_test(status: JobStatus, inputs: impl Into<StoredInputs>) -> Self {
+        match (status.kind(), inputs.into()) {
+            (StatusKind::Active(status), StoredInputs::Admitted(inputs)) => {
+                Self::Active { status, inputs }
+            }
+            (StatusKind::Active(_), StoredInputs::Recorded(_)) => {
+                panic!("an active fixture needs admitted inputs")
+            }
+            (StatusKind::Finished(status), inputs) => Self::Finished { status, inputs },
+        }
+    }
+
+    /// Put a fixture in `status`, keeping its inputs.
+    pub(crate) fn force_status_for_test(&mut self, status: JobStatus) {
+        let inputs = match self {
+            Self::Active { inputs, .. } => StoredInputs::Admitted(inputs.clone()),
+            Self::Finished { inputs, .. } => inputs.clone(),
+        };
+        *self = Self::for_test(status, inputs);
+    }
+
+    /// Give a fixture `inputs`, keeping its status.
+    pub(crate) fn replace_inputs_for_test(&mut self, inputs: impl Into<StoredInputs>) {
+        let status = self.status();
+        *self = Self::for_test(status, inputs);
+    }
+
+    /// A fixture's admitted inputs, to change in place.
+    pub(crate) fn admitted_mut_for_test(&mut self) -> &mut JobInputs {
+        match self {
+            Self::Active { inputs, .. }
+            | Self::Finished {
+                inputs: StoredInputs::Admitted(inputs),
+                ..
+            } => inputs,
+            Self::Finished {
+                inputs: StoredInputs::Recorded(_),
+                ..
+            } => panic!("the fixture's inputs are recorded"),
+        }
+    }
+}
+
+/// A job's inputs borrowed as stored: admitted or recorded.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StoredInputsRef<'a> {
+    /// Admitted by this process.
+    Admitted(&'a JobInputs),
+    /// Recorded history, not admitted.
+    Recorded(&'a RecordedInputs),
+}
+
+/// A job's inputs as the database stores them: parallel columns. The storage
+/// format only; [`StoredInputs::to_columns`] and [`InputColumns::parse`] are
+/// the one serializer and the one parser, and nothing else reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InputColumns {
+    pub(crate) filenames: Vec<String>,
+    pub(crate) has_chat: Vec<bool>,
+    pub(crate) paths_mode: bool,
+    pub(crate) source_paths: Vec<String>,
+    pub(crate) output_paths: Vec<String>,
+    /// One entry per file, or empty when no file has a prior.
+    pub(crate) before_paths: Vec<Option<String>>,
+}
+
+/// The `before_paths` column: empty when no file has a prior (as every
+/// content-mode job), else one entry per file.
+fn before_column<'a>(befores: impl Iterator<Item = Option<&'a ClientPath>>) -> Vec<Option<String>> {
+    let befores: Vec<Option<String>> = befores
+        .map(|before| before.map(|path| path.as_str().to_owned()))
+        .collect();
+    match befores.iter().any(Option::is_some) {
+        true => befores,
+        false => Vec::new(),
+    }
+}
+
+/// Stored input columns that disagree in length, so no job can be read from
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "stored input columns disagree in length (names {names}, kinds {kinds}, sources {sources}, outputs {outputs}, priors {befores})"
+)]
+pub(crate) struct InputColumnsRefusal {
+    names: usize,
+    kinds: usize,
+    sources: usize,
+    outputs: usize,
+    befores: usize,
+}
+
+impl InputColumns {
+    /// Read stored columns back, with no filesystem access: content-mode
+    /// inputs are admitted as they are (they name no server path), and
+    /// paths-mode inputs come back recorded, for the caller to admit only
+    /// when the job is to run.
+    pub(crate) fn parse(
+        self,
+        source_dir: Option<ClientPath>,
+    ) -> Result<StoredInputs, InputColumnsRefusal> {
+        let Self {
+            filenames,
+            has_chat,
+            paths_mode,
+            source_paths,
+            output_paths,
+            before_paths,
+        } = self;
+        let lengths_agree = has_chat.len() == filenames.len()
+            && match paths_mode {
+                true => {
+                    source_paths.len() == filenames.len()
+                        && output_paths.len() == filenames.len()
+                        && (before_paths.is_empty() || before_paths.len() == filenames.len())
+                }
+                // A content-mode job names no server path: a row that does
+                // is refused, never read with its paths silently dropped.
+                false => {
+                    source_paths.is_empty() && output_paths.is_empty() && before_paths.is_empty()
+                }
+            };
+        if !lengths_agree {
+            return Err(InputColumnsRefusal {
+                names: filenames.len(),
+                kinds: has_chat.len(),
+                sources: source_paths.len(),
+                outputs: output_paths.len(),
+                befores: before_paths.len(),
+            });
+        }
+        let named = filenames
+            .into_iter()
+            .zip(has_chat)
+            .map(|(name, chat)| (DisplayPath::from(name), InputKind::from_is_chat(chat)));
+        Ok(match paths_mode {
+            true => StoredInputs::Recorded(RecordedInputs {
+                files: named
+                    .zip(source_paths.into_iter().zip(output_paths))
+                    // An empty column is no file with a prior.
+                    .zip(
+                        before_paths
+                            .into_iter()
+                            .map(Some)
+                            .chain(std::iter::repeat(None)),
+                    )
+                    .map(
+                        |(((display, kind), (source, output)), before)| RecordedPathsInput {
+                            display,
+                            kind,
+                            source: ClientPath::from(source),
+                            output: ClientPath::from(output),
+                            before: before.flatten().map(ClientPath::from),
+                        },
+                    )
+                    .collect(),
+                source_dir,
+            }),
+            false => StoredInputs::Admitted(JobInputs::Content(
+                named
+                    .map(|(display, kind)| ContentInput { display, kind })
+                    .collect(),
+            )),
+        })
+    }
+}
+
+impl JobInputs {
+    /// The columns the database stores.
+    pub(crate) fn to_columns(&self) -> InputColumns {
+        match self {
+            Self::Paths { files, .. } => InputColumns {
+                filenames: files.iter().map(|file| file.display.to_string()).collect(),
+                has_chat: files.iter().map(|file| file.kind.is_chat()).collect(),
+                paths_mode: true,
+                source_paths: files
+                    .iter()
+                    .map(|file| file.source.client().as_str().to_owned())
+                    .collect(),
+                output_paths: files
+                    .iter()
+                    .map(|file| file.output.client().as_str().to_owned())
+                    .collect(),
+                before_paths: before_column(
+                    files
+                        .iter()
+                        .map(|file| file.before.as_ref().map(AdmittedPath::client)),
+                ),
+            },
+            Self::Content(files) => InputColumns {
+                filenames: files.iter().map(|file| file.display.to_string()).collect(),
+                has_chat: files.iter().map(|file| file.kind.is_chat()).collect(),
+                paths_mode: false,
+                source_paths: Vec::new(),
+                output_paths: Vec::new(),
+                before_paths: Vec::new(),
+            },
+        }
+    }
+}
+
 /// File lists and storage layout for one job.
 #[derive(Debug, Clone)]
 pub struct JobFilesystemConfig {
-    /// Ordered list of file basenames to process.
-    pub filenames: Vec<DisplayPath>,
-    /// Parallel CHAT/media markers for [`Self::filenames`].
-    pub has_chat: Vec<bool>,
     /// Server-local temporary directory for staged input/output content.
     pub staging_dir: ServerPath,
-    /// Whether the job reads and writes directly on the filesystem.
-    pub paths_mode: bool,
-    /// Absolute source paths parallel to [`Self::filenames`] in paths mode.
-    pub source_paths: Vec<ClientPath>,
-    /// Absolute output paths parallel to [`Self::filenames`] in paths mode.
-    pub output_paths: Vec<ClientPath>,
-    /// Optional "before" paths parallel to [`Self::source_paths`].
-    pub before_paths: Vec<Option<ClientPath>>,
     /// Key into the server's configured media-mapping roots.
     pub media_mapping: MediaMappingKey,
     /// Optional subdirectory within the selected media mapping.
     pub media_subdir: RepoRelativePath,
-    /// Client-provided source directory for media locality inference.
-    ///
-    /// In paths mode, the FA pipeline uses this to auto-detect the media
-    /// mapping via [`batchalign_types::paths::infer_media_mapping()`].
-    /// Without this field, `--server` jobs from remote clients cannot
-    /// resolve media files.
-    pub source_dir: ClientPath,
 }
 
 /// Mutable execution state for one job.
 #[derive(Debug, Clone)]
 pub struct JobExecutionState {
-    /// Current lifecycle state of the job.
-    pub status: JobStatus,
+    /// Where the job is in its life, with the inputs that state needs. The
+    /// status and the inputs are one value so an active job cannot hold
+    /// inputs this process did not admit. Written only through
+    /// the event methods on [`JobLifecycle`].
+    pub(crate) lifecycle: JobLifecycle,
     /// Per-file processing state keyed by filename.
     pub file_statuses: HashMap<String, FileStatus>,
     /// Accumulated per-file result entries.
@@ -391,8 +1331,8 @@ pub(crate) struct RunnerClaim {
 pub(crate) struct StoppedRun(RunnerClaim);
 
 impl StoppedRun {
-    pub(in crate::store) fn for_job(job: &Job) -> Self {
-        Self(RunnerClaim::for_job(job))
+    pub(in crate::store) fn for_job(job: &Job) -> Option<Self> {
+        RunnerClaim::for_job(job).map(Self)
     }
 
     pub(in crate::store) fn into_claim(self) -> RunnerClaim {
@@ -401,14 +1341,16 @@ impl StoppedRun {
 }
 
 impl RunnerClaim {
-    pub(in crate::store) fn for_job(job: &Job) -> Self {
-        Self {
+    /// The claim for `job`'s current run: `None` when this process has not
+    /// admitted the job's inputs, which then cannot run.
+    pub(in crate::store) fn for_job(job: &Job) -> Option<Self> {
+        Some(Self {
             run: RunBinding {
                 job_id: job.identity.job_id.clone(),
                 generation: job.runtime.run_generation,
             },
-            snapshot: std::sync::Arc::new(job.to_runner_snapshot()),
-        }
+            snapshot: std::sync::Arc::new(job.to_runner_snapshot()?),
+        })
     }
 
     /// Immutable dispatch input bound to the claimed generation.
@@ -465,16 +1407,82 @@ impl JobRuntimeControl {
 
 /// One file that still requires runner work.
 ///
-/// This is the stable runner-facing replacement for ad hoc
-/// `(usize, DisplayPath, bool)` tuples.
+/// Made only by [`JobInputs::entries`]: the fields are private, so a pending
+/// file's name, kind and location are always those of its own input, and no
+/// caller (test fixtures included) can pair a file with another's paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingJobFile {
-    /// Index into the job's parallel path vectors.
-    pub file_index: usize,
+    /// Index into the job's inputs.
+    file_index: usize,
     /// Logical filename of the work item.
-    pub filename: DisplayPath,
-    /// Whether the input is CHAT text rather than media.
-    pub has_chat: bool,
+    filename: DisplayPath,
+    /// Transcript or recording.
+    kind: InputKind,
+    /// Where it is read and written.
+    location: InputLocation,
+}
+
+/// Where a pending file is read and written: admitted paths on the server's
+/// disk, or its staged copy. Taken from the file's own input entry when the
+/// pending list is made, so no index lookup can miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputLocation {
+    /// Paths mode: read, written and compared in place. Boxed: three
+    /// admitted paths beside a unit variant.
+    Paths(Box<PathsLocation>),
+    /// Content mode: staged under the job's staging directory.
+    Staged,
+}
+
+/// A paths-mode file's admitted paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathsLocation {
+    /// The source the job reads.
+    pub source: AdmittedPath,
+    /// Where its output is written.
+    pub output: AdmittedPath,
+    /// The earlier version, for incremental processing.
+    pub before: Option<AdmittedPath>,
+}
+
+impl PendingJobFile {
+    /// Its index into the job's inputs, and into the job's file order.
+    pub fn file_index(&self) -> usize {
+        self.file_index
+    }
+
+    /// Its display name.
+    pub fn filename(&self) -> &DisplayPath {
+        &self.filename
+    }
+
+    /// Transcript or recording.
+    pub fn kind(&self) -> InputKind {
+        self.kind
+    }
+
+    /// Where it is read and written.
+    pub fn location(&self) -> &InputLocation {
+        &self.location
+    }
+
+    /// Where the input is read: its admitted source, or its staged copy
+    /// under `input/`.
+    pub(crate) fn input_path(&self, staging_dir: &ServerPath) -> ServerPath {
+        match &self.location {
+            InputLocation::Paths(paths) => paths.source.server().clone(),
+            InputLocation::Staged => staging_dir.join("input").join(self.filename.as_ref()),
+        }
+    }
+
+    /// Its earlier version, in paths mode, when one was given. Never a
+    /// neighbouring file's.
+    pub(crate) fn before_path(&self) -> Option<ServerPath> {
+        match &self.location {
+            InputLocation::Paths(paths) => paths.before.as_ref().map(|path| path.server().clone()),
+            InputLocation::Staged => None,
+        }
+    }
 }
 
 /// Successful result metadata for one completed file.
@@ -590,14 +1598,8 @@ pub struct RunnerDispatchConfig {
 /// Filesystem and media-resolution configuration for one job.
 #[derive(Debug, Clone)]
 pub struct RunnerFilesystemConfig {
-    /// Whether the job reads and writes directly on the filesystem.
-    pub paths_mode: bool,
-    /// Source paths parallel to [`PendingJobFile::file_index`].
-    pub source_paths: Vec<ClientPath>,
-    /// Output paths parallel to [`PendingJobFile::file_index`].
-    pub output_paths: Vec<ClientPath>,
-    /// Optional "before" paths parallel to [`PendingJobFile::file_index`].
-    pub before_paths: Vec<Option<ClientPath>>,
+    /// The job's inputs, indexed by [`PendingJobFile::file_index`].
+    pub inputs: JobInputs,
     /// Staging directory for uploaded content mode.
     pub staging_dir: ServerPath,
     /// Media-mapping key for server-side audio lookup.
@@ -609,20 +1611,6 @@ pub struct RunnerFilesystemConfig {
     /// The FA pipeline passes this to `infer_media_mapping()` to auto-detect
     /// which media volume and repo-relative subdir to search for audio files.
     pub source_dir: ClientPath,
-}
-
-impl RunnerFilesystemConfig {
-    /// Resolve only this file's optional prior in shared-filesystem mode.
-    /// Missing entries never borrow a neighbouring file's reuse evidence.
-    pub(crate) fn before_path(&self, file_index: usize) -> Option<ServerPath> {
-        if !self.paths_mode {
-            return None;
-        }
-        self.before_paths
-            .get(file_index)
-            .and_then(Option::as_ref)
-            .map(ClientPath::assume_shared_filesystem)
-    }
 }
 
 /// Immutable runner-facing snapshot of job state.
@@ -643,15 +1631,14 @@ pub struct RunnerJobSnapshot {
     pub pending_files: Vec<PendingJobFile>,
 }
 
-/// Result of recovering a persisted interrupted/running job on startup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecoveryDisposition {
-    /// The job still has resumable work and was returned to the queue.
-    Requeued,
-    /// The job had only terminal failures and was promoted to failed.
-    Failed,
-    /// The job had completed output and was promoted to completed.
-    Completed,
+/// What startup recovery did to one loaded job, for the database.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Recovered {
+    /// Nothing: the row stands as stored.
+    Unchanged,
+    /// The job's status columns changed, and so did each listed file's
+    /// phase (requeued, or closed).
+    Rewritten(Vec<(String, crate::store::FilePhase)>),
 }
 
 #[cfg(test)]

@@ -55,7 +55,7 @@ impl Job {
     /// Currently exercised only by the test-only local queue-claim path.
     #[cfg(test)]
     pub(crate) fn ready_for_local_dispatch(&self, now: MachineTime) -> bool {
-        self.execution.status == crate::api::JobStatus::Queued
+        self.status() == crate::api::JobStatus::Queued
             && !self.runtime.runner_active
             && !self.lease_blocks_local_dispatch(now)
             && self
@@ -96,7 +96,7 @@ impl Job {
         now: MachineTime,
         lease_ttl: LeaseTtl,
     ) -> Option<LeaseRecord> {
-        if !self.runtime.runner_active || self.execution.status.is_terminal() {
+        if !self.runtime.runner_active || self.status().is_terminal() {
             return None;
         }
         match &mut self.schedule.lease {

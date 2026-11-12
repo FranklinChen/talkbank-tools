@@ -110,6 +110,8 @@ impl ProbeServer {
             // 16GB host. Small/Medium's one-worker policy cannot enter warmup.
             // Physical readings, leases and all admission gates stay active.
             memory_tier: Some(batchalign::types::runtime::MemoryTierKind::Large),
+            // The probe job's files live under the system temporary folder.
+            paths_mode_roots: vec![std::env::temp_dir()],
             ..ServerConfig::default()
         };
         let host = Arc::new(batchalign::host_facts::HostSnapshot::for_tests_in(

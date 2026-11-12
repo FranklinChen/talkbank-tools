@@ -1313,6 +1313,22 @@ pub enum ServeAction {
     Stop,
     /// Check server health and status.
     Status(ServeStatusArgs),
+    /// Sign one request to this account's own server (for the desktop app):
+    /// reads the body on stdin, prints the same-user header value. The key
+    /// never leaves this process.
+    #[command(hide = true)]
+    SignRequest(ServeSignRequestArgs),
+}
+
+/// Arguments for the hidden `serve sign-request`.
+#[derive(Args, Debug, Clone)]
+pub struct ServeSignRequestArgs {
+    /// The request's HTTP method.
+    #[arg(long)]
+    pub method: String,
+    /// The request's path, without query (for example `/jobs`).
+    #[arg(long)]
+    pub path: String,
 }
 
 /// Arguments for `serve start`.
@@ -1336,7 +1352,8 @@ pub struct ServeStartArgs {
     #[arg(long)]
     pub port: Option<u16>,
 
-    /// Host to bind to (defaults to server.yaml or 0.0.0.0).
+    /// Host to bind to (defaults to server.yaml, else 127.0.0.1: this machine
+    /// only).
     #[arg(long)]
     pub host: Option<String>,
 
@@ -1815,8 +1832,8 @@ pub struct UtsegPreAsrReplayArgs {
     /// The media name the run recorded in the `@Media` header. Omit it to
     /// reproduce a run that recorded none, as transcribe's own option is
     /// optional.
-    #[arg(long)]
-    pub media_name: Option<String>,
+    #[arg(long, value_parser = parse_media_filename)]
+    pub media_name: Option<talkbank_model::model::MediaFilename>,
     /// Reproduce a run that generated `%wor` tiers from ASR word timings.
     #[arg(long)]
     pub wor: bool,
@@ -2015,4 +2032,9 @@ pub struct MergeVerifyArgs {
     /// seam owns the vocabulary; this pass only needs the prefix.
     #[arg(long, default_value = "verify")]
     pub flag_prefix: String,
+}
+
+/// A `--media-name` as `@Media` writes it, refused here if it cannot be.
+fn parse_media_filename(value: &str) -> Result<talkbank_model::model::MediaFilename, String> {
+    talkbank_model::model::MediaFilename::parse(value).map_err(|error| error.to_string())
 }

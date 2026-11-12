@@ -171,7 +171,7 @@ async fn infer_missing_input(
             });
         }
         RetainedPreparation::Ready(PreparedFaInput::Cached(answer)) => {
-            return Ok(answer.into_supplied_retry(key));
+            return Ok(answer.into_supplied_retry(source.request(), key));
         }
         RetainedPreparation::Ready(PreparedFaInput::Inference(prepared)) => {
             AvailableRetryInput::Retained(prepared)
@@ -181,7 +181,7 @@ async fn infer_missing_input(
     let request = source.request();
     cached.lookup(request, context).await;
     if let CandidateCacheState::Admitted(answer) = cached.state(unit) {
-        return Ok(answer.clone().into_supplied_retry(key));
+        return Ok(answer.clone().into_supplied_retry(request, key));
     }
     // A missing optional cache entry retains the primary partial output. It
     // cannot acquire a worker-inference permit under RequireCache.

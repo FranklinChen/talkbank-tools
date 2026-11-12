@@ -85,6 +85,10 @@ remain in the transcript and count as untimed. A short acknowledgement can
 also remain untimed when its uncertain search window cannot pass the selected
 model's input or resource checks; this does not mean the spoken acknowledgement
 itself was long.
+A reply from the aligner that does not fit its request (timings for a
+different number of words, or a time outside the stretch it was asked about)
+leaves just that stretch's words untimed, counted as `refused` in the file's
+review, and the rest of the file is still aligned.
 Keep the diagnostic or debug evidence when asking which stage left a word
 untimed; the missing-timing count alone does not identify an acoustic failure.
 

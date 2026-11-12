@@ -73,11 +73,6 @@ pub enum BuildChatError {
         message: String,
     },
 
-    /// The supplied media name cannot be written to an `@Media` header and
-    /// read back unchanged.
-    #[error("invalid @Media filename: {0}")]
-    MediaFilename(#[from] talkbank_model::model::MediaFilenameError),
-
     /// The description carried no utterances at all.
     ///
     /// A CHAT document of headers and nothing else is not a transcript of

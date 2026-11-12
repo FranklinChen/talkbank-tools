@@ -205,9 +205,27 @@ pub(crate) async fn delete_job(
 pub(crate) async fn restart_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Result<Json<JobInfo>, ServerError> {
     let job_id = JobId::from(job_id);
-    let info = state.control.backend.restart_job(&job_id).await?;
+    // A restart admits the job's paths again, under the authority of
+    // whoever asks for it; its proof covers this path and an empty body.
+    let authority = state.environment.authority_for(
+        &headers,
+        peer,
+        &crate::same_user_key::RequestBinding {
+            method: "POST",
+            path: uri.path(),
+            body: &[],
+        },
+    )?;
+    let info = state
+        .control
+        .backend
+        .restart_job(&job_id, &authority)
+        .await?;
 
     Ok(Json(info))
 }

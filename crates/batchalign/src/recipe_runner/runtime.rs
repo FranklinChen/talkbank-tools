@@ -44,24 +44,13 @@ pub(crate) fn discover_input_for_pending_file(
     filesystem: &RunnerFilesystemConfig,
     file: &PendingJobFile,
 ) -> DiscoveredInput {
-    let source_path = if filesystem.paths_mode && file.file_index < filesystem.source_paths.len() {
-        filesystem.source_paths[file.file_index]
-            .assume_shared_filesystem()
-            .as_path()
-            .to_owned()
-    } else {
-        filesystem
-            .staging_dir
-            .join("input")
-            .join(file.filename.as_ref())
-            .as_path()
-            .to_owned()
-    };
-    let before_path = filesystem
-        .before_path(file.file_index)
-        .map(|path| path.as_path().to_owned());
+    let source_path = file
+        .input_path(&filesystem.staging_dir)
+        .as_path()
+        .to_owned();
+    let before_path = file.before_path().map(|path| path.as_path().to_owned());
     DiscoveredInput {
-        display_path: file.filename.clone(),
+        display_path: file.filename().clone(),
         source_path,
         before_path,
     }
@@ -134,25 +123,20 @@ pub(crate) fn result_display_path_for_command(
 /// Resolve the concrete write path for one planned output artifact.
 pub(crate) fn output_write_path(
     filesystem: &RunnerFilesystemConfig,
-    file_index: usize,
+    location: &crate::store::InputLocation,
     result_display_path: &DisplayPath,
 ) -> PathBuf {
-    if filesystem.paths_mode && file_index < filesystem.output_paths.len() {
-        let result_name = Path::new(result_display_path.as_ref())
-            .file_name()
-            .unwrap_or_default();
-        let output_server_path = filesystem.output_paths[file_index].assume_shared_filesystem();
-        Path::new(output_server_path.as_str())
-            .parent()
-            .map(|parent| parent.join(result_name))
-            .unwrap_or_else(|| result_name.into())
-    } else {
-        filesystem
-            .staging_dir
-            .join("output")
-            .join(result_display_path.as_ref())
-            .as_path()
-            .to_owned()
+    match location {
+        // Beside the file's admitted output, under the result's own file
+        // name: admission keeps that folder inside an allowed root.
+        crate::store::InputLocation::Paths(paths) => {
+            paths.output.server().as_path().with_file_name(
+                Path::new(result_display_path.as_ref())
+                    .file_name()
+                    .unwrap_or_default(),
+            )
+        }
+        crate::store::InputLocation::Staged => staged_output_path(filesystem, result_display_path),
     }
 }
 
@@ -184,30 +168,30 @@ pub(crate) async fn publish_text(path: &Path, content: &str) -> std::io::Result<
 
 /// One text-output destination (CHAT, CSV sidecar or evidence document) for
 /// a single file in a job: enough state to derive both the primary on-disk
-/// write path and the staged copy. Bundling the (filesystem, file_index,
+/// write path and the staged copy. Bundling the (filesystem, location,
 /// display_path) triple gives all the writers a single typed seam. The paths
 /// it derives are private: the only way bytes reach them is [`publish_text`].
 pub(crate) struct ChatOutputTarget<'a> {
     filesystem: &'a RunnerFilesystemConfig,
-    file_index: usize,
+    location: &'a crate::store::InputLocation,
     display_path: &'a DisplayPath,
 }
 
 impl<'a> ChatOutputTarget<'a> {
     pub fn new(
         filesystem: &'a RunnerFilesystemConfig,
-        file_index: usize,
+        location: &'a crate::store::InputLocation,
         display_path: &'a DisplayPath,
     ) -> Self {
         Self {
             filesystem,
-            file_index,
+            location,
             display_path,
         }
     }
 
     fn primary_path(&self) -> PathBuf {
-        output_write_path(self.filesystem, self.file_index, self.display_path)
+        output_write_path(self.filesystem, self.location, self.display_path)
     }
 
     fn staged_path(&self) -> PathBuf {
@@ -379,8 +363,7 @@ mod tests {
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
     use crate::pipeline::post_validate::PostValidated;
     use crate::store::{
-        PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
-        RunnerJobSnapshot,
+        RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity, RunnerJobSnapshot,
     };
 
     /// A paths-mode job whose one input is `<root>/input/sample.cha`, whose
@@ -391,10 +374,14 @@ mod tests {
             batchalign_types::paths::ClientPath::new(path.to_string_lossy().to_string())
         };
         RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![client(root.join("input/sample.cha"))],
-            output_paths: vec![client(host_out.to_path_buf())],
-            before_paths: Vec::new(),
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                true,
+                vec![client(root.join("input/sample.cha"))],
+                vec![client(host_out.to_path_buf())],
+                Vec::new(),
+            ),
             staging_dir: batchalign_types::paths::ServerPath::from(root.join("jobs/job-1")),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -404,11 +391,12 @@ mod tests {
 
     fn runner_snapshot(
         command: ReleasedCommand,
-        pending_files: Vec<PendingJobFile>,
+        displays: Vec<&str>,
         source_paths: Vec<&str>,
-        before_paths: Vec<&str>,
+        before_paths: Vec<Option<&str>>,
     ) -> RunnerJobSnapshot {
-        RunnerJobSnapshot {
+        let file_count = displays.len();
+        crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-runtime"),
                 correlation_id: CorrelationId::from("corr-runtime"),
@@ -425,27 +413,34 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                paths_mode: true,
-                source_paths: source_paths
-                    .into_iter()
-                    .map(batchalign_types::paths::ClientPath::from)
-                    .collect(),
-                output_paths: vec![
-                    batchalign_types::paths::ClientPath::new("/out/main.cha");
-                    pending_files.len()
-                ],
-                before_paths: before_paths
-                    .into_iter()
-                    .map(|path| Some(batchalign_types::paths::ClientPath::from(path)))
-                    .collect(),
+                inputs: crate::store::test_support::inputs_from_parts(
+                    displays.into_iter().map(DisplayPath::from).collect(),
+                    Vec::new(),
+                    true,
+                    source_paths
+                        .into_iter()
+                        .map(batchalign_types::paths::ClientPath::from)
+                        .collect(),
+                    // One output per file: two files writing one output is
+                    // refused at admission.
+                    (0..file_count)
+                        .map(|index| {
+                            batchalign_types::paths::ClientPath::new(format!("/out/{index}.cha"))
+                        })
+                        .collect(),
+                    before_paths
+                        .into_iter()
+                        .map(|path| path.map(batchalign_types::paths::ClientPath::from))
+                        .collect(),
+                ),
                 staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
                 source_dir: batchalign_types::paths::ClientPath::new("/source"),
             },
             cancel_token: CancellationToken::new(),
-            pending_files,
-        }
+            pending_files: Vec::new(),
+        })
     }
 
     /// A transcribe re-run on a new build over identical content changes only
@@ -502,18 +497,13 @@ mod tests {
 
     #[test]
     fn discover_input_carries_before_path() {
-        let file = PendingJobFile {
-            file_index: 0,
-            filename: DisplayPath::from("nested/sample.cha"),
-            has_chat: true,
-        };
         let job = runner_snapshot(
             ReleasedCommand::Morphotag,
-            vec![file.clone()],
+            vec!["nested/sample.cha"],
             vec!["/src/nested/sample.cha"],
-            vec!["/before/nested/sample.cha"],
+            vec![Some("/before/nested/sample.cha")],
         );
-        let input = discover_input_for_pending_file(&job.filesystem, &file);
+        let input = discover_input_for_pending_file(&job.filesystem, &job.pending_files[0]);
         assert_eq!(input.source_path, PathBuf::from("/src/nested/sample.cha"));
         assert_eq!(
             input.before_path,
@@ -523,22 +513,15 @@ mod tests {
 
     #[test]
     fn optional_priors_keep_recipe_and_text_consumers_on_the_same_file() {
-        let files: Vec<_> = ["a.cha", "b.cha", "c.cha"]
-            .into_iter()
-            .enumerate()
-            .map(|(file_index, filename)| PendingJobFile {
-                file_index,
-                filename: filename.into(),
-                has_chat: true,
-            })
-            .collect();
-        let mut job = runner_snapshot(
+        // A prior belongs to its own file's input, so the second file's prior
+        // can reach neither neighbour. (A prior for a file past the end, or
+        // in a content-mode job, has no input to live on.)
+        let job = runner_snapshot(
             ReleasedCommand::Morphotag,
-            files,
+            vec!["a.cha", "b.cha", "c.cha"],
             vec!["/a.cha", "/b.cha", "/c.cha"],
-            vec![],
+            vec![None, Some("/before/b.cha"), None],
         );
-        job.filesystem.before_paths = vec![None, Some("/before/b.cha".into()), None];
         for (index, file) in job.pending_files.iter().enumerate() {
             let expected = (index == 1).then(|| std::path::PathBuf::from("/before/b.cha"));
             assert_eq!(
@@ -546,29 +529,13 @@ mod tests {
                 expected
             );
         }
-        assert!(job.filesystem.before_path(3).is_none());
-        job.filesystem.paths_mode = false;
-        assert!(job.filesystem.before_path(1).is_none());
-        job.filesystem.before_paths.clear();
-        assert!(job.filesystem.before_path(0).is_none());
     }
 
     #[test]
     fn compare_job_planning_uses_gold_companion_shape() {
         let job = runner_snapshot(
             ReleasedCommand::Compare,
-            vec![
-                PendingJobFile {
-                    file_index: 0,
-                    filename: DisplayPath::from("nested/sample.cha"),
-                    has_chat: true,
-                },
-                PendingJobFile {
-                    file_index: 1,
-                    filename: DisplayPath::from("nested/sample.gold.cha"),
-                    has_chat: true,
-                },
-            ],
+            vec!["nested/sample.cha", "nested/sample.gold.cha"],
             vec!["/src/nested/sample.cha", "/src/nested/sample.gold.cha"],
             vec![],
         );
@@ -644,10 +611,14 @@ mod tests {
     #[test]
     fn output_write_path_preserves_staging_relative_dirs() {
         let filesystem = RunnerFilesystemConfig {
-            paths_mode: false,
-            source_paths: Vec::new(),
-            output_paths: Vec::new(),
-            before_paths: Vec::new(),
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -655,7 +626,7 @@ mod tests {
         };
         let write_path = output_write_path(
             &filesystem,
-            0,
+            &crate::store::InputLocation::Staged,
             &DisplayPath::from("nested/result.compare.csv"),
         );
         assert_eq!(
@@ -669,9 +640,10 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let host_out = root.path().join("host/output/sample.cha");
         let filesystem = paths_mode_filesystem(root.path(), &host_out);
+        let location = crate::store::test_support::only_location(&filesystem.inputs);
 
         let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        let target = ChatOutputTarget::new(&filesystem, &location, &display);
         write_text_output_artifact(&target, "@Begin\n@End\n")
             .await
             .expect("write output");
@@ -721,6 +693,7 @@ mod tests {
         let before = std::fs::metadata(&host_out).expect("metadata before");
 
         let filesystem = paths_mode_filesystem(root.path(), &host_out);
+        let location = crate::store::test_support::only_location(&filesystem.inputs);
 
         // Same content as `original` except for the stamp's name (legacy
         // `ba3` to `fc-ba3`) and its timestamp: the fields are identical.
@@ -740,7 +713,7 @@ mod tests {
 ";
 
         let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        let target = ChatOutputTarget::new(&filesystem, &location, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
             &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
@@ -778,9 +751,10 @@ mod tests {
         std::fs::write(&host_out, "@UTF8\n@Begin\n*CHI:\told .\n@End\n").unwrap();
         let old_inode = std::fs::metadata(&host_out).expect("metadata").ino();
         let filesystem = paths_mode_filesystem(root.path(), &host_out);
+        let location = crate::store::test_support::only_location(&filesystem.inputs);
 
         let display = DisplayPath::from("sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        let target = ChatOutputTarget::new(&filesystem, &location, &display);
         write_text_output_artifact(&target, "@UTF8\n@Begin\n*CHI:\tnew .\n@End\n")
             .await
             .expect("write output");
@@ -812,6 +786,7 @@ mod tests {
         std::fs::write(&host_out, original).unwrap();
 
         let filesystem = paths_mode_filesystem(root.path(), &host_out);
+        let location = crate::store::test_support::only_location(&filesystem.inputs);
 
         // Different `%mor` content: a legitimate result update.
         let candidate = "\
@@ -821,7 +796,7 @@ mod tests {
 ";
 
         let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        let target = ChatOutputTarget::new(&filesystem, &location, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
             &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
@@ -845,6 +820,7 @@ mod tests {
         // Note: target file does NOT exist yet.
 
         let filesystem = paths_mode_filesystem(root.path(), &host_out);
+        let location = crate::store::test_support::only_location(&filesystem.inputs);
 
         let candidate = "\
 @Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]
@@ -853,7 +829,7 @@ mod tests {
 ";
 
         let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, 0, &display);
+        let target = ChatOutputTarget::new(&filesystem, &location, &display);
         write_chat_output_artifact_with_provenance_gate(
             &target,
             &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),

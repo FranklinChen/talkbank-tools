@@ -18,7 +18,14 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tempfile = "3"
+# Admitted paths name files the way the disk compares names: NFC on macOS,
+# whose file systems ignore Unicode normalization.
+unicode-normalization = "0.1.26"
 utoipa = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# `pathconf(_PC_CASE_SENSITIVE)`: whether a folder's volume ignores case.
+libc = { workspace = true }
 
 [features]
 sqlx = ["dep:sqlx"]

@@ -712,19 +712,6 @@ impl LanguageSpec {
             text => Ok(Self::Resolved(LanguageCode3::try_new(text)?)),
         }
     }
-
-    /// Parse from a DB string column. `"auto"` → `Auto`, `"per-file"`
-    /// → `PerFile`, `"eng,spa"` → `Pair`, anything else → `Resolved`.
-    ///
-    /// Returns `(spec, true)` if the value was valid, `(spec, false)` if
-    /// the stored value was invalid and fell back to `eng`. Callers should
-    /// log the fallback so corrupt DB values are visible.
-    pub fn parse_from_db(s: &str) -> (Self, bool) {
-        match Self::parse(s) {
-            Ok(spec) => (spec, true),
-            Err(_) => (Self::Resolved(LanguageCode3::eng()), false),
-        }
-    }
 }
 
 impl std::fmt::Display for LanguageSpec {
@@ -2444,24 +2431,6 @@ mod tests {
     }
 
     #[test]
-    fn language_spec_parse_from_db_valid() {
-        let (spec, valid) = LanguageSpec::parse_from_db("auto");
-        assert_eq!(spec, LanguageSpec::Auto);
-        assert!(valid);
-
-        let (spec, valid) = LanguageSpec::parse_from_db("eng");
-        assert_eq!(spec, LanguageSpec::Resolved(LanguageCode3::eng()));
-        assert!(valid);
-    }
-
-    #[test]
-    fn language_spec_parse_from_db_invalid_falls_back() {
-        let (spec, valid) = LanguageSpec::parse_from_db("not-a-lang");
-        assert_eq!(spec, LanguageSpec::Resolved(LanguageCode3::eng()));
-        assert!(!valid, "invalid DB value should report fallback");
-    }
-
-    #[test]
     fn language_spec_maps_to_worker_language() {
         assert_eq!(
             LanguageSpec::Auto.to_worker_language(),
@@ -2509,13 +2478,6 @@ mod tests {
         let back: LanguageSpec = serde_json::from_str(&json)?;
         assert_eq!(back, spec);
         Ok(())
-    }
-
-    #[test]
-    fn language_spec_parse_from_db_per_file() {
-        let (spec, valid) = LanguageSpec::parse_from_db("per-file");
-        assert_eq!(spec, LanguageSpec::PerFile);
-        assert!(valid);
     }
 
     #[test]
@@ -2574,7 +2536,6 @@ mod tests {
         let json = serde_json::to_string(&spec)?;
         assert_eq!(json, "\"eng,spa\"");
         assert_eq!(serde_json::from_str::<LanguageSpec>(&json)?, spec);
-        assert_eq!(LanguageSpec::parse_from_db("eng,spa"), (spec.clone(), true));
         assert!(serde_json::from_str::<LanguageSpec>("\"eng,eng\"").is_err());
         Ok(())
     }

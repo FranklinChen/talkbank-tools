@@ -14,7 +14,7 @@
 //! by `interrupt_for_shutdown`: although `JobStatus::is_terminal()` returns
 //! `true` for it, the recovery sequence at startup is special-cased to
 //! transition resumable Interrupted rows back to `Queued` (see
-//! `reconcile_recovered_runtime_state` here and `load_from_db` in
+//! `Job::recover` here and `load_from_db` in
 //! `store/queries/recovery.rs`).
 //!
 //! Restart preparation (`prepare_for_restart`) resets unfinished file work
@@ -24,10 +24,9 @@ use tokio_util::sync::CancellationToken;
 
 use std::collections::BTreeSet;
 
-use crate::api::{FileStatusKind, JobStatus, MachineTime, StatusChange};
+use crate::api::{FileStatusKind, JobStatus, MachineTime};
 
 use super::Job;
-use super::types::RecoveryDisposition;
 use crate::store::FilePhase;
 
 impl Job {
@@ -54,31 +53,52 @@ impl Job {
             .any(|file_status| file_status.status() == FileStatusKind::Error)
     }
 
-    /// Apply a status change if the state machine permits it.
-    ///
-    /// The ONLY place `execution.status` is written. Returns false when the
-    /// transition is illegal for this reason, in which case nothing is
-    /// mutated and the caller must not persist a status either. See
-    /// [`JobStatus::can_transition_to`].
-    #[must_use = "a refusal means the status did NOT change; status-derived \
-                  bookkeeping and any persisted status must not assume it did"]
-    pub(crate) fn set_status(&mut self, next: JobStatus, reason: StatusChange) -> bool {
-        if !self.execution.status.can_transition_to(next, reason) {
-            // Logged here because this is the single choke point, so no writer
-            // has to remember. Most refusals are ordinary races (a user cancels
-            // while a runner is mid-flight); the loud one is a refused
-            // `Finalize`, which means work was completed and then discarded.
-            tracing::debug!(
-                job_id = %self.identity.job_id,
-                from = %self.execution.status,
-                to = %next,
-                ?reason,
-                "refusing job status transition"
-            );
-            return false;
+    /// The job's status.
+    pub(crate) fn status(&self) -> JobStatus {
+        self.execution.lifecycle.status()
+    }
+
+    /// The job's inputs as stored, whichever state it is in.
+    pub(crate) fn inputs(&self) -> crate::store::StoredInputsRef<'_> {
+        self.execution.lifecycle.stored()
+    }
+
+    /// A queued or running job's inputs; `None` for a finished job.
+    pub(crate) fn active_inputs(&self) -> Option<&crate::store::JobInputs> {
+        match &self.execution.lifecycle {
+            super::JobLifecycle::Active { inputs, .. } => Some(inputs),
+            super::JobLifecycle::Finished { .. } => None,
         }
-        self.execution.status = next;
-        true
+    }
+
+    /// The inputs a runner may use: those this process admitted.
+    pub(crate) fn admitted_inputs(&self) -> Option<&crate::store::JobInputs> {
+        self.execution.lifecycle.admitted()
+    }
+
+    /// Whether a lifecycle event applied, logging a refusal: the one place
+    /// a refused event is reported, so no transition has to remember. Most
+    /// refusals are ordinary races (a user cancels while a runner is
+    /// mid-flight); a refused `Finish` means work was completed and then
+    /// discarded. A refused event changed nothing, and its caller must not
+    /// persist a status either.
+    fn accepted(&self, event: Result<(), super::Refused>) -> bool {
+        match event {
+            Ok(()) => true,
+            Err(refused) => {
+                tracing::debug!(job_id = %self.identity.job_id, %refused, "refusing job lifecycle event");
+                false
+            }
+        }
+    }
+
+    /// Clear what the previous run concluded, for a job queued again: no
+    /// carried error, completion time, retry time or lease.
+    fn clear_run_outcome(&mut self) {
+        self.execution.error = None;
+        self.schedule.completed_at = None;
+        self.schedule.next_eligible_at = None;
+        self.clear_lease();
     }
 
     /// Stop the job at `at`, if its status allows: the status image's
@@ -87,26 +107,28 @@ impl Job {
     ///
     /// [`JobStatusColumns::stopped`]: super::JobStatusColumns::stopped
     fn stop(&mut self, stop: super::Stop, at: MachineTime) -> bool {
-        if !self.set_status(stop.status(), StatusChange::Interrupt) {
+        let event = self.execution.lifecycle.stop(stop);
+        if !self.accepted(event) {
             return false;
         }
         let image = self.status_columns().stopped(stop, at);
-        self.adopt_status_columns(image);
+        self.adopt_stopped_columns(image);
         true
     }
 
     /// Make the live job hold `image`, every column of it. Destructured
     /// whole, so a column added to the image cannot be left out here, and a
     /// transition stated on the image is the transition the live job takes.
-    fn adopt_status_columns(&mut self, image: super::JobStatusColumns) {
+    /// The status is the one column not written here: `stop` moved the
+    /// lifecycle to `stop.status()`, which is the image's.
+    fn adopt_stopped_columns(&mut self, image: super::JobStatusColumns) {
         let super::JobStatusColumns {
-            status,
+            status: _,
             error,
             completed_at,
             num_workers,
             next_eligible_at,
         } = image;
-        self.execution.status = status;
         self.execution.error = error;
         self.schedule.completed_at = completed_at;
         self.schedule.num_workers = num_workers;
@@ -130,7 +152,8 @@ impl Job {
     /// `cancelled_job_is_not_requeued_by_the_memory_gate`.
     #[must_use = "an ignored refusal requeues a job that is no longer active"]
     pub(crate) fn requeue_after_memory_gate(&mut self, retry_at: MachineTime) -> bool {
-        if !self.set_status(JobStatus::Queued, StatusChange::MemoryRequeue) {
+        let event = self.execution.lifecycle.memory_requeue();
+        if !self.accepted(event) {
             return false;
         }
         self.schedule.completed_at = None;
@@ -157,11 +180,13 @@ impl Job {
     ///
     /// Refusing leaves the job `Cancelled`, and the database row is written
     /// from the job as it is (`Job::status_columns`), so registry and
-    /// database agree. Every status writer goes through [`Job::set_status`]
-    /// and the [`JobStatus::can_transition_to`] table.
+    /// database agree. Every status change is an event on the job's
+    /// [`JobLifecycle`](super::JobLifecycle), legal only from the states it
+    /// leaves.
     #[must_use = "a dropped refusal silently resurrects a cancelled job"]
     pub(crate) fn mark_running(&mut self) -> bool {
-        if !self.set_status(JobStatus::Running, StatusChange::Dispatch) {
+        let event = self.execution.lifecycle.dispatch();
+        if !self.accepted(event) {
             return false;
         }
         self.schedule.next_eligible_at = None;
@@ -179,12 +204,47 @@ impl Job {
     /// cannot overwrite a user's `Cancelled` with `Failed`.
     #[must_use = "an ignored refusal overwrites a terminal status"]
     pub(crate) fn fail(&mut self, error: &str, completed_at: MachineTime) -> bool {
-        if !self.set_status(JobStatus::Failed, StatusChange::Finalize) {
+        let event = self.execution.lifecycle.finish(super::Outcome::Failed);
+        if !self.accepted(event) {
             return false;
         }
         self.execution.error = Some(error.to_string());
         self.schedule.completed_at = Some(completed_at);
         true
+    }
+
+    /// Close every unfinished file with `message`, for a recovered job that
+    /// will not run: its inputs were refused, or it was cancelled with files
+    /// still open (no runner is started for a cancelled job after a restart,
+    /// and closing a file reads no path). Returns each closed file with its
+    /// new phase, for the database.
+    pub(crate) fn close_unfinished_files(
+        &mut self,
+        message: &str,
+        category: crate::scheduling::FailureCategory,
+        at: crate::store::EventTime,
+    ) -> Vec<(String, crate::store::FilePhase)> {
+        let unfinished: Vec<String> = self
+            .execution
+            .file_statuses
+            .iter()
+            .filter(|(_, file)| !file.status().is_terminal())
+            .map(|(filename, _)| filename.clone())
+            .collect();
+        let failure = crate::store::FileFailureRecord {
+            message: message.to_owned(),
+            category,
+            finished_at: at,
+        };
+        unfinished
+            .into_iter()
+            .filter_map(|filename| {
+                // Taken from this map, unfinished, a moment ago.
+                self.mark_file_error(&filename, &failure).ok()?;
+                let phase = self.execution.file_statuses.get(&filename)?.phase.clone();
+                Some((filename, phase))
+            })
+            .collect()
     }
 
     /// Mark the job interrupted by server shutdown and clear runtime claims.
@@ -197,11 +257,10 @@ impl Job {
     ///    through `JobStatusColumns::stopped`, the transition this one
     ///    applies; it does **not** touch rows already written as
     ///    `interrupted` (such as the rows written here).
-    /// 2. `load_from_db()` then reads each row and, for any job with
-    ///    `status ∈ {Interrupted, Running}`, calls
-    ///    `Job::reconcile_recovered_runtime_state()` which transitions the
-    ///    in-memory job (and writes back to the DB) to `Queued` if any
-    ///    file is resumable.
+    /// 2. `load_from_db()` then reads each row (a stored active status
+    ///    loads as `Interrupted`) and calls `Job::recover()`, which moves an
+    ///    interrupted job (in memory, and written back to the DB) to
+    ///    `Queued` if any file is resumable and its inputs are admitted.
     ///
     /// Writing `Cancelled` here (the previous behavior) skipped both steps:
     /// the row is never revisited, so an in-flight job that was running
@@ -239,8 +298,9 @@ impl Job {
     /// File-level bookkeeping still runs either way, because those counters
     /// describe the files and are true regardless of the job's status.
     #[must_use = "a refused finalize must not be persisted either"]
-    pub(crate) fn finalize(&mut self, final_status: JobStatus, completed_at: MachineTime) -> bool {
-        let applied = self.set_status(final_status, StatusChange::Finalize);
+    pub(crate) fn finalize(&mut self, outcome: super::Outcome, completed_at: MachineTime) -> bool {
+        let event = self.execution.lifecycle.finish(outcome);
+        let applied = self.accepted(event);
         // When finalizing as Failed, surface WHY: aggregate the per-file error
         // messages into the job-level error so the dashboard, jobs.db, and the
         // CLI all show a reason instead of a bare "failed". Without this the
@@ -250,7 +310,7 @@ impl Job {
         //
         // Gated on `applied`: a refused finalize must not hang a Failed-shaped
         // reason on a job that stayed Cancelled.
-        if applied && final_status == JobStatus::Failed {
+        if applied && outcome == super::Outcome::Failed {
             self.set_failure_reason_from_files();
         }
         if applied {
@@ -295,7 +355,7 @@ impl Job {
     /// unless one was already set directly (e.g. by [`Job::fail`]).
     ///
     /// The single idempotent entry point that both [`Job::finalize`] and
-    /// [`Job::reconcile_recovered_runtime_state`] use, so a Failed job always
+    /// [`Job::recover`] use, so a Failed job always
     /// carries its cause regardless of which terminal path it took (normal
     /// finalization or recovery after a server bounce).
     fn set_failure_reason_from_files(&mut self) {
@@ -311,32 +371,40 @@ impl Job {
     /// A file that wrote its output keeps it, clean or diagnosed: a
     /// diagnosed file's output is the producer's verdict on that recording,
     /// not a failure a rerun would repair, so it is never retried.
-    pub(crate) fn prepare_for_restart(&mut self) -> Result<(), crate::error::ServerError> {
+    pub(crate) fn prepare_for_restart(
+        &mut self,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<(), crate::error::ServerError> {
         // Validate before ANY mutation: recovered incompatible rows must stay
         // visible, non-runnable and unchanged, even through a manual restart.
         crate::command_model::command_spec(self.dispatch.command)
             .selected_output_policy(&self.dispatch.options)?;
-        if !self.execution.status.can_restart() {
-            return Err(crate::error::ServerError::JobConflict {
-                message: format!(
-                    "Job {} is {}, only cancelled or failed jobs can be restarted.",
-                    self.identity.job_id, self.execution.status
-                ),
-                conflicts: Vec::new(),
-            });
+        // Every run is admitted under the rules in force when it starts: a
+        // job recorded as history, or one whose folder has since been removed
+        // from the configuration, is admitted again here or not restarted.
+        match self
+            .execution
+            .lifecycle
+            .restart(|stored| stored.readmit(authority))
+        {
+            Ok(()) => {}
+            Err(super::Reactivation::Refused(refused)) => {
+                return Err(crate::error::ServerError::JobConflict {
+                    message: format!(
+                        "Job {} is {}, only cancelled or failed jobs can be restarted.",
+                        self.identity.job_id, refused.from
+                    ),
+                    conflicts: Vec::new(),
+                });
+            }
+            Err(super::Reactivation::Admission(refusal)) => return Err(refusal.into()),
         }
         for file_status in self.execution.file_statuses.values_mut() {
             if !file_status.status().wrote_output() {
                 file_status.requeue();
             }
         }
-
-        // Admission above checks the same transition before mutating files.
-        let _ = self.set_status(JobStatus::Queued, StatusChange::Restart);
-        self.execution.error = None;
-        self.schedule.completed_at = None;
-        self.schedule.next_eligible_at = None;
-        self.clear_lease();
+        self.clear_run_outcome();
         self.runtime.cancel_token = CancellationToken::new();
         // A restarted job moves to a NEW run generation: the previous
         // runner (possibly still tearing down its in-flight file) becomes
@@ -351,54 +419,129 @@ impl Job {
         Ok(())
     }
 
-    /// Reconcile a persisted interrupted/running job during startup recovery.
-    pub(crate) fn reconcile_recovered_runtime_state(&mut self) -> RecoveryDisposition {
-        let has_resumable = self
+    /// Recover a job read back from the database at startup: the one
+    /// entry point, matched on the job's state.
+    ///
+    /// An interrupted job (the server stopped while it ran) with resumable
+    /// files is queued again on inputs `authority` admits now, before
+    /// anything changes; if they are refused, its unfinished files are
+    /// closed with the reason (results already written are kept) and it
+    /// fails visibly, so a restart can admit it once its folders are
+    /// allowed. An interrupted job whose files all ended is settled: failed
+    /// if any failed, otherwise completed. A cancelled job's open files are
+    /// closed as cancelled: no runner is started for it after a restart, and
+    /// closing reads no path. Every other job stands as stored.
+    pub(crate) fn recover(
+        &mut self,
+        authority: &batchalign_types::paths::AllowedRoots,
+        at: crate::store::EventTime,
+    ) -> super::Recovered {
+        match self.execution.lifecycle {
+            super::JobLifecycle::Finished {
+                status: crate::api::FinishedStatus::Interrupted,
+                ..
+            } => self.recover_interrupted(authority, at),
+            super::JobLifecycle::Finished {
+                status: crate::api::FinishedStatus::Cancelled,
+                ..
+            } => {
+                let closed = self.close_unfinished_files(
+                    "File stopped after job cancellation before the server restarted",
+                    crate::scheduling::FailureCategory::Cancelled,
+                    at,
+                );
+                if closed.is_empty() {
+                    return super::Recovered::Unchanged;
+                }
+                self.clear_lease();
+                super::Recovered::Rewritten(closed)
+            }
+            super::JobLifecycle::Finished {
+                status:
+                    crate::api::FinishedStatus::Completed
+                    | crate::api::FinishedStatus::Failed
+                    | crate::api::FinishedStatus::WritebackFailed,
+                ..
+            }
+            | super::JobLifecycle::Active { .. } => super::Recovered::Unchanged,
+        }
+    }
+
+    /// [`Job::recover`] for an interrupted job: resume, refuse or settle.
+    fn recover_interrupted(
+        &mut self,
+        authority: &batchalign_types::paths::AllowedRoots,
+        at: crate::store::EventTime,
+    ) -> super::Recovered {
+        let resumable = self
             .execution
             .file_statuses
             .values()
             .any(|file_status| file_status.status().is_resumable());
-
-        if has_resumable {
-            for file_status in self.execution.file_statuses.values_mut() {
-                if file_status.status().is_resumable() {
-                    file_status.requeue();
-                }
-            }
-            let _ = self.set_status(JobStatus::Queued, StatusChange::Reconcile);
-            // A requeued job has not failed: an error from an earlier run is
-            // not carried into the new one.
-            self.execution.error = None;
-            self.schedule.completed_at = None;
-            self.schedule.next_eligible_at = None;
-            self.clear_lease();
-            RecoveryDisposition::Requeued
-        } else {
-            let all_errored = self
-                .execution
-                .file_statuses
-                .values()
-                .all(|file_status| file_status.status() == FileStatusKind::Error);
-            let reconciled = if all_errored {
-                JobStatus::Failed
-            } else {
-                JobStatus::Completed
+        if !resumable {
+            let failed = self.any_terminal_files_failed();
+            let settlement = match failed {
+                true => super::Settlement::Failed,
+                false => super::Settlement::Completed,
             };
-            let _ = self.set_status(reconciled, StatusChange::Reconcile);
-            // Same as `finalize`: a recovered job that lands in Failed must
-            // surface its cause, not an empty error (the 2026-06 silent-failure
-            // bug, on the startup-recovery path).
-            if all_errored {
+            let event = self.execution.lifecycle.settle(settlement);
+            if self.accepted(event) && failed {
+                // Same as `finalize`: a recovered job that lands in Failed
+                // must surface its cause, not an empty error (the 2026-06
+                // silent-failure bug, on the startup-recovery path).
                 self.set_failure_reason_from_files();
             }
             self.schedule.next_eligible_at = None;
             self.clear_lease();
-            if all_errored {
-                RecoveryDisposition::Failed
-            } else {
-                RecoveryDisposition::Completed
-            }
+            return super::Recovered::Rewritten(Vec::new());
         }
+
+        let refusal = match self
+            .execution
+            .lifecycle
+            .resume(|stored| stored.readmit(authority))
+        {
+            Ok(()) => {
+                // A requeued job has not failed: an error from an earlier run
+                // is not carried into the new one.
+                self.clear_run_outcome();
+                let requeued = self
+                    .execution
+                    .file_statuses
+                    .iter_mut()
+                    .filter(|(_, file_status)| file_status.status().is_resumable())
+                    .map(|(filename, file_status)| {
+                        file_status.requeue();
+                        (filename.clone(), file_status.phase.clone())
+                    })
+                    .collect();
+                return super::Recovered::Rewritten(requeued);
+            }
+            Err(super::Reactivation::Admission(refusal)) => refusal,
+            // Matched as interrupted by the one caller.
+            Err(super::Reactivation::Refused(refused)) => {
+                tracing::error!(job_id = %self.identity.job_id, %refused, "recovery could not resume an interrupted job");
+                return super::Recovered::Unchanged;
+            }
+        };
+        tracing::warn!(job_id = %self.identity.job_id, %refusal,
+            "Stored paths are not admitted by this server; recovering as a failed job");
+        let reason = format!(
+            "Not resumed after the server restarted: {refusal}. Results already written are kept; restart the job to run the rest once its folders are allowed."
+        );
+        let closed = self.close_unfinished_files(
+            &reason,
+            crate::scheduling::FailureCategory::Validation,
+            at,
+        );
+        let event = self.execution.lifecycle.settle(super::Settlement::Failed);
+        if self.accepted(event) {
+            self.execution.error = Some(reason);
+            self.schedule.completed_at = Some(at.instant());
+        }
+        self.schedule.next_eligible_at = None;
+        self.clear_lease();
+        super::Recovered::Rewritten(closed)
     }
 }
 
@@ -425,7 +568,7 @@ mod tests {
 
         assert!(did_transition, "running job must accept the interrupt");
         assert_eq!(
-            job.execution.status,
+            job.status(),
             JobStatus::Interrupted,
             "shutdown must mark the job Interrupted (recovery-eligible), not Cancelled (final)"
         );
@@ -553,11 +696,14 @@ mod tests {
         // leaves the job in its prior status, and every assertion below would
         // then be checking the fixture's own state instead of finalize's work.
         assert!(
-            job.finalize(JobStatus::Failed, crate::unix_time(1_778_518_060.0)),
-            "Running -> Failed under StatusChange::Finalize must be applied"
+            job.finalize(
+                crate::store::Outcome::Failed,
+                crate::unix_time(1_778_518_060.0)
+            ),
+            "Running -> Failed by the finish event must be applied"
         );
 
-        assert_eq!(job.execution.status, JobStatus::Failed);
+        assert_eq!(job.status(), JobStatus::Failed);
         let reason = job.execution.error.as_deref().expect(
             "failed job with errored files must record a reason even without \
              per-file messages",
@@ -568,7 +714,7 @@ mod tests {
         );
     }
 
-    /// Recovery of an interrupted/running job whose files all terminal-errored
+    /// Recovery of an interrupted job whose files all terminal-errored
     /// must surface the failure reason on the job-level error, the same as
     /// `finalize` does; a server bounce must not drop the cause.
     #[test]
@@ -592,11 +738,16 @@ mod tests {
             job.execution.error.is_none(),
             "precondition: job-level error unset before recovery"
         );
+        // The server stopped while it ran.
+        assert!(job.interrupt_for_shutdown(finished));
 
-        let disposition = job.reconcile_recovered_runtime_state();
+        let recovered = job.recover(
+            &batchalign_types::paths::AllowedRoots::none(),
+            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
+        );
 
-        assert!(matches!(disposition, RecoveryDisposition::Failed));
-        assert_eq!(job.execution.status, JobStatus::Failed);
+        assert_eq!(recovered, crate::store::Recovered::Rewritten(Vec::new()));
+        assert_eq!(job.status(), JobStatus::Failed);
         let reason = job
             .execution
             .error

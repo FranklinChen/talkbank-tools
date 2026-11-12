@@ -116,10 +116,14 @@ fn make_snapshot(
             debug_traces: false,
         },
         filesystem: RunnerFilesystemConfig {
-            paths_mode: false,
-            source_paths: Vec::new(),
-            output_paths: Vec::new(),
-            before_paths: Vec::new(),
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                false,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
             staging_dir: Default::default(),
             media_mapping: Default::default(),
             media_subdir: Default::default(),

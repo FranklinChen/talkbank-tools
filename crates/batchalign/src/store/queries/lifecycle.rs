@@ -11,41 +11,34 @@ use crate::error::ServerError;
 impl JobStore {
     /// Register a job. Returns an error if conflicts are detected.
     pub async fn submit(&self, job: Job) -> Result<(), ServerError> {
+        let crate::store::InputColumns {
+            filenames,
+            has_chat,
+            paths_mode,
+            source_paths,
+            output_paths,
+            before_paths,
+        } = job.inputs().to_columns();
         let persist = NewJobRecord {
             job_id: String::from(job.identity.job_id.clone()),
             correlation_id: job.identity.correlation_id.to_string(),
             command: job.dispatch.command.to_string(),
             lang: job.dispatch.lang.to_string(),
             num_speakers: job.dispatch.num_speakers.0,
-            status: job.execution.status,
+            status: job.status(),
             staging_dir: job.filesystem.staging_dir.to_string(),
-            filenames: job
-                .filesystem
-                .filenames
-                .iter()
-                .cloned()
-                .map(String::from)
-                .collect(),
-            has_chat: job.filesystem.has_chat.clone(),
+            filenames,
+            has_chat,
             options: job.dispatch.options.clone(),
             media_mapping: job.filesystem.media_mapping.to_string(),
             media_subdir: job.filesystem.media_subdir.to_string(),
             source_dir: job.source.source_dir.as_str().to_owned(),
             submitter: job.source.submitter.clone(),
             submitted_at: job.schedule.submitted_at,
-            paths_mode: job.filesystem.paths_mode,
-            source_paths: job
-                .filesystem
-                .source_paths
-                .iter()
-                .map(|p| p.as_str().to_owned())
-                .collect(),
-            output_paths: job
-                .filesystem
-                .output_paths
-                .iter()
-                .map(|p| p.as_str().to_owned())
-                .collect(),
+            paths_mode,
+            source_paths,
+            output_paths,
+            before_paths,
         };
         let job_id = job.identity.job_id.clone();
         let correlation_id = job.identity.correlation_id.clone();
@@ -72,10 +65,14 @@ impl JobStore {
     }
 
     /// Restart a cancelled or failed job, reset file statuses and re-queue.
-    pub async fn restart(&self, job_id: &JobId) -> Result<JobInfo, ServerError> {
+    pub async fn restart(
+        &self,
+        job_id: &JobId,
+        authority: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<JobInfo, ServerError> {
         let info = self
             .registry
-            .restart_job(job_id)
+            .restart_job(job_id, authority)
             .await
             .ok_or_else(|| ServerError::JobNotFound(job_id.clone()))??;
         self.notify_job_item(info.job_update);
@@ -336,7 +333,9 @@ mod tests {
             ReleasedCommand::Morphotag,
             vec!["eng.cha".into(), "missing_lang.cha".into()],
         );
-        job.execution.status = JobStatus::Failed;
+        job.execution
+            .lifecycle
+            .force_status_for_test(JobStatus::Failed);
         job.execution.error = Some("worker dispatch failed".into());
         let eng = job
             .execution
@@ -377,7 +376,10 @@ mod tests {
         store.submit(job).await.expect("submit test job");
 
         let restarted = store
-            .restart(&JobId::from("morphotag-restart"))
+            .restart(
+                &JobId::from("morphotag-restart"),
+                &batchalign_types::paths::AllowedRoots::same_user(),
+            )
             .await
             .expect("restart failed morphotag job");
         assert_eq!(restarted.status, JobStatus::Queued);
@@ -420,7 +422,7 @@ mod tests {
             "restart should queue only the failed morphotag file for rerun"
         );
         assert_eq!(
-            snapshot.pending_files[0].filename.as_ref(),
+            snapshot.pending_files[0].filename().as_ref(),
             "missing_lang.cha"
         );
     }
@@ -565,7 +567,7 @@ mod tests {
     ///   4. Server restarts: `db.recover_interrupted(now)` runs (a no-op for
     ///      already-Interrupted rows; included to faithfully match the
     ///      production startup flow at `server.rs:112`).
-    ///   5. `store.load_from_db()` reads the row, sees `Interrupted` plus a
+    ///   5. `store.load_from_db(&batchalign_types::paths::AllowedRoots::none())` reads the row, sees `Interrupted` plus a
     ///      resumable file, and transitions the job to `Queued`, writing
     ///      the new status back to disk.
     ///
@@ -660,9 +662,12 @@ mod tests {
             .expect("recover_interrupted at restart");
 
         // load_from_db is the second step. It reads the Interrupted row,
-        // calls reconcile_recovered_runtime_state, sees the resumable file,
+        // calls Job::recover, sees the resumable file,
         // and writes status=Queued back to disk.
-        store.load_from_db().await.expect("load_from_db at restart");
+        store
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .expect("load_from_db at restart");
 
         let recovered = store
             .get(&JobId::from("shutdown-recover"))
@@ -676,7 +681,7 @@ mod tests {
 
         // The recovered file should also be back to Queued, not stuck in any
         // intermediate state. This mirrors what
-        // `reconcile_recovered_runtime_state` does for resumable files.
+        // `Job::recover` does for resumable files.
         let recovered_file = recovered
             .file_statuses
             .iter()

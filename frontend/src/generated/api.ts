@@ -358,10 +358,10 @@ export interface components {
          * @description A path on the submitting client's filesystem.
          *
          *     The server MUST NOT do filesystem I/O on this directly, it's metadata
-         *     only.  The only way to convert it to a [`ServerPath`] for I/O is via
-         *     [`assume_shared_filesystem`](Self::assume_shared_filesystem), which
-         *     requires the caller to verify that the server shares the client's
-         *     filesystem (paths_mode with a local daemon).
+         *     only. The only way to use it on the server is to admit it with the
+         *     server's [`AllowedRoots`]: for the server's own account, any absolute
+         *     path; for anyone else, only one inside a folder the server was configured
+         *     to let paths-mode jobs use.
          *
          *     Deliberately does NOT implement `AsRef<Path>` to prevent accidental
          *     filesystem operations.
@@ -1545,6 +1545,19 @@ export interface components {
              */
             words: number;
         } | {
+            /**
+             * @description The first of them, in transcript order, at most
+             *     [`FileOutputDiagnostics::FIRST_FINDINGS`], with why.
+             */
+            first_utterances: components["schemas"]["PrimaryMorphologyDeclinedUtterance"][];
+            /** @enum {string} */
+            kind: "primary_morphology_incomplete";
+            /**
+             * Format: int64
+             * @description Number of declined utterances, at least one.
+             */
+            utterances: number;
+        } | {
             /** @description Transcript-ordered, bounded examples with producer causes. */
             first_spans: components["schemas"]["SecondaryMorphologyFailure"][];
             /** @enum {string} */
@@ -1625,6 +1638,18 @@ export interface components {
              * @description How many of them have no positive interval, at least one.
              */
             untimed_words: number;
+        };
+        /**
+         * @description Why an utterance's primary morphology was declined.
+         * @enum {string}
+         */
+        PrimaryMorphologyDeclineCause: "no_analysis" | "mapping_failed" | "misaligned" | "retokenization_failed";
+        /** @description One utterance whose primary morphology was declined. */
+        PrimaryMorphologyDeclinedUtterance: components["schemas"]["StoredUtteranceLocation"] & {
+            /** @description Why it was declined. */
+            cause: components["schemas"]["PrimaryMorphologyDeclineCause"];
+            /** @description Bounded producer explanation. */
+            detail: string;
         };
         /** @description One extracted provenance entry from a CHAT file. */
         ProvenanceEntry: {
@@ -1908,10 +1933,15 @@ export interface components {
             kind: "yielded_to_kept_end_leading_words_dropped";
         };
         /**
-         * @description A path relative to a data repo root (e.g. `"French/Newcastle/Photos/13"`).
+         * @description A path relative to a data repo root (e.g. `"French/Newcastle/Photos/13"`):
+         *     plain folder names only, so it stays under whatever root it is joined to.
          *
-         *     Valid on any machine that has the repo cloned, but must be combined
-         *     with a server root path to produce a [`ServerPath`] for I/O.
+         *     Built only by [`RepoRelativePath::new`] (the wire too, through
+         *     `try_from`), which refuses an absolute path, a drive prefix, a leading
+         *     `.` and any `..`, and keeps the normalized form: joined to a root, an
+         *     absolute path replaces the root and `..` climbs out of it. Empty is the root itself. Valid on any machine that has the repo
+         *     cloned, but must be combined with a server root path to produce a
+         *     [`ServerPath`] for I/O.
          */
         RepoRelativePath: string;
         /**
@@ -2147,6 +2177,15 @@ export interface components {
             answered: number;
             /** @enum {string} */
             kind: "requested";
+            /**
+             * Format: int64
+             * @description Requests whose answer was refused (a timing outside the request
+             *     window, or timings for another number of words), so only their
+             *     words were left untimed. Absent from records written before
+             *     such answers were kept: then a refused answer failed the file
+             *     and left no record, so zero is what those records mean.
+             */
+            refused?: number;
             /**
              * Format: int64
              * @description Requests left unaligned: no worker evidence was obtained.

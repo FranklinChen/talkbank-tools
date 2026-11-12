@@ -25,23 +25,23 @@ pub(crate) async fn load_text_inputs(
     };
 
     for file in &job.pending_files {
-        let lifecycle = FileRunTracker::new(host.sink().as_ref(), file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(host.sink().as_ref(), file.filename().as_ref());
         lifecycle.stage(FileStage::Reading).await;
 
         let read_path = resolve_input_path(job, file);
         match tokio::fs::read_to_string(&read_path).await {
             Ok(text) => {
                 if load_before_texts
-                    && let Some(before_path) = resolve_before_path(job, file)
+                    && let Some(before_path) = resolve_before_path(file)
                     && let Ok(before_text) = tokio::fs::read_to_string(before_path).await
                 {
                     loaded
                         .before_texts
-                        .insert(file.filename.to_string(), before_text);
+                        .insert(file.filename().to_string(), before_text);
                 }
                 loaded
                     .file_texts
-                    .push(TextBatchFileInput::new(file.filename.clone(), text));
+                    .push(TextBatchFileInput::new(file.filename().clone(), text));
             }
             Err(error) => {
                 lifecycle
@@ -68,12 +68,25 @@ pub(crate) async fn write_text_results(
     let total_results = results.len() as i64;
     for (result_idx, file_result) in results.into_iter().enumerate() {
         let lifecycle = FileRunTracker::new(sink.as_ref(), file_result.filename.as_ref());
-        let file_index = job
+        // The result's own pending file. It used to fall back to file 0, so
+        // in paths mode an unmatched result would have been written to the
+        // first file's output path.
+        let Some(pending) = job
             .pending_files
             .iter()
-            .find(|file| file.filename == file_result.filename)
-            .map(|file| file.file_index)
-            .unwrap_or(0);
+            .find(|file| *file.filename() == file_result.filename)
+        else {
+            lifecycle
+                .fail(
+                    &format!(
+                        "no pending file named {} for this result",
+                        file_result.filename
+                    ),
+                    crate::scheduling::FailureCategory::System,
+                )
+                .await;
+            continue;
+        };
         // What the command decided about stamping this file, recorded on the
         // file's own status so the job detail can report it.
         let stamp = file_result.stamp;
@@ -131,7 +144,7 @@ pub(crate) async fn write_text_results(
                     }
                     let target = crate::recipe_runner::runtime::ChatOutputTarget::new(
                         &job.filesystem,
-                        file_index,
+                        pending.location(),
                         &artifact.display_path,
                     );
                     if let Err(error) = crate::recipe_runner::runtime::write_chat_output_artifact_with_provenance_gate(
@@ -182,28 +195,13 @@ pub(crate) async fn write_text_results(
 }
 
 pub(crate) fn resolve_input_path(job: &RunnerJobSnapshot, file: &PendingJobFile) -> PathBuf {
-    if job.filesystem.paths_mode && file.file_index < job.filesystem.source_paths.len() {
-        job.filesystem.source_paths[file.file_index]
-            .assume_shared_filesystem()
-            .as_path()
-            .to_owned()
-    } else {
-        job.filesystem
-            .staging_dir
-            .join("input")
-            .join(file.filename.as_ref())
-            .as_path()
-            .to_owned()
-    }
+    file.input_path(&job.filesystem.staging_dir)
+        .as_path()
+        .to_owned()
 }
 
-pub(crate) fn resolve_before_path(
-    job: &RunnerJobSnapshot,
-    file: &PendingJobFile,
-) -> Option<PathBuf> {
-    job.filesystem
-        .before_path(file.file_index)
-        .map(|path| path.as_path().to_owned())
+pub(crate) fn resolve_before_path(file: &PendingJobFile) -> Option<PathBuf> {
+    file.before_path().map(|path| path.as_path().to_owned())
 }
 
 #[cfg(test)]
@@ -226,7 +224,9 @@ mod reporting_tests {
             job.dispatch.lang = LanguageSpec::PerFile;
             job.filesystem.staging_dir =
                 batchalign_types::paths::ServerPath::new(temp.path().to_str().unwrap());
-            let snapshot = job.to_runner_snapshot();
+            let snapshot = job
+                .to_runner_snapshot()
+                .expect("a submitted job's inputs are admitted");
             tokio::fs::create_dir_all(temp.path().join("input"))
                 .await
                 .unwrap();
@@ -260,7 +260,13 @@ mod reporting_tests {
             };
             let proof = PostValidated::for_test(CHAT, crate::api::ReleasedCommand::Morphotag);
             let expected = proof.as_str().to_owned();
-            let mut output = MorphosyntaxOutput::new(proof, report);
+            let mut output = MorphosyntaxOutput::new(
+                proof,
+                crate::morphosyntax::report::AnalysisReports {
+                    primary: crate::morphosyntax::report::PrimaryReport::none(),
+                    secondary: report,
+                },
+            );
             if provenance {
                 output = output.with_provenance(
                     crate::provenance::MorphologyProvenanceReport::Incomplete(

@@ -140,6 +140,7 @@ fn response_admission_empty_analysis_is_not_lexical_completion_but_special_forms
     ] {
         for (body, special_form) in [("hello .", false), ("boom@o .", true)] {
             let mut chat = admitted_chat(&parser, &one_utterance(body));
+            let before = chat.to_chat_string();
             let payloads = items(&chat, &language);
             let result = MatchedMorphosyntaxResponses::from_admitted(
                 payloads,
@@ -147,12 +148,27 @@ fn response_admission_empty_analysis_is_not_lexical_completion_but_special_forms
             )
             .expect("paired empty analysis")
             .inject(&parser, &mut chat, mode, &MwtDict::default());
+            let declined = result.expect("the batch binds").into_parts().declined;
             if special_form {
-                result.expect("typed onomatopoeia synthesis needs no model");
+                assert!(
+                    declined.is_empty(),
+                    "typed onomatopoeia synthesis needs no model"
+                );
                 assert!(chat.to_chat_string().contains("on|boom"));
                 admitted_chat(&parser, &chat.to_chat_string());
             } else {
-                assert!(matches!(result, Err(InjectionError::Incomplete(_))));
+                let [utterance] = declined.as_slice() else {
+                    panic!("the analysed utterance is declined: {declined:?}");
+                };
+                assert_eq!(
+                    utterance.cause,
+                    crate::morphosyntax::DeclineCause::NoAnalysis
+                );
+                assert_eq!(
+                    chat.to_chat_string(),
+                    before,
+                    "a declined utterance is untouched"
+                );
             }
         }
     }

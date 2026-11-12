@@ -1,4 +1,4 @@
-use talkbank_model::model::{LanguageCode, MediaStatus};
+use talkbank_model::model::{LanguageCode, MediaFilename, MediaStatus};
 
 use crate::asr_postprocess;
 
@@ -15,8 +15,9 @@ pub struct TranscriptDescription {
     pub langs: TranscriptLanguages,
     /// Participant entries. At least one is required.
     pub participants: Vec<ParticipantDesc>,
-    /// Optional media filename (e.g. `"recording.mp3"`).
-    pub media_name: Option<String>,
+    /// The media's name as `@Media` writes it (the file stem), parsed where
+    /// the name is born, before any recognition is paid for.
+    pub media_name: Option<MediaFilename>,
     /// Optional media type (`"audio"` or `"video"`). Defaults to `"audio"`.
     pub media_type: Option<String>,
     /// Optional relationship between the transcript and its media.

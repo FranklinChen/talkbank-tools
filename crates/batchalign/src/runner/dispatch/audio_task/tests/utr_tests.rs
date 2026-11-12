@@ -128,12 +128,20 @@ async fn utr_failures_survive_real_audio_writeback_and_cancellation_stops_retry(
         let mut job = fake_job(&tmp);
         job.dispatch.command = ReleasedCommand::Align;
         job.dispatch.options = CommandOptions::Align(Default::default());
-        job.pending_files[0].filename = DisplayPath::from("nested/test.cha");
-        job.pending_files[0].has_chat = true;
-        job.filesystem.source_paths[0] = ClientPath::new("/input/test.cha");
+        job.filesystem.inputs = crate::store::test_support::inputs_from_parts(
+            vec![DisplayPath::from("nested/test.cha")],
+            vec![true],
+            true,
+            vec![ClientPath::new("/input/test.cha")],
+            vec![ClientPath::new(
+                tmp.path().join("requested/test.cha").to_string_lossy(),
+            )],
+            vec![],
+        );
+        let job = crate::store::test_support::with_pending(job);
         let file = job.pending_files[0].clone();
         let sink = Arc::new(RecordingSink::default());
-        let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename.as_ref());
+        let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());
         lifecycle
             .begin_first_attempt(WorkUnitKind::FileForcedAlignment, FileStage::ResolvingAudio)
             .await;

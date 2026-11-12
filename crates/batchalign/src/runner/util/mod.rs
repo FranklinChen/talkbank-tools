@@ -482,17 +482,34 @@ mod tests {
         assert!(msg.contains("test.cha"), "should include filename: {msg}");
     }
 
+    /// One pending file, from inputs built the way a job's are: a transcript
+    /// or recording named `display`, read in place from `source` (paths mode)
+    /// or staged.
+    fn media_pending(
+        display: DisplayPath,
+        chat: bool,
+        paths_mode: bool,
+        source: batchalign_types::paths::ClientPath,
+    ) -> Vec<PendingJobFile> {
+        crate::store::test_support::pending_files(&crate::store::test_support::inputs_from_parts(
+            vec![display],
+            vec![chat],
+            paths_mode,
+            vec![source],
+            vec![batchalign_types::paths::ClientPath::new("/tmp/out.cha")],
+            vec![],
+        ))
+    }
+
     #[tokio::test]
     async fn media_validate_not_paths_mode() {
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "audio.wav".into(),
-            has_chat: false,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(
-            "/nonexistent/audio.wav",
-        )];
-        let failures = preflight_validate_media(&file_list, &source_paths, false).await;
+        let file_list = media_pending(
+            DisplayPath::from("audio.wav"),
+            false,
+            false,
+            batchalign_types::paths::ClientPath::new("/nonexistent/audio.wav"),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert!(
             failures.is_empty(),
             "Should skip validation when not paths_mode"
@@ -501,29 +518,25 @@ mod tests {
 
     #[tokio::test]
     async fn media_validate_skips_chat_files() {
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "test.cha".into(),
-            has_chat: true,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(
-            "/nonexistent/test.cha",
-        )];
-        let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+        let file_list = media_pending(
+            DisplayPath::from("test.cha"),
+            true,
+            true,
+            batchalign_types::paths::ClientPath::new("/nonexistent/test.cha"),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert!(failures.is_empty(), "Should skip CHAT files");
     }
 
     #[tokio::test]
     async fn media_validate_missing_file() {
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "missing.wav".into(),
-            has_chat: false,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(
-            "/nonexistent/path/missing.wav",
-        )];
-        let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+        let file_list = media_pending(
+            DisplayPath::from("missing.wav"),
+            false,
+            true,
+            batchalign_types::paths::ClientPath::new("/nonexistent/path/missing.wav"),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert_eq!(failures.len(), 1);
         assert!(failures[&0].contains("not found"));
     }
@@ -536,13 +549,13 @@ mod tests {
         // Rename to .wav for extension check
         let wav_path = format!("{path}.wav");
         std::fs::rename(&path, &wav_path).unwrap();
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "test.wav".into(),
-            has_chat: false,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(&wav_path)];
-        let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+        let file_list = media_pending(
+            DisplayPath::from("test.wav"),
+            false,
+            true,
+            batchalign_types::paths::ClientPath::new(&wav_path),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert_eq!(failures.len(), 1);
         assert!(failures[&0].contains("empty"));
         let _ = std::fs::remove_file(&wav_path);
@@ -553,13 +566,13 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".xyz").unwrap();
         std::io::Write::write_all(&mut tmp, b"data").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "test.xyz".into(),
-            has_chat: false,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(&path)];
-        let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+        let file_list = media_pending(
+            DisplayPath::from("test.xyz"),
+            false,
+            true,
+            batchalign_types::paths::ClientPath::new(&path),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert_eq!(failures.len(), 1);
         assert!(failures[&0].contains("Unknown media format"));
     }
@@ -569,13 +582,13 @@ mod tests {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".wav").unwrap();
         std::io::Write::write_all(&mut tmp, b"RIFF....").unwrap();
         let path = tmp.path().to_string_lossy().to_string();
-        let file_list = vec![PendingJobFile {
-            file_index: 0,
-            filename: "test.wav".into(),
-            has_chat: false,
-        }];
-        let source_paths = vec![batchalign_types::paths::ClientPath::new(&path)];
-        let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+        let file_list = media_pending(
+            DisplayPath::from("test.wav"),
+            false,
+            true,
+            batchalign_types::paths::ClientPath::new(&path),
+        );
+        let failures = preflight_validate_media(&file_list).await;
         assert!(failures.is_empty(), "Valid .wav file should pass");
     }
 
@@ -594,13 +607,13 @@ mod tests {
             let mut tmp = tempfile::NamedTempFile::with_suffix(format!(".{extension}")).unwrap();
             std::io::Write::write_all(&mut tmp, b"data").unwrap();
             let path = tmp.path().to_string_lossy().to_string();
-            let file_list = vec![PendingJobFile {
-                file_index: 0,
-                filename: DisplayPath::from(name.clone()),
-                has_chat: false,
-            }];
-            let source_paths = vec![batchalign_types::paths::ClientPath::new(&path)];
-            let failures = preflight_validate_media(&file_list, &source_paths, true).await;
+            let file_list = media_pending(
+                DisplayPath::from(name.clone()),
+                false,
+                true,
+                batchalign_types::paths::ClientPath::new(&path),
+            );
+            let failures = preflight_validate_media(&file_list).await;
             assert!(failures.is_empty(), "{name} should be accepted");
         }
     }

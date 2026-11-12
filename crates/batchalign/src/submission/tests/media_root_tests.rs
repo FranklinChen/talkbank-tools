@@ -1,4 +1,5 @@
-//! Fresh requests must refuse unadmitted media roots before staging mutations.
+//! Fresh requests must refuse unadmitted media roots. Refusal before staging
+//! needs no assertion: materializing a job requires the validation proof.
 
 use super::*;
 use crate::options::{AbsoluteMediaRoot, AlignOptions};
@@ -26,16 +27,11 @@ async fn media_root_submission_refuses_relative_before_creating_job_directories(
             "localhost".into(),
         ),
         submitted_at: crate::store::EventTime::fixed(crate::unix_time(1_700_000_000.0)),
+        allowed_roots: batchalign_types::paths::AllowedRoots::none(),
     };
-    assert!(submission.validate().is_err());
     assert!(
-        materialize_submission_job(&submission, &context)
-            .await
-            .is_err()
-    );
-    assert!(
-        !context.jobs_dir.exists(),
-        "refusal must precede any filesystem mutation"
+        submission.validate().is_err(),
+        "a relative media root is refused"
     );
 
     submission.options = CommandOptions::Align(AlignOptions {
@@ -46,8 +42,8 @@ async fn media_root_submission_refuses_relative_before_creating_job_directories(
         ),
         ..Default::default()
     });
-    submission.validate().expect("absolute-root control");
-    let job = materialize_submission_job(&submission, &context)
+    let validated = submission.validate().expect("absolute-root control");
+    let job = materialize_submission_job(&validated, &context)
         .await
         .expect("staged control");
     assert!(job.filesystem.staging_dir.as_path().exists());

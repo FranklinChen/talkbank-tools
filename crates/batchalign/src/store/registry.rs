@@ -431,11 +431,13 @@ impl JobRegistry {
     pub(crate) async fn restart_job(
         &self,
         job_id: &JobId,
+        authority: &batchalign_types::paths::AllowedRoots,
     ) -> Option<Result<JobRestartProjection, ServerError>> {
+        let authority = authority.clone();
         self.update_job(
             job_id.clone(),
             move |job| -> Result<JobRestartProjection, ServerError> {
-                job.prepare_for_restart()?;
+                job.prepare_for_restart(&authority)?;
                 Ok(JobRestartProjection {
                     info: job.to_info(),
                     job_update: job.to_list_item(),
@@ -457,10 +459,8 @@ impl JobRegistry {
 
     /// Return whether one job is currently running.
     pub(crate) async fn is_running(&self, job_id: &JobId) -> Option<bool> {
-        self.project_job(job_id.clone(), |job| {
-            job.execution.status == JobStatus::Running
-        })
-        .await
+        self.project_job(job_id.clone(), |job| job.status() == JobStatus::Running)
+            .await
     }
 
     /// Return whether the local dispatcher currently holds an active runner claim.
@@ -482,15 +482,14 @@ impl JobRegistry {
 
     /// Return the current job status for one job.
     pub(crate) async fn job_status(&self, job_id: &JobId) -> Option<JobStatus> {
-        self.project_job(job_id.clone(), |job| job.execution.status)
-            .await
+        self.project_job(job_id.clone(), |job| job.status()).await
     }
 
     /// Count how many jobs are currently running.
     pub(crate) async fn active_jobs(&self) -> i64 {
         self.inspect_all(|jobs| {
             jobs.values()
-                .filter(|job| job.execution.status == JobStatus::Running)
+                .filter(|job| job.status() == JobStatus::Running)
                 .count() as i64
         })
         .await
@@ -597,19 +596,19 @@ impl JobRegistry {
                     updates.push(ForcedFileUpdate { update, failure });
                 }
             }
-            let status = if cancelled {
-                JobStatus::Cancelled
+            let outcome = if cancelled {
+                crate::store::Outcome::Cancelled
             } else if job.any_terminal_files_failed() {
-                JobStatus::Failed
+                crate::store::Outcome::Failed
             } else {
-                JobStatus::Completed
+                crate::store::Outcome::Completed
             };
             // Already accepted cancellation/shutdown retains its status/time.
             match exit {
-                RunExit::Dispatched => { let _ = job.finalize(status, finished_at.instant()); }
+                RunExit::Dispatched => { let _ = job.finalize(outcome, finished_at.instant()); }
                 RunExit::Failed(message) => {
                     if cancelled {
-                        let _ = job.finalize(status, finished_at.instant());
+                        let _ = job.finalize(outcome, finished_at.instant());
                     } else {
                         let _ = job.fail(&message, finished_at.instant());
                     }
@@ -647,22 +646,36 @@ impl JobRegistry {
         self.update_job(job_id.clone(), move |job| {
             if job.runtime.runner_active {
                 BeginRunnerOutcome::RunnerStillLive
-            } else if job.execution.status == JobStatus::Cancelled
+            } else if job.status() == JobStatus::Cancelled
                 && job
                     .execution
                     .file_statuses
                     .values()
                     .any(|file| !file.status().is_terminal())
             {
-                job.runtime.runner_active = true;
-                BeginRunnerOutcome::Stopped {
-                    completion: crate::store::StoppedRun::for_job(job),
+                // A job whose inputs this process has not admitted (recorded
+                // history) has no runner work to finish; it is not runnable.
+                match crate::store::StoppedRun::for_job(job) {
+                    Some(completion) => {
+                        job.runtime.runner_active = true;
+                        BeginRunnerOutcome::Stopped { completion }
+                    }
+                    None => BeginRunnerOutcome::NotRunnable {
+                        status: job.status(),
+                    },
                 }
-            } else if job.execution.status.is_terminal() {
+            } else if job.status().is_terminal() {
                 BeginRunnerOutcome::NotRunnable {
-                    status: job.execution.status,
+                    status: job.status(),
                 }
             } else {
+                // Recovery and restart admit every job they make runnable, so
+                // unadmitted inputs here are recorded history: not runnable.
+                let Some(claim) = crate::store::RunnerClaim::for_job(job) else {
+                    return BeginRunnerOutcome::NotRunnable {
+                        status: job.status(),
+                    };
+                };
                 job.runtime.runner_active = true;
                 // Establish the queue lease at claim time so the runner's
                 // heartbeat loop has something to renew; before this,
@@ -670,10 +683,7 @@ impl JobRegistry {
                 // loop silently stopped on its first tick.
                 let lease = crate::scheduling::LeaseRecord::taken(node_id.clone(), now, lease_ttl);
                 job.schedule.lease = Some(lease.clone());
-                BeginRunnerOutcome::Started {
-                    claim: crate::store::RunnerClaim::for_job(job),
-                    lease,
-                }
+                BeginRunnerOutcome::Started { claim, lease }
             }
         })
         .await
@@ -697,30 +707,49 @@ impl JobRegistry {
 
     /// Project the download-facing detail view for one job.
     pub(crate) async fn job_detail(&self, job_id: &JobId) -> Option<JobDetail> {
-        self.project_job(job_id.clone(), |job| JobDetail {
-            output_folders: crate::api::JobOutputFolders {
-                job_id: job.identity.job_id.clone(),
-                access: crate::api::LocalOutputAccess::admit(if job.filesystem.paths_mode {
-                    crate::types::output_access::OutputLocationSource::Paths {
-                        count: job.filesystem.filenames.len(),
-                        outputs: &job.filesystem.output_paths,
-                    }
-                } else {
-                    crate::types::output_access::OutputLocationSource::Content
-                }),
-            },
-            options: job.dispatch.options.clone(),
-            command: job.dispatch.command,
-            status: job.execution.status,
-            paths_mode: job.filesystem.paths_mode,
-            staging_dir: job.filesystem.staging_dir.clone(),
-            results: job.execution.results.clone(),
-            file_statuses: job
-                .execution
-                .file_statuses
-                .values()
-                .map(|file_status| file_status.to_entry())
-                .collect(),
+        self.project_job(job_id.clone(), |job| {
+            use crate::store::{JobInputs, StoredInputsRef};
+            // The outputs the client named, whether this process admitted
+            // them (a runnable job) or holds them as recorded history.
+            let outputs: Option<Vec<batchalign_types::paths::ClientPath>> = match job.inputs() {
+                StoredInputsRef::Admitted(JobInputs::Paths { files, .. }) => Some(
+                    files
+                        .iter()
+                        .map(|file| file.output.client().clone())
+                        .collect(),
+                ),
+                StoredInputsRef::Recorded(recorded) => Some(
+                    recorded
+                        .files()
+                        .iter()
+                        .map(|file| file.output.clone())
+                        .collect(),
+                ),
+                StoredInputsRef::Admitted(JobInputs::Content(_)) => None,
+            };
+            JobDetail {
+                output_folders: crate::api::JobOutputFolders {
+                    job_id: job.identity.job_id.clone(),
+                    access: crate::api::LocalOutputAccess::admit(match &outputs {
+                        Some(outputs) => crate::types::output_access::OutputLocationSource::Paths {
+                            count: outputs.len(),
+                            outputs,
+                        },
+                        None => crate::types::output_access::OutputLocationSource::Content,
+                    }),
+                },
+                options: job.dispatch.options.clone(),
+                command: job.dispatch.command,
+                status: job.status(),
+                staging_dir: job.filesystem.staging_dir.clone(),
+                results: job.execution.results.clone(),
+                file_statuses: job
+                    .execution
+                    .file_statuses
+                    .values()
+                    .map(|file_status| file_status.to_entry())
+                    .collect(),
+            }
         })
         .await
     }
@@ -749,7 +778,7 @@ impl JobRegistry {
     pub(crate) async fn queued_job_ids(&self) -> Vec<JobId> {
         self.inspect_all(|jobs| {
             jobs.values()
-                .filter(|job| job.execution.status == JobStatus::Queued)
+                .filter(|job| job.status() == JobStatus::Queued)
                 .map(|job| job.identity.job_id.clone())
                 .collect()
         })
@@ -791,9 +820,7 @@ impl JobRegistry {
 
             let next_wake_at = jobs
                 .values()
-                .filter(|job| {
-                    job.execution.status == JobStatus::Queued && !job.runtime.runner_active
-                })
+                .filter(|job| job.status() == JobStatus::Queued && !job.runtime.runner_active)
                 .filter_map(|job| job.next_local_dispatch_wake_at(now))
                 .min();
 
@@ -844,6 +871,7 @@ impl JobRegistry {
     pub(crate) async fn runner_snapshot(&self, job_id: &JobId) -> Option<RunnerJobSnapshot> {
         self.project_job(job_id.clone(), |job| job.to_runner_snapshot())
             .await
+            .flatten()
     }
 
     /// One file write from one run, in one actor mutation, admitted only

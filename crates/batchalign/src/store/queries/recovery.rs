@@ -6,8 +6,8 @@ use crate::api::{DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, Rel
 use tracing::{info, warn};
 
 use super::super::job::{
-    Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity, JobRuntimeControl,
-    JobScheduleState, JobSourceContext, RecoveryDisposition, StoredSubmitter, Submitter,
+    Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity, JobLifecycle,
+    JobRuntimeControl, JobScheduleState, JobSourceContext, Recovered, StoredSubmitter, Submitter,
 };
 use super::super::{
     FileFailure, FilePhase, FilePhaseColumns, FileProgress, FileResultEntry, FileStatus,
@@ -266,14 +266,22 @@ pub(crate) fn recover_file_phase(
 
 impl JobStore {
     /// Load jobs from DB into memory (crash recovery).
-    pub async fn load_from_db(&self) -> Result<usize, ServerError> {
+    pub async fn load_from_db(
+        &self,
+        allowed_roots: &batchalign_types::paths::AllowedRoots,
+    ) -> Result<usize, ServerError> {
         let db = match &self.db {
             Some(db) => db,
             None => return Ok(0),
         };
 
         let rows = db.load_all_jobs().await?;
-        let ttl_cutoff = self.config.job_ttl_days.cutoff(self.now());
+        // Owned, so the store's mutation closure can carry it.
+        let allowed_roots = allowed_roots.clone();
+        // One store-clock instant for everything recovery records.
+        let at = self.event_time();
+        let now = at.instant();
+        let ttl_cutoff = self.config.job_ttl_days.cutoff(now);
         let (loaded, recovered_updates, repairs) = self
             .registry
             .mutate_all(move |jobs| {
@@ -281,7 +289,7 @@ impl JobStore {
                 let mut recovered_updates = Vec::new();
                 let mut repairs = RowRepairs::default();
 
-                'rows: for row in rows {
+                for row in rows {
                     if row.submitted_at < ttl_cutoff {
                         continue;
                     }
@@ -291,6 +299,52 @@ impl JobStore {
                         Err(_) => {
                             warn!(job_id = %row.job_id, command = %row.command,
                                 "Unknown command in DB, skipping job recovery");
+                            continue;
+                        }
+                    };
+                    // A language the row cannot state is not replaced by a
+                    // plausible one: the job would run another language's
+                    // models. Like an unknown command, it is not recovered.
+                    // Read back with no filesystem access: paths-mode inputs
+                    // come back recorded, and are admitted below only if the
+                    // job is to run. Columns that cannot describe any job are
+                    // not recovered, like an unknown command.
+                    let stored_inputs = match (crate::store::InputColumns {
+                        filenames: row.filenames.clone(),
+                        has_chat: row.has_chat.clone(),
+                        paths_mode: row.paths_mode,
+                        source_paths: row.source_paths.clone(),
+                        output_paths: row.output_paths.clone(),
+                        before_paths: row.before_paths.clone(),
+                    })
+                    .parse(
+                        (!row.source_dir.is_empty())
+                            .then(|| batchalign_types::paths::ClientPath::from(row.source_dir.as_str())),
+                    ) {
+                        Ok(inputs) => inputs,
+                        Err(refusal) => {
+                            warn!(job_id = %row.job_id, %refusal,
+                                "Stored job inputs are unreadable, skipping job recovery");
+                            continue;
+                        }
+                    };
+                    // Joined to media roots: a stored value that is not plain
+                    // folder names is not recovered, like an unreadable language.
+                    let media_subdir = match batchalign_types::paths::RepoRelativePath::new(
+                        row.media_subdir.clone(),
+                    ) {
+                        Ok(subdir) => subdir,
+                        Err(refusal) => {
+                            warn!(job_id = %row.job_id, %refusal,
+                                "Unreadable media subdirectory in DB, skipping job recovery");
+                            continue;
+                        }
+                    };
+                    let lang = match crate::api::LanguageSpec::try_from(row.lang.as_str()) {
+                        Ok(lang) => lang,
+                        Err(error) => {
+                            warn!(job_id = %row.job_id, raw_lang = %row.lang, %error,
+                                "Unreadable language in DB, skipping job recovery");
                             continue;
                         }
                     };
@@ -309,6 +363,12 @@ impl JobStore {
                         }
                     };
 
+                    // Written only if this job is loaded: rows of a job left
+                    // out of recovery are never rewritten.
+                    let mut job_repairs = RowRepairs::default();
+                    // One file's result that cannot be named fails this job
+                    // visibly; it never drops the job.
+                    let mut unnamed_result: Option<String> = None;
                     let mut file_statuses = HashMap::new();
                     let mut results: Vec<FileResultEntry> = Vec::new();
                     for fs_row in &row.file_statuses {
@@ -323,7 +383,7 @@ impl JobStore {
                                     "Recovered file status: {dropped}"
                                 );
                                 if admission.is_ok() {
-                                    repairs.files.push((
+                                    job_repairs.files.push((
                                         JobId::from(row.job_id.clone()),
                                         fs_row.filename.clone(),
                                         phase.clone(),
@@ -371,8 +431,10 @@ impl JobStore {
                             ) {
                                 Ok(artifact) => artifact,
                                 Err(error) => {
-                                    warn!(job_id = %row.job_id, %error, "Inconsistent command options in DB, skipping job recovery");
-                                    continue 'rows;
+                                    warn!(job_id = %row.job_id, %error,
+                                        "A stored result cannot be named; recovering as a failed job");
+                                    unnamed_result.get_or_insert_with(|| error.to_string());
+                                    continue;
                                 }
                             };
                             results.push(FileResultEntry {
@@ -390,6 +452,15 @@ impl JobStore {
                         }
                     }
 
+                    let (status, job_status_note) = match unnamed_result {
+                        Some(error) => (
+                            JobStatus::Failed,
+                            Some(format!(
+                                "A stored result cannot be named: {error}. Original records are unchanged."
+                            )),
+                        ),
+                        None => (status, job_status_note),
+                    };
                     let job_id_newtype = JobId::from(row.job_id.clone());
                     let mut job_error = row.error.clone();
                     if let Some(note) = job_status_note {
@@ -406,18 +477,7 @@ impl JobStore {
                         },
                         dispatch: JobDispatchConfig {
                             command,
-                            lang: {
-                                let (spec, valid) =
-                                    crate::api::LanguageSpec::parse_from_db(&row.lang);
-                                if !valid {
-                                    tracing::warn!(
-                                        job_id = %row.job_id,
-                                        raw_lang = %row.lang,
-                                        "Invalid language code in DB, falling back to eng"
-                                    );
-                                }
-                                spec
-                            },
+                            lang,
                             num_speakers: NumSpeakers(row.num_speakers),
                             options: row.options,
                             runtime_state: std::collections::BTreeMap::new(),
@@ -438,7 +498,7 @@ impl JobStore {
                                          address; displayed as no submitter"
                                     );
                                     if admission.is_ok() {
-                                        repairs.submitters.push(JobId::from(row.job_id.clone()));
+                                        job_repairs.submitters.push(JobId::from(row.job_id.clone()));
                                     }
                                     None
                                 }
@@ -446,33 +506,18 @@ impl JobStore {
                             source_dir: row.source_dir.into(),
                         },
                         filesystem: JobFilesystemConfig {
-                            filenames: row.filenames.into_iter().map(DisplayPath::from).collect(),
-                            has_chat: row.has_chat,
                             staging_dir: batchalign_types::paths::ServerPath::from(row.staging_dir),
-                            paths_mode: row.paths_mode,
-                            source_paths: row
-                                .source_paths
-                                .into_iter()
-                                .map(batchalign_types::paths::ClientPath::from)
-                                .collect(),
-                            output_paths: row
-                                .output_paths
-                                .into_iter()
-                                .map(batchalign_types::paths::ClientPath::from)
-                                .collect(),
-                            before_paths: Vec::new(),
                             media_mapping: batchalign_types::paths::MediaMappingKey::from(
                                 row.media_mapping,
                             ),
-                            media_subdir: batchalign_types::paths::RepoRelativePath::from(
-                                row.media_subdir,
-                            ),
+                            media_subdir,
                             // source_dir is owned by JobSourceContext; the runner snapshot
                             // assembles RunnerFilesystemConfig.source_dir from there.
-                            source_dir: Default::default(),
                         },
                         execution: JobExecutionState {
-                            status,
+                            // Finished: nothing runs it in this process. Its
+                            // inputs are admitted below only if it resumes.
+                            lifecycle: JobLifecycle::recovered(status, stored_inputs),
                             file_statuses,
                             results,
                             error: job_error,
@@ -499,34 +544,16 @@ impl JobStore {
                         execution_plan: None,
                     };
 
-                    if status.is_recoverable() {
-                        let resumable: Vec<String> = job
-                            .execution
-                            .file_statuses
-                            .iter()
-                            .filter(|(_, file_status)| file_status.status().is_resumable())
-                            .map(|(filename, _)| filename.clone())
-                            .collect();
-                        let disposition = job.reconcile_recovered_runtime_state();
-                        let requeued_files = match disposition {
-                            RecoveryDisposition::Requeued => resumable
-                                .into_iter()
-                                .filter_map(|filename| {
-                                    let phase =
-                                        job.execution.file_statuses.get(&filename)?.phase.clone();
-                                    Some((filename, phase))
-                                })
-                                .collect(),
-                            RecoveryDisposition::Failed | RecoveryDisposition::Completed => {
-                                Vec::new()
-                            }
-                        };
+                    // Resume, settle or close it, matched on its state.
+                    if let Recovered::Rewritten(rewritten_files) = job.recover(&allowed_roots, at) {
                         recovered_updates.push(RecoveredJobPersistence {
                             job_id: job_id_newtype.clone(),
                             status: job.status_columns(),
-                            requeued_files,
+                            requeued_files: rewritten_files,
                         });
                     }
+                    repairs.files.extend(job_repairs.files);
+                    repairs.submitters.extend(job_repairs.submitters);
 
                     jobs.insert(job_id_newtype, job);
                     loaded += 1;
@@ -612,7 +639,24 @@ mod tests {
             paths_mode: false,
             source_paths: Vec::new(),
             output_paths: Vec::new(),
+            before_paths: Vec::new(),
         }
+    }
+
+    /// Store `record` as a paths-mode job (`on`) whose files are read under
+    /// `/corpus` and written under `/out`, or as a content-mode job.
+    fn set_paths_mode(record: &mut NewJobRecord, on: bool) {
+        record.paths_mode = on;
+        let under = |root: &str| match on {
+            true => record
+                .filenames
+                .iter()
+                .map(|name| format!("{root}/{name}"))
+                .collect(),
+            false => Vec::new(),
+        };
+        record.source_paths = under("/corpus");
+        record.output_paths = under("/out");
     }
 
     /// Open an isolated SQLite DB and `JobStore` pair for recovery tests.
@@ -647,7 +691,7 @@ mod tests {
                 vec!["nested/sample.cha".into(), "nested/failed.cha".into()],
             );
             record.command = "speaker_identify".into();
-            record.paths_mode = paths_mode;
+            set_paths_mode(&mut record, paths_mode);
             record.options = serde_json::from_value(serde_json::json!({
                 "command": "speaker_identify", "enrollments": ["100-500:REF"],
                 "threshold": 0.5, "tiers": []
@@ -680,7 +724,10 @@ mod tests {
             )
             .await
             .unwrap();
-            store.load_from_db().await.unwrap();
+            store
+                .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                .await
+                .unwrap();
             let detail = store
                 .get_job_detail(&JobId::from("evidence-job"))
                 .await
@@ -714,7 +761,7 @@ mod tests {
                     vec!["nested/source.wav".into()],
                 );
                 record.command = "convert".into();
-                record.paths_mode = paths_mode;
+                set_paths_mode(&mut record, paths_mode);
                 record.options = serde_json::from_value(
                     serde_json::json!({"command":"convert", "format":format}),
                 )
@@ -733,7 +780,13 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(store.load_from_db().await.unwrap(), 1);
+                assert_eq!(
+                    store
+                        .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                        .await
+                        .unwrap(),
+                    1
+                );
                 let detail = store
                     .get_job_detail(&JobId::from("native-job"))
                     .await
@@ -781,7 +834,13 @@ mod tests {
 
             // Repeated recovery is idempotent and never changes the raw rows.
             for _ in 0..2 {
-                assert_eq!(store.load_from_db().await.unwrap(), 1);
+                assert_eq!(
+                    store
+                        .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                        .await
+                        .unwrap(),
+                    1
+                );
                 let info = store.get(&id).await.expect("visible failed job");
                 assert_eq!(info.status, JobStatus::Failed);
                 assert!(
@@ -804,7 +863,9 @@ mod tests {
                         .is_empty()
                 );
                 assert!(matches!(
-                    store.restart(&id).await,
+                    store
+                        .restart(&id, &batchalign_types::paths::AllowedRoots::same_user())
+                        .await,
                     Err(ServerError::Planning(
                         crate::error::PlanningError::OutputOptionsMismatch { .. }
                     ))
@@ -826,130 +887,188 @@ mod tests {
         }
     }
 
+    /// SURVIVES: boundary. A stored row is read from the database; one whose
+    /// language cannot be read is not recovered (it used to run as English),
+    /// so nothing can dispatch it, and its raw row is left as evidence.
+    #[tokio::test]
+    async fn a_row_whose_language_cannot_be_read_is_not_recovered_or_run() {
+        let (store, db, _dir) = test_store_with_db().await;
+        let mut record =
+            make_job_record("unreadable-lang", JobStatus::Queued, vec!["a.cha".into()]);
+        record.lang = "not a language".into();
+        db.insert_job(&record).await.unwrap();
+
+        assert_eq!(
+            store
+                .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(store.get(&JobId::from("unreadable-lang")).await.is_none());
+        assert!(
+            store
+                .claim_ready_queued_jobs()
+                .await
+                .ready_job_ids
+                .is_empty()
+        );
+        let retained = db.load_all_jobs().await.unwrap().remove(0);
+        assert_eq!(retained.lang, "not a language");
+    }
+
     /// Startup recovery re-queues resumable work and persists the queued state.
     #[tokio::test]
     async fn load_from_db_requeues_resumable_interrupted_jobs() {
-        let (store, db, _dir) = test_store_with_db().await;
-        db.insert_job(&make_job_record(
-            "job-1",
-            JobStatus::Running,
-            vec!["a.cha".into(), "b.cha".into()],
-        ))
-        .await
-        .unwrap();
-        db.seed_file_status_row(
-            "job-1",
-            "a.cha",
-            "done",
-            None,
-            None,
-            Some("chat"),
-            Some(crate::unix_time(10.0)),
-            Some(crate::unix_time(20.0)),
-            None,
-        )
-        .await
-        .unwrap();
-        db.seed_file_status_row(
-            "job-1",
-            "b.cha",
-            "processing",
-            None,
-            None,
-            None,
-            Some(crate::unix_time(15.0)),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        db.recover_interrupted(MachineTime::now()).await.unwrap();
-
-        store.load_from_db().await.unwrap();
-
-        let info = store.get(&JobId::from("job-1")).await.unwrap();
-        assert_eq!(info.status, JobStatus::Queued);
-        let requeued_file = info
-            .file_statuses
-            .iter()
-            .find(|file| file.filename == "b.cha")
+        // On a server with no paths-mode folders: a content-mode job resumes;
+        // a paths-mode job cannot run, so it fails visibly with its open file
+        // closed and its rows rewritten, rather than waiting forever queued.
+        for paths_mode in [false, true] {
+            let (store, db, _dir) = test_store_with_db().await;
+            let mut record = make_job_record(
+                "job-1",
+                JobStatus::Running,
+                vec!["a.cha".into(), "b.cha".into()],
+            );
+            set_paths_mode(&mut record, paths_mode);
+            db.insert_job(&record).await.unwrap();
+            db.seed_file_status_row(
+                "job-1",
+                "a.cha",
+                "done",
+                None,
+                None,
+                Some("chat"),
+                Some(crate::unix_time(10.0)),
+                Some(crate::unix_time(20.0)),
+                None,
+            )
+            .await
             .unwrap();
-        assert_eq!(requeued_file.status, FileStatusKind::Queued);
-        assert!(requeued_file.started_at.is_none());
-
-        let rows = db.load_all_jobs().await.unwrap();
-        assert_eq!(rows[0].status, "queued");
-        let persisted_file = rows[0]
-            .file_statuses
-            .iter()
-            .find(|file| file.filename == "b.cha")
+            db.seed_file_status_row(
+                "job-1",
+                "b.cha",
+                "processing",
+                None,
+                None,
+                None,
+                Some(crate::unix_time(15.0)),
+                None,
+                None,
+            )
+            .await
             .unwrap();
-        assert_eq!(persisted_file.status, "queued");
-        assert!(persisted_file.started_at.is_none());
+            db.recover_interrupted(MachineTime::now()).await.unwrap();
+
+            store
+                .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                .await
+                .unwrap();
+
+            let info = store.get(&JobId::from("job-1")).await.unwrap();
+            let (job_status, file_status, row_status, file_row) = match paths_mode {
+                false => (
+                    JobStatus::Queued,
+                    FileStatusKind::Queued,
+                    "queued",
+                    "queued",
+                ),
+                true => (JobStatus::Failed, FileStatusKind::Error, "failed", "error"),
+            };
+            assert_eq!(info.status, job_status, "paths mode {paths_mode}");
+            let requeued_file = info
+                .file_statuses
+                .iter()
+                .find(|file| file.filename == "b.cha")
+                .unwrap();
+            assert_eq!(requeued_file.status, file_status);
+            assert!(info.active_lease.is_none());
+
+            let rows = db.load_all_jobs().await.unwrap();
+            assert_eq!(rows[0].status, row_status);
+            let persisted_file = rows[0]
+                .file_statuses
+                .iter()
+                .find(|file| file.filename == "b.cha")
+                .unwrap();
+            assert_eq!(persisted_file.status, file_row);
+            if !paths_mode {
+                assert!(requeued_file.started_at.is_none());
+                assert!(persisted_file.started_at.is_none());
+            }
+        }
     }
 
     /// Startup recovery finalizes all-terminal interrupted jobs and clears leases.
     #[tokio::test]
     async fn load_from_db_finalizes_terminal_interrupted_jobs() {
-        let (store, db, _dir) = test_store_with_db().await;
-        db.insert_job(&make_job_record(
-            "job-2",
-            JobStatus::Running,
-            vec!["a.cha".into(), "b.cha".into()],
-        ))
-        .await
-        .unwrap();
-        db.seed_file_status_row(
-            "job-2",
-            "a.cha",
-            "done",
-            None,
-            None,
-            Some("chat"),
-            Some(crate::unix_time(10.0)),
-            Some(crate::unix_time(20.0)),
-            None,
-        )
-        .await
-        .unwrap();
-        db.seed_file_status_row(
-            "job-2",
-            "b.cha",
-            "error",
-            Some("boom"),
-            Some("worker_crash"),
-            None,
-            Some(crate::unix_time(11.0)),
-            Some(crate::unix_time(21.0)),
-            None,
-        )
-        .await
-        .unwrap();
-        db.update_job_lease(
-            "job-2",
-            Some(
-                &crate::scheduling::LeaseRecord::new(
-                    "node-a".into(),
-                    crate::unix_time(35.0),
-                    crate::unix_time(40.0),
-                )
-                .expect("an ordered fixture lease"),
-            ),
-        )
-        .await
-        .unwrap();
-        db.recover_interrupted(MachineTime::now()).await.unwrap();
+        // Nothing left to run, so no admission is needed in either mode,
+        // even on a server with no paths-mode folders.
+        for paths_mode in [false, true] {
+            let (store, db, _dir) = test_store_with_db().await;
+            let mut record = make_job_record(
+                "job-2",
+                JobStatus::Running,
+                vec!["a.cha".into(), "b.cha".into()],
+            );
+            set_paths_mode(&mut record, paths_mode);
+            db.insert_job(&record).await.unwrap();
+            db.seed_file_status_row(
+                "job-2",
+                "a.cha",
+                "done",
+                None,
+                None,
+                Some("chat"),
+                Some(crate::unix_time(10.0)),
+                Some(crate::unix_time(20.0)),
+                None,
+            )
+            .await
+            .unwrap();
+            db.seed_file_status_row(
+                "job-2",
+                "b.cha",
+                "error",
+                Some("boom"),
+                Some("worker_crash"),
+                None,
+                Some(crate::unix_time(11.0)),
+                Some(crate::unix_time(21.0)),
+                None,
+            )
+            .await
+            .unwrap();
+            db.update_job_lease(
+                "job-2",
+                Some(
+                    &crate::scheduling::LeaseRecord::new(
+                        "node-a".into(),
+                        crate::unix_time(35.0),
+                        crate::unix_time(40.0),
+                    )
+                    .expect("an ordered fixture lease"),
+                ),
+            )
+            .await
+            .unwrap();
+            db.recover_interrupted(MachineTime::now()).await.unwrap();
 
-        store.load_from_db().await.unwrap();
+            store
+                .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+                .await
+                .unwrap();
 
-        let info = store.get(&JobId::from("job-2")).await.unwrap();
-        assert_eq!(info.status, JobStatus::Completed);
-        assert_eq!(info.completed_files, 2);
-        assert!(info.active_lease.is_none());
+            // One file failed, so the job did: `Completed` means none did.
+            let info = store.get(&JobId::from("job-2")).await.unwrap();
+            assert_eq!(info.status, JobStatus::Failed);
+            assert_eq!(info.completed_files, 2);
+            assert!(info.active_lease.is_none());
 
-        let rows = db.load_all_jobs().await.unwrap();
-        assert_eq!(rows[0].status, "completed");
-        assert!(rows[0].lease.is_none());
+            let rows = db.load_all_jobs().await.unwrap();
+            assert_eq!(rows[0].status, "failed");
+            assert!(rows[0].lease.is_none());
+        }
     }
 
     /// Recovery preserves invalid persisted job status evidence instead of silently dropping it.
@@ -967,7 +1086,10 @@ mod tests {
             .await
             .unwrap();
 
-        store.load_from_db().await.unwrap();
+        store
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .unwrap();
 
         let info = store.get(&JobId::from("job-bad-status")).await.unwrap();
         assert_eq!(info.status, JobStatus::Failed);
@@ -1002,7 +1124,10 @@ mod tests {
         .await
         .unwrap();
 
-        store.load_from_db().await.unwrap();
+        store
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .unwrap();
 
         let info = store
             .get(&JobId::from("job-bad-file-status"))
@@ -1051,7 +1176,10 @@ mod tests {
             .await
             .unwrap();
 
-        store.load_from_db().await.unwrap();
+        store
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .unwrap();
 
         let rows = db.load_all_jobs().await.unwrap();
         let file = &rows[0].file_statuses[0];
@@ -1097,7 +1225,10 @@ mod tests {
         .await
         .unwrap();
 
-        store.load_from_db().await.unwrap();
+        store
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .unwrap();
 
         let rows = db.load_all_jobs().await.unwrap();
         let file = &rows[0].file_statuses[0];
@@ -1134,7 +1265,7 @@ mod tests {
         db.fail_file_status_updates().await.unwrap();
 
         let loaded = store
-            .load_from_db()
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
             .await
             .expect("a failed repair write must not fail startup");
         assert_eq!(loaded, 1);

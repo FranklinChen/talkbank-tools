@@ -36,9 +36,8 @@ pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<
     // `None` keys jobs with no recorded submitter together, as the empty
     // string did before absence had its own type.
     let incoming_keys: std::collections::HashSet<(Option<&str>, String)> = incoming
-        .filesystem
-        .filenames
-        .iter()
+        .inputs()
+        .displays()
         .map(|fn_| {
             let path = if incoming.source.source_dir.is_empty() {
                 String::from(fn_.clone())
@@ -54,10 +53,10 @@ pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<
 
     let mut conflicts = Vec::new();
     for active in jobs.values() {
-        if !active.execution.status.is_active() {
+        let Some(inputs) = active.active_inputs() else {
             continue;
-        }
-        for fn_ in &active.filesystem.filenames {
+        };
+        for fn_ in inputs.displays() {
             let path = if active.source.source_dir.is_empty() {
                 String::from(fn_.clone())
             } else {
@@ -72,7 +71,7 @@ pub(crate) fn find_conflicts(jobs: &HashMap<JobId, Job>, incoming: &Job) -> Vec<
                     filename: fn_.clone(),
                     job_id: active.identity.job_id.clone(),
                     command: active.dispatch.command,
-                    status: active.execution.status,
+                    status: active.status(),
                 });
             }
         }

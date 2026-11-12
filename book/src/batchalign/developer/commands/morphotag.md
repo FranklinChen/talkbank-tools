@@ -414,6 +414,17 @@ top comment names the responsibility, and the typed
 sites in that file). The batchalign-side `morphosyntax/worker.rs`
 calls the injection path and propagates the validation outcomes.
 
+An utterance whose analysis cannot be admitted is declined, not the batch.
+Each utterance's morphology is admitted before its one write
+(`inject::admit_morphosyntax` / `admit_rewrite`, whose `AdmittedMorphology`
+holds the utterance it writes), so a declined utterance is left exactly as it
+was. The batch returns `InjectionParts::declined` (a `DeclinedUtterance` per
+utterance, with a closed `DeclineCause`); `AppliedAnalyses` carries them to
+the output's `PrimaryReport`, and the written file reports
+`OutputShortfallRecord::PrimaryMorphologyIncomplete`, so it is recorded as
+written with diagnostics. `InjectionError` now means only that the batch could
+not be bound to the document.
+
 ```bash
 # Unit tests (no ML models)
 make test

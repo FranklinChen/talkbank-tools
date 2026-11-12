@@ -104,7 +104,9 @@ was **where forced alignment actually runs**.
   through `DirectHost`.
 - **Explicit server mode** (`--server URL`) submits a shared-filesystem
   `paths_mode` job. The server must be able to read the submitted source paths
-  and write the requested output paths on the execution host.
+  and write the requested output paths on the execution host, and every one of
+  them must lie inside a folder its `server.yaml` lists under
+  `paths_mode_roots` (see [path provenance](../architecture/path-provenance.md#paths-mode-admission-by-configured-folders)).
 
 Both paths converge on the same FA runner code in
 `crates/batchalign/src/runner/dispatch/fa_pipeline.rs`.

@@ -1,4 +1,3 @@
-use super::BuildChatError;
 use super::*;
 use crate::asr_postprocess;
 use crate::parse::{TreeSitterParser, parse_lenient};
@@ -234,7 +233,9 @@ fn test_build_chat_with_timing() {
             role: "Participant".to_string(),
             corpus: String::new(),
         }],
-        media_name: Some("test.mp3".to_string()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("test").expect("fixture media name"),
+        ),
         media_type: Some("audio".to_string()),
         media_status: None,
         utterances: vec![UtteranceDesc {
@@ -278,7 +279,9 @@ fn word_utterance_main_bullets_are_derived_from_own_word_hulls() {
             role: "Participant".to_string(),
             corpus: String::new(),
         }],
-        media_name: Some("3039.mp3".to_string()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("3039").expect("fixture media name"),
+        ),
         media_type: Some("audio".to_string()),
         media_status: None,
         utterances: vec![
@@ -400,7 +403,9 @@ fn test_write_wor_false_suppresses_wor_tier() {
             role: "Participant".to_string(),
             corpus: String::new(),
         }],
-        media_name: Some("test.mp3".to_string()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("test").expect("fixture media name"),
+        ),
         media_type: Some("audio".to_string()),
         media_status: None,
         utterances: vec![UtteranceDesc {
@@ -462,7 +467,7 @@ fn test_transcript_from_asr_utterances() {
         &utterances,
         &ids,
         &["eng".to_string()],
-        Some("test.mp3"),
+        Some(talkbank_model::model::MediaFilename::parse("test").expect("fixture media name")),
         false,
     )
     .expect("test: transcript_from_asr_utterances should succeed")
@@ -889,7 +894,9 @@ fn media_header_has_comma_separator() {
             role: "Participant".to_string(),
             corpus: String::new(),
         }],
-        media_name: Some("279home-2.mp3".to_string()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("279home-2").expect("fixture media name"),
+        ),
         media_type: Some("audio".to_string()),
         media_status: None,
         utterances: vec![UtteranceDesc {
@@ -1422,7 +1429,7 @@ fn red_reporter_c465e6e8_97c_end_to_end_canary() {
         &utts,
         &["PAR0".to_string(), "PAR1".to_string()],
         &["eng".to_string()],
-        Some("545"),
+        Some(talkbank_model::model::MediaFilename::parse("545").expect("fixture media name")),
         false,
     )
     .expect("test: transcript_from_asr_utterances should succeed")
@@ -1653,7 +1660,7 @@ fn built_chat_file_exposes_participants_from_headers() {
         &utterances,
         &ids,
         &["eng".to_string()],
-        Some("test.mp3"),
+        Some(talkbank_model::model::MediaFilename::parse("test").expect("fixture media name")),
         false,
     )
     .expect("test: transcript_from_asr_utterances should succeed")
@@ -1679,56 +1686,6 @@ fn built_chat_file_exposes_participants_from_headers() {
             .any(|p| p.code().as_str() == "INV"),
         "INV participant present"
     );
-}
-
-/// A media name that `@Media` cannot represent must FAIL, not vanish.
-///
-/// `@Media` delimits the filename with a comma, so `interview,part2` is not a
-/// writable name. When chatter made `MediaHeader::new` take a parsed
-/// `MediaFilename`, the migration absorbed the new failure with `.ok()`, which
-/// turned an unusable name into `None` -- the same value that means "the
-/// caller named no media". The pipeline then reported success and wrote a
-/// transcript with NO `@Media` line and no diagnostic, silently losing the
-/// audio link. Losing a media link without saying so is the exact failure this
-/// whole area was being repaired for.
-#[test]
-fn an_unrepresentable_media_name_is_an_error_not_a_missing_header() {
-    let mut desc = TranscriptDescription {
-        langs: eng(),
-        participants: vec![ParticipantDesc {
-            id: "PAR".to_string(),
-            name: None,
-            role: "Participant".to_string(),
-            corpus: String::new(),
-        }],
-        media_name: Some("interview,part2".to_string()),
-        media_type: Some("audio".to_string()),
-        media_status: None,
-        utterances: vec![UtteranceDesc {
-            speaker: "PAR".to_string(),
-            body: UtteranceBody::Words {
-                words: vec![wd("hello", None, None)],
-                end: observed("."),
-            },
-            lang: None,
-            dropped_tokens: Vec::new(),
-            seam_ambiguities: Vec::new(),
-        }],
-        write_wor: false,
-    };
-
-    let err = build_chat(desc.clone()).expect_err("a comma-bearing media name must be rejected");
-    assert!(
-        matches!(err, BuildChatError::MediaFilename(_)),
-        "the error must name the header it could not write: {err}"
-    );
-
-    // And the ordinary name still works, so the check is not simply refusing.
-    desc.media_name = Some("interview_part2".to_string());
-    let chat = build_chat(desc)
-        .expect("a representable media name still builds")
-        .into_file();
-    assert!(to_chat_string(&chat).contains("@Media:\tinterview_part2, audio"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1841,7 +1798,9 @@ fn generated_bullets_come_only_from_positive_intervals() {
             role: "Participant".to_string(),
             corpus: String::new(),
         }],
-        media_name: Some("sample.mp3".to_string()),
+        media_name: Some(
+            talkbank_model::model::MediaFilename::parse("sample").expect("fixture media name"),
+        ),
         media_type: None,
         media_status: None,
         utterances: vec![UtteranceDesc {
@@ -1898,7 +1857,14 @@ fn generated_bullets_come_only_from_positive_intervals() {
 fn finalized_chat(mut utterances: Vec<asr_postprocess::Utterance>) -> String {
     asr_postprocess::finalize_utterances(&mut utterances, "eng");
     let desc = NamedAsrUtterances::numbered(&utterances)
-        .into_transcript(&["eng".to_owned()], Some("recording.wav"), false)
+        .into_transcript(
+            &["eng".to_owned()],
+            Some(
+                talkbank_model::model::MediaFilename::parse("recording")
+                    .expect("fixture media name"),
+            ),
+            false,
+        )
         .expect("test: transcript")
         .description;
     to_chat_string(&build_chat(desc).expect("test: CHAT builds").into_file())

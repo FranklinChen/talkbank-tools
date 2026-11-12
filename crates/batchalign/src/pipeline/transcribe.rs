@@ -1076,7 +1076,7 @@ fn held_out_shortfall(
 async fn stage_run_localized_morphosyntax<P: TranscribePlan>(
     ctx: &TranscribePipelineContext<'_, (), P>,
     localized: crate::pipeline::post_validate::LocalizedDiagnosis,
-) -> Result<(ProducedOutput, Option<Shortfall>), ServerError> {
+) -> Result<(ProducedOutput, Vec<Shortfall>), ServerError> {
     let filename = ctx
         .audio_path
         .file_name()
@@ -1097,14 +1097,19 @@ async fn stage_run_localized_morphosyntax<P: TranscribePlan>(
     .await;
     Ok(match not_applied(OptionalStage::Morphosyntax, analyzed)? {
         StageOutcome::Applied(crate::pipeline::morphosyntax::LocalizedMorphosyntax::Analyzed(
-            document,
-        )) => (document.without_reports()?, Some(held_out)),
+            output,
+        )) => {
+            let finished = analysed_with_records(*output)?;
+            let mut shortfalls = vec![held_out];
+            shortfalls.extend(finished.shortfalls);
+            (finished.document, shortfalls)
+        }
         StageOutcome::Applied(crate::pipeline::morphosyntax::LocalizedMorphosyntax::Declined(
             document,
-        )) => (ProducedOutput::Diagnosed(document), None),
+        )) => (ProducedOutput::Diagnosed(document), Vec::new()),
         StageOutcome::NotApplied(shortfall) => {
             tracing::warn!(%filename, %shortfall, "transcribe kept its pre-morphosyntax document");
-            (ProducedOutput::Diagnosed(before), Some(shortfall))
+            (ProducedOutput::Diagnosed(before), vec![shortfall])
         }
     })
 }
@@ -1139,6 +1144,20 @@ fn transcribe_morphosyntax_params(
     }
 }
 
+/// Transcribe's morphosyntax output, with what it records located against the
+/// document written: declined utterances (and any provenance shortfall) become
+/// the file's shortfalls. Transcribe runs no secondary-language analysis, so
+/// an exclusion would be a report it has nowhere to carry, and is refused.
+fn analysed_with_records<D: crate::morphosyntax::report::WrittenDocument>(
+    output: crate::morphosyntax::report::MorphosyntaxOutput<D>,
+) -> Result<crate::morphosyntax::report::FinishedMorphosyntax<D>, ServerError> {
+    let finished = output.finish().map_err(ServerError::from)?;
+    match finished.exclusions.is_empty() {
+        true => Ok(finished),
+        false => Err(ServerError::UnexpectedMorphologyReport),
+    }
+}
+
 async fn stage_run_morphosyntax<'a, P: TranscribePlan>(
     ctx: TranscribePipelineContext<'a, ChatReady, P>,
 ) -> Result<TranscribePipelineContext<'a, Analyzed, P>, ServerError> {
@@ -1170,7 +1189,11 @@ async fn stage_run_morphosyntax<'a, P: TranscribePlan>(
     }
     .await;
     let document = match not_applied(OptionalStage::Morphosyntax, analyzed)? {
-        StageOutcome::Applied(document) => document.without_reports()?,
+        StageOutcome::Applied(output) => {
+            let finished = analysed_with_records(output)?;
+            shortfalls.extend(finished.shortfalls);
+            finished.document
+        }
         StageOutcome::NotApplied(shortfall) => {
             tracing::warn!(%filename, %shortfall, "transcribe kept its pre-morphosyntax document");
             shortfalls.push(shortfall);

@@ -62,6 +62,7 @@ use crate::submission::{SubmissionContext, materialize_submission_job};
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", post(submit_job))
+        .route("/same-user/nonce", post(issue_same_user_nonce))
         .route("/jobs", get(list_jobs))
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/results", get(get_results))
@@ -118,6 +119,16 @@ fn correlation_id_from_headers(headers: &HeaderMap, fallback: &str) -> Correlati
         .unwrap_or_else(|| CorrelationId::from(fallback.to_string()))
 }
 
+/// Issue a single-use nonce for a same-user proof (see
+/// [`crate::same_user_key`]). Anyone may ask: a nonce grants nothing without
+/// this server's key, and each is good once, for a minute.
+pub(crate) async fn issue_same_user_nonce(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let nonce = state.environment.same_user_nonces.issue()?;
+    Ok(Json(serde_json::json!({ "nonce": nonce })))
+}
+
 /// Accept a new processing job and begin execution.
 ///
 /// Validates the command against built-in tasks and worker-advertised capabilities,
@@ -139,8 +150,15 @@ pub(crate) async fn submit_job(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(submission): Json<JobSubmission>,
-) -> Result<impl IntoResponse, ServerError> {
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    // Raw, so a same-user proof is checked over exactly the bytes parsed.
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, ServerError> {
+    let submission = match Json::<JobSubmission>::from_bytes(&body) {
+        Ok(Json(submission)) => submission,
+        // The rejection the `Json` extractor gave before, unchanged.
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
     // Validate command
     if !state.workers.capabilities.serves(submission.command) {
         return Err(ServerError::UnknownCommand(format!(
@@ -156,7 +174,7 @@ pub(crate) async fn submit_job(
     // with `Auto` or `Resolved(_)`. This is the single chokepoint that
     // keeps job records honest and stops the 2026-05-03 lang-placeholder
     // leak from ever recurring at the wire boundary.
-    submission
+    let validated = submission
         .validate()
         .map_err(|e| ServerError::Validation(e.to_string()))?;
 
@@ -164,20 +182,31 @@ pub(crate) async fn submit_job(
     // once a worker has reported one; the job meets the same registry again
     // after its capability probe if none had been admitted yet.
     if let Ok(registry) = state.workers.pool.stanza_registry() {
-        crate::types::request::validate_language_with_registry(&submission, &registry)
+        crate::types::request::validate_language_with_registry(&validated, &registry)
             .map_err(|e| ServerError::Validation(e.to_string()))?;
     }
 
     let job_id = uuid::Uuid::new_v4().to_string()[..12].to_string();
     let correlation_id = correlation_id_from_headers(&headers, &job_id);
     let job = materialize_submission_job(
-        &submission,
+        &validated,
         &SubmissionContext {
             job_id: job_id.clone().into(),
             correlation_id: correlation_id.clone(),
             jobs_dir: state.environment.paths.jobs_dir.clone(),
             submitter: Submitter::client(addr.ip(), resolve_hostname(&addr.ip())),
             submitted_at: state.control.backend.event_time(),
+            // This server's own account (its same-user key) may name any
+            // path; anyone else only the configured folders.
+            allowed_roots: state.environment.authority_for(
+                &headers,
+                addr,
+                &crate::same_user_key::RequestBinding {
+                    method: "POST",
+                    path: uri.path(),
+                    body: &body,
+                },
+            )?,
         },
     )
     .await?;
@@ -187,7 +216,10 @@ pub(crate) async fn submit_job(
         correlation_id = %correlation_id,
         command = %submission.command,
         total_files = job.total_files(),
-        paths_mode = job.filesystem.paths_mode,
+        paths_mode = matches!(
+            job.admitted_inputs(),
+            Some(crate::store::JobInputs::Paths { .. })
+        ),
         submitted_by = %addr.ip(),
         "Job submission accepted"
     );
@@ -200,7 +232,7 @@ pub(crate) async fn submit_job(
         response_headers.insert("x-request-id", request_id);
     }
 
-    Ok((StatusCode::OK, response_headers, Json(info)))
+    Ok((StatusCode::OK, response_headers, Json(info)).into_response())
 }
 
 /// Return a summary of every job the server knows about (active, completed,

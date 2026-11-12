@@ -17,9 +17,13 @@
 
 use talkbank_model::Location;
 use talkbank_model::WriteChat;
-use talkbank_model::alignment::helpers::PositionalDomain;
-use talkbank_model::alignment::helpers::{MorAlignableWordCount, MorItemCount};
-use talkbank_model::model::{DependentTier, GrammaticalRelation, Mor, MorTier, Utterance};
+use talkbank_model::alignment::helpers::{
+    MorAlignableWordCount, MorItemCount, PositionalDomain, count_tier_positions,
+};
+use talkbank_model::model::{
+    DependentTier, GraTier, GrammaticalRelation, Mor, MorTier, TierContentItems, Utterance,
+    UtteranceContent,
+};
 
 use crate::extract::collect_utterance_content;
 
@@ -96,38 +100,13 @@ impl MisalignmentClass {
     }
 }
 
-/// Inject parsed Mor items and GRA relations into an utterance.
-///
-/// Validates alignment before injecting, catches count mismatches at the
-/// point of corruption rather than deferring to pre-serialization validation.
+/// Inject parsed Mor items and GRA relations into an utterance: admit them
+/// against its content ([`admit_morphosyntax`]), then write them. Atomic by
+/// construction: on a refusal the utterance is unchanged.
 ///
 /// # Errors
 ///
-/// Returns a [`MisalignmentDiagnostic`] when the 1-to-1 invariant is
-/// violated (Mor count ≠ Mor-alignable CHAT word count). The diagnostic
-/// carries `chat_words`, `expected`, `actual`, and a placeholder
-/// `suspected_class` of [`MisalignmentClass::Unknown`]. Callers that have
-/// additional context (Stanza tokens, whether retokenization was used,
-/// whether the utterance was code-switched) may enrich the diagnostic
-/// before surfacing it.
-/// # Instrumentation contract
-///
-/// Every call to this function emits at least one `tracing` event so an
-/// operator running with `--verbose` (filter ≥ info) can reconstruct the
-/// inject path taken for any utterance. Events:
-///
-/// | Branch                                   | Level | Target message                        |
-/// |------------------------------------------|-------|---------------------------------------|
-/// | Entry (always)                           | info  | `inject_morphosyntax: enter`          |
-/// | mors empty (skip)                        | info  | `inject_morphosyntax: skip empty`     |
-/// | word/mor count mismatch (returns Err)    | warn  | `MOR count mismatch ...`              |
-/// | %mor-only (no %gra) install              | info  | `inject_morphosyntax: mor-only`       |
-/// | %mor/%gra count mismatch (returns Err)   | warn  | `%mor/%gra count mismatch ...`        |
-/// | aligned (success)                        | info  | `inject_morphosyntax: aligned`        |
-///
-/// At the daemon's default filter (`warn`), only the two error events fire.
-/// Run with `batchalign3 -v` (info) to see entry + per-branch outcomes, or
-/// `-vv` (debug) for the original `alignment check` debug counts.
+/// The [`MisalignmentDiagnostic`] [`admit_morphosyntax`] returns.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -139,54 +118,184 @@ pub fn inject_morphosyntax(
     terminator: talkbank_model::Terminator,
     gra_relations: Vec<GrammaticalRelation>,
 ) -> Result<(), MisalignmentDiagnostic> {
+    admit_morphosyntax(utterance, mors, terminator, gra_relations)?.write();
+    Ok(())
+}
+
+/// Morphology admitted for one utterance, holding that utterance: the
+/// `%mor` item count equals the Mor-alignable word count of the main-tier
+/// content it will annotate, and a `%gra` tier, when there is one, pairs one
+/// relation with every `%mor` chunk.
+///
+/// Built only by [`admit_morphosyntax`] (against the utterance's own content)
+/// or [`admit_rewrite`] (against the content that will replace it), neither of
+/// which modifies anything, and written only by [`AdmittedMorphology::write`],
+/// which cannot fail and writes the utterance it was admitted for. Every
+/// refusal therefore happens before the one write, admitted tiers cannot be
+/// written to another utterance, and rewritten content and its tiers are
+/// installed together: a caller that declines one utterance leaves it exactly
+/// as it was.
+#[must_use = "admitted morphology does nothing until it is written"]
+pub struct AdmittedMorphology<'u> {
+    utterance: &'u mut Utterance,
+    rewrite: Option<Vec<UtteranceContent>>,
+    tiers: Admitted,
+}
+
+/// What admission produced. Private, so the only route to a variant is
+/// admission itself.
+enum Admitted {
+    /// No items, for content with no Mor-alignable word.
+    Nothing,
+    /// A `%mor` tier alone. Some paths legitimately produce `%mor` without a
+    /// paired `%gra` (e.g. utseg).
+    Mor(MorTier),
+    /// A `%mor` and `%gra` pair, co-constructed so their alignment holds.
+    MorGra(MorTier, GraTier),
+}
+
+impl AdmittedMorphology<'_> {
+    /// Install the rewritten content, if any, and the admitted tiers. A tier
+    /// the admission did not produce is removed rather than left beside new
+    /// ones: a `%gra` from an earlier run indexes the earlier `%mor`'s items.
+    pub fn write(self) {
+        let Self {
+            utterance,
+            rewrite,
+            tiers,
+        } = self;
+        if let Some(content) = rewrite {
+            utterance.main.content.content = TierContentItems::new(content);
+        }
+        let tiers_of = &mut utterance.dependent_tiers;
+        match tiers {
+            Admitted::Nothing => {
+                tiers_of.retain(|entry| {
+                    !matches!(entry.tier, DependentTier::Mor(_) | DependentTier::Gra(_))
+                });
+            }
+            Admitted::Mor(mor) => {
+                tiers_of.retain(|entry| !matches!(entry.tier, DependentTier::Gra(_)));
+                replace_or_add_tier(tiers_of, DependentTier::Mor(mor));
+            }
+            Admitted::MorGra(mor, gra) => {
+                replace_or_add_tier(tiers_of, DependentTier::Mor(mor));
+                replace_or_add_tier(tiers_of, DependentTier::Gra(gra));
+            }
+        }
+    }
+}
+
+/// Admit Mor items and GRA relations against the utterance's own main-tier
+/// content, without modifying anything.
+///
+/// # Errors
+///
+/// The [`MisalignmentDiagnostic`] of [`admit_tiers`].
+pub fn admit_morphosyntax(
+    utterance: &mut Utterance,
+    mors: Vec<Mor>,
+    terminator: talkbank_model::Terminator,
+    gra_relations: Vec<GrammaticalRelation>,
+) -> Result<AdmittedMorphology<'_>, MisalignmentDiagnostic> {
+    let tiers = admit_tiers(
+        &utterance.main.content.content,
+        mors,
+        terminator,
+        gra_relations,
+    )?;
+    Ok(AdmittedMorphology {
+        utterance,
+        rewrite: None,
+        tiers,
+    })
+}
+
+/// Admit Mor items and GRA relations against `content`, the main-tier content
+/// that will replace the utterance's own when the admission is written.
+///
+/// # Errors
+///
+/// The [`MisalignmentDiagnostic`] of [`admit_tiers`].
+pub fn admit_rewrite(
+    utterance: &mut Utterance,
+    content: Vec<UtteranceContent>,
+    mors: Vec<Mor>,
+    terminator: talkbank_model::Terminator,
+    gra_relations: Vec<GrammaticalRelation>,
+) -> Result<AdmittedMorphology<'_>, MisalignmentDiagnostic> {
+    let tiers = admit_tiers(&content, mors, terminator, gra_relations)?;
+    Ok(AdmittedMorphology {
+        utterance,
+        rewrite: Some(content),
+        tiers,
+    })
+}
+
+/// Admit parsed Mor items and GRA relations against the main-tier content they
+/// will annotate. Private: the public entries bind the result to its utterance.
+///
+/// Validates alignment at the point of corruption rather than deferring to
+/// pre-serialization validation.
+///
+/// # Errors
+///
+/// Returns a [`MisalignmentDiagnostic`] when the 1-to-1 invariant is
+/// violated (Mor count differs from the Mor-alignable CHAT word count, or the
+/// `%gra` relations do not pair with the `%mor` chunks). The diagnostic
+/// carries `chat_words`, `expected`, `actual`, and a `suspected_class`;
+/// callers with more context (the model's tokens) may enrich it.
+///
+/// # Instrumentation contract
+///
+/// Every call emits at least one `tracing` event so an operator running with
+/// `--verbose` (filter at least info) can reconstruct the path taken for any
+/// utterance:
+///
+/// | Branch                                   | Level | Target message                        |
+/// |------------------------------------------|-------|---------------------------------------|
+/// | Entry (always)                           | info  | `inject_morphosyntax: enter`          |
+/// | mors empty (skip)                        | info  | `inject_morphosyntax: skip empty`     |
+/// | word/mor count mismatch (returns Err)    | warn  | `MOR count mismatch ...`              |
+/// | %mor-only (no %gra) install              | info  | `inject_morphosyntax: mor-only`       |
+/// | %mor/%gra count mismatch (returns Err)   | warn  | `%mor/%gra count mismatch ...`        |
+/// | aligned (success)                        | info  | `inject_morphosyntax: aligned`        |
+///
+/// At the daemon's default filter (`warn`), only the two error events fire.
+fn admit_tiers(
+    content: &[UtteranceContent],
+    mors: Vec<Mor>,
+    terminator: talkbank_model::Terminator,
+    gra_relations: Vec<GrammaticalRelation>,
+) -> Result<Admitted, MisalignmentDiagnostic> {
     tracing::info!(
         mor_count = mors.len(),
         gra_count = gra_relations.len(),
         "inject_morphosyntax: enter",
     );
-    if mors.is_empty() {
-        tracing::info!("inject_morphosyntax: skip empty");
-        return Ok(());
-    }
 
-    // Validate: MOR count must match alignable word count. The canonical
-    // definition of N lives on `Utterance` in `talkbank-model` and applies
-    // the CHAT manual's alignment rules, see
-    // `talkbank-model::model::file::utterance::accessors::mor_alignable_word_count`.
-    // The chat_words Vec is built only for diagnostic output on mismatch.
-    // Typed counts: the model method returns `MorAlignableWordCount`,
-    // a domain newtype distinct from `MorItemCount` / plain `usize`, so
-    // any future refactor that swaps one for the other at the inject
-    // boundary fails to compile rather than silently misaligning.
-    let word_count = utterance.mor_alignable_word_count();
-    let mor_count = talkbank_model::alignment::helpers::MorItemCount::new(mors.len());
+    // The canonical N applies the CHAT manual's alignment rules
+    // (`talkbank-model`'s `count_tier_positions` over the Mor domain, which
+    // `Utterance::mor_alignable_word_count` also reads). Typed counts keep
+    // the two sides from being swapped at this boundary.
+    let word_count =
+        MorAlignableWordCount::new(count_tier_positions(content, PositionalDomain::Mor));
+    let mor_count = MorItemCount::new(mors.len());
     tracing::debug!(
         word_count = word_count.get(),
         mor_count = mor_count.get(),
         "inject_morphosyntax: alignment check"
     );
     if word_count.get() != mor_count.get() {
-        // Materialize the actual word list only when we need it for
-        // the diagnostic: the fast path avoids the allocation.
+        // The 1-to-1 invariant (CHAT extraction, tokenizer realignment and
+        // UD-to-Mor mapping each keep N) is violated: always a bug in one of
+        // them, never an expected divergence. The word list is built only for
+        // the diagnostic.
         let mut extracted = Vec::new();
-        collect_utterance_content(
-            &utterance.main.content.content,
-            PositionalDomain::Mor,
-            &mut extracted,
-        );
-        // Mismatch class:
-        //
-        // The 1-to-1 invariant (CHAT extract `counts_for_tier` output N,
-        // Stanza realignment produces N tokens, UD→Mor mapping keeps N
-        // chunks) is violated. This is always a bug in extraction,
-        // realignment, or mapping: never an expected divergence.
-        // Return a typed diagnostic; the outer layer logs visibly and
-        // absorbs at the file boundary.
-        let utt_text = utterance.main.to_chat_string();
+        collect_utterance_content(content, PositionalDomain::Mor, &mut extracted);
         tracing::warn!(
             word_count = word_count.get(),
             mor_count = mor_count.get(),
-            utterance = %utt_text,
             "MOR count mismatch: returning MisalignmentDiagnostic"
         );
         return Err(MisalignmentDiagnostic {
@@ -194,9 +303,8 @@ pub fn inject_morphosyntax(
                 .iter()
                 .map(|w| w.text.as_ref().to_string())
                 .collect(),
-            // The injector only sees the mapped Mors, not the raw Stanza
-            // tokens: leaving empty here and letting the caller enrich
-            // with Stanza-side context if available.
+            // The injector sees only the mapped Mors, not the model's tokens;
+            // the caller enriches with those when it has them.
             stanza_tokens_after_mapping: Vec::new(),
             expected: word_count,
             actual: mor_count,
@@ -204,75 +312,63 @@ pub fn inject_morphosyntax(
         });
     }
 
-    // No-gra case: install MorTier alone. Some pipeline paths legitimately
-    // produce a `%mor` without a paired `%gra` (e.g., utseg).
-    if gra_relations.is_empty() {
-        tracing::info!(mor_count = mors.len(), "inject_morphosyntax: mor-only");
-        let mor_tier = MorTier::new_mor(Location::Unlocated, mors, terminator);
-        replace_or_add_tier(&mut utterance.dependent_tiers, DependentTier::Mor(mor_tier));
-        return Ok(());
+    // Counts agree, so no items means no Mor-alignable words: content with
+    // nothing to annotate, never an analysed utterance reported complete.
+    if mors.is_empty() {
+        tracing::info!("inject_morphosyntax: skip empty");
+        return Ok(Admitted::Nothing);
     }
 
-    // Co-construct (MorTier, GraTier) via try_align_mor_gra so the chunk-
-    // relation alignment is enforced at construction time. The terminator's
-    // PUNCT relation is the last entry of gra_relations (per upstream
-    // AppendTrailingPunct policy in build_gra_and_validate); pop it for the
-    // typed terminator slot.
+    // The terminator's PUNCT relation is the last of `gra_relations` (the
+    // upstream AppendTrailingPunct policy); it fills the typed terminator
+    // slot. No relations at all means a `%mor` alone.
     let mut item_relations = gra_relations;
     let Some(terminator_relation) = item_relations.pop() else {
-        // Unreachable: checked non-empty above.
-        return Ok(());
+        tracing::info!(mor_count = mors.len(), "inject_morphosyntax: mor-only");
+        return Ok(Admitted::Mor(MorTier::new_mor(
+            Location::Unlocated,
+            mors,
+            terminator,
+        )));
     };
     let slot = talkbank_model::alignment::MorGraTerminatorSlot {
         terminator,
         relation: terminator_relation,
     };
-
-    let (mor_tier, gra_tier) = match talkbank_model::alignment::try_align_mor_gra(
+    match talkbank_model::alignment::try_align_mor_gra(
         mors,
         item_relations,
         slot,
         Location::Unlocated,
     ) {
-        Ok(pair) => pair,
+        Ok((mor_tier, gra_tier)) => {
+            tracing::info!(
+                mor_chunks = mor_tier.count_chunks(),
+                gra_relations = gra_tier.relations().len(),
+                "inject_morphosyntax: aligned",
+            );
+            Ok(Admitted::MorGra(mor_tier, gra_tier))
+        }
         Err(talkbank_model::alignment::MorGraConstructionError::CountMismatch {
             mor_chunks,
             gra_relations,
         }) => {
-            // dona@s bug class: upstream produced misaligned counts.
-            // Surface as MisalignmentDiagnostic; the mor_chunks / gra_relations
-            // counts are stuffed into the existing typed fields semantically
-            // (they are usize counts, even if the field types were named for
-            // the word/mor case originally).
+            // dona@s bug class: upstream produced misaligned counts. The
+            // chunk and relation counts travel in the typed count fields.
             tracing::warn!(
                 mor_chunks,
                 gra_relations,
-                utterance = %utterance.main.to_chat_string(),
                 "%mor/%gra count mismatch: returning MisalignmentDiagnostic",
             );
-            return Err(MisalignmentDiagnostic {
+            Err(MisalignmentDiagnostic {
                 chat_words: Vec::new(),
                 stanza_tokens_after_mapping: Vec::new(),
-                expected: talkbank_model::alignment::helpers::MorAlignableWordCount::new(
-                    mor_chunks,
-                ),
-                actual: talkbank_model::alignment::helpers::MorItemCount::new(gra_relations),
+                expected: MorAlignableWordCount::new(mor_chunks),
+                actual: MorItemCount::new(gra_relations),
                 suspected_class: MisalignmentClass::MorGraCountMismatch,
-            });
+            })
         }
-    };
-
-    let mor_chunks = mor_tier.count_chunks();
-    let gra_relations_count = gra_tier.relations().len();
-    tracing::info!(
-        mor_chunks,
-        gra_relations = gra_relations_count,
-        "inject_morphosyntax: aligned",
-    );
-    replace_or_add_tier(&mut utterance.dependent_tiers, DependentTier::Mor(mor_tier));
-    replace_or_add_tier(&mut utterance.dependent_tiers, DependentTier::Gra(gra_tier));
-
-    Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -368,13 +464,17 @@ mod tests {
         assert_eq!(wor.words().count(), 1);
     }
 
+    /// SURVIVES: boundary. No items for an utterance that has words is a
+    /// misalignment, refused with the utterance untouched: it used to be
+    /// admitted as "nothing to write", so an analysed utterance could report
+    /// completed morphology while keeping none, or a stale `%mor`.
     #[test]
-    fn test_inject_empty_mors_is_noop() {
+    fn no_items_for_an_utterance_with_words_is_refused_and_leaves_it_untouched() {
         let mut chat = parse_chat(HELLO_CHAT);
         let output_before = chat.to_chat_string();
 
         let utt = get_utterance(&mut chat, 0);
-        inject_morphosyntax(
+        let refused = inject_morphosyntax(
             utt,
             Vec::new(),
             talkbank_model::Terminator::Period {
@@ -382,10 +482,9 @@ mod tests {
             },
             Vec::new(),
         )
-        .unwrap();
-
-        let output_after = chat.to_chat_string();
-        assert_eq!(output_before, output_after);
+        .expect_err("one word, no items");
+        assert_eq!((refused.expected.get(), refused.actual.get()), (1, 0));
+        assert_eq!(output_before, chat.to_chat_string());
     }
 
     /// A Mor-count / main-tier word-count mismatch must surface as `Err`

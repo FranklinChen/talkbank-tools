@@ -41,7 +41,6 @@ use super::diarize_turns::{SpeakerTurnsSource, format_turns_json};
 use crate::api::NumWorkers;
 
 use super::MediaAnalysisDispatchPlan;
-use super::asr_media::resolve_paths_mode_or_staging_input;
 
 /// Shared runtime dependencies for top-level media-analysis dispatch.
 pub(crate) struct MediaAnalysisDispatchRuntime {
@@ -90,7 +89,7 @@ pub(crate) async fn dispatch_media_analysis_v2(
         let cache = runtime.cache.clone();
         let job = job.clone();
         let file = file.clone();
-        let filename = file.filename.clone();
+        let filename = file.filename().clone();
         let plan = plan.clone();
         let host = host.clone();
 
@@ -134,16 +133,18 @@ async fn process_one_media_analysis_file_v2(
 ) -> FileTaskOutcome {
     let job_id = &job.identity.job_id;
     let correlation_id = &*job.identity.correlation_id;
-    let file_index = file.file_index;
-    let filename = file.filename.as_ref();
+    let file_index = file.file_index();
+    let filename = file.filename().as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
-    let original_audio_path =
-        resolve_paths_mode_or_staging_input(&job.filesystem, file_index, filename);
+    let original_audio_path = file
+        .input_path(&job.filesystem.staging_dir)
+        .as_path()
+        .to_owned();
 
     if let MediaAnalysisDispatchPlan::Diarize { output_mode, .. } = plan
         && !output_mode.accepts_source_name(filename)
@@ -233,7 +234,7 @@ async fn process_one_media_analysis_file_v2(
                     &job.filesystem,
                     job.dispatch.command,
                     &job.dispatch.options,
-                    file_index,
+                    file.location(),
                     filename,
                     output,
                 )

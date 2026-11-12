@@ -2,30 +2,12 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ServerError;
 
-pub(crate) fn resolve_paths_mode_or_staging_input(
-    filesystem: &crate::store::RunnerFilesystemConfig,
-    file_index: usize,
-    filename: &str,
-) -> PathBuf {
-    if filesystem.paths_mode && file_index < filesystem.source_paths.len() {
-        filesystem.source_paths[file_index]
-            .assume_shared_filesystem()
-            .as_path()
-            .to_owned()
-    } else {
-        filesystem
-            .staging_dir
-            .as_path()
-            .join("input")
-            .join(filename)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedAsrMediaInput {
     pub original_audio_path: PathBuf,
     pub inference_audio_path: PathBuf,
-    pub media_name: Option<String>,
+    /// The `@Media` name, parsed here, before any recognition is paid for.
+    pub media_name: Option<talkbank_model::model::MediaFilename>,
 }
 
 pub(crate) fn preserved_media_name_for_chat(
@@ -54,14 +36,16 @@ pub(crate) async fn prepare_asr_media_input(
     // in the field. Nothing here is recoverable by the pipeline: the operator
     // renames the file. So the cheapest possible moment to say so is now,
     // while the only thing spent is a path lookup.
-    if let Some(name) = media_name.as_deref()
-        && let Err(error) = talkbank_model::model::MediaFilename::parse(name)
-    {
-        return Err(ServerError::Validation(format!(
-            "Media name {name:?} for {context_label} cannot be written to an @Media header \
-             ({error}); rename the media file and resubmit"
-        )));
-    }
+    let media_name = media_name
+        .map(|name| {
+            talkbank_model::model::MediaFilename::parse(&name).map_err(|error| {
+                ServerError::Validation(format!(
+                    "Media name {name:?} for {context_label} cannot be written to an @Media \
+                     header ({error}); rename the media file and resubmit"
+                ))
+            })
+        })
+        .transpose()?;
 
     let inference_audio_path = crate::ensure_wav::ensure_wav(&original_audio_path, None)
         .await
@@ -80,8 +64,7 @@ pub(crate) async fn prepare_asr_media_input(
 
 #[cfg(test)]
 mod tests {
-    use super::{preserved_media_name_for_chat, resolve_paths_mode_or_staging_input};
-    use crate::store::RunnerFilesystemConfig;
+    use super::preserved_media_name_for_chat;
 
     /// An unusable media name is rejected BEFORE ASR runs, not at CHAT
     /// serialization afterwards.
@@ -114,42 +97,6 @@ mod tests {
     }
 
     use std::path::PathBuf;
-
-    #[test]
-    fn resolve_paths_mode_or_staging_input_prefers_explicit_source_path() {
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: vec![batchalign_types::paths::ClientPath::new(
-                "/shared/in/clip.mp3".to_string(),
-            )],
-            output_paths: vec![],
-            before_paths: vec![],
-            staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: Default::default(),
-        };
-
-        let path = resolve_paths_mode_or_staging_input(&filesystem, 0, "ignored.mp3");
-        assert_eq!(path, PathBuf::from("/shared/in/clip.mp3"));
-    }
-
-    #[test]
-    fn resolve_paths_mode_or_staging_input_falls_back_to_staging_input() {
-        let filesystem = RunnerFilesystemConfig {
-            paths_mode: false,
-            source_paths: vec![],
-            output_paths: vec![],
-            before_paths: vec![],
-            staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: Default::default(),
-        };
-
-        let path = resolve_paths_mode_or_staging_input(&filesystem, 0, "clip.mp3");
-        assert_eq!(path, PathBuf::from("/tmp/staging/input/clip.mp3"));
-    }
 
     #[test]
     fn preserved_media_name_prefers_original_basename() {

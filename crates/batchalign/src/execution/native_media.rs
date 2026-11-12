@@ -56,26 +56,23 @@ fn admit_work(
     let plan = build_job_plan(job)?;
     let mut destinations = HashSet::new();
     let mut work = Vec::with_capacity(files.len());
+    // Each file carries its own input's location (a `PendingJobFile` is made
+    // only from the job's inputs), so none can be paired with another's source.
     for file in files {
-        let source_file = job
-            .pending_files
-            .iter()
-            .find(|candidate| {
-                candidate.file_index == file.file_index
-                    && candidate.filename == file.filename
-                    && candidate.has_chat == file.has_chat
-            })
-            .ok_or_else(|| NativeExportAdmissionError::Artifact(file.filename.clone()))?;
-        let set = artifact_set_for_source(&plan, &file.filename)
-            .ok_or_else(|| NativeExportAdmissionError::Artifact(file.filename.clone()))?;
+        let set = artifact_set_for_source(&plan, file.filename())
+            .ok_or_else(|| NativeExportAdmissionError::Artifact(file.filename().clone()))?;
         let [artifact] = set.files.as_slice() else {
-            return Err(NativeExportAdmissionError::Artifact(file.filename.clone()));
+            return Err(NativeExportAdmissionError::Artifact(
+                file.filename().clone(),
+            ));
         };
         if artifact.role != MaterializedArtifactRole::Primary || !artifact.content_type.is_binary()
         {
-            return Err(NativeExportAdmissionError::Artifact(file.filename.clone()));
+            return Err(NativeExportAdmissionError::Artifact(
+                file.filename().clone(),
+            ));
         }
-        let primary = output_write_path(&job.filesystem, file.file_index, &artifact.display_path);
+        let primary = output_write_path(&job.filesystem, file.location(), &artifact.display_path);
         let staged = job
             .filesystem
             .staging_dir
@@ -102,8 +99,8 @@ fn admit_work(
             }
         }
         work.push(NativeExportWork {
-            file: source_file.clone(),
-            source: discover_input_for_pending_file(&job.filesystem, source_file).source_path,
+            file: file.clone(),
+            source: discover_input_for_pending_file(&job.filesystem, file).source_path,
             artifact: artifact.clone(),
             primary,
             staged,
@@ -136,10 +133,10 @@ pub(crate) async fn dispatch_audio_export(
         let sink = host.sink().clone();
         let limit = limit.clone();
         tasks.push(spawn_supervised_file_task(
-            work.file.filename.clone(),
+            work.file.filename().clone(),
             "native export file task",
             async move {
-                let filename = work.file.filename.clone();
+                let filename = work.file.filename().clone();
                 let lifecycle = FileRunTracker::new(sink.as_ref(), filename.as_ref());
                 let Ok(_slot) = limit.acquire_owned().await else {
                     return lifecycle

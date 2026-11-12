@@ -3,9 +3,10 @@
 //! or complete attribution.
 
 use crate::api::{
-    OutputExclusionRecord, OutputShortfallRecord, SecondaryExtractionFailure,
-    SecondaryMorphologyFailure, SecondaryMorphologyFailureKind, SecondaryMorphologySpan,
-    SecondaryMorphologyUnplacedUtterance, UtteranceLocator, UtteranceNotInDocument,
+    OutputExclusionRecord, OutputShortfallRecord, PrimaryMorphologyDeclineCause,
+    PrimaryMorphologyDeclinedUtterance, SecondaryExtractionFailure, SecondaryMorphologyFailure,
+    SecondaryMorphologyFailureKind, SecondaryMorphologySpan, SecondaryMorphologyUnplacedUtterance,
+    UtteranceLocator, UtteranceNotInDocument,
 };
 use crate::pipeline::post_validate::PostValidated;
 use talkbank_model::UtteranceIdx;
@@ -63,6 +64,83 @@ impl SpanAddress {
             language: self.language.clone(),
         })
     }
+}
+
+/// Utterances whose primary morphology was declined, by index in the document
+/// the report describes. Each is left exactly as it was; the report is what
+/// says so.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PrimaryReport {
+    declined: Vec<DeclinedPrimary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclinedPrimary {
+    utterance: UtteranceIdx,
+    cause: PrimaryMorphologyDeclineCause,
+    detail: String,
+}
+
+impl PrimaryReport {
+    /// No utterance was declined.
+    pub(crate) fn none() -> Self {
+        Self {
+            declined: Vec::new(),
+        }
+    }
+
+    /// Record the utterances one injection declined.
+    pub(crate) fn declined(
+        &mut self,
+        declined: Vec<batchalign_transform::morphosyntax::DeclinedUtterance>,
+    ) {
+        self.declined
+            .extend(declined.into_iter().map(|utterance| DeclinedPrimary {
+                utterance: utterance.address.utterance(),
+                cause: utterance.cause.into(),
+                detail: utterance.reason.chars().take(500).collect(),
+            }));
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.declined.extend(other.declined);
+    }
+
+    /// The shortfall, located against `chat`, when any utterance was declined.
+    fn into_record(
+        mut self,
+        chat: &crate::chat_ops::ChatFile,
+    ) -> Result<Option<OutputShortfallRecord>, UtteranceNotInDocument> {
+        if self.declined.is_empty() {
+            return Ok(None);
+        }
+        self.declined.sort_by_key(|declined| declined.utterance);
+        let limit = crate::api::FileOutputDiagnostics::FIRST_FINDINGS;
+        Ok(Some(OutputShortfallRecord::PrimaryMorphologyIncomplete {
+            utterances: self.declined.len() as u64,
+            first_utterances: self
+                .declined
+                .iter()
+                .take(limit)
+                .map(|declined| {
+                    Ok(PrimaryMorphologyDeclinedUtterance {
+                        location: UtteranceLocator::of(chat, declined.utterance)?.into(),
+                        cause: declined.cause,
+                        detail: declined.detail.clone(),
+                    })
+                })
+                .collect::<Result<_, UtteranceNotInDocument>>()?,
+        }))
+    }
+}
+
+/// The analysis reports an output carries: primary declines and secondary
+/// outcomes, each its own domain. One value, required by
+/// [`MorphosyntaxOutput::new`], so no path can drop one by forgetting it.
+#[derive(Debug, Clone)]
+pub(crate) struct AnalysisReports {
+    pub(crate) primary: PrimaryReport,
+    pub(crate) secondary: SecondaryReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +364,7 @@ pub(crate) struct MorphosyntaxOutput<D = PostValidated> {
 /// Independent report domains share writeback, not each other's semantics.
 #[derive(Debug, Clone)]
 pub(crate) struct MorphologyReport {
+    primary: PrimaryReport,
     secondary: SecondaryReport,
     provenance: crate::provenance::MorphologyProvenanceReport,
 }
@@ -298,7 +377,10 @@ impl MorphologyReport {
         chat: &crate::chat_ops::ChatFile,
     ) -> Result<(Vec<OutputShortfallRecord>, Vec<OutputExclusionRecord>), UtteranceNotInDocument>
     {
-        let (mut shortfalls, exclusions) = self.secondary.into_records(chat)?;
+        let mut shortfalls: Vec<OutputShortfallRecord> =
+            self.primary.into_record(chat)?.into_iter().collect();
+        let (secondary, exclusions) = self.secondary.into_records(chat)?;
+        shortfalls.extend(secondary);
         shortfalls.extend(self.provenance.into_record());
         Ok((shortfalls, exclusions))
     }
@@ -307,18 +389,35 @@ impl MorphologyReport {
 /// A text command's output as it will be written, with its records located
 /// against that same document. Made only by [`MorphosyntaxOutput::finish`].
 #[derive(Debug)]
-pub(crate) struct FinishedMorphosyntax {
-    pub(crate) document: PostValidated,
+pub(crate) struct FinishedMorphosyntax<D = PostValidated> {
+    pub(crate) document: D,
     pub(crate) shortfalls: Vec<OutputShortfallRecord>,
     pub(crate) exclusions: Vec<OutputExclusionRecord>,
 }
 
-impl MorphosyntaxOutput<PostValidated> {
+/// A judged document the reports can be located against: the one written.
+pub(crate) trait WrittenDocument {
+    fn written(&self) -> &crate::chat_ops::ChatFile;
+}
+
+impl WrittenDocument for PostValidated {
+    fn written(&self) -> &crate::chat_ops::ChatFile {
+        self.document()
+    }
+}
+
+impl WrittenDocument for crate::pipeline::post_validate::ProducedOutput {
+    fn written(&self) -> &crate::chat_ops::ChatFile {
+        self.document()
+    }
+}
+
+impl<D: WrittenDocument> MorphosyntaxOutput<D> {
     /// Locate the reports against this output's own document, the one
     /// written, leaving no way to pass a different one. Refused only when a
     /// record cannot name its utterance there: an internal fault.
-    pub(crate) fn finish(self) -> Result<FinishedMorphosyntax, UtteranceNotInDocument> {
-        let (shortfalls, exclusions) = self.report.into_records(self.document.document())?;
+    pub(crate) fn finish(self) -> Result<FinishedMorphosyntax<D>, UtteranceNotInDocument> {
+        let (shortfalls, exclusions) = self.report.into_records(self.document.written())?;
         Ok(FinishedMorphosyntax {
             document: self.document,
             shortfalls,
@@ -328,10 +427,12 @@ impl MorphosyntaxOutput<PostValidated> {
 }
 
 impl<D> MorphosyntaxOutput<D> {
-    pub(crate) fn new(document: D, secondary: SecondaryReport) -> Self {
+    pub(crate) fn new(document: D, reports: AnalysisReports) -> Self {
+        let AnalysisReports { primary, secondary } = reports;
         Self {
             document,
             report: MorphologyReport {
+                primary,
                 secondary,
                 provenance: crate::provenance::MorphologyProvenanceReport::Complete,
             },
@@ -354,7 +455,8 @@ impl<D> MorphosyntaxOutput<D> {
     /// Consumers without L2 or prior-reuse reporting cannot silently discard
     /// either report if their policy changes later.
     pub(crate) fn without_reports(self) -> Result<D, crate::error::ServerError> {
-        if self.report.secondary.failures.is_empty()
+        if self.report.primary.declined.is_empty()
+            && self.report.secondary.failures.is_empty()
             && self.report.secondary.exclusions.is_empty()
             && self.report.secondary.unplaced.is_empty()
             && matches!(
@@ -371,7 +473,13 @@ impl<D> MorphosyntaxOutput<D> {
 
 impl From<PostValidated> for MorphosyntaxOutput {
     fn from(document: PostValidated) -> Self {
-        Self::new(document, SecondaryReport::default())
+        Self::new(
+            document,
+            AnalysisReports {
+                primary: PrimaryReport::none(),
+                secondary: SecondaryReport::default(),
+            },
+        )
     }
 }
 
@@ -466,9 +574,15 @@ mod tests {
     fn opting_out_consumer_cannot_silently_drop_a_secondary_report() {
         let mut report = SecondaryReport::default();
         report.excluded(span(1));
-        let error = MorphosyntaxOutput::new((), report)
-            .without_reports()
-            .unwrap_err();
+        let error = MorphosyntaxOutput::new(
+            (),
+            AnalysisReports {
+                primary: PrimaryReport::none(),
+                secondary: report,
+            },
+        )
+        .without_reports()
+        .unwrap_err();
         assert!(matches!(
             error,
             crate::error::ServerError::UnexpectedMorphologyReport
@@ -478,15 +592,26 @@ mod tests {
             crate::scheduling::FailureCategory::System
         );
         assert!(
-            MorphosyntaxOutput::new((), SecondaryReport::default())
-                .without_reports()
-                .is_ok()
+            MorphosyntaxOutput::new(
+                (),
+                AnalysisReports {
+                    primary: PrimaryReport::none(),
+                    secondary: SecondaryReport::default()
+                }
+            )
+            .without_reports()
+            .is_ok()
         );
-        let reported = MorphosyntaxOutput::new((), SecondaryReport::default()).with_provenance(
-            crate::provenance::MorphologyProvenanceReport::Incomplete(
-                crate::provenance::IncrementalMorphotagStampError::PriorIncomplete,
-            ),
-        );
+        let reported = MorphosyntaxOutput::new(
+            (),
+            AnalysisReports {
+                primary: PrimaryReport::none(),
+                secondary: SecondaryReport::default(),
+            },
+        )
+        .with_provenance(crate::provenance::MorphologyProvenanceReport::Incomplete(
+            crate::provenance::IncrementalMorphotagStampError::PriorIncomplete,
+        ));
         assert!(reported.clone().without_reports().is_err());
         let (_, report) = reported.into_parts();
         let (shortfalls, exclusions) = report.into_records(&document(1)).unwrap();

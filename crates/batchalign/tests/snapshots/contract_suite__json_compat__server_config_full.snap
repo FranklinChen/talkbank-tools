@@ -7,6 +7,10 @@ expression: cfg
     "/data/media",
     "/data/media2"
   ],
+  "paths_mode_roots": [
+    "/data/corpora",
+    "/data/results"
+  ],
   "media_mappings": {
     "aphasia-data": "/nfs/aphasia",
     "childes-data": "/nfs/childes"

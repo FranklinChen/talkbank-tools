@@ -199,6 +199,7 @@ pub(crate) mod revai;
 pub mod runner;
 pub mod runtime_paths;
 /// What a running server publishes about itself (PID, bound port).
+pub mod same_user_key;
 pub mod server_handshake;
 pub mod staging;
 pub mod stanza_registry;

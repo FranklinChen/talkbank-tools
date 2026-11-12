@@ -2,12 +2,32 @@
 
 import type { JobInfo, JobListItem } from "./types";
 import { SubmittedJob, type SubmissionOutcome } from "./submission";
+import { signSameUser } from "./lib/tauri";
 import {
   controlPlaneHostPort,
   controlPlaneHttpScheme,
   controlPlaneOrigin,
+  desktopEndpointForServer,
   isSameControlPlaneAsPage,
 } from "./runtime";
+
+/** The header that proves a request as this account, only for a request to
+ * the desktop's own admitted endpoint named in full (an empty base goes to
+ * the page's own origin, which is not that endpoint). Signed natively over
+ * exactly `method`, `path` and `body`. With none, the server judges the job's
+ * paths by its configured folders and says so if it refuses. */
+async function sameUserHeadersFor(
+  base: string, method: string, path: string, body: string,
+): Promise<Record<string, string>> {
+  if (!base || !desktopEndpointForServer(base)) return {};
+  try {
+    return { [SAME_USER_HEADER]: await signSameUser(method, path, body) };
+  } catch {
+    return {};
+  }
+}
+
+const SAME_USER_HEADER = "x-batchalign-same-user";
 
 /** Preserve an actual server explanation, raw refusal, or explicit absence. */
 type ApiRefusal = { kind: "explanation" | "response-body"; message: string }
@@ -79,7 +99,13 @@ export async function cancelJob(
 }
 
 export async function restartJob(jobId: string, base = ""): Promise<JobInfo> {
-  const res = await fetch(`${base}/jobs/${jobId}/restart`, { method: "POST" });
+  // A restart admits the job's paths again: as this account, when this is
+  // the desktop's own admitted server.
+  const path = `/jobs/${jobId}/restart`;
+  const res = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: await sameUserHeadersFor(base, "POST", path, ""),
+  });
   return parseJson<JobInfo>(res, "POST restart");
 }
 
@@ -106,10 +132,15 @@ export async function submitJob(
   base = "",
 ): Promise<SubmissionOutcome> {
   try {
+    // Signed over exactly these bytes, then sent as they are.
+    const encoded = JSON.stringify(body);
     const res = await fetch(`${base}/jobs`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      headers: {
+        "Content-Type": "application/json",
+        ...(await sameUserHeadersFor(base, "POST", "/jobs", encoded)),
+      },
+      body: encoded,
     });
     if (!res.ok) {
       const error = new ApiError("POST /jobs", res.status, await readRefusal(res));

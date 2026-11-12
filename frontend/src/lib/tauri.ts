@@ -79,3 +79,11 @@ export function serverStatus(): Promise<DesktopServerStatus> {
 export function startServer(): Promise<DesktopServerStatus> {
   return tauriInvoke("startServer");
 }
+
+/** The same-user header value for one request to the desktop's own local
+ * service, signed by the installed CLI over the exact method, path and body.
+ * The key never reaches the webview; each proof is good once. */
+export function signSameUser(method: string, path: string, body: string): Promise<string> {
+  if (!isDesktop()) return Promise.reject(desktopOnlyError("Same-user signing"));
+  return tauriInvoke("signSameUser", { method, path, body });
+}

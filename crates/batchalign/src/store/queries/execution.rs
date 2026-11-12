@@ -214,7 +214,10 @@ mod tests {
             .cancel(&id, crate::api::CancellationRequest::default())
             .await
             .unwrap();
-        store.restart(&id).await.unwrap();
+        store
+            .restart(&id, &batchalign_types::paths::AllowedRoots::same_user())
+            .await
+            .unwrap();
         assert!(matches!(
             store
                 .complete_run(
@@ -356,7 +359,10 @@ mod tests {
             tx2,
             std::sync::Arc::new(crate::clock::SystemClock),
         );
-        store2.load_from_db().await.unwrap();
+        store2
+            .load_from_db(&batchalign_types::paths::AllowedRoots::none())
+            .await
+            .unwrap();
         let reloaded = store2.get(&job_id).await.expect("reloaded job present");
         let persisted = reloaded
             .error

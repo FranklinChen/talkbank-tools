@@ -105,7 +105,7 @@ pub(crate) fn default_num_speakers() -> NumSpeakers {
 ///
 /// The ONE answer to that question at the submission boundary, shared with
 /// [`crate::submission::materialize_submission_job`], which derives each file's
-/// `has_chat` flag from the same strings. Two spellings of this predicate can
+/// [`crate::store::InputKind`] from the same strings. Two spellings of this predicate can
 /// disagree, and the obvious second spelling does: `Path::extension()` returns
 /// `None` for a file named exactly `.cha`, where this returns `true`.
 pub(crate) fn is_chat_source_name(name: &str) -> bool {
@@ -125,9 +125,192 @@ enum PairedLanguage<'a> {
     PerFile,
 }
 
+/// A submission that passed [`JobSubmission::validate`], carrying what
+/// validation decided: how its inputs are staged, and what the Stanza registry
+/// must serve for it. Its fields are private and `validate` is its only
+/// constructor, so a step that needs a validated submission (the registry
+/// check, [`validate_language_with_registry`], and job materialization) cannot
+/// be run on one that skipped validation, and never sees a language pair.
+#[derive(Debug, Clone)]
+pub struct ValidatedSubmission<'a> {
+    submission: &'a JobSubmission,
+    staging: Staging<'a>,
+    stanza: Option<StanzaAdmission<'a>>,
+}
+
+/// What the Stanza registry must serve for a submission's job-level language,
+/// decided at validation without the registry. `None` for a command that takes
+/// no job language, or that runs no Stanza stage it must refuse for.
+#[derive(Debug, Clone)]
+enum StanzaAdmission<'a> {
+    /// `utseg` on its resolved route: the route is chosen here, so a language
+    /// with no route at all is refused at validation, registry or not.
+    Utseg {
+        lang: &'a LanguageCode3,
+        route: crate::utseg_route::UtsegRoute,
+    },
+}
+
+impl<'a> ValidatedSubmission<'a> {
+    /// The submission that was validated.
+    pub fn submission(&self) -> &'a JobSubmission {
+        self.submission
+    }
+
+    /// How the job's inputs reach the server, as validation admitted them.
+    pub fn staging(&self) -> &Staging<'a> {
+        &self.staging
+    }
+}
+
+/// How a validated job's inputs reach the server.
+#[derive(Debug, Clone)]
+pub enum Staging<'a> {
+    /// The client and server share a filesystem: the job reads and writes
+    /// the submitted paths, one entry per file.
+    Paths(Vec<PathsSource<'a>>),
+    /// The client sent the content: each file is written under the job's
+    /// staging directory at its admitted name, and media files are named.
+    Content(Vec<StagedFile<'a>>),
+}
+
+/// One paths-mode file: what it reads, where it writes, the earlier version
+/// it may be compared with, and the name the job shows. One value per file,
+/// so the four can no longer disagree in length or position.
+#[derive(Debug, Clone)]
+pub struct PathsSource<'a> {
+    /// The source the job reads.
+    pub source: &'a batchalign_types::paths::ClientPath,
+    /// Where its output is written (whether two files collide is decided
+    /// after admission, by `PathsFiles::admit`).
+    pub output: &'a batchalign_types::paths::ClientPath,
+    /// The earlier version for incremental processing, when one was sent.
+    pub before: Option<&'a batchalign_types::paths::ClientPath>,
+    /// The name the job shows for it.
+    pub display: DisplayPath,
+}
+
+/// A paths-mode source's display name when the client sent none: its path
+/// relative to the submitted folder (`A/01.cha`), so files with one name in
+/// different folders stay distinct; its file name when it is not under that
+/// folder.
+fn source_display(
+    source: &batchalign_types::paths::ClientPath,
+    source_dir: &batchalign_types::paths::ClientPath,
+) -> Result<DisplayPath, ValidationError> {
+    if !source_dir.is_empty()
+        && let Ok(relative) =
+            std::path::Path::new(source.as_str()).strip_prefix(source_dir.as_str())
+        && relative.components().count() > 0
+    {
+        return Ok(DisplayPath::from(relative.to_string_lossy().into_owned()));
+    }
+    source_file_name(source)
+}
+
+/// A paths-mode source's file name, for one outside the submitted folder.
+fn source_file_name(
+    source: &batchalign_types::paths::ClientPath,
+) -> Result<DisplayPath, ValidationError> {
+    std::path::Path::new(source.as_str())
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| DisplayPath::from(name.to_string_lossy().to_string()))
+        .ok_or_else(|| {
+            ValidationError(format!(
+                "paths_mode source path has no filename component: {}",
+                source.as_str()
+            ))
+        })
+}
+
+/// One content-mode file, admitted for staging.
+#[derive(Debug, Clone, Copy)]
+pub struct StagedFile<'a> {
+    /// Where it is written, relative to the staging directory.
+    pub name: StagedName<'a>,
+    /// Its text.
+    pub content: &'a str,
+    /// The name the job shows for it.
+    pub display: &'a DisplayPath,
+}
+
+/// A content-mode file name admitted as a path that stays inside the job's
+/// staging directory: relative, and every component a plain name (no root,
+/// no drive prefix, no `.` or `..`). Built only by validation, which also
+/// refuses two files with one name and a name that is another's directory, so
+/// joining it to the staging directory can neither escape it nor overwrite a
+/// sibling.
+#[derive(Debug, Clone, Copy)]
+pub struct StagedName<'a>(&'a std::path::Path);
+
+impl<'a> StagedName<'a> {
+    /// The name as a path relative to the staging directory.
+    pub fn relative_path(&self) -> &'a std::path::Path {
+        self.0
+    }
+
+    /// Admit one name, or say why it cannot be staged.
+    fn admit(name: &'a DisplayPath) -> Result<Self, ValidationError> {
+        use std::path::Component;
+        let path = std::path::Path::new(name.as_ref());
+        let plain = path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+        match (plain, path.components().next().is_some()) {
+            (true, true) => Ok(Self(path)),
+            _ => Err(ValidationError(format!(
+                "file name '{name}' must be a relative path of plain names, with no root, \
+                 drive, '.' or '..'"
+            ))),
+        }
+    }
+}
+
+/// Admit every content-mode file's name: each a plain relative path, no two
+/// alike, and none the directory of another.
+fn admit_staged_files(files: &[FilePayload]) -> Result<Vec<StagedFile<'_>>, ValidationError> {
+    let staged = files
+        .iter()
+        .map(|file| {
+            Ok(StagedFile {
+                name: StagedName::admit(&file.filename)?,
+                content: &file.content,
+                display: &file.filename,
+            })
+        })
+        .collect::<Result<Vec<_>, ValidationError>>()?;
+    let names: std::collections::HashSet<&std::path::Path> = staged
+        .iter()
+        .map(|file| file.name.relative_path())
+        .collect();
+    if names.len() != staged.len() {
+        return Err(ValidationError(
+            "two submitted files have the same name; each file needs its own".into(),
+        ));
+    }
+    for file in &staged {
+        if let Some(directory) = file
+            .name
+            .relative_path()
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| names.contains(ancestor))
+        {
+            return Err(ValidationError(format!(
+                "file name '{}' needs '{}' to be a directory, but another file has that name",
+                file.display,
+                directory.display()
+            )));
+        }
+    }
+    Ok(staged)
+}
+
 impl JobSubmission {
-    /// Validate submission constraints (paths_mode, command consistency).
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    /// Validate submission constraints (paths_mode, command consistency),
+    /// returning the proof later checks require.
+    pub fn validate(&self) -> Result<ValidatedSubmission<'_>, ValidationError> {
         // Validate options command tag matches the command field.
         if self.command != self.options.command_name() {
             return Err(ValidationError(format!(
@@ -197,29 +380,51 @@ impl JobSubmission {
         // Refuse a language transcribe cannot segment, here at submission.
         self.validate_utseg_route(&language)?;
 
-        if self.paths_mode {
-            if self.source_paths.is_empty() || self.output_paths.is_empty() {
-                return Err(ValidationError(
-                    "paths_mode requires non-empty source_paths and output_paths".into(),
-                ));
+        let staging = match self.paths_mode {
+            true => Staging::Paths(self.admit_paths_sources()?),
+            false => {
+                if !self.source_paths.is_empty()
+                    || !self.output_paths.is_empty()
+                    || !self.before_paths.is_empty()
+                    || !self.display_names.is_empty()
+                {
+                    return Err(ValidationError(
+                        "source_paths, output_paths, before_paths and display_names are for \
+                         paths_mode; this submission sends file content"
+                            .into(),
+                    ));
+                }
+                if self.files.is_empty() && self.media_files.is_empty() {
+                    return Err(ValidationError(
+                        "Must provide at least one file or media_file.".into(),
+                    ));
+                }
+                // Every content-mode file is tracked by its name: a media name
+                // that repeats another name would share one status.
+                let mut names = std::collections::HashSet::with_capacity(
+                    self.files.len() + self.media_files.len(),
+                );
+                for name in self
+                    .files
+                    .iter()
+                    .map(|file| file.filename.as_ref())
+                    .chain(self.media_files.iter().map(String::as_str))
+                {
+                    if !names.insert(name) {
+                        return Err(ValidationError(format!(
+                            "two submitted files are both named {name}; each needs its own name"
+                        )));
+                    }
+                }
+                Staging::Content(admit_staged_files(&self.files)?)
             }
-            if self.source_paths.len() != self.output_paths.len() {
-                return Err(ValidationError(
-                    "source_paths and output_paths must have equal length".into(),
-                ));
-            }
-            if !self.before_paths.is_empty() && self.before_paths.len() != self.source_paths.len() {
-                return Err(ValidationError(
-                    "before_paths must have the same length as source_paths when non-empty".into(),
-                ));
-            }
-            if !self.files.is_empty() || !self.media_files.is_empty() {
-                return Err(ValidationError(
-                    "paths_mode is mutually exclusive with files/media_files".into(),
-                ));
-            }
-        }
-        Ok(())
+        };
+        let stanza = self.admit_stanza_requirement(&language)?;
+        Ok(ValidatedSubmission {
+            submission: self,
+            staging,
+            stanza,
+        })
     }
 
     /// The ASR engine this submission will actually use, if it uses one.
@@ -427,10 +632,94 @@ impl JobSubmission {
         Ok(())
     }
 
-    /// Resolve the transcription segmentation policy before accepting a job.
-    /// Taiwanese preserves ASR punctuation; other languages use the declared
-    /// boundary model or an explicitly authorized fallback. Auto-detection
-    /// defers this same resolution until the recognized language is known.
+    /// One [`PathsSource`] per submitted path: the parallel lists must agree in
+    /// length and each source must name a file. Collisions between files are
+    /// judged after admission, on what the paths name.
+    fn admit_paths_sources(&self) -> Result<Vec<PathsSource<'_>>, ValidationError> {
+        if self.source_paths.is_empty() || self.output_paths.is_empty() {
+            return Err(ValidationError(
+                "paths_mode requires non-empty source_paths and output_paths".into(),
+            ));
+        }
+        if self.source_paths.len() != self.output_paths.len() {
+            return Err(ValidationError(
+                "source_paths and output_paths must have equal length".into(),
+            ));
+        }
+        if !self.before_paths.is_empty() && self.before_paths.len() != self.source_paths.len() {
+            return Err(ValidationError(
+                "before_paths must have the same length as source_paths when non-empty".into(),
+            ));
+        }
+        if !self.display_names.is_empty() && self.display_names.len() != self.source_paths.len() {
+            return Err(ValidationError(
+                "display_names must have the same length as source_paths when non-empty".into(),
+            ));
+        }
+        if !self.files.is_empty() || !self.media_files.is_empty() {
+            return Err(ValidationError(
+                "paths_mode is mutually exclusive with files/media_files".into(),
+            ));
+        }
+        // Whether two files collide (one output, one name, one file's
+        // output another's input) is decided on what the paths name, after
+        // admission: `PathsFiles::admit`, still before anything is created.
+        self.source_paths
+            .iter()
+            .zip(&self.output_paths)
+            .enumerate()
+            .map(|(index, (source, output))| {
+                let display = match self.display_names.get(index) {
+                    Some(name) => DisplayPath::from(name.as_str()),
+                    None => source_display(source, &self.source_dir)?,
+                };
+                Ok(PathsSource {
+                    source,
+                    output,
+                    before: self.before_paths.get(index).and_then(Option::as_ref),
+                    display,
+                })
+            })
+            .collect::<Result<Vec<_>, ValidationError>>()
+    }
+
+    /// What the Stanza registry must serve for this submission's job-level
+    /// language. Exhaustive over the commands with no catch-all, so a new
+    /// command states whether it uses Stanza. Per-file commands (`morphotag`,
+    /// `compare`, `translate`, `coref`, `convert`, `align`) carry no job
+    /// language and are admitted per file. `transcribe` runs its Stanza stages
+    /// only optionally and records one the registry cannot serve as not
+    /// applied (`pipeline::transcribe`), so it is not refused here.
+    fn admit_stanza_requirement<'a>(
+        &'a self,
+        language: &PairedLanguage<'a>,
+    ) -> Result<Option<StanzaAdmission<'a>>, ValidationError> {
+        let lang = match language {
+            PairedLanguage::Resolved(code) => *code,
+            PairedLanguage::Auto | PairedLanguage::PerFile => return Ok(None),
+        };
+        match &self.options {
+            CommandOptions::Utseg(utseg) => {
+                let route = crate::utseg_route::UtsegRoute::resolve(lang, utseg.utseg_fallback)
+                    .map_err(|unavailable| ValidationError(unavailable.to_string()))?;
+                Ok(Some(StanzaAdmission::Utseg { lang, route }))
+            }
+            CommandOptions::Morphotag(_)
+            | CommandOptions::Compare(_)
+            | CommandOptions::Coref(_)
+            | CommandOptions::Align(_)
+            | CommandOptions::Transcribe(_)
+            | CommandOptions::TranscribeS(_)
+            | CommandOptions::Translate(_)
+            | CommandOptions::Benchmark(_)
+            | CommandOptions::Opensmile(_)
+            | CommandOptions::Avqi(_)
+            | CommandOptions::Diarize(_)
+            | CommandOptions::SpeakerIdentify(_)
+            | CommandOptions::Convert(_) => Ok(None),
+        }
+    }
+
     fn validate_utseg_route(&self, language: &PairedLanguage<'_>) -> Result<(), ValidationError> {
         let fallback = match &self.options {
             CommandOptions::Transcribe(opts) | CommandOptions::TranscribeS(opts) => {
@@ -914,55 +1203,21 @@ pub struct ValidationError(pub String);
 /// to load a language its catalog lacks refuses with
 /// `UnsupportedLanguageError`.
 ///
-/// Exhaustive over the commands with no catch-all, so a new command states
-/// whether it uses Stanza. `compare` morphotags its main transcript, but per
-/// file from `@Languages:` like `morphotag`, so like `morphotag` it arrives as
-/// `PerFile` and is admitted per file; its arm here is reached by no
-/// submission. `utseg`
-/// runs Stanza only on its constituency route, so it is admitted by the
-/// route: a boundary-model language needs no Stanza, and a language with no
-/// route at all is refused here with the remedy. `transcribe` runs its Stanza
-/// stages only optionally and records one the registry cannot serve as not
-/// applied (`pipeline::transcribe`), so its submission is not refused here.
-/// `coref` has no Stanza admission: it is English-only by construction.
+/// The registry check runs only what validation decided the job needs
+/// ([`StanzaAdmission`]): today, `utseg`'s route. Validation already refused a
+/// language with no route; here the route's requirement meets the registry.
 pub fn validate_language_with_registry(
-    submission: &JobSubmission,
+    validated: &ValidatedSubmission<'_>,
     registry: &std::sync::Arc<crate::stanza_registry::StanzaRegistry>,
 ) -> Result<(), ValidationError> {
-    use crate::stanza_registry::{Morphosyntax, UtteranceSegmentation};
-    // Auto: can't validate until ASR resolves the language.
-    // PerFile: morphotag/translate/coref resolve per-file from @Languages:,
-    // admitted per file against this same registry.
-    let lang = match &submission.lang {
-        LanguageSpec::Auto | LanguageSpec::PerFile => return Ok(()),
-        // A pair's Stanza stages run under its primary language.
-        LanguageSpec::Pair(pair) => pair.primary(),
-        LanguageSpec::Resolved(code) => code,
-    };
-    match &submission.options {
-        CommandOptions::Morphotag(_) | CommandOptions::Compare(_) => registry
-            .admit::<Morphosyntax>(lang)
+    use crate::stanza_registry::UtteranceSegmentation;
+    match &validated.stanza {
+        None => Ok(()),
+        Some(StanzaAdmission::Utseg { lang, route }) => route
+            .clone()
+            .admit_by(registry)
             .map(drop)
-            .map_err(|gap| stanza_refusal(lang, &gap, registry)),
-        CommandOptions::Utseg(utseg) => {
-            let route = crate::utseg_route::UtsegRoute::resolve(lang, utseg.utseg_fallback)
-                .map_err(|unavailable| ValidationError(unavailable.to_string()))?;
-            route
-                .admit_by(registry)
-                .map(drop)
-                .map_err(|gap| stanza_refusal::<UtteranceSegmentation>(lang, &gap, registry))
-        }
-        CommandOptions::Coref(_)
-        | CommandOptions::Align(_)
-        | CommandOptions::Transcribe(_)
-        | CommandOptions::TranscribeS(_)
-        | CommandOptions::Translate(_)
-        | CommandOptions::Benchmark(_)
-        | CommandOptions::Opensmile(_)
-        | CommandOptions::Avqi(_)
-        | CommandOptions::Diarize(_)
-        | CommandOptions::SpeakerIdentify(_)
-        | CommandOptions::Convert(_) => Ok(()),
+            .map_err(|gap| stanza_refusal::<UtteranceSegmentation>(lang, &gap, registry)),
     }
 }
 
@@ -1001,12 +1256,21 @@ mod tests {
     /// `LanguageSpec::PerFile`. The `lang_spec` parameter exists only so
     /// regression tests can construct *invalid* submissions (e.g. with
     /// `Resolved(eng)`) and assert that `validate()` rejects them.
+    /// One CHAT file, so a content-mode fixture is a submission production
+    /// admits (a content-mode job with no files is refused).
+    fn sample_chat_file() -> FilePayload {
+        FilePayload {
+            filename: "sample.cha".into(),
+            content: "@UTF8\n@Begin\n@End\n".into(),
+        }
+    }
+
     fn morphotag_submission_with_lang(lang_spec: LanguageSpec) -> JobSubmission {
         JobSubmission {
             command: ReleasedCommand::Morphotag,
             lang: lang_spec,
             num_speakers: NumSpeakers(1),
-            files: vec![],
+            files: vec![sample_chat_file()],
             media_files: vec![],
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -1134,7 +1398,15 @@ mod tests {
         assert!(error.to_string().contains("'rev'"), "{error}");
         // Taiwanese has no Stanza model: the registry refuses it for utseg.
         let registry = crate::stanza_registry::StanzaRegistry::admitting(&["eng"]).shared();
-        assert!(validate_language_with_registry(&utseg_submission("nan"), &registry).is_err());
+        assert!(
+            validate_language_with_registry(
+                &utseg_submission("nan")
+                    .validate()
+                    .expect("the submission validates"),
+                &registry
+            )
+            .is_err()
+        );
     }
 
     /// Timing recovery asks stock Whisper's token table, and the refusal
@@ -1218,7 +1490,7 @@ mod tests {
             command: ReleasedCommand::Utseg,
             lang: LanguageSpec::Resolved(LanguageCode3::try_new(lang).expect("test lang")),
             num_speakers: NumSpeakers(1),
-            files: vec![],
+            files: vec![sample_chat_file()],
             media_files: vec![],
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -1369,6 +1641,8 @@ mod tests {
     #[test]
     fn a_chat_consuming_command_still_accepts_chat_sources() {
         let mut submission = morphotag_submission();
+        submission.paths_mode = true;
+        submission.files.clear();
         submission.source_paths = vec!["/corpus/session.cha".into()];
         submission.output_paths = vec!["/corpus/out/session.cha".into()];
         submission
@@ -1782,7 +2056,11 @@ mod tests {
             &[Tokenize, Pos, Constituency],
         )])
         .shared();
-        let err = validate_language_with_registry(&submission, &registry).unwrap_err();
+        let err = validate_language_with_registry(
+            &submission.validate().expect("the submission validates"),
+            &registry,
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("'xyz' is not supported by Stanza") && message.contains("no model"),
@@ -1792,15 +2070,20 @@ mod tests {
             message.contains("kaz"),
             "the help lists the registry's languages: {message}"
         );
-        validate_language_with_registry(&utseg_submission("kaz"), &registry)
-            .expect("a language the registry admits passes");
+        validate_language_with_registry(
+            &utseg_submission("kaz")
+                .validate()
+                .expect("the submission validates"),
+            &registry,
+        )
+        .expect("a language the registry admits passes");
     }
 
     /// RED FIRST: utseg was held to the Stanza requirement whatever its
     /// route, and a language with no segmenter at all passed submission and
     /// failed at dispatch. The requirement is now the route's: a boundary
     /// model needs no Stanza catalog entry, and a language with no route is
-    /// refused at submission with the remedy.
+    /// refused by validation, before any registry, with the remedy.
     #[test]
     fn utseg_submission_is_held_to_its_routes_requirement() {
         let no_stanza = crate::stanza_registry::StanzaRegistry::admitting(&[]).shared();
@@ -1809,15 +2092,21 @@ mod tests {
             unreachable!("utseg fixture")
         };
         options.utseg_fallback = crate::params::UtsegFallbackPolicy::Refuse;
-        validate_language_with_registry(&english, &no_stanza)
-            .expect("the boundary-model route reads no Stanza output");
+        validate_language_with_registry(
+            &english.validate().expect("the submission validates"),
+            &no_stanza,
+        )
+        .expect("the boundary-model route reads no Stanza output");
 
         let mut spanish = utseg_submission("spa");
         let CommandOptions::Utseg(options) = &mut spanish.options else {
             unreachable!("utseg fixture")
         };
         options.utseg_fallback = crate::params::UtsegFallbackPolicy::Refuse;
-        let refusal = validate_language_with_registry(&spanish, &no_stanza)
+        // Refused by validation itself, registry or not: the direct path and
+        // a fresh server with no catalog refuse it too.
+        let refusal = spanish
+            .validate()
             .expect_err("no boundary model and no authorized fallback");
         assert!(
             refusal.to_string().contains("--utseg-fallback-stanza"),
@@ -1827,9 +2116,13 @@ mod tests {
         use crate::stanza_registry::StanzaProcessor::{Pos, Tokenize};
         let without_constituency =
             crate::stanza_registry::StanzaRegistry::serving(&[("spa", &[Tokenize, Pos])]).shared();
-        let refusal =
-            validate_language_with_registry(&utseg_submission("spa"), &without_constituency)
-                .expect_err("the Stanza route needs a constituency parser");
+        let refusal = validate_language_with_registry(
+            &utseg_submission("spa")
+                .validate()
+                .expect("the submission validates"),
+            &without_constituency,
+        )
+        .expect_err("the Stanza route needs a constituency parser");
         assert!(refusal.to_string().contains("constituency"), "{refusal}");
     }
 
@@ -1844,8 +2137,13 @@ mod tests {
             &[Tokenize, Pos, Depparse, Constituency],
         )])
         .shared();
-        validate_language_with_registry(&utseg_submission("vie"), &registry)
-            .expect("utseg needs no lemmatizer");
+        validate_language_with_registry(
+            &utseg_submission("vie")
+                .validate()
+                .expect("the submission validates"),
+            &registry,
+        )
+        .expect("utseg needs no lemmatizer");
     }
 
     /// Align's UTR engine is checked against each FILE's language once that

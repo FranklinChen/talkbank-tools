@@ -1,10 +1,8 @@
-use std::path::Path;
 use talkbank_model::Location;
 
 use talkbank_model::model::{
-    Header, IDHeader, LanguageCodes, Line, MediaFilename, MediaHeader, MediaType,
-    ParticipantDetails, ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole,
-    SpeakerCode,
+    Header, IDHeader, LanguageCodes, Line, MediaHeader, MediaType, ParticipantDetails,
+    ParticipantEntries, ParticipantEntry, ParticipantName, ParticipantRole, SpeakerCode,
 };
 
 use super::BuildChatError;
@@ -36,7 +34,7 @@ pub(super) fn build_header_lines(
         lines.push(Line::header(Location::Unlocated, Header::ID(id)));
     }
 
-    if let Some(media_header) = build_media_header(desc)? {
+    if let Some(media_header) = build_media_header(desc) {
         lines.push(Line::header(
             Location::Unlocated,
             Header::Media(media_header),
@@ -81,20 +79,11 @@ fn build_id_headers(desc: &TranscriptDescription) -> Vec<IDHeader> {
         .collect()
 }
 
-/// Builds the `@Media` header, if the description names any media.
-///
-/// FALLIBLE, and the `Result` is the point. The media name is external input
-/// (a file stem the operator chose), and `@Media` cannot represent every
-/// string: the comma separates the filename from the media type. Swallowing
-/// that with `.ok()` produced a transcript with NO `@Media` line and no
-/// diagnostic, so a job on `interview,part2.mp3` reported success and silently
-/// lost its audio link. `Ok(None)` means "the description named no media";
-/// an unusable name is an error, and the two must not share a signature.
-fn build_media_header(desc: &TranscriptDescription) -> Result<Option<MediaHeader>, BuildChatError> {
-    let Some(media_name) = desc.media_name.as_ref() else {
-        return Ok(None);
-    };
-    let normalized_media_name = normalize_media_name(media_name);
+/// Builds the `@Media` header, if the description names any media. The name
+/// arrives parsed ([`MediaFilename`], made where the name is born), so an
+/// unwritable name was refused before recognition, not here after it.
+fn build_media_header(desc: &TranscriptDescription) -> Option<MediaHeader> {
+    let filename = desc.media_name.clone()?;
     let media_type = match desc.media_type.as_deref() {
         Some("video") => MediaType::Video,
         Some("audio") | None => MediaType::Audio,
@@ -103,22 +92,9 @@ fn build_media_header(desc: &TranscriptDescription) -> Result<Option<MediaHeader
             MediaType::Audio
         }
     };
-
-    let filename = MediaFilename::parse(&normalized_media_name)?;
     let mut header = MediaHeader::new(filename, media_type);
     if let Some(status) = &desc.media_status {
         header = header.with_status(status.clone());
     }
-    Ok(Some(header))
-}
-
-fn normalize_media_name(raw: &str) -> String {
-    let candidate = Path::new(raw);
-    candidate
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .or_else(|| candidate.file_name())
-        .filter(|name| !name.is_empty())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| raw.to_string())
+    Some(header)
 }

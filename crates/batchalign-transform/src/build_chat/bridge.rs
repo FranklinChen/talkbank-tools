@@ -221,7 +221,7 @@ impl<'a> NamedAsrUtterances<'a> {
     pub fn into_transcript(
         self,
         langs: &[String],
-        media_name: Option<&str>,
+        media_name: Option<talkbank_model::model::MediaFilename>,
         write_wor: bool,
     ) -> Result<AsrTranscript, TranscriptBuildError> {
         build_named_asr_transcript(self, langs, media_name, write_wor)
@@ -248,7 +248,7 @@ pub fn transcript_from_asr_utterances(
     utterances: &[asr_postprocess::Utterance],
     participant_ids: &[String],
     langs: &[String],
-    media_name: Option<&str>,
+    media_name: Option<talkbank_model::model::MediaFilename>,
     write_wor: bool,
 ) -> Result<AsrTranscript, TranscriptBuildError> {
     NamedAsrUtterances::with_participant_ids(utterances, participant_ids)?
@@ -258,7 +258,7 @@ pub fn transcript_from_asr_utterances(
 fn build_named_asr_transcript(
     input: NamedAsrUtterances<'_>,
     langs: &[String],
-    media_name: Option<&str>,
+    media_name: Option<talkbank_model::model::MediaFilename>,
     write_wor: bool,
 ) -> Result<AsrTranscript, TranscriptBuildError> {
     let utterances = input.source;
@@ -322,7 +322,7 @@ fn build_named_asr_transcript(
         description: TranscriptDescription {
             langs: languages,
             participants,
-            media_name: media_name.map(String::from),
+            media_name,
             media_type: Some("audio".to_string()),
             media_status: None,
             utterances: utterance_descs,

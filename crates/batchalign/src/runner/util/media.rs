@@ -6,7 +6,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::store::PendingJobFile;
-use batchalign_types::paths::ClientPath;
 
 use crate::media::MediaExtensions;
 use crate::media::probe::{AudioDuration, MediaProbe};
@@ -14,7 +13,7 @@ use tracing::{debug, warn};
 
 /// Pre-validate media files before dispatch.
 ///
-/// For non-CHAT files in paths_mode, checks:
+/// For each recording read in place (a paths-mode input), checks:
 /// 1. File exists on disk
 /// 2. File is non-empty
 /// 3. File extension is a known audio/video format
@@ -22,37 +21,29 @@ use tracing::{debug, warn};
 /// Returns the set of file indices that failed validation.
 pub(in crate::runner) async fn preflight_validate_media(
     file_list: &[PendingJobFile],
-    source_paths: &[ClientPath],
-    paths_mode: bool,
 ) -> HashMap<usize, String> {
-    if !paths_mode {
-        return HashMap::new();
-    }
-
     let mut failures = HashMap::new();
 
     for file in file_list {
-        // Only validate non-CHAT (media) files
-        if file.has_chat {
-            continue;
-        }
-
-        let Some(client_path) = source_paths.get(file.file_index) else {
-            failures.insert(file.file_index, "No source path for file index".to_string());
-            continue;
+        // Only media read in place (paths mode) is checked here: a staged
+        // file is checked where it is staged, and a transcript is not media.
+        let path = match (&file.kind(), &file.location()) {
+            (crate::store::InputKind::Media, crate::store::InputLocation::Paths(paths)) => {
+                paths.source.server().clone()
+            }
+            (crate::store::InputKind::Chat, _) | (_, crate::store::InputLocation::Staged) => {
+                continue;
+            }
         };
-
-        // In paths_mode the client and server share a filesystem.
-        let path = client_path.assume_shared_filesystem();
 
         // Check file exists and non-empty via metadata (one syscall)
         match tokio::fs::metadata(&path).await {
             Err(_) => {
-                failures.insert(file.file_index, format!("File not found: {}", path));
+                failures.insert(file.file_index(), format!("File not found: {}", path));
                 continue;
             }
             Ok(meta) if meta.len() == 0 => {
-                failures.insert(file.file_index, format!("File is empty: {}", path));
+                failures.insert(file.file_index(), format!("File is empty: {}", path));
                 continue;
             }
             Ok(_) => {}
@@ -67,12 +58,15 @@ pub(in crate::runner) async fn preflight_validate_media(
         if let Some(ref ext) = ext {
             if !MediaExtensions::is_known(ext) {
                 failures.insert(
-                    file.file_index,
+                    file.file_index(),
                     format!("Unknown media format '.{ext}': {}", path),
                 );
             }
         } else {
-            failures.insert(file.file_index, format!("File has no extension: {}", path));
+            failures.insert(
+                file.file_index(),
+                format!("File has no extension: {}", path),
+            );
         }
     }
 

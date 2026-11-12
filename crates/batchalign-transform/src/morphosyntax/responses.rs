@@ -139,15 +139,24 @@ fn check_response_count(expected: usize, actual: usize) -> Result<(), ResponseCo
     Ok(())
 }
 
-/// A matched batch whose destination positions were admitted while exclusively
-/// borrowing the document. Only the injection implementation can consume it.
+/// A matched batch bound to its destinations: every response is paired with
+/// the utterance it annotates, borrowed from the document. Binding is the one
+/// check that a collected line still names an utterance, and the only route to
+/// that utterance, so injection never looks a line up again.
 pub(super) struct BoundMorphosyntaxResponses<'chat> {
-    chat: &'chat mut talkbank_model::ChatFile,
-    batch: MatchedMorphosyntaxResponses,
+    pairs: Vec<BoundUtterance<'chat>>,
 }
 
+/// One response, its collected item, and the utterance both describe.
+pub(super) struct BoundUtterance<'chat> {
+    pub(super) utterance: &'chat mut talkbank_model::model::Utterance,
+    pub(super) response: AdmittedUdResponse,
+    pub(super) collected: CollectedUtterance,
+}
+
+/// Why a collected line could not be bound.
 #[derive(Debug, thiserror::Error)]
-#[error("Line at index {index} is no longer an utterance")]
+#[error("Line at index {index} is no longer an utterance, or is claimed twice")]
 pub(super) struct InvalidInjectionPosition {
     pub(super) index: usize,
 }
@@ -157,26 +166,42 @@ impl MatchedMorphosyntaxResponses {
         self,
         chat: &mut talkbank_model::ChatFile,
     ) -> Result<BoundMorphosyntaxResponses<'_>, InvalidInjectionPosition> {
-        for item in &self.items {
-            let index = item.line().raw();
-            if !matches!(
-                chat.lines.get(index),
-                Some(talkbank_model::Line::Utterance(_))
-            ) {
-                return Err(InvalidInjectionPosition { index });
-            }
-        }
-        Ok(BoundMorphosyntaxResponses { chat, batch: self })
+        // One pass hands out a disjoint borrow of every utterance line; a
+        // line is taken by the first response that names it, so a second
+        // response for the same line finds it gone.
+        let mut utterances: std::collections::HashMap<
+            usize,
+            &mut talkbank_model::model::Utterance,
+        > = chat
+            .lines
+            .as_mut_slice()
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, line)| match line {
+                talkbank_model::Line::Utterance(utterance) => Some((index, &mut **utterance)),
+                _ => None,
+            })
+            .collect();
+        let pairs = self
+            .into_pairs()
+            .map(|(response, collected)| {
+                let index = collected.line().raw();
+                utterances
+                    .remove(&index)
+                    .map(|utterance| BoundUtterance {
+                        utterance,
+                        response,
+                        collected,
+                    })
+                    .ok_or(InvalidInjectionPosition { index })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(BoundMorphosyntaxResponses { pairs })
     }
 }
 
 impl<'chat> BoundMorphosyntaxResponses<'chat> {
-    pub(super) fn into_parts(
-        self,
-    ) -> (
-        &'chat mut talkbank_model::ChatFile,
-        MatchedMorphosyntaxResponses,
-    ) {
-        (self.chat, self.batch)
+    pub(super) fn into_pairs(self) -> impl Iterator<Item = BoundUtterance<'chat>> {
+        self.pairs.into_iter()
     }
 }

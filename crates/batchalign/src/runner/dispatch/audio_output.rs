@@ -190,7 +190,7 @@ pub(crate) async fn write_primary_chat_output_artifact(
     filesystem: &RunnerFilesystemConfig,
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
-    file_index: usize,
+    location: &crate::store::InputLocation,
     source_filename: &str,
     output: ChatOutput,
 ) -> Result<WrittenOutput, OutputWriteFailure> {
@@ -206,7 +206,7 @@ pub(crate) async fn write_primary_chat_output_artifact(
     if primary_output.content_type != crate::api::ContentType::Chat {
         return Err(OutputWriteFailure::ContentKind(primary_output.content_type));
     }
-    let target = ChatOutputTarget::new(filesystem, file_index, &primary_output.display_path);
+    let target = ChatOutputTarget::new(filesystem, location, &primary_output.display_path);
     write_chat_output_artifact_with_provenance_gate(&target, &proof).await?;
     // Read from the proof that was WRITTEN, so the reported
     // findings describe the bytes on disk, with every shortfall of the run.
@@ -244,7 +244,7 @@ pub(crate) async fn write_primary_output_artifact(
     filesystem: &RunnerFilesystemConfig,
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
-    file_index: usize,
+    location: &crate::store::InputLocation,
     source_filename: &str,
     output: FileOutput,
 ) -> Result<WrittenOutput, OutputWriteFailure> {
@@ -254,7 +254,7 @@ pub(crate) async fn write_primary_output_artifact(
                 filesystem,
                 command,
                 options,
-                file_index,
+                location,
                 source_filename,
                 chat,
             )
@@ -268,8 +268,7 @@ pub(crate) async fn write_primary_output_artifact(
             {
                 return Err(OutputWriteFailure::ContentKind(primary_output.content_type));
             }
-            let target =
-                ChatOutputTarget::new(filesystem, file_index, &primary_output.display_path);
+            let target = ChatOutputTarget::new(filesystem, location, &primary_output.display_path);
             // No provenance gate. That gate exists because re-running a CHAT
             // command rewrites a `[fc-ba3 ...]` timestamp line and produces
             // semantically empty corpus diffs. An evidence document IS a
@@ -306,7 +305,7 @@ mod tests {
             &filesystem,
             ReleasedCommand::Convert,
             &options,
-            0,
+            &crate::store::InputLocation::Staged,
             "source.wav",
             FileOutput::Evidence {
                 body: "not audio".into(),
@@ -324,10 +323,14 @@ mod tests {
 
     fn sample_filesystem(paths_mode: bool) -> RunnerFilesystemConfig {
         RunnerFilesystemConfig {
-            paths_mode,
-            source_paths: vec![ClientPath::new("/input/test.cha")],
-            output_paths: vec![ClientPath::new("/tmp/output/test.cha")],
-            before_paths: Vec::new(),
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                paths_mode,
+                vec![ClientPath::new("/input/test.cha")],
+                vec![ClientPath::new("/tmp/output/test.cha")],
+                Vec::new(),
+            ),
             staging_dir: ServerPath::new("/tmp/staging-audio-output"),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -371,9 +374,16 @@ mod tests {
     async fn a_declared_pass_through_is_written_unchanged_not_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let filesystem = RunnerFilesystemConfig {
-            output_paths: vec![ClientPath::new(
-                tmp.path().join("requested/dummy.cha").to_string_lossy(),
-            )],
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                true,
+                vec![ClientPath::new("/input/test.cha")],
+                vec![ClientPath::new(
+                    tmp.path().join("requested/dummy.cha").to_string_lossy(),
+                )],
+                Vec::new(),
+            ),
             staging_dir: ServerPath::new(tmp.path().join("staging")),
             ..sample_filesystem(true)
         };
@@ -390,7 +400,7 @@ mod tests {
             &filesystem,
             ReleasedCommand::Align,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Align),
-            0,
+            &crate::store::test_support::only_location(&filesystem.inputs),
             "nested/dummy.cha",
             ChatOutput {
                 document: PostValidated::pass_through(unchanged, ReleasedCommand::Align).into(),
@@ -439,9 +449,16 @@ mod tests {
     async fn write_primary_chat_output_artifact_uses_command_primary_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let filesystem = RunnerFilesystemConfig {
-            output_paths: vec![ClientPath::new(
-                tmp.path().join("requested/test.cha").to_string_lossy(),
-            )],
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                true,
+                vec![ClientPath::new("/input/test.cha")],
+                vec![ClientPath::new(
+                    tmp.path().join("requested/test.cha").to_string_lossy(),
+                )],
+                Vec::new(),
+            ),
             staging_dir: ServerPath::new(tmp.path().join("staging")),
             ..sample_filesystem(true)
         };
@@ -451,7 +468,7 @@ mod tests {
             &filesystem,
             ReleasedCommand::Transcribe,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Transcribe),
-            0,
+            &crate::store::test_support::only_location(&filesystem.inputs),
             "nested/test.mp3",
             ChatOutput {
                 document: PostValidated::gate_owned(
@@ -509,9 +526,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let filesystem = RunnerFilesystemConfig {
-            output_paths: vec![ClientPath::new(
-                tmp.path().join("requested/test.cha").to_string_lossy(),
-            )],
+            inputs: crate::store::test_support::inputs_from_parts(
+                Vec::new(),
+                Vec::new(),
+                true,
+                vec![ClientPath::new("/input/test.cha")],
+                vec![ClientPath::new(
+                    tmp.path().join("requested/test.cha").to_string_lossy(),
+                )],
+                Vec::new(),
+            ),
             staging_dir: ServerPath::new(tmp.path().join("staging")),
             ..sample_filesystem(true)
         };
@@ -538,7 +562,7 @@ mod tests {
             &filesystem,
             ReleasedCommand::Transcribe,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Transcribe),
-            0,
+            &crate::store::test_support::only_location(&filesystem.inputs),
             "nested/test.mp3",
             ChatOutput {
                 document: PostValidated::produced(generated, ReleasedCommand::Transcribe),

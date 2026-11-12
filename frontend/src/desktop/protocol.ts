@@ -42,6 +42,7 @@ export interface DesktopCommandMap {
   writeConfig: { name: "write_config"; request: { config: DesktopConfig }; response: DesktopCommandAck };
   serverStatus: { name: "server_status"; request: void; response: DesktopServerStatus };
   startServer: { name: "start_server"; request: void; response: DesktopServerStatus };
+  signSameUser: { name: "sign_same_user"; request: { method: string; path: string; body: string }; response: string };
 }
 
 /** Runtime names owned by the native protocol adapter. */
@@ -54,6 +55,7 @@ export const DESKTOP_COMMANDS = {
   writeConfig: { name: "write_config" },
   serverStatus: { name: "server_status" },
   startServer: { name: "start_server" },
+  signSameUser: { name: "sign_same_user" },
 } satisfies { [K in keyof DesktopCommandMap]: { name: DesktopCommandMap[K]["name"] } };
 
 export type DesktopCommandKey = keyof DesktopCommandMap;

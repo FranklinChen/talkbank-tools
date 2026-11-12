@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -96,7 +95,7 @@ pub(crate) async fn dispatch_benchmark_infer(
             ),
             Err(error) => {
                 for file in &job.pending_files {
-                    FileRunTracker::new(sink.as_ref(), file.filename.as_ref())
+                    FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
                         .fail(
                             &format!("Benchmark planning failed: {error}"),
                             FailureCategory::Validation,
@@ -134,7 +133,7 @@ pub(crate) async fn dispatch_benchmark_infer(
         let file = file.clone();
         let mwt = mwt.clone();
         let planned_units = planned_units.clone();
-        let filename = file.filename.clone();
+        let filename = file.filename().clone();
 
         let task: BenchmarkFileFuture = Box::pin(async move {
             let _permit = permit;
@@ -182,16 +181,17 @@ async fn process_one_benchmark_file(
         planned_units,
     } = context;
     let job_id = &job.identity.job_id;
-    let file_index = file.file_index;
-    let filename = file.filename.as_ref();
+    let filename = file.filename().as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
-    let original_audio_path =
-        resolve_benchmark_original_audio_path(&job.filesystem, file_index, filename);
+    let original_audio_path = file
+        .input_path(&job.filesystem.staging_dir)
+        .as_path()
+        .to_owned();
 
     let Some(planned_unit) = planned_units.get(filename) else {
         return lifecycle
@@ -310,66 +310,5 @@ async fn process_one_benchmark_file(
                 };
             }
         }
-    }
-}
-
-fn resolve_benchmark_original_audio_path(
-    filesystem: &crate::store::RunnerFilesystemConfig,
-    file_index: usize,
-    filename: &str,
-) -> PathBuf {
-    filesystem
-        .source_paths
-        .get(file_index)
-        .map(|cp| cp.assume_shared_filesystem().as_path().to_owned())
-        // paths_mode is active for benchmark, convert ClientPath to ServerPath before joining.
-        .unwrap_or_else(|| {
-            filesystem
-                .source_dir
-                .assume_shared_filesystem()
-                .join(filename)
-                .as_path()
-                .to_owned()
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_benchmark_original_audio_path;
-    use crate::store::RunnerFilesystemConfig;
-    use std::path::PathBuf;
-
-    fn filesystem_config(source_paths: Vec<&str>, source_dir: &str) -> RunnerFilesystemConfig {
-        RunnerFilesystemConfig {
-            paths_mode: false,
-            source_paths: source_paths
-                .into_iter()
-                .map(batchalign_types::paths::ClientPath::from)
-                .collect(),
-            output_paths: Vec::new(),
-            before_paths: Vec::new(),
-            staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new(source_dir),
-        }
-    }
-
-    #[test]
-    fn resolve_benchmark_original_audio_path_prefers_explicit_source_path() {
-        let filesystem = filesystem_config(vec!["/tmp/input/clip.mp3"], "/tmp/source");
-
-        let path = resolve_benchmark_original_audio_path(&filesystem, 0, "clip.mp3");
-
-        assert_eq!(path, PathBuf::from("/tmp/input/clip.mp3"));
-    }
-
-    #[test]
-    fn resolve_benchmark_original_audio_path_falls_back_to_source_dir() {
-        let filesystem = filesystem_config(Vec::new(), "/tmp/source");
-
-        let path = resolve_benchmark_original_audio_path(&filesystem, 0, "clip.mp3");
-
-        assert_eq!(path, PathBuf::from("/tmp/source/clip.mp3"));
     }
 }

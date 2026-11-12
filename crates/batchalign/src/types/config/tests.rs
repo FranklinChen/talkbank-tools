@@ -10,7 +10,7 @@ use super::*;
 fn default_config() {
     let cfg = ServerConfig::default();
     assert_eq!(cfg.port, crate::config::PortRequest::from_u16(8000));
-    assert_eq!(cfg.host, "0.0.0.0");
+    assert_eq!(cfg.host, "127.0.0.1");
     assert_eq!(cfg.default_lang, "eng"); // PartialEq<&str>
     assert_eq!(cfg.job_ttl_days.get(), 7);
     assert!(cfg.auto_daemon);

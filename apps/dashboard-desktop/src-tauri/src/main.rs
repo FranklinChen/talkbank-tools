@@ -125,6 +125,7 @@ fn main() {
             output::open_output_directory,
             server::start_server,
             server::server_status,
+            server::sign_same_user,
             config::is_first_launch,
             config::read_config,
             config::write_config,

@@ -11,7 +11,7 @@ fn snapshot(
     names: &[&str],
     format: AudioExportFormat,
 ) -> RunnerJobSnapshot {
-    RunnerJobSnapshot {
+    crate::store::test_support::with_pending(RunnerJobSnapshot {
         identity: RunnerJobIdentity {
             job_id: JobId::from("native-admission"),
             correlation_id: "test".into(),
@@ -28,38 +28,34 @@ fn snapshot(
             debug_traces: false,
         },
         filesystem: RunnerFilesystemConfig {
-            paths_mode: true,
-            source_paths: names
-                .iter()
-                .map(|name| {
-                    batchalign_types::paths::ClientPath::new(root.join(name).to_str().unwrap())
-                })
-                .collect(),
-            output_paths: names
-                .iter()
-                .map(|name| {
-                    batchalign_types::paths::ClientPath::new(
-                        root.join("out").join(name).to_str().unwrap(),
-                    )
-                })
-                .collect(),
-            before_paths: vec![],
+            inputs: crate::store::test_support::inputs_from_parts(
+                names.iter().map(|name| (*name).into()).collect(),
+                vec![false; names.len()],
+                true,
+                names
+                    .iter()
+                    .map(|name| {
+                        batchalign_types::paths::ClientPath::new(root.join(name).to_str().unwrap())
+                    })
+                    .collect(),
+                names
+                    .iter()
+                    .map(|name| {
+                        batchalign_types::paths::ClientPath::new(
+                            root.join("out").join(name).to_str().unwrap(),
+                        )
+                    })
+                    .collect(),
+                vec![],
+            ),
             staging_dir: batchalign_types::paths::ServerPath::new(root.join("job")),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
             source_dir: batchalign_types::paths::ClientPath::new(root.to_str().unwrap()),
         },
         cancel_token: tokio_util::sync::CancellationToken::new(),
-        pending_files: names
-            .iter()
-            .enumerate()
-            .map(|(file_index, name)| PendingJobFile {
-                file_index,
-                filename: (*name).into(),
-                has_chat: false,
-            })
-            .collect(),
-    }
+        pending_files: Vec::new(),
+    })
 }
 
 #[test]
@@ -120,19 +116,6 @@ fn persisted_command_and_options_cannot_choose_different_execution_lanes() {
     assert!(matches!(
         admit_work(&job, &job.pending_files),
         Err(NativeExportAdmissionError::Planning(_))
-    ));
-    assert!(!root.path().join("out").exists());
-}
-
-#[test]
-fn submitted_file_identity_cannot_be_paired_with_another_source_index() {
-    let root = tempfile::tempdir().unwrap();
-    let job = snapshot(root.path(), &["one.wav", "two.wav"], AudioExportFormat::Wav);
-    let mut files = job.pending_files.clone();
-    files[0].file_index = 1;
-    assert!(matches!(
-        admit_work(&job, &files),
-        Err(NativeExportAdmissionError::Artifact(_))
     ));
     assert!(!root.path().join("out").exists());
 }

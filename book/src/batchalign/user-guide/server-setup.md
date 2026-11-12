@@ -1,7 +1,7 @@
 # Server and Fleet Setup
 
 **Status:** Current
-**Last updated:** 2026-08-30 19:35 EDT
+**Last updated:** 2026-11-12 09:03 EST
 
 ## Overview
 
@@ -41,12 +41,33 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/FranklinChen/talkbank-t
 
 ### 2. Configure batchalign3
 
+A server listens only on its own machine unless its configuration says
+otherwise. Serving other machines is an explicit choice: the server has no
+authentication, so expose it only on a network where every machine that can
+reach it is trusted.
+
+A server reads and writes files on its own disk by path (paths mode) for its
+own account anywhere that account can: the account's CLI and desktop app send
+a private key the server publishes in its state folder, so running commands as
+the account that runs the server needs no configuration. For anyone else,
+paths mode works only in the folders the configuration lists under
+`paths_mode_roots`, and none by default; such a command is refused with a
+message naming this setting. The server always accepts transcripts sent as
+text from other machines.
+
 Create `~/.batchalign3/server.yaml`:
 
 ```yaml
 port: 8001
-host: "0.0.0.0"
+host: "0.0.0.0"   # serve other machines on a trusted network (see above)
 max_concurrent_jobs: 4
+
+# Folders the server may read and write in place (paths mode) for accounts
+# other than its own. Absolute; each must exist when the server starts.
+# Leave out unless another account on this machine uses this server.
+paths_mode_roots:
+  - /data/corpora
+  - /data/results
 
 # Map data repository names to media file locations.
 media_mappings:

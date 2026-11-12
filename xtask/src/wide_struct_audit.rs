@@ -84,6 +84,10 @@ struct NamedStructInfo {
 /// Dropped on 2026-11-04: `AlignAudioTask`, under the threshold once the align
 /// route was decided at admission (`AlignRoute::decide`) and the audio-reading
 /// task stopped carrying the no-recording paths.
+///
+/// Dropped on 2026-11-12: `JobFilesystemConfig`, under the threshold once a
+/// job's inputs moved into its lifecycle (`JobLifecycle`), where an active
+/// job holds admitted inputs and a finished one holds them as stored.
 const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
     WideStructAllowance {
         path: "crates/batchalign/src/host_memory.rs",
@@ -410,14 +414,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         reason: "forced-alignment per-file context still bundles several workflow concerns \
                  (UTR policy, before-file, debug dumper beside the engine admission and media \
                  root)",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/src/store/job/types.rs",
-        struct_name: "JobFilesystemConfig",
-        max_fields: 10,
-        max_bool_fields: 2,
-        disposition: WideStructDisposition::BoundaryShim,
-        reason: "filesystem/layout configuration boundary for job storage",
     },
     WideStructAllowance {
         path: "crates/batchalign/src/store/mod.rs",

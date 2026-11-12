@@ -282,7 +282,12 @@ pub(crate) async fn process_morphosyntax_incremental(
                     Ok(injection_result) => {
                         // Secondary L2 dispatch for @s words, at the
                         // positions read from the analysis injection mapped.
-                        let (retokenization_traces, l2) = injection_result.into_parts();
+                        let batchalign_transform::morphosyntax::InjectionParts {
+                            retokenization_traces,
+                            l2,
+                            declined,
+                        } = injection_result.into_parts();
+                        applied.declined_primary(declined);
                         let l2_deferred = if params.policy.l2.should_analyze() {
                             applied.secondary_positions(l2)
                         } else {
@@ -335,7 +340,7 @@ pub(crate) async fn process_morphosyntax_incremental(
     )?;
     applied.secondary_mut().annotate(&mut after_file)?;
     gate_incremental_output(after_file).map(|document| {
-        MorphosyntaxOutput::new(document, applied.into_secondary()).with_provenance(provenance)
+        MorphosyntaxOutput::new(document, applied.into_reports()).with_provenance(provenance)
     })
 }
 

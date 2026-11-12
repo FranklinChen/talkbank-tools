@@ -68,7 +68,7 @@ fn snapshot_job_submission_with_files() {
         }],
         media_files: vec![],
         media_mapping: "childes-data".into(),
-        media_subdir: "Eng-NA/MacWhinney".into(),
+        media_subdir: batchalign_types::paths::RepoRelativePath::new("Eng-NA/MacWhinney").unwrap(),
         source_dir: "/data/corpus".into(),
         options: CommandOptions::Align(AlignOptions {
             common: CommonOptions::default(),
@@ -359,6 +359,7 @@ fn snapshot_server_config_full() {
         memory_gate_mb: Some(MemoryMb(2048)),
         worker_health_interval_s: batchalign::api::PositiveSeconds::literal::<15>(),
         allow_mps: Some(true),
+        paths_mode_roots: vec!["/data/corpora".into(), "/data/results".into()],
         ..Default::default()
     };
     insta::assert_json_snapshot!("server_config_full", cfg);

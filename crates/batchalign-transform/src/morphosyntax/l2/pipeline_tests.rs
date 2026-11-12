@@ -151,7 +151,7 @@ fn run_l2_in(
         "the primary analysis must align: {:?}",
         injection.l2().unaligned()
     );
-    let (_, l2) = injection.into_parts();
+    let l2 = injection.into_parts().l2;
     let deferred = l2.into_reported_positions();
 
     let plan = plan_dispatch_spans(deferred);

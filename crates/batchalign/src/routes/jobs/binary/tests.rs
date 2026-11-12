@@ -14,7 +14,6 @@ fn detail(root: &std::path::Path) -> JobDetail {
         command: crate::ReleasedCommand::Align, // command routing is not exercised
         options: crate::recipe_runner::runtime::test_options(crate::ReleasedCommand::Align),
         status: JobStatus::Completed,
-        paths_mode: true,
         staging_dir: batchalign_types::paths::ServerPath::new(root),
         results: vec![FileResultEntry {
             filename: DisplayPath::from("nested/recording.wav"),

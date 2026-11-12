@@ -38,6 +38,10 @@ pub const MAX_POLL_FAILURES: u32 = 10;
 #[derive(Clone)]
 pub struct BatchalignClient {
     http: Client,
+    /// For requests that carry this account's same-user key: no proxy and no
+    /// redirects, so the key reaches the loopback server it was presented
+    /// for and nothing else.
+    keyed: Client,
 }
 
 impl BatchalignClient {
@@ -47,7 +51,13 @@ impl BatchalignClient {
             .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        Ok(Self { http })
+        let keyed = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self { http, keyed })
     }
 
     /// `GET /health`: check server health and capabilities.
@@ -82,6 +92,117 @@ impl BatchalignClient {
             .await?;
         let info: JobInfo = resp.json().await?;
         Ok(info)
+    }
+
+    /// `POST /jobs` to this account's own server, proved as this account
+    /// (see [`crate::same_user_key`]): the job may use any path the account
+    /// can. Sent only to the server's own address from its handshake, never
+    /// to a URL the caller supplies, so the proof cannot reach another
+    /// listener. The key itself is never sent.
+    pub async fn submit_job_as_own(
+        &self,
+        own: &crate::same_user_key::OwnServer,
+        sub: &JobSubmission,
+    ) -> Result<JobInfo, CliError> {
+        let body = serde_json::to_vec(sub)
+            .map_err(|error| CliError::InvalidArgument(format!("encoding the job: {error}")))?;
+        let resp = self
+            .signed_request_with_retry(
+                own,
+                reqwest::Method::POST,
+                "/jobs",
+                body,
+                Duration::from_secs(120),
+            )
+            .await?;
+        let info: JobInfo = resp.json().await?;
+        Ok(info)
+    }
+
+    /// The `HEADER` value proving one request to `own`: a fresh nonce from
+    /// it, signed over the method, path and body.
+    pub async fn sign_for_own(
+        &self,
+        own: &crate::same_user_key::OwnServer,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<String, CliError> {
+        let resp = self
+            .keyed
+            .post(format!("{}/same-user/nonce", own.url()))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let detail = read_http_error_detail(resp).await;
+            return Err(CliError::ServerHttp { status, detail });
+        }
+        #[derive(serde::Deserialize)]
+        struct Nonce {
+            nonce: String,
+        }
+        let Nonce { nonce } = resp.json().await?;
+        Ok(own.sign(
+            &nonce,
+            &crate::same_user_key::RequestBinding { method, path, body },
+        ))
+    }
+
+    /// [`Self::request_with_retry`] for a request proved as this account:
+    /// each attempt takes its own nonce (a nonce is good once), and the
+    /// client uses no proxy and follows no redirects.
+    async fn signed_request_with_retry(
+        &self,
+        own: &crate::same_user_key::OwnServer,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        per_attempt_timeout: Duration,
+    ) -> Result<reqwest::Response, CliError> {
+        let mut delay = RETRY_BACKOFF;
+        let mut last_err: Option<reqwest::Error> = None;
+        for attempt in 0..RETRY_ATTEMPTS {
+            let proof = self.sign_for_own(own, method.as_str(), path, &body).await;
+            let sent = match proof {
+                Ok(proof) => {
+                    self.keyed
+                        .request(method.clone(), format!("{}{path}", own.url()))
+                        .header(crate::same_user_key::HEADER, proof)
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .body(body.clone())
+                        .timeout(per_attempt_timeout)
+                        .send()
+                        .await
+                }
+                Err(CliError::Http(error)) => Err(error),
+                Err(other) => return Err(other),
+            };
+            match sent {
+                Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let detail = read_http_error_detail(resp).await;
+                    return Err(CliError::ServerHttp { status, detail });
+                }
+                Err(error)
+                    if (error.is_connect() || error.is_timeout())
+                        && attempt < RETRY_ATTEMPTS - 1 =>
+                {
+                    let jitter = 0.5 + rand::random::<f64>() * 0.5;
+                    tokio::time::sleep(Duration::from_secs_f64(delay * jitter)).await;
+                    delay *= 2.0;
+                    last_err = Some(error);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        // The loop sets `last_err` before every retry.
+        #[allow(clippy::expect_used)]
+        Err(last_err
+            .expect("retry loop exhausted without setting last_err")
+            .into())
     }
 
     /// `GET /jobs/{id}`: get job status.

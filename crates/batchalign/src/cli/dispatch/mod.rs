@@ -307,6 +307,7 @@ pub async fn dispatch(
                 return dispatch_single_server(
                     &client,
                     &target,
+                    layout.state_dir(),
                     &lang,
                     num_speakers,
                     input_kind,
@@ -368,6 +369,7 @@ pub async fn dispatch(
                 return dispatch_single_server(
                     &client,
                     &target,
+                    layout.state_dir(),
                     &lang,
                     num_speakers,
                     input_kind,
@@ -405,6 +407,7 @@ pub async fn dispatch(
                 return dispatch_single_server(
                     &client,
                     &target,
+                    layout.state_dir(),
                     &lang,
                     num_speakers,
                     input_kind,

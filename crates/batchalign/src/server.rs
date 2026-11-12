@@ -245,6 +245,10 @@ pub async fn create_app_with_prepared_workers(
         workers: WorkerSubsystem { pool, capabilities },
         environment: AppEnvironment {
             config,
+            allowed_roots: backend_bootstrap.allowed_roots,
+            // Published by `serve_with_runtime`, which knows its slot.
+            same_user_key: crate::same_user_key::ServerKey::generate(),
+            same_user_nonces: crate::same_user_key::NonceStore::default(),
             media: MediaResolver::new(),
             paths: AppPaths {
                 jobs_dir,
@@ -324,6 +328,10 @@ pub async fn create_test_app_with_prepared_workers(
         workers: WorkerSubsystem { pool, capabilities },
         environment: AppEnvironment {
             config,
+            allowed_roots: backend_bootstrap.allowed_roots,
+            // Published by `serve_with_runtime`, which knows its slot.
+            same_user_key: crate::same_user_key::ServerKey::generate(),
+            same_user_nonces: crate::same_user_key::NonceStore::default(),
             media: MediaResolver::new(),
             paths: AppPaths {
                 jobs_dir,
@@ -434,7 +442,7 @@ pub async fn serve_with_runtime(
             "listener on {local_addr} reports port 0, so nothing is actually bound"
         )))
     })?;
-    info!(addr = %local_addr, requested = %port.describe(), "Server listening");
+    info!(addr = %local_addr, port = %bound_port, requested = %port.describe(), "Server listening");
 
     // Publish PID and bound port so `daemon.rs` can discover this server
     // without re-deriving the port from the request.
@@ -442,9 +450,17 @@ pub async fn serve_with_runtime(
     // Best-effort: if the write fails (e.g. read-only filesystem), log and
     // continue. The server still works; it just will not be auto-discovered.
     // Off the runtime: publishing waits for the slot's file lock.
+    // The handshake carries the bound address and this server's same-user
+    // key, published and later retired as one owner-only record.
     let state_dir = layout.state_dir().to_path_buf();
+    let keyed_state = state.clone();
     let published = match crate::blocking::spawn_in_span(move || {
-        ServerHandshake::publish_listening(&state_dir, slot, bound_port)
+        ServerHandshake::publish_listening(
+            &state_dir,
+            slot,
+            local_addr,
+            &keyed_state.environment.same_user_key,
+        )
     })
     .await
     .map_err(|error| crate::server_handshake::HandshakeError::Task(error.to_string()))
@@ -510,6 +526,7 @@ pub async fn serve_with_runtime(
             .map_err(|error| crate::server_handshake::HandshakeError::Task(error.to_string()))
             .and_then(|retired| retired);
         match retired {
+            // The key was in the record, so it is retired with it.
             Ok(Removal::Removed | Removal::Absent) => {}
             Ok(Removal::NamesAnother { pid }) => {
                 info!(

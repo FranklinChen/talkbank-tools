@@ -173,7 +173,7 @@
         ]
       },
       "ClientPath": {
-        "description": "A path on the submitting client's filesystem.\n\nThe server MUST NOT do filesystem I/O on this directly, it's metadata\nonly.  The only way to convert it to a [`ServerPath`] for I/O is via\n[`assume_shared_filesystem`](Self::assume_shared_filesystem), which\nrequires the caller to verify that the server shares the client's\nfilesystem (paths_mode with a local daemon).\n\nDeliberately does NOT implement `AsRef<Path>` to prevent accidental\nfilesystem operations.",
+        "description": "A path on the submitting client's filesystem.\n\nThe server MUST NOT do filesystem I/O on this directly, it's metadata\nonly. The only way to use it on the server is to admit it with the\nserver's [`AllowedRoots`]: for the server's own account, any absolute\npath; for anyone else, only one inside a folder the server was configured\nto let paths-mode jobs use.\n\nDeliberately does NOT implement `AsRef<Path>` to prevent accidental\nfilesystem operations.",
         "type": "string"
       },
       "ContentType": {
@@ -2304,6 +2304,36 @@
             "type": "object"
           },
           {
+            "description": "Primary morphology was declined for some utterances: each keeps the\nform it had, with no new `%mor` or `%gra`, and every other utterance is\nanalysed. A problem confined to one utterance never fails the file.",
+            "properties": {
+              "first_utterances": {
+                "description": "The first of them, in transcript order, at most\n[`FileOutputDiagnostics::FIRST_FINDINGS`], with why.",
+                "items": {
+                  "$ref": "#/components/schemas/PrimaryMorphologyDeclinedUtterance"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "enum": [
+                  "primary_morphology_incomplete"
+                ],
+                "type": "string"
+              },
+              "utterances": {
+                "description": "Number of declined utterances, at least one.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "utterances",
+              "first_utterances",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Secondary morphology retained placeholders for requested spans.",
             "properties": {
               "first_spans": {
@@ -2495,6 +2525,42 @@
             "type": "object"
           }
         ]
+      },
+      "PrimaryMorphologyDeclineCause": {
+        "description": "Why an utterance's primary morphology was declined.",
+        "enum": [
+          "no_analysis",
+          "mapping_failed",
+          "misaligned",
+          "retokenization_failed"
+        ],
+        "type": "string"
+      },
+      "PrimaryMorphologyDeclinedUtterance": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StoredUtteranceLocation",
+            "description": "Where the utterance is."
+          },
+          {
+            "properties": {
+              "cause": {
+                "$ref": "#/components/schemas/PrimaryMorphologyDeclineCause",
+                "description": "Why it was declined."
+              },
+              "detail": {
+                "description": "Bounded producer explanation.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ],
+        "description": "One utterance whose primary morphology was declined."
       },
       "ProvenanceEntry": {
         "description": "One extracted provenance entry from a CHAT file.",
@@ -3096,7 +3162,7 @@
         ]
       },
       "RepoRelativePath": {
-        "description": "A path relative to a data repo root (e.g. `\"French/Newcastle/Photos/13\"`).\n\nValid on any machine that has the repo cloned, but must be combined\nwith a server root path to produce a [`ServerPath`] for I/O.",
+        "description": "A path relative to a data repo root (e.g. `\"French/Newcastle/Photos/13\"`):\nplain folder names only, so it stays under whatever root it is joined to.\n\nBuilt only by [`RepoRelativePath::new`] (the wire too, through\n`try_from`), which refuses an absolute path, a drive prefix, a leading\n`.` and any `..`, and keeps the normalized form: joined to a root, an\nabsolute path replaces the root and `..` climbs out of it. Empty is the root itself. Valid on any machine that has the repo\ncloned, but must be combined with a server root path to produce a\n[`ServerPath`] for I/O.",
         "type": "string"
       },
       "ResultContent": {
@@ -3565,6 +3631,12 @@
                   "requested"
                 ],
                 "type": "string"
+              },
+              "refused": {
+                "description": "Requests whose answer was refused (a timing outside the request\nwindow, or timings for another number of words), so only their\nwords were left untimed. Absent from records written before\nsuch answers were kept: then a refused answer failed the file\nand left no record, so zero is what those records mean.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
               },
               "unaligned": {
                 "description": "Requests left unaligned: no worker evidence was obtained.",

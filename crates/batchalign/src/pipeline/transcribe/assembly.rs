@@ -46,7 +46,7 @@ pub(super) async fn stage_build_chat<'a, P: TranscribePlan>(
 
     let transcript = build_chat::NamedAsrUtterances::numbered(utterances).into_transcript(
         &langs,
-        ctx.opts.media_name.as_deref(),
+        ctx.opts.media_name.clone(),
         ctx.opts.write_wor,
     )?;
 

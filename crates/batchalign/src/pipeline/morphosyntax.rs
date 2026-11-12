@@ -77,7 +77,7 @@ pub(crate) enum LocalizedMorphosyntax {
     /// Analyzed everywhere but at the held-out utterances, and judged afresh
     /// (still diagnosed for them, or admitted if the analysis happened to
     /// remove the findings' cause).
-    Analyzed(MorphosyntaxOutput<crate::pipeline::post_validate::ProducedOutput>),
+    Analyzed(Box<MorphosyntaxOutput<crate::pipeline::post_validate::ProducedOutput>>),
 }
 
 /// Morphosyntax on a generated transcript whose findings are confined to some
@@ -96,9 +96,9 @@ pub(crate) async fn run_localized_morphosyntax(
         &services.pool.stanza_registry(),
     )? {
         LocalizedParse::Declined(diagnosed) => Ok(LocalizedMorphosyntax::Declined(diagnosed)),
-        LocalizedParse::Analyze(parsed) => Ok(LocalizedMorphosyntax::Analyzed(
+        LocalizedParse::Analyze(parsed) => Ok(LocalizedMorphosyntax::Analyzed(Box::new(
             analyze_in_scope(*parsed, &options).await?,
-        )),
+        ))),
     }
 }
 

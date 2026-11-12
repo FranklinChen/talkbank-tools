@@ -11,7 +11,7 @@ use super::Submitter;
 
 use super::Job;
 use super::types::{
-    PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
+    JobInputs, PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
     RunnerJobSnapshot,
 };
 
@@ -55,10 +55,10 @@ pub(crate) enum Stop {
 
 impl Stop {
     /// The status the stop writes.
-    pub(crate) fn status(self) -> crate::api::JobStatus {
+    pub(crate) fn status(self) -> crate::api::FinishedStatus {
         match self {
-            Self::Interrupted => crate::api::JobStatus::Interrupted,
-            Self::Cancelled => crate::api::JobStatus::Cancelled,
+            Self::Interrupted => crate::api::FinishedStatus::Interrupted,
+            Self::Cancelled => crate::api::FinishedStatus::Cancelled,
         }
     }
 }
@@ -137,7 +137,7 @@ impl JobStatusColumns {
     /// left queued or running.
     pub(crate) fn stopped(self, stop: Stop, at: crate::api::MachineTime) -> Self {
         Self {
-            status: stop.status(),
+            status: stop.status().into(),
             completed_at: Some(at),
             next_eligible_at: None,
             ..self
@@ -149,7 +149,7 @@ impl Job {
     /// The job's status columns as they are now.
     pub(crate) fn status_columns(&self) -> JobStatusColumns {
         JobStatusColumns {
-            status: self.execution.status,
+            status: self.status(),
             error: self.execution.error.clone(),
             completed_at: self.schedule.completed_at,
             num_workers: self.schedule.num_workers,
@@ -164,7 +164,7 @@ impl Job {
 
     /// Return the total number of logical files in the job.
     pub fn total_files(&self) -> usize {
-        self.filesystem.filenames.len()
+        self.inputs().len()
     }
 
     /// How long the job took from submission to completion; absent while it
@@ -205,7 +205,7 @@ impl Job {
 
         JobInfo {
             job_id: self.identity.job_id.clone(),
-            status: self.execution.status,
+            status: self.status(),
             command: self.dispatch.command,
             options: self.dispatch.options.clone(),
             lang: self.dispatch.lang.clone(),
@@ -255,7 +255,7 @@ impl Job {
 
         JobListItem {
             job_id: self.identity.job_id.clone(),
-            status: self.execution.status,
+            status: self.status(),
             command: self.dispatch.command,
             lang: self.dispatch.lang.clone(),
             source_dir: self.source.source_dir.as_str().to_owned(),
@@ -276,35 +276,29 @@ impl Job {
         }
     }
 
-    /// Return the files that have not yet reached a terminal state.
-    pub fn pending_files(&self) -> Vec<PendingJobFile> {
-        self.filesystem
-            .filenames
-            .iter()
-            .enumerate()
-            .zip(self.filesystem.has_chat.iter().copied())
-            .filter_map(|((file_index, filename), has_chat)| {
-                let already_done = self
+    /// The files that have not yet reached a terminal state, from the job's
+    /// admitted inputs: `None` when this process has not admitted them.
+    pub fn pending_files(&self) -> Option<Vec<PendingJobFile>> {
+        Some(self.pending_files_of(self.admitted_inputs()?))
+    }
+
+    fn pending_files_of(&self, inputs: &JobInputs) -> Vec<PendingJobFile> {
+        inputs
+            .entries(|display| {
+                !self
                     .execution
                     .file_statuses
-                    .get(&**filename)
-                    .is_some_and(|status| status.status().is_terminal());
-                if already_done {
-                    None
-                } else {
-                    Some(PendingJobFile {
-                        file_index,
-                        filename: filename.clone(),
-                        has_chat,
-                    })
-                }
+                    .get(&**display)
+                    .is_some_and(|status| status.status().is_terminal())
             })
             .collect()
     }
 
-    /// Create the immutable runner-facing snapshot for this job.
-    pub fn to_runner_snapshot(&self) -> RunnerJobSnapshot {
-        RunnerJobSnapshot {
+    /// Create the immutable runner-facing snapshot for this job: `None` when
+    /// this process has not admitted its inputs, so it cannot run.
+    pub fn to_runner_snapshot(&self) -> Option<RunnerJobSnapshot> {
+        let inputs = self.admitted_inputs()?;
+        Some(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: self.identity.job_id.clone(),
                 correlation_id: self.identity.correlation_id.clone(),
@@ -318,17 +312,14 @@ impl Job {
                 debug_traces: self.dispatch.debug_traces,
             },
             filesystem: RunnerFilesystemConfig {
-                paths_mode: self.filesystem.paths_mode,
-                source_paths: self.filesystem.source_paths.clone(),
-                output_paths: self.filesystem.output_paths.clone(),
-                before_paths: self.filesystem.before_paths.clone(),
+                inputs: inputs.clone(),
                 staging_dir: self.filesystem.staging_dir.clone(),
                 media_mapping: self.filesystem.media_mapping.clone(),
                 media_subdir: self.filesystem.media_subdir.clone(),
                 source_dir: self.source.source_dir.clone(),
             },
             cancel_token: self.runtime.cancel_token.clone(),
-            pending_files: self.pending_files(),
-        }
+            pending_files: self.pending_files_of(inputs),
+        })
     }
 }

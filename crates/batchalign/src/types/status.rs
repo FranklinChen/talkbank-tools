@@ -47,105 +47,90 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
-    /// A terminal job will never change status again.
+    /// Which kind of status this is: the one classification of
+    /// [`JobStatus`], matched exhaustively, that every predicate below and
+    /// the job lifecycle's typed transitions are defined from.
+    pub fn kind(self) -> StatusKind {
+        match self {
+            Self::Queued => StatusKind::Active(ActiveStatus::Queued),
+            Self::Running => StatusKind::Active(ActiveStatus::Running),
+            Self::Completed => StatusKind::Finished(FinishedStatus::Completed),
+            Self::Failed => StatusKind::Finished(FinishedStatus::Failed),
+            Self::Cancelled => StatusKind::Finished(FinishedStatus::Cancelled),
+            Self::Interrupted => StatusKind::Finished(FinishedStatus::Interrupted),
+            Self::WritebackFailed => StatusKind::Finished(FinishedStatus::WritebackFailed),
+        }
+    }
+
+    /// A terminal job is finished: nothing runs it until a restart or
+    /// startup recovery queues it again.
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed
-                | Self::Failed
-                | Self::Cancelled
-                | Self::Interrupted
-                | Self::WritebackFailed
-        )
+        matches!(self.kind(), StatusKind::Finished(_))
     }
 
     /// An active job is either waiting or currently running.
     pub fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
+        matches!(self.kind(), StatusKind::Active(_))
     }
 
     /// A job can be cancelled if it is still active.
     pub fn can_cancel(self) -> bool {
         self.is_active()
     }
+}
 
-    /// Whether startup recovery should reconcile a job left in this state.
-    ///
-    /// `Running` counts as well as `Interrupted`: the state diagram's
-    /// `Running -> Interrupted -> Queued` is the CLEAN shutdown path, where
-    /// `interrupt_for_shutdown` gets to run. A hard crash never reaches it, so
-    /// the row is still `Running` when recovery finds it. Shared with the
-    /// recovery scan so the two cannot drift.
-    pub fn is_recoverable(self) -> bool {
-        matches!(self, Self::Running | Self::Interrupted)
-    }
+/// A [`JobStatus`] split into the two kinds of state a job can be in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// Queued or running.
+    Active(ActiveStatus),
+    /// Anything else: nothing runs the job.
+    Finished(FinishedStatus),
+}
 
-    /// Only cancelled, failed, or writeback-failed jobs can be restarted.
-    pub fn can_restart(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Failed | Self::WritebackFailed)
-    }
+/// A status in which a job runs, or is waiting to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveStatus {
+    /// Waiting for a runner.
+    Queued,
+    /// A runner holds it.
+    Running,
+}
 
-    /// Whether this job may move to `next` for the given reason.
-    ///
-    /// The authority for the machine drawn in
-    /// `book/src/batchalign/architecture/job-state-machine.md`. Every status
-    /// write goes through `Job::set_status`, which consults this; before
-    /// 2026-07-29 legality lived in whichever caller happened to check, and
-    /// four writers checked nothing.
-    ///
-    /// The reason is part of the question, not decoration: `Cancelled ->
-    /// Queued` is legal as an operator [`StatusChange::Restart`] and illegal
-    /// as a [`StatusChange::MemoryRequeue`], and a plain from/to table cannot
-    /// tell those apart. Conflating them is what let the memory gate
-    /// resurrect a cancelled job.
-    pub fn can_transition_to(self, next: Self, reason: StatusChange) -> bool {
-        match reason {
-            // A worker picked the job up. Only from the queue.
-            StatusChange::Dispatch => self == Self::Queued && next == Self::Running,
-            // The memory gate rejected an ACTIVE job; park it. A job that has
-            // left the active set (cancelled while waiting) stays gone.
-            StatusChange::MemoryRequeue => self.is_active() && next == Self::Queued,
-            // User cancel, or shutdown interrupting whatever was live.
-            //
-            // Deliberately narrower than `Finalize`, which would also permit
-            // these: keeping it separate means a cancel path can never write
-            // `Completed` or `Failed` by passing the wrong target.
-            StatusChange::Interrupt => {
-                self.can_cancel() && matches!(next, Self::Cancelled | Self::Interrupted)
-            }
-            // The job reached a terminal state under its own power.
-            StatusChange::Finalize => self.is_active() && next.is_terminal(),
-            // Operator restart, only from the restartable terminals.
-            StatusChange::Restart => self.can_restart() && next == Self::Queued,
-            // Startup reconciliation of a job left mid-flight; see
-            // [`JobStatus::is_recoverable`].
-            StatusChange::Reconcile => {
-                self.is_recoverable()
-                    && matches!(next, Self::Queued | Self::Failed | Self::Completed)
-            }
+/// A status in which nothing runs the job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishedStatus {
+    /// Every file ended, none failed.
+    Completed,
+    /// It failed, or a file did.
+    Failed,
+    /// A user stopped it.
+    Cancelled,
+    /// The server stopped while it ran; startup recovery resumes it.
+    Interrupted,
+    /// Its outputs could not be written back.
+    WritebackFailed,
+}
+
+impl From<ActiveStatus> for JobStatus {
+    fn from(status: ActiveStatus) -> Self {
+        match status {
+            ActiveStatus::Queued => Self::Queued,
+            ActiveStatus::Running => Self::Running,
         }
     }
 }
 
-/// Why a job's status is changing.
-///
-/// Names the EVENT rather than the target state, because the same from/to pair
-/// can be legal or illegal depending on what caused it (see
-/// [`JobStatus::can_transition_to`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusChange {
-    /// A worker was checked out and the job began running.
-    Dispatch,
-    /// The host memory gate refused the job; return it to the queue.
-    MemoryRequeue,
-    /// A user cancelled, or shutdown interrupted an active job.
-    Interrupt,
-    /// All file work stopped; record the outcome.
-    Finalize,
-    /// An operator restarted a terminal job.
-    Restart,
-    /// Startup recovery reconciled a job left `Interrupted` by a crash.
-    Reconcile,
+impl From<FinishedStatus> for JobStatus {
+    fn from(status: FinishedStatus) -> Self {
+        match status {
+            FinishedStatus::Completed => Self::Completed,
+            FinishedStatus::Failed => Self::Failed,
+            FinishedStatus::Cancelled => Self::Cancelled,
+            FinishedStatus::Interrupted => Self::Interrupted,
+            FinishedStatus::WritebackFailed => Self::WritebackFailed,
+        }
+    }
 }
 
 impl std::fmt::Display for JobStatus {
@@ -385,66 +370,5 @@ impl FileProgressStage {
             Self::PreparingWorker => "Preparing worker",
             Self::DownloadingModel => "Downloading model",
         }
-    }
-}
-
-#[cfg(test)]
-mod transition_tests {
-    use super::{JobStatus, StatusChange};
-
-    /// The pair that forced the table to be keyed by cause rather than by
-    /// from/to alone. Both are `Cancelled -> Queued`.
-    #[test]
-    fn cancelled_to_queued_is_legal_only_as_a_restart() {
-        assert!(
-            JobStatus::Cancelled.can_transition_to(JobStatus::Queued, StatusChange::Restart),
-            "an operator may restart a cancelled job"
-        );
-        assert!(
-            !JobStatus::Cancelled.can_transition_to(JobStatus::Queued, StatusChange::MemoryRequeue),
-            "the memory gate must never return a cancelled job to the active set"
-        );
-    }
-
-    /// The originally-reported bug: a job cancelled while queued, then picked
-    /// up by a runner.
-    #[test]
-    fn a_cancelled_job_cannot_be_dispatched() {
-        assert!(
-            !JobStatus::Cancelled.can_transition_to(JobStatus::Running, StatusChange::Dispatch)
-        );
-        assert!(JobStatus::Queued.can_transition_to(JobStatus::Running, StatusChange::Dispatch));
-        assert!(
-            !JobStatus::Running.can_transition_to(JobStatus::Running, StatusChange::Dispatch),
-            "dispatch starts from the queue, not from Running"
-        );
-    }
-
-    /// A late dispatch error must not overwrite the user's outcome.
-    #[test]
-    fn a_terminal_job_cannot_be_failed_again() {
-        assert!(!JobStatus::Cancelled.can_transition_to(JobStatus::Failed, StatusChange::Finalize));
-        assert!(!JobStatus::Completed.can_transition_to(JobStatus::Failed, StatusChange::Finalize));
-        assert!(JobStatus::Running.can_transition_to(JobStatus::Failed, StatusChange::Finalize));
-    }
-
-    /// A finished job is not restartable. The positive cases are covered by
-    /// `can_restart` itself and by `cancelled_to_queued_is_legal_only_as_a_restart`.
-    #[test]
-    fn completed_jobs_are_not_restartable() {
-        assert!(!JobStatus::Completed.can_transition_to(JobStatus::Queued, StatusChange::Restart));
-    }
-
-    /// Recovery reconciles a hard crash (still `Running`) as well as a clean
-    /// shutdown (`Interrupted`).
-    #[test]
-    fn reconcile_accepts_both_crash_and_clean_shutdown() {
-        for from in [JobStatus::Running, JobStatus::Interrupted] {
-            assert!(from.can_transition_to(JobStatus::Queued, StatusChange::Reconcile));
-        }
-        assert!(
-            !JobStatus::Completed.can_transition_to(JobStatus::Queued, StatusChange::Reconcile),
-            "a finished job is not mid-flight and must not be reconciled"
-        );
     }
 }

@@ -41,8 +41,11 @@
 //! ledger/unit pair, ordinal lookup, or duplicate insertion is available.
 
 mod replies;
+mod resolution;
 pub(in crate::fa) use replies::ReplyTicket;
+pub(in crate::fa) use replies::UnitResolution;
 use replies::{ReplyProgress, ReplySlot};
+pub(in crate::fa) use resolution::UnitAnswer;
 
 mod inference;
 use inference::RetainUnitResults;
@@ -418,27 +421,6 @@ impl<'g> DispatchPlan<'g> {
     }
 }
 
-/// One unit's resolved timings and where they came from.
-#[derive(Debug, Clone)]
-pub(super) struct UnitResolution {
-    timings: Vec<Option<WordTiming>>,
-    source: FaEvidenceSourceTrace,
-}
-
-impl UnitResolution {
-    /// Consume admitted cache evidence without exposing a constructor for
-    /// arbitrary timing arrays paired with cache-admission provenance.
-    pub(super) fn into_supplied_retry(
-        self,
-        key: &str,
-    ) -> crate::chat_ops::fa::supplied_retry::SuppliedRetryAnswer {
-        crate::chat_ops::fa::supplied_retry::SuppliedRetryAnswer::Timings {
-            timings: self.timings,
-            source: format!("cache key {key}; {:?}", self.source),
-        }
-    }
-}
-
 /// How one group is being resolved, in the group's own shape.
 enum GroupResolution<'p, 'g> {
     /// Reused whole from `%wor`: no request is awaited.
@@ -569,7 +551,7 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                                     PlannedPart::Request(_) => None,
                                     PlannedPart::Unavailable(piece) => Some(unrequested_trace(
                                         piece,
-                                        FaEvidenceSourceTrace::WorReuse,
+                                        crate::types::traces::UnrequestedRangeSource::WorReuse,
                                     )),
                                 })
                                 .collect(),
@@ -583,8 +565,8 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                         missing.push(unit.ordinal);
                         continue;
                     };
-                    let span = single_span(unit, answer.source);
-                    (answered(unit, answer, context)?, span)
+                    let (timings, source) = owned_timings(unit, answer);
+                    (timings, single_span(unit, source))
                 }
                 GroupResolution::Pieces(pieces) => {
                     let mut timings = Vec::new();
@@ -597,7 +579,7 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                                 timings.extend(std::iter::repeat_n(None, piece.words().len()));
                                 unrequested.push(unrequested_trace(
                                     piece,
-                                    FaEvidenceSourceTrace::Unaligned,
+                                    crate::types::traces::UnrequestedRangeSource::Unaligned,
                                 ));
                             }
                             PartResolution::Request { slot, piece } => {
@@ -605,8 +587,9 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                                 match answer {
                                     None => missing.push(unit.ordinal),
                                     Some(answer) => {
-                                        traces.push(piece_trace(piece, answer.source));
-                                        timings.extend(answered(unit, answer, context)?);
+                                        let (owned, source) = owned_timings(unit, answer);
+                                        traces.push(piece_trace(piece, source));
+                                        timings.extend(owned);
                                     }
                                 }
                             }
@@ -643,49 +626,27 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
     }
 }
 
-/// A request's timings, refused when they do not answer for exactly its
-/// words.
-fn answered(
+/// The timings a resolution contributes to its group: all of a whole
+/// group's, or only a piece's owned words (its borrowed context words are
+/// another piece's). The resolution was bound to this request when it was
+/// made, so there is nothing left to refuse.
+fn owned_timings(
     unit: &DispatchUnit<'_>,
     answer: UnitResolution,
-    context: &str,
-) -> Result<Vec<Option<WordTiming>>, ServerError> {
-    match answer.timings.len() == unit.words().len() {
-        true => {
-            let timings = answer
-                .timings
+) -> (Vec<Option<WordTiming>>, FaEvidenceSourceTrace) {
+    let (timings, source) = answer.into_parts();
+    let owned = match unit.request {
+        UnitRequest::Whole(_) => timings,
+        UnitRequest::Piece(piece) => {
+            let owned = piece.owned_range();
+            timings
                 .into_iter()
-                .map(|timing| {
-                    let Some(timing) = timing else { return Ok(None) };
-                    timing.bind_request(unit.window()).map(Some).map_err(|refused| {
-                        ServerError::Validation(format!(
-                            "{context}: request {} of group {} returned timing {}..{} outside {}..{}",
-                            unit.ordinal, unit.group, refused.start_ms, refused.end_ms,
-                            unit.window().audio_start().get(), unit.window().end().get(),
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(match unit.request {
-                UnitRequest::Whole(_) => timings,
-                UnitRequest::Piece(piece) => {
-                    let owned = piece.owned_range();
-                    timings
-                        .into_iter()
-                        .skip(owned.start)
-                        .take(owned.len())
-                        .collect()
-                }
-            })
+                .skip(owned.start)
+                .take(owned.len())
+                .collect()
         }
-        false => Err(ServerError::Validation(format!(
-            "{context}: request {} of group {} answered for {} words, not its {}",
-            unit.ordinal,
-            unit.group,
-            answer.timings.len(),
-            unit.words().len()
-        ))),
-    }
+    };
+    (owned, source)
 }
 
 /// A single group's evidence span.
@@ -721,7 +682,7 @@ fn piece_trace(piece: &PlannedPiece<'_>, source: FaEvidenceSourceTrace) -> FaPie
 
 fn unrequested_trace(
     piece: &Unrequested<'_>,
-    source: FaEvidenceSourceTrace,
+    source: crate::types::traces::UnrequestedRangeSource,
 ) -> crate::types::traces::FaUnrequestedPieceTrace {
     crate::types::traces::FaUnrequestedPieceTrace {
         first_word: piece.first_word().raw(),
@@ -954,7 +915,11 @@ pub(super) async fn resolve_group_timings<'a>(
             }
         };
         match answer {
-            Some(answer) => reply.cached(answer)?,
+            Some(answer) => match reply.cached(answer)? {
+                replies::CacheDelivery::Delivered => {}
+                // Corrupt evidence for this request: aligned again.
+                replies::CacheDelivery::Refused(reply) => misses.push(reply),
+            },
             None => misses.push(reply),
         }
     }
@@ -1088,8 +1053,20 @@ mod tests {
         WordTiming::fixture(start, end)
     }
 
-    fn answer(timings: Vec<Option<WordTiming>>, source: FaEvidenceSourceTrace) -> UnitResolution {
-        UnitResolution { timings, source }
+    /// A fixture answer, offered the way the cache tier offers one: the
+    /// ticket binds it to its own request.
+    fn deliver(
+        ticket: ReplyTicket<'_>,
+        timings: Vec<Option<WordTiming>>,
+        source: FaEvidenceSourceTrace,
+    ) {
+        match ticket
+            .cached(UnitAnswer::new(timings, source))
+            .expect("receiving ledger remains owned")
+        {
+            replies::CacheDelivery::Delivered => {}
+            replies::CacheDelivery::Refused(_) => panic!("fixture answers its request"),
+        }
     }
 
     fn bound_timing(unit: &DispatchUnit<'_>, start: u64, end: u64) -> Option<WordTiming> {
@@ -1193,11 +1170,13 @@ mod tests {
             ),
         ];
         for (index, timings, source) in replies {
-            tickets
-                .remove(&index)
-                .expect("one completion right per request")
-                .cached(answer(timings, source))
-                .expect("receiving ledger remains owned");
+            deliver(
+                tickets
+                    .remove(&index)
+                    .expect("one completion right per request"),
+                timings,
+                source,
+            );
         }
 
         assert_eq!((progress.completed(), progress.total()), (4, 4));
@@ -1269,9 +1248,7 @@ mod tests {
                 drop(reply); // An actual abandoned response, not a foreign or duplicate write.
             } else {
                 let timings = vec![None; reply.unit().words().len()];
-                reply
-                    .cached(answer(timings, FaEvidenceSourceTrace::Unaligned))
-                    .expect("receiving ledger remains owned");
+                deliver(reply, timings, FaEvidenceSourceTrace::Unaligned);
             }
         }
         let error = ledger
@@ -1284,41 +1261,40 @@ mod tests {
         );
     }
 
-    /// A piece answering for the wrong number of words is refused: the
-    /// injection cursor would otherwise drift.
+    /// Binding is the one boundary every answer crosses (worker JSON,
+    /// replayed raw evidence, the derived cache), so its refusals are
+    /// asserted here; nothing downstream can receive an unbound answer.
     #[test]
-    fn assemble_refuses_a_piece_answering_for_other_words() {
-        let groups = vec![anchored_group()];
-        let plan = plan_for(&groups);
-        let OpenedLedger {
-            ledger, replies, ..
-        } = UnitLedger::open(&plan, |_| None);
-        for reply in replies {
-            reply
-                .cached(answer(vec![None], FaEvidenceSourceTrace::Cache))
-                .expect("receiving ledger remains owned");
-        }
-        let error = ledger
-            .assemble("test")
-            .expect_err("pieces 0 and 1 hold two words each");
-        assert!(
-            error
-                .to_string()
-                .contains("answered for 1 words, not its 2")
-        );
-    }
-
-    #[test]
-    fn assemble_refuses_a_measured_reply_outside_its_request() {
+    fn binding_admits_only_an_answer_for_exactly_its_request() {
         let groups = vec![anchored_group()];
         let plan = plan_for(&groups);
         let unit = plan.units().next().unwrap();
-        let end = unit.window().end().get();
-        let mut reply = vec![None; unit.words().len()];
-        reply[0] = timing(end - 10, end + 10);
-        let error = answered(unit, answer(reply, FaEvidenceSourceTrace::Cache), "test")
-            .expect_err("cache admission cannot grant timing outside the request");
-        assert!(error.to_string().contains("outside 0..13000"));
+        let (start, end) = (unit.window().audio_start().get(), unit.window().end().get());
+        let words = unit.words().len();
+        let bind = |timings| resolution::bind_timings(unit.input(), timings);
+
+        let mut inside = vec![None; words];
+        inside[0] = timing(start, end);
+        bind(inside).expect("an answer for its request");
+
+        assert_eq!(
+            bind(vec![None; words - 1]).unwrap_err(),
+            resolution::ReplyRefusal::WordCount {
+                answered: words - 1,
+                expected: words
+            }
+        );
+        let mut outside = vec![None; words];
+        outside[0] = timing(end - 10, end + 10);
+        assert_eq!(
+            bind(outside).unwrap_err(),
+            resolution::ReplyRefusal::OutsideWindow {
+                start_ms: end - 10,
+                end_ms: end + 10,
+                window_start_ms: start,
+                window_end_ms: end,
+            }
+        );
     }
 
     /// A group reused from `%wor` takes its timings whole, records every one
@@ -1376,22 +1352,16 @@ mod tests {
             ..
         } = UnitLedger::open(&plan, |_| None);
         assert_eq!(replies.len(), 2);
-        replies
-            .pop()
-            .unwrap()
-            .cached(answer(
-                vec![timing(31_000, 32_000), timing(33_000, 34_000)],
-                FaEvidenceSourceTrace::Cache,
-            ))
-            .expect("suffix reply");
-        replies
-            .pop()
-            .unwrap()
-            .cached(answer(
-                vec![timing(100, 200), timing(300, 400)],
-                FaEvidenceSourceTrace::Cache,
-            ))
-            .expect("prefix reply");
+        deliver(
+            replies.pop().unwrap(),
+            vec![timing(31_000, 32_000), timing(33_000, 34_000)],
+            FaEvidenceSourceTrace::Cache,
+        );
+        deliver(
+            replies.pop().unwrap(),
+            vec![timing(100, 200), timing(300, 400)],
+            FaEvidenceSourceTrace::Cache,
+        );
         let (timings, evidence) =
             split_parts(ledger.assemble("partial").expect("all requests answered"));
         assert_eq!(
@@ -1438,10 +1408,10 @@ mod tests {
         let FaGroupSpanTrace::Anchored { unrequested, .. } = &evidence[0].group.span else {
             panic!("anchored")
         };
-        assert!(matches!(
+        assert_eq!(
             unrequested[0].source,
-            FaEvidenceSourceTrace::WorReuse
-        ));
+            crate::types::traces::UnrequestedRangeSource::WorReuse
+        );
     }
 
     #[test]

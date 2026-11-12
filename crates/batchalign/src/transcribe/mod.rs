@@ -764,7 +764,13 @@ mod tests {
         let utterances = asr_postprocess::process_raw_asr(&asr_output, response.lang.as_ref())
             .expect("test: ASR post-processing must not refuse this input");
         let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
-            .into_transcript(&[response.lang.to_string()], media_name, false)
+            .into_transcript(
+                &[response.lang.to_string()],
+                media_name.map(|name| {
+                    talkbank_model::model::MediaFilename::parse(name).expect("fixture media name")
+                }),
+                false,
+            )
             .expect("test: transcript_from_asr_utterances should succeed")
             .description;
         let chat_file = build_chat::build_chat(desc)
@@ -778,7 +784,8 @@ mod tests {
     #[test]
     fn canned_revai_response_produces_multi_speaker_chat() {
         let response = canned_revai_two_speaker_response();
-        let chat = run_canned_response_to_chat(&response, Some("interview.mp3"));
+        // The stem, as the media input step derives it from `interview.mp3`.
+        let chat = run_canned_response_to_chat(&response, Some("interview"));
 
         // Must have 2 @Participants entries (PAR0 + PAR1, generic numbered codes)
         let participants_line = chat
@@ -815,7 +822,7 @@ mod tests {
         // @Media header
         assert!(
             chat.contains("@Media:\tinterview, audio"),
-            "expected @Media header with stripped extension"
+            "expected the @Media header to name the media"
         );
 
         // Must reparse cleanly
@@ -1021,7 +1028,14 @@ mod tests {
         let utterances = asr_postprocess::process_raw_asr(&asr_output, response.lang.as_ref())
             .expect("post-processing");
         let desc = build_chat::NamedAsrUtterances::numbered(&utterances)
-            .into_transcript(&[response.lang.to_string()], Some("test.mp3"), false)
+            .into_transcript(
+                &[response.lang.to_string()],
+                Some(
+                    talkbank_model::model::MediaFilename::parse("test")
+                        .expect("fixture media name"),
+                ),
+                false,
+            )
             .expect("transcript")
             .description;
         let chat_file = build_chat::build_chat(desc)

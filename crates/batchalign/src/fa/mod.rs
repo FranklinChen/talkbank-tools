@@ -399,7 +399,9 @@ enum FaDerivedEvidenceError {
     WordCardinality { expected: usize, actual: usize },
 }
 
-/// Cached timings proven to correspond one-to-one with a current FA group.
+/// Cached timings whose envelope names the current request: engine, worker
+/// version, cache key and word count. The timings themselves are proven
+/// against the request when its holder binds it (`units/resolution.rs`).
 #[derive(Debug)]
 struct AdmittedCachedFaTimings(Vec<Option<WordTiming>>);
 
@@ -462,12 +464,8 @@ impl AdmittedCachedFaTimings {
                 current: expected_words,
             });
         }
-        if cached.timings.len() != expected_words {
-            return Err(FaDerivedEvidenceError::WordCardinality {
-                expected: expected_words,
-                actual: cached.timings.len(),
-            });
-        }
+        // That the timings answer for exactly the request's words, each
+        // inside its window, is proven once, when the answer is bound to it.
         Ok(Self(cached.timings))
     }
 

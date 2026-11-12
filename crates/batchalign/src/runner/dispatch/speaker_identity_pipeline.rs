@@ -233,7 +233,7 @@ pub(crate) async fn dispatch_speaker_identity(
         let route = route.clone();
         let options = options.clone();
         let file = file.clone();
-        let filename = file.filename.clone();
+        let filename = file.filename().clone();
 
         tasks.push(spawn_supervised_file_task(
             filename,
@@ -262,28 +262,14 @@ async fn process_one_file(
     options: crate::options::SpeakerIdentifyOptions,
     file: &crate::store::PendingJobFile,
 ) -> FileTaskOutcome {
-    let filename = file.filename.as_ref();
-    let file_index = file.file_index;
+    let filename = file.filename().as_ref();
     let lifecycle = FileRunTracker::new(sink.as_ref(), filename);
 
     lifecycle
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::Reading)
         .await;
 
-    let read_path: PathBuf =
-        if job.filesystem.paths_mode && file_index < job.filesystem.source_paths.len() {
-            job.filesystem.source_paths[file_index]
-                .assume_shared_filesystem()
-                .as_path()
-                .to_owned()
-        } else {
-            job.filesystem
-                .staging_dir
-                .join("input")
-                .join(filename)
-                .as_path()
-                .to_owned()
-        };
+    let read_path = file.input_path(&job.filesystem.staging_dir);
 
     let chat_text = match tokio::fs::read_to_string(&read_path).await {
         Ok(content) => content,

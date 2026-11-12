@@ -655,7 +655,7 @@ mod abbreviation_tests {
             &utterances,
             &["PAR".to_string()],
             &["eng".to_string()],
-            Some("clip"),
+            Some(talkbank_model::model::MediaFilename::parse("clip").expect("fixture media name")),
             true,
         )
         .expect("the transcript description builds")
