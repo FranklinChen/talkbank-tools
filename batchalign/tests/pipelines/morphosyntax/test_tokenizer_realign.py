@@ -16,6 +16,7 @@ import pytest
 
 from batchalign.inference._domain_types import StanzaCode
 from batchalign.inference._tokenizer_realign import (
+    RealignRefused,
     TokenizerContext,
     _conform,
     _realign_sentence,
@@ -169,12 +170,14 @@ class TestRealignSentenceMwtTuples:
     def test_character_mismatch_refuses_unbound_native_tokens(self) -> None:
         tokens = ["totally", "different"]
         words = ["something", "else"]
-        with pytest.raises(ValueError, match="does not fit"):
-            _realign_sentence(tokens, words, EN)
+        result = _realign_sentence(tokens, words, EN)
+        assert isinstance(result, RealignRefused)
+        assert "does not fit" in result.reason
 
     def test_native_token_cannot_cross_word_boundary(self) -> None:
-        with pytest.raises(ValueError, match="does not fit"):
-            _realign_sentence(["foobar"], ["foo", "bar"], EN)
+        result = _realign_sentence(["foobar"], ["foo", "bar"], EN)
+        assert isinstance(result, RealignRefused)
+        assert "does not fit" in result.reason
 
     def test_embedded_space_fragments_preserve_later_native_hint(self) -> None:
         result = _realign_sentence(
@@ -207,6 +210,23 @@ class TestMakeTokenizerPostprocessor:
         batch = [["l", "'"]]
         result = pp(batch)  # type: ignore[operator]
         assert result[0][0] == ("l'", False)
+
+    def test_one_unbindable_sentence_is_refused_alone(self) -> None:
+        """A sentence whose tokens cannot be bound to its words keeps Stanza's
+        own tokens and is recorded as refused; the other sentences are
+        realigned. It used to raise out of the whole group's Stanza call."""
+        ctx = TokenizerContext(StanzaCode("en"))
+        ctx.original_words = [["don't"], ["cat"], ["ice-cream"]]
+        pp = make_tokenizer_postprocessor(ctx)
+        batch = [["don", "'t"], ["dog"], ["ice", "-", "cream"]]
+        result = pp(batch)  # type: ignore[operator]
+        assert result[0] == [("don't", True)]
+        assert result[1] == ["dog"], "the refused sentence keeps Stanza's tokens"
+        assert result[2] == [("ice-cream", False)]
+        assert list(ctx.refusals) == [1]
+        assert isinstance(ctx.refusals[1], RealignRefused)
+        ctx.original_words = [["cat"]]
+        assert ctx.refusals == {}, "a new call starts with no refusals"
 
     def test_empty_context_returns_batch_unchanged(self) -> None:
         ctx = TokenizerContext(StanzaCode("en"))

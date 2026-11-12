@@ -110,3 +110,47 @@ fn untimed_word_with_inherited_bullet_gets_no_wor_tier() {
         "a bullet with zero timed words must get no %wor tier"
     );
 }
+
+/// An utterance that already carries a TIMED `%wor`, sent to the aligner
+/// (as a drifted `%wor` is), which returns no timing for it. The gate used to
+/// pass on the old `%wor`'s timing while the writer built the new tier from
+/// the untimed main tier, so a timed `%wor` was replaced by an untimed one
+/// (2026-11-12 review). The tier is now its own proof: none is written, and
+/// the old one, which no longer describes this run's timing, is removed.
+#[test]
+fn an_old_timed_wor_never_becomes_an_untimed_one() {
+    let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|x|CHI|||||Child|||\n*CHI:\thello . \u{15}29500_30980\u{15}\n%wor:\thello \u{15}29500_30000\u{15} .\n@End\n";
+    let mut chat = parse_chat(input);
+    assert!(
+        get_test_utterance(&mut chat, 0).wor_tier().is_some(),
+        "precondition: the input carries a timed %wor"
+    );
+
+    let groups = vec![FaGroup::test_fixture(
+        TimeSpan::new(0, 40_000),
+        vec![FaWord {
+            utterance_index: UtteranceIdx::new(0),
+            utterance_word_index: WordIdx::new(0),
+            text: "hello".into(),
+        }],
+        vec![UtteranceIdx::new(0)],
+    )];
+    let responses = vec![vec![None]];
+
+    let _finalized = apply_fa_results(
+        &mut chat,
+        &groups,
+        &responses,
+        WordEndPolicy::measured(WordGapHealing::PreserveMeasured),
+        true,
+    )
+    .then_finalize(&mut chat, BulletRepairPolicy::Disabled)
+    .expect("finalization under the default policy holds");
+
+    let utt0 = get_test_utterance(&mut chat, 0);
+    assert!(
+        utt0.wor_tier().is_none(),
+        "no untimed %wor replaces the timed one: {:?}",
+        utt0.wor_tier()
+    );
+}

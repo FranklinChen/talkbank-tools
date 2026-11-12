@@ -338,7 +338,7 @@ pub(crate) async fn process_morphosyntax_incremental(
         &applied,
         retokenize,
     )?;
-    applied.secondary_mut().annotate(&mut after_file)?;
+    applied.annotate(&mut after_file)?;
     gate_incremental_output(after_file).map(|document| {
         MorphosyntaxOutput::new(document, applied.into_reports()).with_provenance(provenance)
     })

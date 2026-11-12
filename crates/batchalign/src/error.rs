@@ -781,6 +781,10 @@ pub enum ServerError {
     /// malformed user input and not a reason to repeat model inference.
     #[error("generated header was blank: {0}")]
     GeneratedHeader(#[from] talkbank_model::model::BlankContent),
+    /// A producer's `%xbatchalign` note named a line that is not an
+    /// utterance. A server defect, like a blank generated header.
+    #[error("generated note: {0}")]
+    GeneratedNote(#[from] batchalign_transform::notes::NoteError),
     /// A job was routed to a remote fleet target, but this host would not
     /// report its name, which names the job's remote scratch directory.
     #[error(
@@ -1651,6 +1655,7 @@ impl ServerError {
             Self::MediaTiming(_)
             | Self::OutputParse(_)
             | Self::GeneratedHeader(_)
+            | Self::GeneratedNote(_)
             | Self::MorphosyntaxInjection(_)
             | Self::UtterancePartition(_)
             | Self::AlignmentSourceBinding(_)

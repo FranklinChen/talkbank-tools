@@ -61,6 +61,40 @@ fn test_inject_timings_simple() {
     }
 }
 
+/// The key format: a language-dependent engine's key carries the language;
+/// every other engine's key is byte-identical whatever the language, so its
+/// existing cache entries stay reachable.
+#[test]
+fn only_a_language_dependent_engine_keys_by_language() {
+    use crate::types::engines::FaEngineName;
+    let words = vec!["hello".to_string(), "world".to_string()];
+    let identity = AudioIdentity::from_metadata("test.mp3", 1234, 5678);
+    let key = |engine: FaEngineName, language: &str| {
+        let language = crate::api::LanguageCode3::try_from(language).expect("code");
+        cache_key(
+            &words,
+            &identity,
+            0,
+            5000,
+            WhisperTextMode::CharSpaced,
+            engine,
+            &crate::chat_ops::fa::FaKeyLanguage::for_engine(engine, &language),
+        )
+    };
+    assert_ne!(
+        key(FaEngineName::Qwen3, "eng"),
+        key(FaEngineName::Qwen3, "yue"),
+        "Qwen3 timings depend on the language they were measured in"
+    );
+    for engine in [
+        FaEngineName::Wave2Vec,
+        FaEngineName::Whisper,
+        FaEngineName::Wav2vecCanto,
+    ] {
+        assert_eq!(key(engine, "eng"), key(engine, "yue"), "{engine:?}");
+    }
+}
+
 #[test]
 fn test_fa_cache_key() {
     let words = vec!["hello".to_string(), "world".to_string()];
@@ -71,6 +105,10 @@ fn test_fa_cache_key() {
         5000,
         WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
+        &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+            crate::types::engines::FaEngineName::Whisper,
+            &crate::api::LanguageCode3::eng(),
+        ),
     );
     // Verify it's a valid hex BLAKE3 (64 chars)
     assert_eq!(key.as_str().len(), 64);
@@ -84,6 +122,10 @@ fn test_fa_cache_key() {
         5000,
         WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
+        &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+            crate::types::engines::FaEngineName::Whisper,
+            &crate::api::LanguageCode3::eng(),
+        ),
     );
     assert_eq!(key, key2);
 
@@ -95,6 +137,10 @@ fn test_fa_cache_key() {
         5000,
         WhisperTextMode::SpaceJoined,
         crate::types::engines::FaEngineName::Whisper,
+        &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+            crate::types::engines::FaEngineName::Whisper,
+            &crate::api::LanguageCode3::eng(),
+        ),
     );
     assert_ne!(key, key3);
 }
@@ -113,6 +159,10 @@ fn word_interval_cache_key_retires_scoreless_entries_only() {
         5000,
         WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Wave2Vec,
+        &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+            crate::types::engines::FaEngineName::Wave2Vec,
+            &crate::api::LanguageCode3::eng(),
+        ),
     );
     assert_ne!(score_bearing_interval_key, legacy_interval_key);
 
@@ -129,6 +179,10 @@ fn word_interval_cache_key_retires_scoreless_entries_only() {
         5000,
         WhisperTextMode::CharSpaced,
         crate::types::engines::FaEngineName::Whisper,
+        &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+            crate::types::engines::FaEngineName::Whisper,
+            &crate::api::LanguageCode3::eng(),
+        ),
     );
     assert_eq!(current_whisper_key, legacy_whisper_key);
 }
@@ -220,6 +274,74 @@ fn test_monotonicity_enforcement() {
             ..
         }] if utterance_idx.raw() == 1 && previous_utterance_idx.raw() == 0
     ));
+}
+
+/// One mistyped start (600000 for 6000) loses its own timing; every later
+/// utterance keeps theirs. The greedy rule made the outlier the floor and
+/// stripped every utterance after it.
+#[test]
+fn one_outlier_start_strips_only_itself() {
+    let input = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n@ID:\teng|x|CHI|||||Child|||\n\
+                 *CHI:\tone . \u{15}1000_2000\u{15}\n\
+                 *CHI:\ttwo . \u{15}600000_601000\u{15}\n\
+                 *CHI:\tthree . \u{15}7000_8000\u{15}\n\
+                 *CHI:\tfour . \u{15}9000_10000\u{15}\n@End\n";
+    let mut chat = parse_chat(input);
+    let decisions = enforce_monotonicity(&mut chat);
+
+    for (index, timed) in [(0, true), (1, false), (2, true), (3, true)] {
+        let utterance = get_test_utterance(&mut chat, index);
+        assert_eq!(
+            utterance.main.content.bullet.is_some(),
+            timed,
+            "utterance {index}"
+        );
+    }
+    assert!(matches!(
+        decisions.effects(),
+        [MonotonicityEffect::StartAheadStripped {
+            utterance_idx,
+            start_ms: 600_000,
+            following_start_ms: 7_000,
+            following_utterance_idx,
+            ..
+        }] if utterance_idx.raw() == 1 && following_utterance_idx.raw() == 2
+    ));
+}
+
+/// Two `+<` backchannels that regress against one in-order turn never
+/// outvote it: the chain weighs only unmarked starts, so MOT keeps its timing
+/// and the backchannels are resolved as the greedy rule resolved them (here
+/// stripped: nothing of either lies after MOT's start).
+#[test]
+fn backchannels_never_outvote_the_turn_they_overlap() {
+    let input = "@UTF8\n@Begin\n@Languages:\teng\n\
+                 @Participants:\tPAR Participant, MOT Mother, INV Investigator, CHI Child\n\
+                 @ID:\teng|x|PAR|||||Participant|||\n@ID:\teng|x|MOT|||||Mother|||\n\
+                 @ID:\teng|x|INV|||||Investigator|||\n@ID:\teng|x|CHI|||||Child|||\n\
+                 *PAR:\tone two . \u{15}1000_2900\u{15}\n\
+                 *MOT:\tthree four . \u{15}3000_6000\u{15}\n\
+                 *INV:\t+< mhm . \u{15}2500_2700\u{15}\n\
+                 *CHI:\t+< yeah . \u{15}2700_2900\u{15}\n@End\n";
+    let mut chat = parse_chat(input);
+    let decisions = enforce_monotonicity(&mut chat);
+
+    assert!(
+        get_test_utterance(&mut chat, 1)
+            .main
+            .content
+            .bullet
+            .is_some(),
+        "MOT's in-order start keeps its timing"
+    );
+    assert!(
+        !decisions
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, MonotonicityEffect::StartAheadStripped { .. })),
+        "no in-order start is stripped as ahead: {:?}",
+        decisions.effects()
+    );
 }
 
 #[test]

@@ -83,6 +83,7 @@ pub mod diff;
 pub mod dp_align;
 pub mod inject;
 pub mod morphosyntax;
+pub mod notes;
 pub mod retokenize;
 pub mod tokenizer_realign;
 pub mod translate;

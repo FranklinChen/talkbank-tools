@@ -251,6 +251,58 @@ fn derived_bullet_before_a_lower_kept_start_is_the_one_stripped() {
     );
 }
 
+/// A kept start that itself regresses is no ceiling: the derived bullet
+/// between the two kept ones is in order with the earlier kept start, so it
+/// keeps its timing, and only the kept regression is recorded. (A regressing
+/// kept start once bounded the segment before it and stripped every derived
+/// start there.)
+#[test]
+fn a_regressing_kept_start_does_not_strip_the_derived_starts_before_it() {
+    let (_, kept) = run_under_both_policies(
+        &two_speaker_transcript(
+            "*CHI:\tone . \u{15}10000_11000\u{15}\n*MOT:\ttwo .\n*CHI:\tthree . \u{15}5000_6000\u{15}\n",
+        ),
+        EndOverlapPolicy::PreserveCrossSpeaker,
+        |chat, projection| {
+            derive_bullet(chat, 1, 12000, 13000);
+            finalize_as_is(chat, projection, BulletRepairPolicy::Disabled)
+        },
+    );
+    assert_eq!(get_utterance_bullet(&kept.chat, 1), Some((12000, 13000)));
+    let (records, effects, _) = kept.outcome;
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        records_with(&records, UNRESOLVED)
+            .iter()
+            .any(|r| r.reason.starts_with("non_monotonic kept_main_bullet")),
+        "{records:?}"
+    );
+}
+
+/// A `+<` start below the kept floor is judged against the greatest start
+/// accepted before it, not the floor: raised to 5000 it keeps nothing, so it
+/// is stripped. It used to be raised to the floor, writing 1000 after 5000.
+#[test]
+fn a_backchannel_below_the_kept_floor_is_judged_against_the_greatest_start() {
+    let (_, kept) = run_under_both_policies(
+        &two_speaker_transcript(
+            "*MOT:\tone . \u{15}1000_3000\u{15}\n*CHI:\ttwo .\n*CHI:\t+< three .\n",
+        ),
+        EndOverlapPolicy::PreserveCrossSpeaker,
+        |chat, projection| {
+            derive_bullet(chat, 1, 5000, 6000);
+            derive_bullet(chat, 2, 800, 1200);
+            finalize_as_is(chat, projection, BulletRepairPolicy::Disabled)
+        },
+    );
+    assert_eq!(get_utterance_bullet(&kept.chat, 1), Some((5000, 6000)));
+    assert_eq!(
+        get_utterance_bullet(&kept.chat, 2),
+        None,
+        "never 1000_1200 after 5000"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Bullet repair
 // ---------------------------------------------------------------------------

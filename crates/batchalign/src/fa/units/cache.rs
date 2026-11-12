@@ -100,12 +100,7 @@ pub(in crate::fa) async fn collect_candidate_cache(
     }
     // Candidate keys describe proposals. They grant no inference capability;
     // the final dispatch plan is built only after resource geometry is chosen.
-    let candidates = DispatchPlan::build(
-        groups,
-        context.audio.audio_identity,
-        context.params.whisper_text,
-        context.params.engine,
-    );
+    let candidates = DispatchPlan::build(groups, super::RequestKeying::of(&context));
     let keys: Vec<_> = candidates
         .units()
         .map(|unit| unit.cache_key().as_str().to_owned())

@@ -1643,7 +1643,7 @@ export interface components {
          * @description Why an utterance's primary morphology was declined.
          * @enum {string}
          */
-        PrimaryMorphologyDeclineCause: "no_analysis" | "mapping_failed" | "misaligned" | "retokenization_failed";
+        PrimaryMorphologyDeclineCause: "no_analysis" | "mapping_failed" | "misaligned" | "retokenization_failed" | "worker_failed";
         /** @description One utterance whose primary morphology was declined. */
         PrimaryMorphologyDeclinedUtterance: components["schemas"]["StoredUtteranceLocation"] & {
             /** @description Why it was declined. */
@@ -1843,6 +1843,23 @@ export interface components {
          *     speakers, stays in [`FaTimelineTrace::timing_decisions`].
          */
         RemovalEffectTrace: {
+            /** @description Index into `ChatFile.lines` of the utterance that supplied it. */
+            following_line_idx: number;
+            /** @description Speaker on that line. */
+            following_speaker: string;
+            /**
+             * Format: int64
+             * @description The next accepted start, which this one came after.
+             */
+            following_start_ms: number;
+            /** @enum {string} */
+            kind: "start_ahead_stripped";
+            /**
+             * Format: int64
+             * @description The utterance's own measured start, the outlier.
+             */
+            utterance_start_ms: number;
+        } | {
             /** @enum {string} */
             kind: "start_regression_stripped";
             /** @description Index into `ChatFile.lines` of the utterance that supplied it. */

@@ -974,22 +974,44 @@ async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
     use crate::api::PrimaryMorphologyDeclineCause as Cause;
+    /// What the worker answers for the one utterance.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Wire(&'static str),
+        Failed(&'static str),
+    }
+    use Answer::{Failed, Wire};
     let cases = [
-        ("no sentences", r#"{"sentences":[]}"#, Cause::NoAnalysis),
+        (
+            "no sentences",
+            Wire(r#"{"sentences":[]}"#),
+            Cause::NoAnalysis,
+        ),
+        // A worker failure for this utterance alone declines it with the
+        // worker's reason; it used to refuse the whole file.
+        (
+            "worker failed",
+            Failed("dependency projection failed"),
+            Cause::WorkerFailed,
+        ),
         (
             "missing words",
-            r#"{"sentences":[{"words":[
+            Wire(
+                r#"{"sentences":[{"words":[
                 {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":0,"deprel":"root"}
             ]}]}"#,
+            ),
             Cause::Misaligned,
         ),
         (
             "malformed dependency",
-            r#"{"sentences":[{"words":[
+            Wire(
+                r#"{"sentences":[{"words":[
                 {"id":1,"text":"hello","lemma":"hello","upos":"INTJ","head":9,"deprel":"dep"},
                 {"id":2,"text":"good","lemma":"good","upos":"ADJ","head":3,"deprel":"amod"},
                 {"id":3,"text":"world","lemma":"world","upos":"NOUN","head":0,"deprel":"root"}
             ]}]}"#,
+            ),
             Cause::MappingFailed,
         ),
     ];
@@ -1000,7 +1022,7 @@ async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
         TokenizationMode::Preserve,
         TokenizationMode::StanzaRetokenize,
     ] {
-        for (label, wire, cause) in cases {
+        for (label, answer, cause) in cases {
             if label == "missing words" && mode == TokenizationMode::StanzaRetokenize {
                 continue;
             }
@@ -1012,13 +1034,18 @@ async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
             else {
                 panic!("lexical CHAT requires analysis");
             };
-            let response = serde_json::from_str(wire).expect("worker wire fixture");
+            let admitted = match answer {
+                Wire(wire) => AdmittedMorphosyntaxResponse::for_test(
+                    serde_json::from_str(wire).expect("worker wire fixture"),
+                    "test",
+                    "eng",
+                ),
+                Failed(reason) => AdmittedMorphosyntaxResponse::worker_failed(reason.into()),
+            };
             let inferred = parsed
                 .collect(&options)
                 .expect("admitted fixture language context")
-                .with_responses(vec![AdmittedMorphosyntaxResponse::for_test(
-                    response, "test", "eng",
-                )])
+                .with_responses(vec![admitted])
                 .expect("one response for one utterance");
             let finished = inferred
                 .apply(&options)
@@ -1048,6 +1075,19 @@ async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
             assert!(
                 utterance.mor_tier().is_none(),
                 "{label}: no %mor is written"
+            );
+            // The same decline is marked in the CHAT, on that utterance.
+            let notes: Vec<String> = utterance
+                .dependent_tiers
+                .iter()
+                .filter(|entry| entry.kind() == batchalign_transform::notes::NOTE_TIER)
+                .map(ToString::to_string)
+                .collect();
+            assert_eq!(notes.len(), 1, "{label}: one note: {notes:?}");
+            assert!(
+                notes[0].starts_with("%xbatchalign:\tmorphotag: not analysed; ")
+                    && notes[0].contains(cause.describe()),
+                "{label}: {notes:?}"
             );
         }
     }

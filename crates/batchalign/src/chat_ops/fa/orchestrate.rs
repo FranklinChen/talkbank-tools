@@ -16,6 +16,8 @@ use talkbank_model::model::{BracketedItems, TierContentItems};
 
 #[cfg(test)]
 use super::WordEndPolicy;
+#[cfg(test)]
+use super::add_wor_tier;
 use super::injection::inject_timings_for_utterance;
 use super::main_bullets::{
     BulletMutability, FaProjection, GivenMutability, ImposedBullets, KeptBullet, KeptBulletError,
@@ -26,7 +28,7 @@ use super::postprocess::postprocess_utterance_timings_with_boundary_policy;
 use super::repair::{BulletRepairPolicy, RepairStats, repair_bullets_under};
 use super::{EndOverlapPolicy, ExistingWorBoundaryPolicy};
 use super::{
-    FaGroup, TimeSpan, WordTiming, add_wor_tier, count_alignable_main_words, get_utterance_mut,
+    FaGroup, TimeSpan, WordTiming, count_alignable_main_words, get_utterance_mut,
     update_utterance_bullet_with_boundary_policy,
 };
 
@@ -89,9 +91,13 @@ impl WorPlan {
     }
 }
 
-/// Proof that, at the moment it was built, `utterance` carried at least one
-/// word with real timing (main tier or `%wor`, whichever currently carries
-/// it -- see [`furthest_word_timing_end`]).
+/// A `%wor` tier generated from the utterance's CURRENT main tier, proved
+/// by its own words to carry at least one timing bullet: the only thing the
+/// write phase writes. The proof is the tier itself, not a look at the
+/// utterance, because the writer builds `%wor` from the main tier alone: a
+/// check that also read the old `%wor` let an utterance whose main tier
+/// forced alignment left untimed pass on its previous `%wor` timing, which
+/// the write then replaced with an untimed tier (2026-11-12 review).
 ///
 /// 2026-09-01 review, item 9. The write phase's own `WorPlan::Pending` list
 /// records which utterances a run INJECTED or REFRESHED timing into, but an
@@ -108,24 +114,44 @@ impl WorPlan {
 /// generated from zero timed words is worse than none: it looks like
 /// evidence and carries no timing at all.
 ///
-/// So the write phase does not trust `Pending`'s membership; it re-derives
-/// this fact FRESH, from whatever state the utterance is actually in at the
-/// moment `%wor` would be written, which is after every strip and every
-/// clamp above has already run. `write_wor_tier` below takes this proof, not
-/// an `UtteranceIdx`, so there is no route to `add_wor_tier` in the write
-/// phase that skips the check: an untimed `%wor` tier is unconstructible
-/// from this call site, regardless of what `Pending` says.
-struct TimedUtterance(UtteranceIdx);
+/// So the write phase does not trust `Pending`'s membership; it generates
+/// the tier FRESH, from the state the utterance is actually in at the moment
+/// `%wor` would be written, which is after every strip and every clamp above
+/// has already run, and writes it only if that tier is timed. An untimed
+/// `%wor` tier is unconstructible from the write phase. An utterance whose
+/// generated tier has no timing keeps no `%wor` at all: its earlier tier
+/// described words or timing this run did not keep, and its words are
+/// reported untimed by the completion account.
+struct TimedWorTier(talkbank_model::model::WorTier);
 
-impl TimedUtterance {
-    /// The only constructor. `None` when `utterance` currently has no timed
-    /// word on any tier.
-    fn inspect(utterance_idx: UtteranceIdx, utterance: &Utterance) -> Option<Self> {
-        furthest_word_timing_end(utterance).map(|_| Self(utterance_idx))
+impl TimedWorTier {
+    /// The only constructor. `None` when the tier `utterance`'s main tier
+    /// generates now has no timed word.
+    fn generate(utterance: &Utterance) -> Option<Self> {
+        let tier = utterance.main.generate_wor_tier();
+        match tier.timing_evidence() {
+            talkbank_model::model::WorTimingEvidence::Recorded(_) => Some(Self(tier)),
+            talkbank_model::model::WorTimingEvidence::Absent => None,
+        }
     }
 
-    fn utterance_idx(self) -> UtteranceIdx {
-        self.0
+    /// Write the tier, replacing the utterance's `%wor`.
+    fn write(self, utterance: &mut Utterance) {
+        batchalign_transform::inject::replace_or_add_tier(
+            &mut utterance.dependent_tiers,
+            DependentTier::Wor(self.0),
+        );
+    }
+}
+
+/// Write `utterance`'s `%wor` from its current main tier, or remove the one
+/// it has when that tier would carry no timing.
+fn rewrite_wor_tier(utterance: &mut Utterance) {
+    match TimedWorTier::generate(utterance) {
+        Some(tier) => tier.write(utterance),
+        None => utterance
+            .dependent_tiers
+            .retain(|entry| !matches!(entry.tier, DependentTier::Wor(_))),
     }
 }
 
@@ -251,6 +277,31 @@ pub enum MonotonicityEffect {
         /// utterance's timing, so this is every timed word it had; the
         /// completion account reports each as removed by this effect rather
         /// than as never answered.
+        words_dropped: Vec<DroppedWordTiming>,
+    },
+    /// An utterance started after the next start of the chain of in-order
+    /// starts (a mistyped start, say, or a `+<` start above such a chain
+    /// start), so it lost its timing and the utterances after it kept theirs
+    /// (2026-11-12; the greedy rule made such a start the floor and stripped
+    /// everything after it). The chain is chosen to keep the most timings.
+    StartAheadStripped {
+        /// Affected line index, including headers.
+        line_idx: usize,
+        /// Stable ordinal among utterances only.
+        utterance_idx: UtteranceIdx,
+        /// Speaker on the affected utterance.
+        speaker: String,
+        /// Its measured start, after the following one.
+        start_ms: u64,
+        /// The next accepted start after it in document order.
+        following_start_ms: u64,
+        /// Line that supplied `following_start_ms`.
+        following_line_idx: usize,
+        /// Stable ordinal of that utterance.
+        following_utterance_idx: UtteranceIdx,
+        /// Speaker on that line.
+        following_speaker: String,
+        /// The measured word intervals the strip removed.
         words_dropped: Vec<DroppedWordTiming>,
     },
     /// A later utterance started before the greatest preceding start, and
@@ -465,6 +516,7 @@ impl MonotonicityEffect {
                 ..
             }
             | Self::StartRegressionStripped { .. }
+            | Self::StartAheadStripped { .. }
             | Self::ZeroDurationClampStripped { .. }
             | Self::EndClampedCoverageOnly { .. }
             | Self::EndClampedBoundaryFromWords { .. } => None,
@@ -678,17 +730,12 @@ fn enforce_monotonicity_then_write_wor(
         // question, but there is no reason to do it.
         let candidates: std::collections::BTreeSet<UtteranceIdx> = touched.into_iter().collect();
         for utt_idx in candidates {
-            // The write phase does not trust its own candidate list:
-            // `TimedUtterance::inspect` re-derives, from the utterance's
-            // CURRENT words, whether there is anything to write at all
-            // (2026-09-01 review, item 9). An untimed `%wor` tier is
-            // unconstructible from this call site.
-            let timed = get_utterance_mut(chat_file, utt_idx)
-                .and_then(|utt| TimedUtterance::inspect(utt_idx, &*utt));
-            if let Some(timed) = timed
-                && let Some(utt) = get_utterance_mut(chat_file, timed.utterance_idx())
-            {
-                add_wor_tier(utt);
+            // The write phase does not trust its own candidate list: the
+            // tier is generated from the utterance's CURRENT main tier and
+            // written only if it is timed (2026-09-01 review, item 9;
+            // 2026-11-12). An untimed `%wor` tier is unconstructible here.
+            if let Some(utt) = get_utterance_mut(chat_file, utt_idx) {
+                rewrite_wor_tier(utt);
             }
         }
     }

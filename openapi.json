@@ -2532,7 +2532,8 @@
           "no_analysis",
           "mapping_failed",
           "misaligned",
-          "retokenization_failed"
+          "retokenization_failed",
+          "worker_failed"
         ],
         "type": "string"
       },
@@ -2942,6 +2943,46 @@
       "RemovalEffectTrace": {
         "description": "The finalization rules that can remove a word's measured timing, and\nnothing else: a closed set, so a removal cannot name an effect that moves\nonly a bullet (`end_clamped_coverage_only`, `end_clamped_boundary_from_words`)\nor trims a word without dropping it.\n\nEach variant carries what a reader needs to find the conflict in the\ntranscript: the boundary the utterance collided with and the line that\nsupplied it. The full effect, with both utterances' ordinals and\nspeakers, stays in [`FaTimelineTrace::timing_decisions`].",
         "oneOf": [
+          {
+            "description": "Pass 1: the utterance's measured start came after the next accepted\nstart, and the whole utterance's timing was stripped.",
+            "properties": {
+              "following_line_idx": {
+                "description": "Index into `ChatFile.lines` of the utterance that supplied it.",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "following_speaker": {
+                "description": "Speaker on that line.",
+                "type": "string"
+              },
+              "following_start_ms": {
+                "description": "The next accepted start, which this one came after.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "start_ahead_stripped"
+                ],
+                "type": "string"
+              },
+              "utterance_start_ms": {
+                "description": "The utterance's own measured start, the outlier.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "utterance_start_ms",
+              "following_start_ms",
+              "following_line_idx",
+              "following_speaker",
+              "kind"
+            ],
+            "type": "object"
+          },
           {
             "description": "Pass 1: the utterance's measured start preceded the greatest start\naccepted before it, and the whole utterance's timing was stripped.",
             "properties": {

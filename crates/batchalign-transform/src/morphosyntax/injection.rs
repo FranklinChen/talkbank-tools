@@ -83,6 +83,8 @@ pub enum DeclineCause {
     Misaligned,
     /// The model's tokens could not be written back onto the utterance's words.
     RetokenizationFailed,
+    /// The worker reported a failure for this utterance alone.
+    WorkerFailed,
 }
 
 impl DeclineCause {
@@ -93,6 +95,7 @@ impl DeclineCause {
             Self::MappingFailed => "mapping_failed",
             Self::Misaligned => "misaligned",
             Self::RetokenizationFailed => "retokenization_failed",
+            Self::WorkerFailed => "worker_failed",
         }
     }
 }
@@ -454,7 +457,19 @@ impl UtteranceInjection<'_, '_> {
         // The analysis as the model returned it, beside its rewrite: the
         // retokenizing path rebuilds the main tier from the model's own
         // tokens, never from words a rewrite added.
-        let analysed = ud_resp.sentence().map(|raw| {
+        let raw = match ud_resp.analysis() {
+            super::UdAnalysis::Sentence(raw) => Some(raw),
+            super::UdAnalysis::Empty => None,
+            // The worker answered for this utterance with a failure: it is
+            // declined with that reason, and the rest of the file goes on.
+            super::UdAnalysis::WorkerFailed(reason) => {
+                return Err(Declined {
+                    cause: DeclineCause::WorkerFailed,
+                    reason: format!("worker_failed={reason}"),
+                });
+            }
+        };
+        let analysed = raw.map(|raw| {
             // What the transcriber wrote that Stanza never saw: the pauses,
             // aligned to the payload's words. Read only by a chain that
             // uses it.

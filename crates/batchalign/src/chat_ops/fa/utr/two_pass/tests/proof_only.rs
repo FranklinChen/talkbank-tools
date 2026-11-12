@@ -24,6 +24,7 @@ fn proof_only_overlap_avoids_unused_quadratic_inspection() {
         &super::super::PreparedUtrTokens::spaced(&tokens),
         0,
         1000,
+        &super::super::evidence::ClaimedTokens::none(),
     )
     .texts();
     let counter = PollAllowance(std::cell::Cell::new(usize::MAX));
@@ -50,13 +51,18 @@ fn proof_only_overlap_avoids_unused_quadratic_inspection() {
         )
         .is_err()
     );
+    let mut claimed = super::super::evidence::ClaimedTokens::none();
     let result = recover_overlap_timing_controlled(
         &crate::chat_ops::fa::utr::token_text::UtrChatUnits::spaced(&words),
-        &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        super::OverlapTokens {
+            prepared: &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+            claimed: &claimed,
+        },
         0,
         1000,
         MatchMode::Exact,
         &PollAllowance(std::cell::Cell::new(allowance)),
-    );
+    )
+    .map(|recovery| recovery.map(|recovery| claimed.claim(recovery)));
     assert_eq!(result, Ok(Some(expected_interval(100, 600))));
 }

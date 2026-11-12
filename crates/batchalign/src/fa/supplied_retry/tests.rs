@@ -92,7 +92,15 @@ async fn cached_primary_retries_only_projected_gaps_and_retains_evidence() {
             services,
             params: &params,
         };
-        let plan = DispatchPlan::build(&groups, &identity, params.whisper_text, params.engine);
+        let plan = DispatchPlan::build(
+            &groups,
+            crate::fa::units::RequestKeying::new(
+                &identity,
+                params.whisper_text,
+                params.engine,
+                &crate::api::LanguageCode3::eng(),
+            ),
+        );
         let primary = plan.units().next().unwrap();
         let retry = DispatchUnit::supplied(&sources.sources()[0], context);
         let entries = match control {

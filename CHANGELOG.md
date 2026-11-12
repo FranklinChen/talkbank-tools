@@ -5,6 +5,129 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- `align` utterance timing recovery no longer lets one timed utterance whose
+  bullet is out of place (it starts after later ones, or ends far beyond
+  them) block or crop the recovery of every untimed utterance around it. Only
+  the timed utterances whose starts agree with each other bound the search,
+  the same ones that already divide the file into regions. **What does not
+  change:** the out-of-place utterance keeps its own timing, and files whose
+  bullets are in order are recovered as before.
+
+- `align` utterance timing recovery no longer times an overlapping turn
+  (`+<`) from a word the recognizer heard in another speaker's turn. When the
+  only recognized `yeah` belonged to the participant, the investigator's
+  overlapping `yeah` used to be given its time; it now stays untimed unless
+  a word of its own is found. **What does not change:** overlapping turns
+  whose own words were recognized are recovered as before.
+
+- `align --fa-engine qwen3`: cached word timings are now keyed by the
+  language they were measured in, so a file aligned in one language never
+  reuses timings Qwen3 produced for the same audio and words in another.
+  Earlier Qwen3 cache entries are not reused and are measured again once.
+  **What does not change:** the cache of every other alignment engine
+  (Wave2Vec, Whisper, Cantonese Wave2Vec), whose entries stay valid.
+
+- English `morphotag`: a contraction such as `hafta`, `gonna` or `wanna`
+  that heads a clause of its own (for example a relative clause, `the one you
+  hafta read`) is no longer "raised" over the word it is attached to. That
+  rewrote the noun as the contraction's complement and attached `to` to it,
+  a wrong `%gra`. **What does not change:** a contraction that depends on its
+  verb or predicate (`you hafta go`, `you hafta be good`) is expanded and
+  raised as before.
+
+- `align` with an engine that returns its own word labels (Wav2Vec and
+  others) no longer reports a word as exactly matched when it won a label it
+  shares with the next word (`in to` against one label `into`). The label's
+  characters the next word matched are now counted against it, so its timing
+  is marked approximate instead of exact. **What does not change:** words
+  whose labels match them one for one.
+
+- `align` no longer stretches an utterance's alignment window up to 1.5
+  seconds into the next utterance's speech when that next utterance has no
+  bullet and no recognizer evidence. Where its speech is, is not known, so the
+  window now stops at the utterance's own end. **What does not change:**
+  padding into a real gap before the next located utterance, and toward the
+  end of the recording, is as before.
+
+- `align` no longer replaces a timed `%wor` tier with an untimed one. When a
+  rerun sends an utterance to the aligner (for example because its `%wor` no
+  longer matches the main tier) and the aligner returns no timing for it, the
+  utterance now keeps no `%wor`, and its words are reported untimed; before,
+  an untimed `%wor` was written over the old one. **What does not change:**
+  every utterance the aligner times gets its `%wor` as before.
+
+- `align`: an utterance with a bullet but no alignable word (`xxx`, `0`)
+  now ends the alignment window before it, so the words around it are no
+  longer aligned against audio that contains its untranscribed speech. A
+  window `align` itself refuses (an end before its start, or past the end
+  of the recording) no longer lets the previous window be padded toward
+  it. **What changes:** timings near such turns can differ from earlier
+  runs, and those windows are aligned afresh rather than read from the
+  cache. **What does not change:** files without such turns.
+- `align`: a word whose letters were partly recognized inside a
+  neighbouring word's label now reports those letters as edits, so its
+  timing is no longer marked as an exact match.
+- `morphotag` on English: `hafta`, `sposta` and the other expanded
+  contractions are raised into the verb's place in `%gra` only when Stanza
+  attached them to the following verb as an auxiliary, adverb, interjection,
+  copula or unlabelled dependent. A contraction Stanza read as a verb's
+  subject or object, or as modifying an earlier word, keeps its own
+  attachment instead of being made that word's governor, and when the
+  contraction heads its own clause, `to` now marks the verb it governs.
+  **What does not change:** ordinary `you hafta put that in` parses.
+- `align` with two-pass UTR: two `+<` utterances near the same turn no
+  longer take their timing from one recognized word. The first to match it
+  keeps it; the other stays untimed (and is reported) unless it has a word
+  of its own. **What does not change:** a `+<` utterance whose words were
+  recognized separately.
+- `morphotag` on Cantonese: characters outside the basic CJK block (most
+  Cantonese-specific characters, such as 𡃁 and 𠮶) are segmented together
+  with the characters around them again, so words like 𡃁仔 can be formed.
+  An earlier fix today had made each such character a word of its own.
+- `morphotag` on Cantonese: when PyCantonese's tagger answers one utterance
+  with different words than the analysis, only that utterance is declined
+  (with a `%xbatchalign` note and a warning). It used to fail every utterance
+  of the language group, including ones already analysed. **What does not
+  change:** utterances PyCantonese tags normally.
+- `align` no longer strips the timing of every later utterance when one
+  utterance's start is out of place (for example a hand-typed `600000` where
+  `6000` was meant). The starts kept are a run that goes forward through
+  the file, so only the outlier loses its timing, recorded as
+  `ahead_of_following_start`. The run is chosen to keep the most timings:
+  backchannels (`+<`) below a turn never outvote it, and one mistyped turn
+  does not cost the backchannels above it their timings. A `+<` utterance
+  that starts before the run is now always moved to the latest start
+  before it, never written out of order. The forced-alignment reference documents one known
+  limit of the choice, with an example. Under
+  `--main-bullets keep`, a kept bullet that is itself out of order no longer
+  strips the derived bullets before it. **What does not change:** a file whose starts
+  are in order, and the choice between two starts that are simply swapped
+  (the first is kept, as before).
+
+- An utterance Batchalign could not finish is now marked in the CHAT itself:
+  a `%xbatchalign` tier on that utterance says which command, what happened
+  and why (for example `%xbatchalign:	morphotag: not analysed; ...`), beside
+  the warning in the job record. Each run of a command replaces its own
+  earlier notes and keeps other commands'. So far `morphotag` writes them;
+  `align` follows. **What does not change:** utterances that were processed
+  get no tier, and nothing else in the file moves.
+
+- `morphotag` no longer fails a whole file when the worker cannot analyse
+  one utterance (its analysis raised, or its output could not be read). That
+  utterance is left exactly as written, with no `%mor` or `%gra`, the file is
+  written with every other utterance analysed, and the job record names the
+  utterance with "the worker could not analyse this utterance". The same
+  holds for a code-switched (`@s`) span: only that span goes without its
+  analysis. **What does not change:** utterances that analyse are written as
+  before.
+
+- Cantonese `morphotag`: a Latin word inside a run of Chinese characters is
+  never joined to them for word segmentation (`I like 鍾 意 食` used to reach
+  the segmenter as `Ilike鍾意食`), and PyCantonese's part-of-speech tags are
+  matched to words by position, so a word that occurs twice in an utterance
+  keeps the tag of its own context. **What does not change:** per-character
+  segmentation of Chinese text, and files with no Latin words.
+
 - A server now reads and writes files in place (paths mode, which the CLI
   and the desktop app use for a server on the same machine) only for its own
   account, or inside folders listed under `paths_mode_roots` in

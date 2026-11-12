@@ -279,6 +279,30 @@ fn anchor_chain(census: &[UtrUtteranceInfo]) -> Vec<Anchor> {
         .collect()
 }
 
+/// The anchors a pass may bound its hints by: the [`anchor_chain`], by
+/// census ordinal. Built only from a census, so projection bounds and region
+/// boundaries come from one chain: a timed utterance left out of the chain
+/// (its start contradicts the chain's) keeps its timing but bounds nothing,
+/// where reading every retained bullet let one out-of-order bullet raise the
+/// floor of, or crop, every hint after it (2026-11-12 review).
+pub(super) struct ChainAnchors(Vec<Option<ObservedWordTiming>>);
+
+impl ChainAnchors {
+    /// The chain of `census`.
+    pub(super) fn of(census: &[UtrUtteranceInfo]) -> Self {
+        let mut by_ordinal = vec![None; census.len()];
+        for anchor in anchor_chain(census) {
+            by_ordinal[anchor.index] = Some(anchor.timing);
+        }
+        Self(by_ordinal)
+    }
+
+    /// The anchor timing of the utterance at `ordinal`, if it is in the chain.
+    pub(super) fn at(&self, ordinal: usize) -> Option<ObservedWordTiming> {
+        self.0.get(ordinal).copied().flatten()
+    }
+}
+
 /// Partition a census into anchored regions, in document order.
 ///
 /// Every utterance is owned by exactly one region; an empty census has none.

@@ -117,6 +117,7 @@
 - [%gra Format Conventions](batchalign/reference/gra-format.md)
 - [Forced Alignment](batchalign/reference/forced-alignment.md)
 - [Bullet and Word-Timing Policies](batchalign/reference/bullet-policies.md)
+- [`%xbatchalign` Notes](batchalign/reference/xbatchalign-notes.md)
 - [Speaker Identity Evidence](batchalign/reference/speaker-identity-evidence.md)
 - [Whisper ASR](batchalign/reference/whisper-asr.md)
 - [HuggingFace Whisper Fine-tunes (`whisper_hub`)](batchalign/reference/whisper-hub-asr.md)

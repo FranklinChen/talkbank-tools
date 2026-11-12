@@ -243,6 +243,19 @@ class TestClaim3_PyCantonese_Segmentation:
         assert "鍾意" not in split
         assert "".join(split) == "鍾意食"
 
+    def test_a_latin_word_in_a_run_is_never_joined_or_resegmented(self) -> None:
+        """Only stretches of single CJK characters reach PyCantonese.
+
+        A run holding `I like 鍾 意 食` used to reach the segmenter as one
+        string, `Ilike鍾意食`, erasing the boundary between the Latin words.
+        """
+        from batchalign.inference.morphosyntax import _segment_cantonese
+
+        result = _segment_cantonese([["I", "like", "鍾", "意", "食"]])
+        assert result[:2] == ["I", "like"], f"Latin words stay as written: {result}"
+        assert "".join(result[2:]) == "鍾意食"
+        assert "鍾意" in result[2:], "the CJK stretch is still segmented"
+
 
 # =============================================================================
 # Assumption 4: Stanza's Chinese tokenizer can segment Mandarin into words

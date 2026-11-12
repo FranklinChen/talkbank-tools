@@ -501,6 +501,11 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
     if asr_tokens.tokens().is_empty() {
         return Ok(Ok(result.with_overlap_recoveries(Vec::new())));
     }
+    // What the first pass gave to utterances is not the overlap pass's to
+    // give again.
+    // Each overlap recovery adds its own tokens (see `ClaimedTokens::claim`),
+    // so two `+<` utterances in one window cannot both take one token.
+    let mut claimed = result.alignment.claimed_tokens();
 
     // Pass 2: recover timing for overlap utterances from predecessor windows.
     // When skip_in_pass1 is false, pass 2 only runs on utterances that
@@ -557,9 +562,12 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
         };
 
         // Adaptive window: try narrow first, widen on failure.
-        if let Some(interval) = recover_with_adaptive_window_controlled(
+        if let Some(recovery) = recover_with_adaptive_window_controlled(
             &info.units,
-            asr_tokens,
+            OverlapTokens {
+                prepared: asr_tokens,
+                claimed: &claimed,
+            },
             utt_idx,
             &utt_bullets,
             pred_onset_fraction,
@@ -568,7 +576,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
         )? {
             pass2_bullets.push(RecoveredOverlapBullet {
                 utterance_index: super::UtrUtteranceOrdinal(utt_idx),
-                interval,
+                interval: claimed.claim(recovery),
             });
             result.discard_recovered_unmatched_decision(utt_line_indices[utt_idx]);
         }
@@ -771,26 +779,31 @@ fn recover_with_adaptive_window(
     pred_onset_fraction: Option<f64>,
     config: &TwoPassConfig,
 ) -> Option<PositiveUtrInterval> {
+    let mut claimed = super::evidence::ClaimedTokens::none();
     uninterrupted(recover_with_adaptive_window_controlled(
         words,
-        asr_tokens,
+        OverlapTokens {
+            prepared: asr_tokens,
+            claimed: &claimed,
+        },
         utt_idx,
         utt_bullets,
         pred_onset_fraction,
         config,
         &Uninterrupted,
     ))
+    .map(|recovery| claimed.claim(recovery))
 }
 
 fn recover_with_adaptive_window_controlled<C: WorkControl + ?Sized>(
     words: &super::token_text::UtrChatUnits,
-    asr_tokens: &super::PreparedUtrTokens,
+    tokens: OverlapTokens<'_>,
     utt_idx: usize,
     utt_bullets: &[Option<(u64, u64)>],
     pred_onset_fraction: Option<f64>,
     config: &TwoPassConfig,
     control: &C,
-) -> Result<Option<PositiveUtrInterval>, C::Error> {
+) -> Result<Option<super::evidence::OverlapRecovery>, C::Error> {
     control.check()?;
     // Find predecessor bullet
     let Some((pred_start, pred_end)) = find_predecessor_bullet(utt_idx, utt_bullets) else {
@@ -829,7 +842,7 @@ fn recover_with_adaptive_window_controlled<C: WorkControl + ?Sized>(
 
         if let Some(timing) = recover_overlap_timing_controlled(
             words,
-            asr_tokens,
+            tokens,
             window_start,
             window_end,
             config.match_mode.to_dp_match_mode(),
@@ -927,27 +940,46 @@ pub(super) fn recover_overlap_timing(
     window_end_ms: u64,
     dp_match_mode: MatchMode,
 ) -> Option<PositiveUtrInterval> {
+    let mut claimed = super::evidence::ClaimedTokens::none();
     uninterrupted(recover_overlap_timing_controlled(
         words,
-        asr_tokens,
+        OverlapTokens {
+            prepared: asr_tokens,
+            claimed: &claimed,
+        },
         window_start_ms,
         window_end_ms,
         dp_match_mode,
         &Uninterrupted,
     ))
+    .map(|recovery| claimed.claim(recovery))
+}
+
+/// The tokens one overlap search may match: the prepared stream, less every
+/// token already claimed (by the first pass, or by an earlier overlap
+/// recovery). A read view for one utterance's search, rebuilt per utterance;
+/// claims grow only through [`super::evidence::ClaimedTokens::claim`].
+#[derive(Clone, Copy)]
+struct OverlapTokens<'a> {
+    prepared: &'a super::PreparedUtrTokens,
+    claimed: &'a super::evidence::ClaimedTokens,
 }
 
 fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
     words: &super::token_text::UtrChatUnits,
-    asr_tokens: &super::PreparedUtrTokens,
+    tokens: OverlapTokens<'_>,
     window_start_ms: u64,
     window_end_ms: u64,
     dp_match_mode: MatchMode,
     control: &C,
-) -> Result<Option<PositiveUtrInterval>, C::Error> {
+) -> Result<Option<super::evidence::OverlapRecovery>, C::Error> {
     control.check()?;
-    let windowed =
-        super::lexical::UtrLexicalStream::within_window(asr_tokens, window_start_ms, window_end_ms);
+    let windowed = super::lexical::UtrLexicalStream::within_window(
+        tokens.prepared,
+        window_start_ms,
+        window_end_ms,
+        tokens.claimed,
+    );
 
     if windowed.is_empty() {
         return Ok(None);
@@ -977,10 +1009,7 @@ fn recover_overlap_timing_controlled<C: WorkControl + ?Sized>(
     else {
         return Ok(None);
     };
-    Ok(match admitted.proposal() {
-        super::UtrTimingProposal::Positive { interval } => Some(interval),
-        super::UtrTimingProposal::NonPositive { .. } => None,
-    })
+    Ok(super::evidence::OverlapRecovery::of(&admitted))
 }
 
 #[cfg(test)]
@@ -1392,6 +1421,218 @@ mod tests {
             "best-of-both should fall back to global and time all utterances"
         );
         assert_eq!(result.injected, 3);
+    }
+
+    /// The overlap pass never matches a token the first pass gave another
+    /// utterance: PAR's `yeah` is the only one recognized, so INV's
+    /// overlapping `yeah` stays untimed instead of being timed from PAR's
+    /// word (2026-11-12 review).
+    #[test]
+    fn the_overlap_pass_never_reuses_a_token_the_first_pass_gave_another_speaker() {
+        use talkbank_parser::TreeSitterParser;
+
+        let chat_text = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant, INV Investigator
+@ID:\teng|test|PAR|||||Participant|||
+@ID:\teng|test|INV|||||Investigator|||
+@Media:\ttest, audio
+*PAR:\tI went to the store yeah .
+*INV:\t+< yeah .
+*PAR:\tand bought some groceries .
+*PAR:\tthen I went home .
+*PAR:\tit was late .
+@End
+";
+        let parser = TreeSitterParser::new().unwrap();
+        let mut chat = parser.parse_chat_file(chat_text).expect_built();
+        // One `yeah` is recognized, inside PAR's first turn: PAR's own.
+        let tokens = make_asr_tokens(&[
+            ("I", 100, 300),
+            ("went", 400, 800),
+            ("to", 900, 1100),
+            ("the", 1200, 1400),
+            ("store", 1500, 2000),
+            ("yeah", 2100, 2400),
+            ("and", 5000, 5300),
+            ("bought", 5400, 5800),
+            ("some", 5900, 6200),
+            ("groceries", 6300, 7000),
+            ("then", 8000, 8300),
+            ("I", 8400, 8500),
+            ("went", 8600, 8900),
+            ("home", 9000, 9400),
+            ("it", 10000, 10200),
+            ("was", 10300, 10500),
+            ("late", 10600, 11000),
+        ]);
+
+        TwoPassOverlapUtr::new().inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
+
+        let bullets: Vec<Option<(u64, u64)>> = chat
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Utterance(utterance) => Some(
+                    utterance
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
+                        .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            bullets[0].is_some(),
+            "PAR's first turn is timed from its own words"
+        );
+        assert_eq!(bullets[1], None, "INV is not timed from PAR's `yeah`");
+    }
+
+    /// Two `+<` utterances in one window never share a token: INV's
+    /// recovery claims the one recognized `yeah`, so MOT's `yeah` stays
+    /// untimed instead of carrying INV's timing (2026-11-12 review 1.2).
+    #[test]
+    fn two_overlap_recoveries_never_share_a_token() {
+        use talkbank_parser::TreeSitterParser;
+
+        let chat_text = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant, INV Investigator, MOT Mother
+@ID:\teng|test|PAR|||||Participant|||
+@ID:\teng|test|INV|||||Investigator|||
+@ID:\teng|test|MOT|||||Mother|||
+@Media:\ttest, audio
+*PAR:\tI went to the store .
+*INV:\t+< yeah .
+*MOT:\t+< yeah .
+*PAR:\tand bought some groceries .
+*PAR:\tthen I went home .
+*PAR:\tit was late .
+@End
+";
+        let parser = TreeSitterParser::new().unwrap();
+        let mut chat = parser.parse_chat_file(chat_text).expect_built();
+        let tokens = make_asr_tokens(&[
+            ("I", 100, 300),
+            ("went", 400, 800),
+            ("to", 900, 1100),
+            ("the", 1200, 1400),
+            ("store", 1500, 2000),
+            ("yeah", 2100, 2400),
+            ("and", 5000, 5300),
+            ("bought", 5400, 5800),
+            ("some", 5900, 6200),
+            ("groceries", 6300, 7000),
+            ("then", 8000, 8300),
+            ("I", 8400, 8500),
+            ("went", 8600, 8900),
+            ("home", 9000, 9400),
+            ("it", 10000, 10200),
+            ("was", 10300, 10500),
+            ("late", 10600, 11000),
+        ]);
+
+        TwoPassOverlapUtr::new().inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
+
+        let bullets: Vec<Option<(u64, u64)>> = chat
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Utterance(utterance) => Some(
+                    utterance
+                        .main
+                        .content
+                        .bullet
+                        .as_ref()
+                        .and_then(talkbank_model::BulletState::as_parsed)
+                        .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms)),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bullets[1], Some((2100, 2400)), "INV takes the `yeah`");
+        assert_eq!(bullets[2], None, "MOT is not timed from INV's token");
+    }
+
+    /// One timed turn whose bullet contradicts the others (90000 between
+    /// 1000 and 8000) bounds nothing: the untimed turn after it is still
+    /// projected where its words were recognized. Its end used to become the
+    /// floor of every later hint, leaving nothing to project into.
+    #[test]
+    fn an_out_of_order_bullet_does_not_block_later_hints() {
+        use talkbank_parser::TreeSitterParser;
+
+        let chat_text = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
+@Media:\ttest, audio
+*PAR:\tI went to the store . \u{15}1000_2000\u{15}
+*PAR:\tthat was odd . \u{15}90000_95000\u{15}
+*PAR:\tand bought some groceries .
+*PAR:\tthen I went home . \u{15}8000_9000\u{15}
+@End
+";
+        let parser = TreeSitterParser::new().unwrap();
+        let mut chat = parser.parse_chat_file(chat_text).expect_built();
+        let tokens = make_asr_tokens(&[
+            ("I", 1000, 1200),
+            ("went", 1300, 1500),
+            ("to", 1550, 1650),
+            ("the", 1700, 1800),
+            ("store", 1850, 2000),
+            ("and", 5000, 5300),
+            ("bought", 5400, 5800),
+            ("some", 5900, 6200),
+            ("groceries", 6300, 7000),
+            ("then", 8000, 8200),
+            ("I", 8250, 8350),
+            ("went", 8400, 8600),
+            ("home", 8700, 9000),
+        ]);
+
+        TwoPassOverlapUtr::new().inject(
+            &mut chat,
+            &crate::chat_ops::fa::utr::PreparedUtrTokens::spaced(&tokens),
+        );
+
+        let third = chat
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Utterance(utterance) => Some(utterance),
+                _ => None,
+            })
+            .nth(2)
+            .expect("the untimed turn");
+        let bullet = third
+            .main
+            .content
+            .bullet
+            .as_ref()
+            .and_then(talkbank_model::BulletState::as_parsed)
+            .map(|bullet| (bullet.timing.start_ms, bullet.timing.end_ms));
+        assert_eq!(
+            bullet,
+            Some((5000, 7000)),
+            "projected where its words were heard"
+        );
     }
 
     /// When grouping context is provided and two-pass creates fewer FA groups

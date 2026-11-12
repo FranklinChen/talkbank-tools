@@ -141,6 +141,13 @@ untimed `%wor` tier does not. Align's source-bound admission can replace bad
 word tiers and carry a timing-regeneration obligation, but does not exempt
 retained source faults. `NoAlign` is a valid-input no-op, not a validity bypass.
 
+Align writes a `%wor` tier only when the tier it generates from the
+utterance's main tier, after every strip and clamp, carries a timed word
+(`TimedWorTier` in `chat_ops/fa/orchestrate.rs`). An utterance the run left
+without word timing keeps no `%wor`: an earlier tier on it described words or
+timing this run did not keep, so it is removed rather than replaced by an
+untimed tier, and the words are reported untimed.
+
 Reusable word timing needs the canonical word membership, matching counts,
 lexical corroboration, and positive complete timing required by its consumer.
 Those checks do not certify acoustic accuracy, immutable origin, word

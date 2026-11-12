@@ -190,6 +190,126 @@ fn supplied_long_utterance_reaches_alignment_as_one_unchanged_request() {
     assert!(grouped.decisions.is_empty());
 }
 
+/// A group followed by an utterance with no localization (no bullet, no UTR
+/// evidence) is not padded into it: where its speech is is not known. The
+/// group used to be finished against the END OF THE RECORDING, and padded up
+/// to 1.5 seconds into the next utterance's speech.
+#[test]
+fn a_group_before_an_unlocalized_utterance_is_not_padded_into_it() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+         @ID:\teng|test|CHI|||||Child|||\n\
+         *CHI:\twe saw a bird .\x151000_3000\x15\n\
+         *CHI:\tit flew away .\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(60_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(
+        grouped.groups.len(),
+        1,
+        "only the bulleted utterance is grouped"
+    );
+    assert_eq!(
+        grouped.groups[0].audio_end_ms(),
+        3_000,
+        "no padding into the unlocalized utterance that follows"
+    );
+}
+
+/// A bulleted utterance with no alignable word (`xxx`) still says where
+/// that turn's speech is: the group before it ends there, never merged
+/// across it or padded into it.
+#[test]
+fn a_group_is_never_merged_across_or_padded_into_a_bulleted_xxx_turn() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child, MOT Mother\n\
+         @ID:\teng|test|CHI|||||Child|||\n@ID:\teng|test|MOT|||||Mother|||\n\
+         *CHI:\twe saw a bird .\x151000_3000\x15\n\
+         *MOT:\txxx .\x153200_4000\x15\n\
+         *CHI:\tit flew away .\x154200_6000\x15\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(60_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(grouped.groups.len(), 2, "the xxx turn separates the groups");
+    assert!(
+        grouped.groups[0].audio_end_ms() <= 3_200,
+        "no padding into the xxx turn's speech: {}",
+        grouped.groups[0].audio_end_ms()
+    );
+}
+
+/// An `xxx` turn whose bullet is not a window inside the recording (here
+/// past its end) bounds nothing: the group before it is not padded toward
+/// the bullet's claimed start.
+#[test]
+fn an_xxx_turn_with_an_impossible_bullet_does_not_bound_padding() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child, MOT Mother\n\
+         @ID:\teng|test|CHI|||||Child|||\n@ID:\teng|test|MOT|||||Mother|||\n\
+         *CHI:\twe saw a bird .\x151000_3000\x15\n\
+         *MOT:\txxx .\x15600000_600500\x15\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(60_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(grouped.groups[0].audio_end_ms(), 3_000);
+}
+
+/// A following utterance whose window the grouping itself refuses as
+/// inverted says nothing about where its speech starts, so the group before
+/// it is not padded toward its claimed start.
+#[test]
+fn a_group_before_a_refused_inverted_window_is_not_padded() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+         @ID:\teng|test|CHI|||||Child|||\n\
+         *CHI:\twe saw a bird .\x151000_3000\x15\n\
+         *CHI:\tit flew away .\x159000_5000\x15\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(60_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert_eq!(
+        grouped.groups[0].audio_end_ms(),
+        3_000,
+        "no padding toward the refused window's claimed start"
+    );
+}
+
+/// The last group of a file is still padded toward the end of the recording.
+#[test]
+fn the_last_group_is_padded_toward_the_end_of_the_recording() {
+    let chat = parse_chat(
+        "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+         @ID:\teng|test|CHI|||||Child|||\n\
+         *CHI:\twe saw a bird .\x151000_3000\x15\n@End\n",
+    );
+    let grouped = group_utterances(
+        &chat,
+        crate::options::FaEngineName::Wav2vecCanto.aggregation_target(),
+        &test_recording(60_000),
+        &crate::chat_ops::fa::AnchorIndex::not_observed(),
+    );
+    assert!(
+        grouped.groups[0].audio_end_ms() > 3_000,
+        "padded into the trailing silence"
+    );
+}
+
 #[test]
 fn group_window_budget_includes_trailing_padding() {
     let chat = parse_chat(include_str!(

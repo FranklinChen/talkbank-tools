@@ -122,30 +122,12 @@ pub(crate) async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
 ) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
-    let item_results = DispatchPlan::admit(pool, items, lang)?
+    // Every item is answered: an analysis, an explicit empty, or a failure
+    // for that item alone, which declines its utterance. One bad utterance
+    // never refuses the batch, and so never fails a file.
+    DispatchPlan::admit(pool, items, lang)?
         .infer(mwt, retokenize, progress, cancellation)
-        .await?;
-    admit_worker_responses(item_results)
-}
-
-/// Retain the full per-item failure inventory while refusing completion.
-/// These errors describe model output, never the submitted CHAT's validity.
-fn admit_worker_responses(
-    item_results: Vec<Result<AdmittedMorphosyntaxResponse, String>>,
-) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
-    let item_results: Vec<_> = item_results
-        .into_iter()
-        // Per-item messages retain the worker's failure or native rejection
-        // of its output. Morphotag has no command-specific empty-result
-        // outcome of the kind translate carries.
-        .map(|item| item.map_err(crate::text_batch::EngineItemFailure::EngineReported))
-        .collect();
-    crate::text_batch::unwrap_per_item_results("morphotag", item_results).map_err(|err| {
-        ServerError::OutputAdmission {
-            command: crate::api::ReleasedCommand::Morphotag,
-            details: crate::error::OutputAdmissionRefusal::unestablished(err.to_string()),
-        }
-    })
+        .await
 }
 
 impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
@@ -156,7 +138,7 @@ impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
         retokenize: bool,
         progress: Option<&BackendProgressPort>,
         cancellation: Cancellation<'_>,
-    ) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
+    ) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
         let Self {
             pool,
             items,
@@ -184,8 +166,8 @@ impl<T: AsRef<MorphosyntaxBatchItem> + Sync> DispatchPlan<'_, T> {
             "Dispatching admitted morphosyntax batch by effective utterance language"
         );
 
-        let mut merged: Vec<Option<Result<AdmittedMorphosyntaxResponse, String>>> =
-            vec![None; items.len()];
+        let mut merged: Vec<Option<AdmittedMorphosyntaxResponse>> =
+            (0..items.len()).map(|_| None).collect();
 
         for group in groups {
             let group_items: Vec<&T> = group.indices.iter().map(|&idx| &items[idx]).collect();
@@ -226,7 +208,7 @@ async fn infer_batch_homogeneous<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     retokenize: bool,
     progress: Option<&BackendProgressPort>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
+) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
     // Progress reporting for this batch.
     //
     // The Python backend emits `progress_v2` events with a `units` measure
@@ -387,7 +369,7 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     retokenize: bool,
     progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     cancellation: Cancellation<'_>,
-) -> Result<Vec<Result<AdmittedMorphosyntaxResponse, String>>, ServerError> {
+) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
     let payload_items: Vec<MorphosyntaxBatchItem> =
         items.iter().map(|item| item.as_ref().clone()).collect();
 
@@ -446,11 +428,11 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     for (i, item_result) in result.items.into_iter().enumerate() {
         let (raw_sentences, model, repairs) = match item_result {
             MorphosyntaxItemResultV2::Failed { error } => {
-                ud_responses.push(Err(error));
+                ud_responses.push(AdmittedMorphosyntaxResponse::worker_failed(error));
                 continue;
             }
             MorphosyntaxItemResultV2::NoWords => {
-                ud_responses.push(Ok(AdmittedMorphosyntaxResponse::no_words()));
+                ud_responses.push(AdmittedMorphosyntaxResponse::no_words());
                 continue;
             }
             MorphosyntaxItemResultV2::Analyzed {
@@ -461,16 +443,19 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
         };
         match parse_raw_stanza_output(&raw_sentences) {
             Ok(ud) => ud_responses.push(
-                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs)
-                    .map_err(|error| format!("worker item {i}: {error}")),
+                AdmittedMorphosyntaxResponse::from_worker(ud, model, repairs).unwrap_or_else(
+                    |error| {
+                        AdmittedMorphosyntaxResponse::worker_failed(format!(
+                            "worker item {i}: {error}"
+                        ))
+                    },
+                ),
             ),
             Err(error) => {
                 // Log full diagnostics so the failure is debuggable
-                // without a replay, then surface as a per-item Err
-                // so the cross-file driver can attribute the
-                // failure back to the file that contributed this
-                // item: matches the BA2 "one bad utterance
-                // abandons the file" semantics.
+                // without a replay, then answer this item with its
+                // failure: its utterance is declined with the reason and
+                // the rest of the file is analysed.
                 let words_sent: Vec<&str> = payload_items[i]
                     .words()
                     .iter()
@@ -496,7 +481,7 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
                     %error,
                     "Stanza output parse failure: full diagnostics logged"
                 );
-                ud_responses.push(Err(format!(
+                ud_responses.push(AdmittedMorphosyntaxResponse::worker_failed(format!(
                     "Failed to parse raw Stanza output for item {i} \
                      (words: {words_sent:?}): {error}. Diagnostics: {diag_str}"
                 )));
@@ -544,30 +529,6 @@ mod tests {
             },
             talkbank_model::model::LanguageCode::new(lang).expect("valid test language code"),
         )
-    }
-
-    #[test]
-    fn worker_response_failure_inventory_is_system_not_invalid_chat() {
-        let error = admit_worker_responses(vec![
-            Err("worker item 0: one payload received 2 sentences".into()),
-            Ok(AdmittedMorphosyntaxResponse::no_words()),
-            Err("worker item 2: malformed dependency result".into()),
-        ])
-        .expect_err("any failed item refuses completion");
-        assert!(matches!(error, ServerError::OutputAdmission { .. }));
-        assert_eq!(
-            crate::runner::util::classify_server_error(&error),
-            crate::scheduling::FailureCategory::System
-        );
-        let detail = error.to_string();
-        assert!(detail.contains("2 sentences"), "{detail}");
-        assert!(detail.contains("malformed dependency result"), "{detail}");
-        #[cfg(feature = "server")]
-        assert_eq!(
-            axum::response::IntoResponse::into_response(error).status(),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        );
-        assert!(admit_worker_responses(vec![Ok(AdmittedMorphosyntaxResponse::no_words())]).is_ok());
     }
 
     #[test]

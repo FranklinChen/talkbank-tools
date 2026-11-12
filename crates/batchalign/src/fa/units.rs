@@ -159,11 +159,7 @@ impl<'g> DispatchUnit<'g> {
             UnitOrdinal(0),
             GroupOrdinal(0),
             UnitRequest::Whole(source.request()),
-            &RequestKeying {
-                audio_identity: context.audio.audio_identity,
-                whisper_text: context.params.whisper_text,
-                engine: context.params.engine,
-            },
+            &RequestKeying::of(&context),
         )
     }
     /// Key one request and place it in the plan.
@@ -178,14 +174,7 @@ impl<'g> DispatchUnit<'g> {
             .iter()
             .map(|word| word.text.clone())
             .collect();
-        let cache_key = cache_key(
-            &texts,
-            key.audio_identity,
-            request.window().audio_start().get(),
-            request.window().end().get(),
-            key.whisper_text,
-            key.engine,
-        );
+        let cache_key = key.key(&texts, request.window());
         Self {
             ordinal,
             group,
@@ -228,10 +217,59 @@ impl<'g> DispatchUnit<'g> {
 }
 
 /// The run facts every request's cache key is computed from.
-struct RequestKeying<'a> {
+/// Everything an FA request's cache key depends on besides its words and
+/// window: the one place a key is computed ([`Self::key`]), so the key
+/// formula cannot drift between the preparation, candidate and dispatch
+/// sites that each used to spell it out.
+pub(super) struct RequestKeying<'a> {
     audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
     whisper_text: crate::chat_ops::fa::WhisperTextMode,
     engine: crate::types::engines::FaEngineName,
+    language: crate::chat_ops::fa::FaKeyLanguage,
+}
+
+impl<'a> RequestKeying<'a> {
+    /// The keying for `engine` aligning `audio_identity` in `language`.
+    pub(super) fn new(
+        audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
+        whisper_text: crate::chat_ops::fa::WhisperTextMode,
+        engine: crate::types::engines::FaEngineName,
+        language: &crate::api::LanguageCode3,
+    ) -> Self {
+        Self {
+            audio_identity,
+            whisper_text,
+            engine,
+            language: crate::chat_ops::fa::FaKeyLanguage::for_engine(engine, language),
+        }
+    }
+
+    /// The keying of one preparation context.
+    pub(super) fn of(context: &FaPreparationContext<'a>) -> Self {
+        Self::new(
+            context.audio.audio_identity,
+            context.params.whisper_text,
+            context.params.engine,
+            context.worker_lang,
+        )
+    }
+
+    /// The cache key of `words` aligned in `window`.
+    pub(super) fn key(
+        &self,
+        words: &[String],
+        window: crate::chat_ops::fa::coordinates::FaWindow,
+    ) -> CacheKey {
+        cache_key(
+            words,
+            self.audio_identity,
+            window.audio_start().get(),
+            window.end().get(),
+            self.whisper_text,
+            self.engine,
+            &self.language,
+        )
+    }
 }
 
 /// One piece's request and the words it starts and ends at, for evidence.
@@ -357,17 +395,7 @@ impl<'g> DispatchPlan<'g> {
     ///
     /// A single group is keyed by its own words and window, the same inputs
     /// its cache entries are written under, so they stay reachable.
-    pub(super) fn build(
-        groups: &'g [FaGroup],
-        audio_identity: &crate::chat_ops::fa::AudioIdentity,
-        whisper_text: crate::chat_ops::fa::WhisperTextMode,
-        engine: crate::types::engines::FaEngineName,
-    ) -> Self {
-        let key = RequestKeying {
-            audio_identity,
-            whisper_text,
-            engine,
-        };
+    pub(super) fn build(groups: &'g [FaGroup], key: RequestKeying<'_>) -> Self {
         let mut next_ordinal = 0usize;
         let mut mint = || {
             let ordinal = UnitOrdinal(next_ordinal);
@@ -844,9 +872,12 @@ pub(super) async fn resolve_group_timings<'a>(
     } = preparation;
     let plan = DispatchPlan::build(
         &groups,
-        audio.audio_identity,
-        fa_params.whisper_text,
-        fa_params.engine,
+        RequestKeying::new(
+            audio.audio_identity,
+            fa_params.whisper_text,
+            fa_params.engine,
+            worker_lang,
+        ),
     );
     let total_units = plan.units().count();
     for unit in plan.units() {
@@ -995,9 +1026,12 @@ pub(crate) mod test_support {
         let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("/tmp/test.wav", 0, 0);
         DispatchPlan::build(
             groups,
-            &identity,
-            crate::chat_ops::fa::WhisperTextMode::CharSpaced,
-            crate::types::engines::FaEngineName::Wave2Vec,
+            RequestKeying::new(
+                &identity,
+                crate::chat_ops::fa::WhisperTextMode::CharSpaced,
+                crate::types::engines::FaEngineName::Wave2Vec,
+                &crate::api::LanguageCode3::eng(),
+            ),
         )
     }
 

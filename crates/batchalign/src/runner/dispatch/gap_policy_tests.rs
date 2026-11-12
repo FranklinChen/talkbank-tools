@@ -55,6 +55,10 @@ fn measured_end_policy_reaches_final_wor_without_changing_model_inputs() {
             2000,
             params.whisper_text,
             params.engine,
+            &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+                params.engine,
+                &crate::api::LanguageCode3::eng(),
+            ),
         ));
         let parser = TreeSitterParser::new().expect("parser");
         let mut chat = parser
@@ -133,6 +137,10 @@ fn whisper_shaping_and_legacy_cache_keys_are_independent_of_gap_healing() {
                 2000,
                 params.whisper_text,
                 params.engine,
+                &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+                    params.engine,
+                    &crate::api::LanguageCode3::eng(),
+                ),
             );
             assert_eq!(
                 key,

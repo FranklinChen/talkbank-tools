@@ -867,6 +867,8 @@ pub enum PrimaryMorphologyDeclineCause {
     Misaligned,
     /// The model's tokens could not be written back onto the words.
     RetokenizationFailed,
+    /// The worker reported a failure for this utterance alone.
+    WorkerFailed,
 }
 
 impl PrimaryMorphologyDeclineCause {
@@ -877,6 +879,7 @@ impl PrimaryMorphologyDeclineCause {
             Self::MappingFailed => "analysis could not be mapped",
             Self::Misaligned => "analysis does not match the words",
             Self::RetokenizationFailed => "tokens could not be placed on the words",
+            Self::WorkerFailed => "the worker could not analyse this utterance",
         }
     }
 }
@@ -889,6 +892,7 @@ impl From<batchalign_transform::morphosyntax::DeclineCause> for PrimaryMorpholog
             DeclineCause::MappingFailed => Self::MappingFailed,
             DeclineCause::Misaligned => Self::Misaligned,
             DeclineCause::RetokenizationFailed => Self::RetokenizationFailed,
+            DeclineCause::WorkerFailed => Self::WorkerFailed,
         }
     }
 }

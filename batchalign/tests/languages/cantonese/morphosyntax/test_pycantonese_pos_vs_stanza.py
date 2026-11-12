@@ -197,6 +197,42 @@ class TestPyCantonesePosOverride:
         assert pos_map["咗"] == "PART", f"咗 should be PART, got {pos_map['咗']}"
 
 
+class TestPyCantonesePositionalTags:
+    """Tags are paired with words by position, never looked up by spelling."""
+
+    def test_a_repeated_word_keeps_its_own_tag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The tagger reads context, so one surface form can take two tags in
+        one utterance; a map keyed by text gave both the last one's."""
+        from batchalign.inference.morphosyntax import _override_pos_with_pycantonese
+
+        def context_tags(words: list[str]) -> list[tuple[str, str]]:
+            return [("好", "ADV"), ("好", "ADJ")]
+
+        monkeypatch.setattr(pycantonese, "pos_tag", context_tags)
+        words = [
+            {
+                "id": (1,),
+                "text": "好",
+                "upos": "X",
+                "lemma": "好",
+                "head": 2,
+                "deprel": "advmod",
+            },
+            {
+                "id": (2,),
+                "text": "好",
+                "upos": "X",
+                "lemma": "好",
+                "head": 0,
+                "deprel": "root",
+            },
+        ]
+        result = _override_pos_with_pycantonese(words)
+        assert [w["upos"] for w in result] == ["ADV", "ADJ"]
+
+
 class TestPyCantonesePosVsStanza:
     """Direct comparison of PyCantonese POS vs Stanza on same inputs."""
 

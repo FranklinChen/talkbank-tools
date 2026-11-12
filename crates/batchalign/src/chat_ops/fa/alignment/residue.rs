@@ -147,8 +147,13 @@ pub(crate) fn remap_residue(
     }
 
     // Rule 1: one owner per label. `BTreeMap` iterates ascending and the
-    // comparison is strict, so the earliest word wins a tie.
-    let mut owner: Vec<Option<WordSlot>> = vec![None; labels.len()];
+    // comparison is strict, so the earliest word wins a tie. The owner is
+    // charged for every label character it did not match itself: the ones no
+    // word matched AND the ones another word matched. Charging only the
+    // first let a word win a shared label (`in` over `into`, beside `to`)
+    // with zero edits, and be timed over its neighbour's speech as an exact
+    // match (2026-11-12 review).
+    let mut owner: Vec<Option<LabelOwner>> = vec![None; labels.len()];
     for slot in first_label.0..labels.len() {
         let mut best: Option<(WordSlot, usize)> = None;
         for (word, count) in &shared[slot] {
@@ -156,7 +161,26 @@ pub(crate) fn remap_residue(
                 best = Some((*word, *count));
             }
         }
-        owner[slot] = best.map(|(word, _)| word);
+        let matched: usize = shared[slot].values().sum();
+        owner[slot] = best.map(|(word, owned)| LabelOwner {
+            word,
+            not_its_own: unmatched_label_chars[slot] + (matched - owned),
+        });
+        // The other side of the same fact: a word that matched characters of
+        // a label another word owns placed them under its neighbour's timing,
+        // so they are charged to it as transcript-only. Charging only the
+        // owner let `to`, two of whose characters sat in `into`'s label, be
+        // timed from its own labels as an exact fold.
+        if let Some((owner_word, _)) = best {
+            for (word, count) in &shared[slot] {
+                if *word != owner_word {
+                    edits
+                        .entry(*word)
+                        .or_insert(CharEdits::ZERO)
+                        .transcript_only += count;
+                }
+            }
+        }
     }
 
     // Contiguity and non-overlap follow from the alignment being monotone: a
@@ -166,14 +190,18 @@ pub(crate) fn remap_residue(
     // fails, the claims below could interleave and two words would be given
     // overlapping spans, so the residue is refused rather than timed from a
     // contradiction.
-    if !owners_are_monotone(&owner) {
+    let owner_words: Vec<Option<WordSlot>> = owner
+        .iter()
+        .map(|owner| owner.as_ref().map(|owner| owner.word))
+        .collect();
+    if !owners_are_monotone(&owner_words) {
         return Err(UntimedReason::NonMonotoneAttribution);
     }
 
     // Each word's claim is the first and last label it owns.
     let mut claim: BTreeMap<WordSlot, (LabelSlot, LabelSlot)> = BTreeMap::new();
-    for slot in first_label.0..labels.len() {
-        let Some(word) = owner[slot] else {
+    for (slot, label_owner) in owner.iter().enumerate().skip(first_label.0) {
+        let Some(LabelOwner { word, not_its_own }) = *label_owner else {
             continue;
         };
         let label = LabelSlot(slot);
@@ -181,7 +209,7 @@ pub(crate) fn remap_residue(
             .entry(word)
             .and_modify(|(_, last)| *last = label)
             .or_insert((label, label));
-        edits.entry(word).or_insert(CharEdits::ZERO).label_only += unmatched_label_chars[slot];
+        edits.entry(word).or_insert(CharEdits::ZERO).label_only += not_its_own;
     }
 
     // Rule 2: an unplaced word BRACKETED ON BOTH SIDES takes the gap between
@@ -259,6 +287,15 @@ pub(crate) fn remap_residue(
     }
 
     Ok(())
+}
+
+/// A label's owner, with how many of the label's characters it did not
+/// match itself (unmatched by any word, or matched by another word): the
+/// edits its timing from this label carries.
+#[derive(Debug, Clone, Copy)]
+struct LabelOwner {
+    word: WordSlot,
+    not_its_own: usize,
 }
 
 /// Whether label ownership runs FORWARD through the group.

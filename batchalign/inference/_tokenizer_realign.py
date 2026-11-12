@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypeAlias
 
 from batchalign.inference._domain_types import StanzaCode
@@ -55,6 +56,19 @@ L = logging.getLogger("batchalign")
 
 
 TokenizerToken: TypeAlias = str | tuple[str, bool | list[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class RealignRefused:
+    """One sentence the realigner could not bind to its CHAT words.
+
+    The sentence keeps Stanza's own tokens, so the rest of the call is
+    analysed; its item is answered with this refusal and declined on the Rust
+    side. One unbindable utterance used to raise out of the whole language
+    group's Stanza call, failing every utterance in it.
+    """
+
+    reason: str
 
 
 class TokenizerContext:
@@ -85,6 +99,21 @@ class TokenizerContext:
     @original_words.setter
     def original_words(self, value: list[list[str]]) -> None:
         self._local.original_words = value
+        # A new call's words start a new call's refusals.
+        self._local.refusals = {}
+
+    @property
+    def refusals(self) -> dict[int, RealignRefused]:
+        """The sentences of the call in progress the realigner refused, by
+        sentence index."""
+        refusals: dict[int, RealignRefused] = getattr(self._local, "refusals", {})
+        return refusals
+
+    def refuse(self, sentence: int, refusal: RealignRefused) -> None:
+        """Record that ``sentence`` of the call in progress was refused."""
+        if not hasattr(self._local, "refusals"):
+            self._local.refusals = {}
+        self._local.refusals[sentence] = refusal
 
 
 def make_tokenizer_postprocessor(
@@ -124,7 +153,12 @@ def make_tokenizer_postprocessor(
         result: list[list[TokenizerToken]] = []
         for sent_idx, sent_tokens in enumerate(tokenized_batch):
             original = ctx.original_words[sent_idx]
-            result.append(_realign_sentence(sent_tokens, original, ctx.language))
+            match _realign_sentence(sent_tokens, original, ctx.language):
+                case RealignRefused() as refusal:
+                    ctx.refuse(sent_idx, refusal)
+                    result.append(sent_tokens)
+                case list() as realigned:
+                    result.append(realigned)
 
         # Applied to the WHOLE batch, not per sentence: the decision needs a
         # second Stanza pass over the candidate words, and doing that once per
@@ -153,7 +187,7 @@ def _realign_sentence(
     stanza_tokens: list[TokenizerToken],
     original_words: list[str],
     language: RealignLanguage,
-) -> list[TokenizerToken]:
+) -> list[TokenizerToken] | RealignRefused:
     """Merge Stanza tokens that map to the same original CHAT word.
 
     Delegates to ``batchalign_core.align_tokens()`` (Rust) for checked
@@ -187,9 +221,13 @@ def _realign_sentence(
         parts = text.split(" ")
         flat_tokens.extend(parts if len(parts) > 1 else [tok])
 
-    merged = align_tokens(
-        original_words, [_conform(tok) for tok in flat_tokens], language
-    )
+    try:
+        merged = align_tokens(
+            original_words, [_conform(tok) for tok in flat_tokens], language
+        )
+    except ValueError as refusal:
+        # The checked aligner's refusal for this sentence (its only error).
+        return RealignRefused(reason=str(refusal))
 
     # Restore Stanza's own MWT hint tuples wherever a merged/aligned token
     # still corresponds 1:1 to one original Stanza token. This matters even
@@ -210,7 +248,9 @@ def _realign_sentence(
                 break
 
         if buf != target:
-            raise RuntimeError("checked realignment lost its native token binding")
+            return RealignRefused(
+                reason="checked realignment lost its native token binding"
+            )
 
         if isinstance(new, tuple):
             restored.append(new)
@@ -226,7 +266,7 @@ def _realign_sentence(
             restored.append(new)
 
     if orig_idx != len(flat_tokens):
-        raise RuntimeError("checked realignment omitted native tokens")
+        return RealignRefused(reason="checked realignment omitted native tokens")
 
     return restored
 

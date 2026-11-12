@@ -36,17 +36,17 @@ fn items(chat: &ChatFile, language: &LanguageCode) -> Vec<CollectedUtterance> {
 
 #[test]
 fn response_admission_preserves_the_whole_single_sentence_or_explicit_absence() {
-    assert!(AdmittedUdResponse::empty().sentence().is_none());
-    assert!(
+    assert_eq!(AdmittedUdResponse::empty().analysis(), &UdAnalysis::Empty);
+    assert_eq!(
         AdmittedUdResponse::try_from(response(0))
             .expect("empty admitted")
-            .sentence()
-            .is_none()
+            .analysis(),
+        &UdAnalysis::Empty
     );
     let raw = response(1);
     let expected = raw.sentences[0].clone();
     let admitted = AdmittedUdResponse::try_from(raw).expect("one sentence admitted");
-    assert_eq!(admitted.sentence(), Some(&expected));
+    assert_eq!(admitted.analysis(), &UdAnalysis::Sentence(expected));
     for count in [2, 3, 8] {
         let error = AdmittedUdResponse::try_from(response(count)).expect_err("no prefix selection");
         assert_eq!(error.actual, count);

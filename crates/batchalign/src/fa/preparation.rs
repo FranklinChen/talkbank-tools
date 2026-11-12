@@ -7,7 +7,7 @@ use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::chat_ops::fa::resource_partition::{
     self, ResourcePlanError, ResourceProbe, ResourceProbeOutcome,
 };
-use crate::chat_ops::fa::{FaGroup, FaInferItem, FaWord, GroupSpan, GroupUnit, cache_key};
+use crate::chat_ops::fa::{FaGroup, FaInferItem, FaWord, GroupSpan, GroupUnit};
 use crate::error::ServerError;
 use crate::params::{AudioContext, CachePolicy, FaParams};
 use crate::types::engines::FaEngineName;
@@ -71,16 +71,10 @@ impl RequestScope {
     ) -> Self {
         let texts: Vec<_> = words.iter().map(|word| word.text.clone()).collect();
         Self {
-            semantic_key: cache_key(
-                &texts,
-                context.audio.audio_identity,
-                window.audio_start().get(),
-                window.end().get(),
-                context.params.whisper_text,
-                context.params.engine,
-            )
-            .as_str()
-            .to_owned(),
+            semantic_key: super::units::RequestKeying::of(&context)
+                .key(&texts, window)
+                .as_str()
+                .to_owned(),
             word_ids: words.iter().map(FaWord::stable_id).collect(),
         }
     }

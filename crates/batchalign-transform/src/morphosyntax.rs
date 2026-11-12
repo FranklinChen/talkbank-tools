@@ -116,7 +116,7 @@ pub use pos_hints::{
 };
 pub use responses::{
     AdmittedUdResponse, MatchedMorphosyntaxResponses, ResponseAdmissionError,
-    ResponseCountMismatch, UnexpectedSentenceCount,
+    ResponseCountMismatch, UdAnalysis, UnexpectedSentenceCount,
 };
 pub use sentence_mapping::{
     ItemLayout, MappedTokens, TokenItems, is_terminator_punct, map_tokens, map_ud_sentence,

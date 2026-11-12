@@ -329,7 +329,11 @@ pub struct UtteranceAddress {
 }
 
 impl UtteranceAddress {
-    /// The utterance's line in `ChatFile.lines`.
+    /// The utterance's line in `ChatFile.lines` AS COLLECTED: it holds for
+    /// the injection that splices into that same document, and moves as
+    /// soon as a header line is inserted (provenance stamps are, before
+    /// notes are written). Anything written later names the utterance by
+    /// [`Self::utterance`], which header edits do not move.
     pub fn line(&self) -> LineIdx {
         self.line
     }

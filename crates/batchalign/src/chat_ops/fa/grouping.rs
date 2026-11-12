@@ -747,6 +747,27 @@ fn group_with_policy(
                 })
                 .collect(),
         ) else {
+            // No request, but a bullet still says where this turn's speech is
+            // (`xxx`, `0` with a bullet): the group before it is finished
+            // there, neither merged across that speech nor padded into it.
+            // A bullet that is not a window inside the recording says
+            // nothing about where the speech is, so the group is finished
+            // unpadded, as for a refused window.
+            if let Some(bullet) = utt
+                .main
+                .content
+                .bullet
+                .as_ref()
+                .and_then(talkbank_model::BulletState::as_parsed)
+                && let Some(previous) = pending.take()
+            {
+                let (start, end) = (bullet.timing.start_ms, bullet.timing.end_ms);
+                let bound = match start < end && end <= total_audio_ms {
+                    true => TrailingBound::Before(FileMs::new(start)),
+                    false => TrailingBound::Unknown,
+                };
+                groups.push(previous.finish(bound));
+            }
             continue;
         };
         let Some(localized) = LocalizedUtterance::from_source(
@@ -757,9 +778,10 @@ fn group_with_policy(
             recording,
             original_bullet,
         ) else {
-            // Do not merge supported neighbours across an unsupported turn.
+            // Do not merge supported neighbours across an unsupported turn,
+            // and do not pad into it: where its speech is is not known.
             if let Some(previous) = pending.take() {
-                groups.push(previous.finish(total_audio_ms));
+                groups.push(previous.finish(TrailingBound::Unknown));
             }
             decisions.push(DecisionRecord::new_and_trace(
                 line_idx,
@@ -800,7 +822,8 @@ fn group_with_policy(
                 // neighbour could share its window). So the group before it
                 // is finished here, padded into the gap up to its start.
                 if let Some(previous) = pending.take() {
-                    groups.push(previous.finish(span.start_ms));
+                    groups
+                        .push(previous.finish(refusal.trailing_bound(FileMs::new(span.start_ms))));
                 }
                 let speaker = utt.main.speaker.as_str().to_owned();
                 let refused = match refusal {
@@ -887,20 +910,20 @@ fn group_with_policy(
             Some(Pending::Merging(mut previous)) => match previous.append(next) {
                 Ok(()) => Pending::Merging(previous),
                 Err(next) => {
-                    groups.push(previous.finish(next_start));
+                    groups.push(previous.finish(TrailingBound::Before(FileMs::new(next_start))));
                     Pending::Merging(next)
                 }
             },
             // An anchored group is never merged with a neighbour.
             #[cfg(test)]
             Some(anchored @ Pending::Anchored(_)) => {
-                groups.push(anchored.finish(next_start));
+                groups.push(anchored.finish(TrailingBound::Before(FileMs::new(next_start))));
                 Pending::Merging(next)
             }
         });
     }
     if let Some(last) = pending {
-        groups.push(last.finish(total_audio_ms));
+        groups.push(last.finish(TrailingBound::EndOfRecording(FileMs::new(total_audio_ms))));
     }
     Grouping {
         groups,
@@ -1067,6 +1090,28 @@ enum MergeSeparation {
     },
 }
 
+impl MergeSeparation {
+    /// How far the group before this refused utterance may be padded: up to
+    /// where the refusal still says its speech starts, and not at all when
+    /// the refusal says nothing about that. A window the code itself refused
+    /// as inverted or past the recording once still bounded the padding at
+    /// its claimed start, letting the group reach into the refused
+    /// utterance's probable speech.
+    fn trailing_bound(&self, start: FileMs) -> TrailingBound {
+        match self {
+            Self::Unmerged(_) => TrailingBound::Before(start),
+            #[cfg(test)]
+            Self::Oversized { .. } => TrailingBound::Before(start),
+            Self::OutsideRecording(fault) => match fault {
+                WindowFault::Empty { at } => TrailingBound::Before(*at),
+                WindowFault::Inverted { .. } | WindowFault::PastRecording { .. } => {
+                    TrailingBound::Unknown
+                }
+            },
+        }
+    }
+}
+
 impl From<WindowFault> for MergeSeparation {
     fn from(fault: WindowFault) -> Self {
         Self::OutsideRecording(fault)
@@ -1139,12 +1184,40 @@ impl GroupWindow {
         ))
     }
 
-    fn extend_into_trailing_gap(&mut self, next_start: u64) {
-        let gap = next_start.saturating_sub(self.window.end().get());
+    fn extend_into_trailing_gap(&mut self, bound: TrailingBound) {
+        let Some(next_start) = bound.padding_limit() else {
+            return;
+        };
+        let gap = next_start.get().saturating_sub(self.window.end().get());
         let extension = (gap / 2)
             .min(TRAILING_GAP_EXTENSION_MS)
             .min(self.end_limit.get() - self.window.end().get());
         self.window = self.window.extend_by(Ms(extension));
+    }
+}
+
+/// What follows a finished group, which its trailing padding may reach into.
+/// Replaces a bare next-start number, which a group followed by an
+/// unlocalized utterance was given as the END OF THE RECORDING, so it was
+/// padded up to [`TRAILING_GAP_EXTENSION_MS`] into that utterance's speech.
+#[derive(Debug, Clone, Copy)]
+enum TrailingBound {
+    /// The next localized utterance starts here: pad into the gap before it.
+    Before(FileMs),
+    /// Nothing follows: pad toward the end of the recording.
+    EndOfRecording(FileMs),
+    /// An utterance with no localization follows: where its speech is is not
+    /// known, so the group is not padded at all.
+    Unknown,
+}
+
+impl TrailingBound {
+    /// Where padding must stop, or `None` when there must be none.
+    fn padding_limit(self) -> Option<FileMs> {
+        match self {
+            Self::Before(at) | Self::EndOfRecording(at) => Some(at),
+            Self::Unknown => None,
+        }
     }
 }
 
@@ -1159,16 +1232,15 @@ enum Pending {
 }
 
 impl Pending {
-    /// Pad into the silence before `next_start` and close the group.
-    fn finish(self, next_start: u64) -> FaGroup {
+    /// Pad into the silence `bound` allows, if any, and close the group.
+    fn finish(self, bound: TrailingBound) -> FaGroup {
         match self {
-            Self::Merging(group) => group.finish(next_start),
+            Self::Merging(group) => group.finish(bound),
             #[cfg(test)]
             Self::Anchored(mut split) => {
-                split.extend_into_trailing_gap(
-                    FileMs::new(next_start),
-                    Ms(TRAILING_GAP_EXTENSION_MS),
-                );
+                if let Some(next_start) = bound.padding_limit() {
+                    split.extend_into_trailing_gap(next_start, Ms(TRAILING_GAP_EXTENSION_MS));
+                }
                 FaGroup {
                     span: GroupSpan::Anchored(split),
                 }
@@ -1209,8 +1281,8 @@ impl PendingGroup {
         Ok(())
     }
 
-    fn finish(mut self, next_start: u64) -> FaGroup {
-        self.window.extend_into_trailing_gap(next_start);
+    fn finish(mut self, bound: TrailingBound) -> FaGroup {
+        self.window.extend_into_trailing_gap(bound);
         FaGroup {
             span: GroupSpan::Single(SingleSpan {
                 window: self.window.window,

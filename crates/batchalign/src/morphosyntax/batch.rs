@@ -138,13 +138,24 @@ fn merge_responses(
     } in analyzed
     {
         let address = SpanAddress::of(&span);
-        let Some(sentence) = admitted.response().sentence() else {
-            applied.secondary_mut().failed(
-                address,
-                Failure::EmptyAnalysis,
-                "worker returned no sentence",
-            );
-            continue;
+        // Each span answers for itself: a worker failure refuses this span
+        // with its reason, and the batch's other spans are still merged.
+        let sentence = match admitted.response().analysis() {
+            batchalign_transform::morphosyntax::UdAnalysis::Sentence(sentence) => sentence,
+            batchalign_transform::morphosyntax::UdAnalysis::Empty => {
+                applied.secondary_mut().failed(
+                    address,
+                    Failure::EmptyAnalysis,
+                    "worker returned no sentence",
+                );
+                continue;
+            }
+            batchalign_transform::morphosyntax::UdAnalysis::WorkerFailed(reason) => {
+                applied
+                    .secondary_mut()
+                    .failed(address, Failure::Worker, reason.as_str());
+                continue;
+            }
         };
         match l2::merge_planned_secondary_span(span, sentence) {
             Ok(span) => merged.push(PendingSplice {

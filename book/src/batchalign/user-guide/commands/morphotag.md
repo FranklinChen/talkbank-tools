@@ -68,11 +68,13 @@ morphology. See
 [the retokenization contract](../../reference/morphotag-retokenization.md#scoped-annotations-and-complete-expansion).
 
 When the model's analysis of one utterance cannot be used (no analysis came
-back, it does not map to `%mor`, it does not match the utterance's words, or
-its tokens cannot be placed on them), that utterance is left exactly as it
-was, with no `%mor` or `%gra`, and every other utterance is analysed. The file
+back, the worker could not analyse it, it does not map to `%mor`, it does not
+match the utterance's words, or its tokens cannot be placed on them), that
+utterance is left exactly as it was, with no `%mor` or `%gra`, and every other utterance is analysed. The file
 is written and reported as needing review, naming each such utterance and
-why. One utterance never fails the file.
+why, and the utterance itself carries a
+[`%xbatchalign` note](../../reference/xbatchalign-notes.md) saying the same.
+One utterance never fails the file.
 
 To "override" the language, edit the file's `@Languages:` line. There is
 no CLI shortcut, and there cannot be, because a single command may span

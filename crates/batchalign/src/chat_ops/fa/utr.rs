@@ -449,6 +449,8 @@ struct PreparedGlobalUtr<'a> {
     anchors: AnchorIndex,
     line_indices: Vec<usize>,
     following_starts: Vec<FollowingStarts>,
+    /// The anchors that bound hints: floors and ceilings come only from these.
+    chain: regions::ChainAnchors,
 }
 
 /// The nearest retained non-overlap start after one utterance, under both
@@ -507,16 +509,50 @@ impl UtrTimingCorridor {
         }
     }
 
-    fn intersect(self, proposal: PositiveUtrInterval) -> Option<PositiveUtrInterval> {
-        match self {
+    /// Fit `proposal` into the corridor, saying whether it was cropped.
+    fn fit(self, proposal: PositiveUtrInterval) -> CorridorFit {
+        let kept = match self {
             Self::Open { floor_end_ms } => proposal.after(floor_end_ms),
             Self::Bounded(corridor) => PositiveUtrInterval::admit(
                 proposal.start_ms().max(corridor.start_ms()),
                 proposal.end_ms().min(corridor.end_ms()),
             ),
             Self::Exhausted => None,
+        };
+        match kept {
+            None => CorridorFit::Exhausted,
+            Some(kept) if kept == proposal => CorridorFit::Within(kept),
+            Some(kept) => CorridorFit::Cropped {
+                kept,
+                proposed: proposal,
+            },
         }
     }
+
+    /// The fitted interval, if any: for the property test of the geometry.
+    #[cfg(test)]
+    fn intersect(self, proposal: PositiveUtrInterval) -> Option<PositiveUtrInterval> {
+        match self.fit(proposal) {
+            CorridorFit::Within(kept) | CorridorFit::Cropped { kept, .. } => Some(kept),
+            CorridorFit::Exhausted => None,
+        }
+    }
+}
+
+/// What fitting a hint into its corridor did: kept it whole, cropped it
+/// (recorded, so a narrowed hint is never silent), or left nothing.
+enum CorridorFit {
+    /// The hint lies inside the corridor.
+    Within(PositiveUtrInterval),
+    /// The hint was narrowed to the corridor.
+    Cropped {
+        /// What was kept.
+        kept: PositiveUtrInterval,
+        /// What correspondence proposed.
+        proposed: PositiveUtrInterval,
+    },
+    /// Nothing of the hint lies inside the corridor.
+    Exhausted,
 }
 
 impl<'a> PreparedGlobalUtr<'a> {
@@ -560,31 +596,24 @@ impl<'a> PreparedGlobalUtr<'a> {
             };
             census.len()
         ];
+        let chain = regions::ChainAnchors::of(&census);
         let mut ceiling: Option<u64> = None;
         let mut speaker_ceilings = std::collections::BTreeMap::<&str, u64>::new();
-        for (ordinal, line_index) in line_indices.iter().enumerate().rev() {
+        for ordinal in (0..line_indices.len()).rev() {
             let info = &census[ordinal];
             following_starts[ordinal] = FollowingStarts {
                 document: ceiling,
                 same_speaker: speaker_ceilings.get(info.speaker.as_str()).copied(),
             };
-            if !info.has_lazy_overlap
-                && !info.has_ca_overlap
-                && let Line::Utterance(utterance) = &source.lines[*line_index]
-                && let Some(bullet) = utterance
-                    .main
-                    .content
-                    .bullet
-                    .as_ref()
-                    .and_then(talkbank_model::BulletState::as_parsed)
-            {
-                ceiling = Some(ceiling.map_or(bullet.timing.start_ms, |previous| {
-                    previous.min(bullet.timing.start_ms)
-                }));
+            // Only a chain anchor bounds: its start never contradicts the
+            // chain's other starts.
+            if let Some(anchor) = chain.at(ordinal) {
+                ceiling =
+                    Some(ceiling.map_or(anchor.start_ms, |previous| previous.min(anchor.start_ms)));
                 speaker_ceilings
                     .entry(info.speaker.as_str())
-                    .and_modify(|previous| *previous = (*previous).min(bullet.timing.start_ms))
-                    .or_insert(bullet.timing.start_ms);
+                    .and_modify(|previous| *previous = (*previous).min(anchor.start_ms))
+                    .or_insert(anchor.start_ms);
             }
         }
         Ok(Self {
@@ -594,6 +623,7 @@ impl<'a> PreparedGlobalUtr<'a> {
             anchors,
             line_indices,
             following_starts,
+            chain,
         })
     }
 
@@ -606,6 +636,7 @@ impl<'a> PreparedGlobalUtr<'a> {
             anchors,
             line_indices: utt_line_indices,
             following_starts,
+            chain,
         } = self;
         let mut result = UtrResult {
             injected: 0,
@@ -662,21 +693,12 @@ impl<'a> PreparedGlobalUtr<'a> {
             let overlaps = info.has_lazy_overlap || info.has_ca_overlap;
             if info.retained_timing.is_some() {
                 result.skipped += 1;
-                if !overlaps
-                    && let Some(Line::Utterance(utt)) =
-                        chat_file.lines.get(utt_line_indices[utt_idx])
-                    && let Some(bullet) = utt
-                        .main
-                        .content
-                        .bullet
-                        .as_ref()
-                        .and_then(talkbank_model::BulletState::as_parsed)
-                {
-                    document_floor_ms = document_floor_ms.max(bullet.timing.end_ms);
-                    speaker_floors.insert(
-                        info.speaker.as_str(),
-                        speaker_floor_ms.max(bullet.timing.end_ms),
-                    );
+                // Only a chain anchor raises the floor; a timed utterance out
+                // of the chain keeps its timing and bounds nothing.
+                if let Some(anchor) = chain.at(utt_idx) {
+                    document_floor_ms = document_floor_ms.max(anchor.end_ms);
+                    speaker_floors
+                        .insert(info.speaker.as_str(), speaker_floor_ms.max(anchor.end_ms));
                 }
                 continue;
             }
@@ -687,11 +709,32 @@ impl<'a> PreparedGlobalUtr<'a> {
                     alignable_words,
                     ..
                 } => {
-                    let projected = if overlaps {
-                        Some(*interval)
+                    let fit = if overlaps {
+                        CorridorFit::Within(*interval)
                     } else {
-                        UtrTimingCorridor::admit(floor_end_ms, ceiling_start_ms)
-                            .intersect(*interval)
+                        UtrTimingCorridor::admit(floor_end_ms, ceiling_start_ms).fit(*interval)
+                    };
+                    let projected = match fit {
+                        CorridorFit::Within(kept) => Some(kept),
+                        CorridorFit::Cropped { kept, proposed } => {
+                            result.decisions.extend(decision(
+                                utt_idx,
+                                batchalign_transform::decisions::UtrStrategy::ProjectionCropped,
+                                format!(
+                                    "words={alignable_words} proposed_ms=[{},{}] \
+                                     kept_ms=[{},{}] floor_end_ms={floor_end_ms} \
+                                     ceiling_start_ms={:?}",
+                                    proposed.start_ms(),
+                                    proposed.end_ms(),
+                                    kept.start_ms(),
+                                    kept.end_ms(),
+                                    ceiling_start_ms,
+                                ),
+                                true,
+                            ));
+                            Some(kept)
+                        }
+                        CorridorFit::Exhausted => None,
                     };
                     if let Some(projected) = projected {
                         bullets_to_set[utt_idx] = Some(projected);
@@ -2009,6 +2052,22 @@ mod tests {
                 batchalign_transform::decisions::UtrStrategy::ZeroDurationSkipped
             )
         )));
+    }
+
+    /// A hint narrowed by its corridor is reported as cropped, never as kept
+    /// whole; one inside it is kept whole.
+    #[test]
+    fn a_narrowed_hint_is_reported_cropped() {
+        let proposal = PositiveUtrInterval::admit(100, 500).expect("positive");
+        assert!(matches!(
+            UtrTimingCorridor::admit(200, Some(400)).fit(proposal),
+            CorridorFit::Cropped { kept, proposed }
+                if (kept.start_ms(), kept.end_ms()) == (200, 400) && proposed == proposal
+        ));
+        assert!(matches!(
+            UtrTimingCorridor::admit(0, Some(1_000)).fit(proposal),
+            CorridorFit::Within(kept) if kept == proposal
+        ));
     }
 
     #[test]

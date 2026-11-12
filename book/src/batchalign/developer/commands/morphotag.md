@@ -425,6 +425,19 @@ the output's `PrimaryReport`, and the written file reports
 written with diagnostics. `InjectionError` now means only that the batch could
 not be bound to the document.
 
+The worker's answer for each item is typed before injection sees it:
+`AdmittedUdResponse` holds a `UdAnalysis`, which is `Sentence`, `Empty`, or
+`WorkerFailed(reason)`. A failure the worker reports for one item (its
+analysis raised, or its output could not be parsed or admitted) is that
+item's answer, not an error of the batch: `infer_batch` returns one response
+per item with no per-item `Result`, injection declines that utterance with
+`DeclineCause::WorkerFailed` and the worker's reason, and every other
+utterance is analysed. A secondary (`@s`) span with a worker failure is
+refused alone, as `SecondaryMorphologyFailureKind::Worker`, while the batch's
+other spans are merged. Only a broken worker contract for the whole batch (a
+response count that differs from the request, or a worker that did not
+answer at all) still refuses the batch.
+
 ```bash
 # Unit tests (no ML models)
 make test

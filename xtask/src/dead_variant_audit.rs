@@ -399,11 +399,9 @@ fn is_constructor(content: &str, qualifier: &str, variant: &str) -> bool {
     if head.ends_with("[`") {
         return false;
     }
+    // A match arm (`Foo::Bar => ...`) is a pattern, not a construction.
     let tail = &s[idx + needle.len()..];
-    if tail.contains("=>") {
-        return false;
-    }
-    true
+    !tail.contains("=>")
 }
 
 /// Whether any of the entries in `entries` is a constructor for

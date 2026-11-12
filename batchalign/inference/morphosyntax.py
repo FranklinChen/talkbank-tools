@@ -8,9 +8,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+import unicodedata
 from collections.abc import Callable, Generator
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import partial
 from typing import TYPE_CHECKING, assert_never
@@ -23,8 +24,11 @@ from batchalign.inference._morphosyntax_graph import (
     AnalyzableSentence,
     DependencyGraph,
     DependencyProjectionError,
+    PosTaggerRefused,
+    PosTagging,
     ProjectionFailure,
 )
+from batchalign.inference._tokenizer_realign import RealignRefused
 from batchalign.worker._pipeline_cache import (
     LoadedPipeline,
     PipelineLookup,
@@ -312,24 +316,36 @@ def _realignment_mode(
             assert_never(unreachable)
 
 
+@dataclass(slots=True)
+class RealignmentReport:
+    """What the realigner refused during one Stanza call, by sentence index:
+    filled when the call's block ends, read after it."""
+
+    refused: dict[int, RealignRefused] = field(default_factory=dict)
+
+
 @contextlib.contextmanager
-def _realignment_applied(mode: RealignmentMode) -> Generator[None]:
-    """Install the realigner's boundaries for the duration of one Stanza call."""
+def _realignment_applied(mode: RealignmentMode) -> Generator[RealignmentReport]:
+    """Install the realigner's boundaries for the duration of one Stanza call,
+    and report the sentences it refused once the call is over."""
+    report = RealignmentReport()
     match mode:
         case Realigned(context=context, inputs=inputs):
             context.original_words = [list(item.boundaries) for item in inputs]
             try:
-                yield
+                yield report
             finally:
+                report.refused.update(context.refusals)
                 context.original_words = []
         case CueFreeRealigned(context=context, words=words):
             context.original_words = [list(words)]
             try:
-                yield
+                yield report
             finally:
+                report.refused.update(context.refusals)
                 context.original_words = []
         case StanzaOwnsTokenization():
-            yield
+            yield report
         case UnrealignedFallback(lang_code=lang_code):
             L.warning(
                 "morphotag: realignment context missing for language %r, "
@@ -338,7 +354,7 @@ def _realignment_applied(mode: RealignmentMode) -> Generator[None]:
                 "will surface as MisalignmentBug decisions.",
                 lang_code,
             )
-            yield
+            yield report
 
 
 # The 37 Universal Dependencies relation heads (UD v2). Subtypes after a
@@ -444,6 +460,60 @@ JSONObject = dict[str, WorkerJSONValue]
 # ---------------------------------------------------------------------------
 
 
+_HAN_NAME_PREFIXES = ("CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-")
+"""How Unicode names a Han character, in every block and extension."""
+
+
+def _is_cjk(character: str) -> bool:
+    """Whether ``character`` is a Han character: what the segmenter is given.
+
+    Decided by Unicode's own name for the character, not by a hand-kept list
+    of ranges, so every extension is covered (Cantonese-specific characters
+    such as 𡃁 U+210C1 and 𠮶 U+20BB6 lie in Extension B) and a later
+    extension needs no edit here. The basic block alone once made those
+    characters verbatim pieces that split the segmenter's stretch, so
+    𡃁仔 could never be formed. Radicals are not words and are excluded.
+    """
+    return unicodedata.name(character, "").startswith(_HAN_NAME_PREFIXES)
+
+
+@dataclass(frozen=True, slots=True)
+class _CjkCharacters:
+    """Consecutive one-character CJK words of one run, nothing between them:
+    the only input PyCantonese segments."""
+
+    characters: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Verbatim:
+    """A word the segmenter never sees (Latin, digits, anything not a single
+    CJK character): it is returned exactly as written."""
+
+    word: str
+
+
+_RunPiece = _CjkCharacters | _Verbatim
+
+
+def _run_pieces(run: list[str]) -> list[_RunPiece]:
+    """Split one run into maximal stretches of single CJK characters and the
+    verbatim words between them, in order."""
+    pieces: list[_RunPiece] = []
+    pending: list[str] = []
+    for word in run:
+        if len(word) == 1 and _is_cjk(word):
+            pending.append(word)
+            continue
+        if pending:
+            pieces.append(_CjkCharacters(tuple(pending)))
+            pending = []
+        pieces.append(_Verbatim(word))
+    if pending:
+        pieces.append(_CjkCharacters(tuple(pending)))
+    return pieces
+
+
 def _segment_cantonese(runs: list[list[str]]) -> list[str]:
     """Segment Cantonese per-character tokens into words using PyCantonese.
 
@@ -466,7 +536,7 @@ def _segment_cantonese(runs: list[list[str]]) -> list[str]:
     # Only re-segment if the input looks like per-character ASR output:
     # all CJK tokens are single characters. If any multi-char CJK token
     # exists, the input already has some word boundaries, preserve them.
-    cjk_words = [w for w in words if any("\u4e00" <= c <= "\u9fff" for c in w)]
+    cjk_words = [w for w in words if any(_is_cjk(c) for c in w)]
     has_multichar_cjk = any(len(w) > 1 for w in cjk_words)
 
     if has_multichar_cjk:
@@ -474,18 +544,24 @@ def _segment_cantonese(runs: list[list[str]]) -> list[str]:
         # This prevents merging tokens across existing boundaries.
         return list(words)
 
-    # All CJK tokens are single characters: segment each run on its own.
-    return [
-        word
-        for run in runs
-        if (text := "".join(run))
-        for word in pycantonese.segment(text)
-    ]
+    # All CJK tokens are single characters: segment each stretch of them on
+    # its own. A Latin word inside a run is a verbatim piece: joining it into
+    # the segmenter's string ("I like 你" as "Ilike你") erased the boundary
+    # between the transcript's words.
+    result: list[str] = []
+    for run in runs:
+        for piece in _run_pieces(run):
+            match piece:
+                case _CjkCharacters(characters=characters):
+                    result.extend(pycantonese.segment("".join(characters)))
+                case _Verbatim(word=word):
+                    result.append(word)
+    return result
 
 
 def _override_pos_with_pycantonese(
     ud_words: list[JSONObject],
-) -> list[JSONObject]:
+) -> PosTagging:
     """Override Stanza POS tags with PyCantonese POS for Cantonese words.
 
     Stanza's Mandarin-trained model misclassifies core Cantonese vocabulary
@@ -494,20 +570,39 @@ def _override_pos_with_pycantonese(
     all other fields (lemma, deprel, head, etc.) from Stanza.
 
     Applied to the admitted lexical rows of the Cantonese pipeline variant.
+    Rows PyCantonese answers with other words, or another count, are refused
+    as a value ([`PosTaggerRefused`]): this one item is declined, never its
+    language group.
     """
     import pycantonese
 
-    texts = [w.get("text", "") for w in ud_words]
+    texts: list[str] = []
+    for w in ud_words:
+        match w.get("text"):
+            case str(text):
+                texts.append(text)
+            case missing:
+                # A row without its text cannot be tagged, nor its tag checked
+                # against it; reading it as "" made the check pass.
+                return PosTaggerRefused(f"an analysed row has no text: {missing!r}")
     if not texts:
         return ud_words
 
+    # Paired by position, never by spelling: the tagger reads context, so one
+    # surface form can take different tags in one utterance, and a map keyed
+    # by text gave every occurrence the last one's.
     tagged = pycantonese.pos_tag(texts)
-    tag_map = {word: pos for word, pos in tagged}
-
-    result = []
-    for w in ud_words:
-        text = w.get("text", "")
-        pyc_pos = tag_map.get(text)
+    if len(tagged) != len(ud_words):
+        return PosTaggerRefused(
+            f"PyCantonese tagged {len(tagged)} words where the analysis has "
+            f"{len(ud_words)}"
+        )
+    result: list[JSONObject] = []
+    for w, text, (tagged_word, pyc_pos) in zip(ud_words, texts, tagged, strict=True):
+        if tagged_word != text:
+            return PosTaggerRefused(
+                f"PyCantonese tagged {tagged_word!r} where the analysis has {text!r}"
+            )
         if pyc_pos is not None:
             w = {**w, "upos": pyc_pos}
         result.append(w)
@@ -910,6 +1005,7 @@ class MorphosyntaxFailure(StrEnum):
     PIPELINE_RAISED = "Stanza pipeline raised"
     PIPELINE_MISSING = "no Stanza pipeline loaded"
     SENTENCE_COUNT_MISMATCH = "Stanza sentence count mismatch"
+    REFUSAL_UNMATCHED = "token realignment refused a sentence the call did not have"
 
 
 @dataclass(frozen=True, slots=True)
@@ -939,10 +1035,10 @@ class LanguageGroupFailure:
         ``result`` is deliberately left unset. An empty UD document is a
         LEGAL analysis (it is what an utterance with no words gets), so
         returning one here would be indistinguishable from success: the Rust
-        side would inject empty ``%mor`` and ``%gra`` tiers and write the
-        file. With an error it fails the file instead, which is what
-        ``crates/batchalign/src/morphosyntax/worker.rs`` does with any
-        per-item error.
+        side would inject empty ``%mor`` and ``%gra`` tiers. With an error,
+        ``crates/batchalign/src/morphosyntax/worker.rs`` answers each item
+        with ``UdAnalysis::WorkerFailed``: every utterance of the group is
+        declined with this reason, and the file is written with the rest.
         """
         return InferResponse.unexecuted(ItemFailed(error=self.message()))
 
@@ -955,7 +1051,8 @@ _UNDECIDED_ERROR = (
 
 Reaching it is a defect in ``batch_infer_morphosyntax`` rather than a fact
 about the utterance, which is exactly why it must not be an empty result: an
-unforeseen path then fails the file loudly instead of silently emptying its
+unforeseen path then declines that utterance loudly, with this reason in its
+`%xbatchalign` note and the job's warnings, instead of silently emptying its
 tiers.
 """
 
@@ -1105,10 +1202,12 @@ def _reanalyze_without_cue(
     lexical = CueFreeRealigned(mode.context, source.chat_words)
     try:
         with entry.calling() as nlp:
-            with _realignment_applied(lexical):
+            with _realignment_applied(lexical) as realignment:
                 retry_rows = nlp(lexical.text).to_dict()
             if lang == "eng":
                 annotate_verb_reading_lemmas(retry_rows, nlp)
+        if (refused := realignment.refused.get(0)) is not None:
+            return ItemFailed(error=f"cue-free token realignment: {refused.reason}")
         if len(retry_rows) != 1:
             return ItemFailed(error="cue-free model returned the wrong sentence count")
         return _analyzed_item(
@@ -1164,6 +1263,116 @@ def _finalized(results: list[InferResponse | None]) -> BatchInferResponse:
 # ---------------------------------------------------------------------------
 # Inference function
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedItem:
+    """One item of a parsed group: the result slot it answers, its position
+    in the group's Stanza call, and what that call gave it (its sentence, or
+    the realigner's refusal). The three travel together, so no consumer
+    joins them by position."""
+
+    result_index: int
+    position: int
+    parse: list[UdWordRaw] | RealignRefused
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedGroup:
+    """One language group after its Stanza call, one item per utterance sent.
+    The only input the item stage takes, so an item's work cannot run inside
+    the group's failure handler. Built by [`_ParsedGroup.of`], which pairs
+    each utterance with its sentence only when the counts agree, so no count
+    is left for a consumer to check. (Python cannot forbid calling the
+    dataclass directly; this module never does.)"""
+
+    items: tuple[_ParsedItem, ...]
+
+    @classmethod
+    def of(
+        cls,
+        result_indices: list[int],
+        sentences: list[list[UdWordRaw]],
+        refused: dict[int, RealignRefused],
+        *,
+        lang: LanguageCode,
+    ) -> _ParsedGroup | LanguageGroupFailure:
+        """The group, if Stanza returned one sentence per item sent."""
+        if len(sentences) != len(result_indices):
+            # No sentence can be attributed to any utterance. That is a
+            # failure of the whole group, not a licence to publish empty tiers.
+            return LanguageGroupFailure(
+                kind=MorphosyntaxFailure.SENTENCE_COUNT_MISMATCH,
+                lang=lang,
+                detail=f"expected {len(result_indices)} sentences, got {len(sentences)}",
+            )
+        unmatched = sorted(set(refused) - set(range(len(sentences))))
+        if unmatched:
+            # A refusal no sentence of this call can carry: the realigner and
+            # this call disagree about the sentences, so nothing can be paired
+            # safely. Dropping it would analyse an item it refused.
+            return LanguageGroupFailure(
+                kind=MorphosyntaxFailure.REFUSAL_UNMATCHED,
+                lang=lang,
+                detail=f"refusals for sentences {unmatched} of {len(sentences)}",
+            )
+        items: list[_ParsedItem] = []
+        for position, (result_index, sentence) in enumerate(
+            zip(result_indices, sentences, strict=True)
+        ):
+            # A sentence the realigner could not bind to its words kept
+            # Stanza's tokens so the rest of the group ran; its item carries
+            # the refusal instead.
+            parse: list[UdWordRaw] | RealignRefused = refused.get(position, sentence)
+            items.append(_ParsedItem(result_index, position, parse))
+        return cls(items=tuple(items))
+
+
+def _parse_group(
+    entry: LoadedPipeline,
+    combined: str,
+    mode: RealignmentMode,
+    lang_code: LanguageCode,
+    result_indices: list[int],
+) -> _ParsedGroup | LanguageGroupFailure:
+    """Run one language group's Stanza call: its sentences, one per item, or
+    why the group as a whole has none. Everything that can fail the group
+    is here, and nothing else is."""
+    try:
+        with entry.calling() as nlp:
+            with _realignment_applied(mode) as realignment:
+                doc = nlp(combined)
+            sents = doc.to_dict()
+            if lang_code == "eng":
+                # Evidence for the Rust finite-verb rescue, computed by the
+                # same pipeline under the same guard (see the module).
+                annotate_verb_reading_lemmas(sents, nlp)
+    except Exception as error:
+        # The narration stays, but it is no longer the only place the fact
+        # goes: a log line is where lost information looks like it was
+        # handled. Every item of the group carries the failure home, and the
+        # Rust side declines each of its utterances with it.
+        return LanguageGroupFailure(
+            kind=MorphosyntaxFailure.PIPELINE_RAISED, lang=lang_code, detail=str(error)
+        )
+    return _ParsedGroup.of(
+        result_indices, sents, dict(realignment.refused), lang=lang_code
+    )
+
+
+def _contained_item(work: Callable[[], ItemOutcome]) -> ItemOutcome:
+    """Run one item's own work so that whatever it raises is that item's
+    failure. Third-party code (Stanza's rows, PyCantonese) runs inside it, so
+    the item stage cannot rely on naming every exception it might see; an
+    expected refusal is still a value, and this is the boundary for the
+    rest."""
+    try:
+        return work()
+    except Exception as error:
+        L.warning("morphotag item raised: %s: %s", type(error).__name__, error)
+        return ItemFailed(
+            error=f"morphosyntax item raised: {type(error).__name__}: {error}"
+        )
 
 
 def batch_infer_morphosyntax(
@@ -1374,40 +1583,25 @@ def batch_infer_morphosyntax(
             lang_code=lang_code, mandarin_retokenize=use_retok_pipeline
         )
 
-        try:
-            with entry.calling() as nlp:
-                with _realignment_applied(mode):
-                    doc = nlp(combined)
-                sents = doc.to_dict()
-                if lang_code == "eng":
-                    # Evidence for the Rust finite-verb rescue, computed by the
-                    # same pipeline under the same guard (see the module).
-                    annotate_verb_reading_lemmas(sents, nlp)
+        # For Cantonese, override Stanza POS with PyCantonese. Stanza's
+        # Mandarin model scores ~50% on Cantonese vocabulary; PyCantonese
+        # scores ~94%. We keep Stanza's dependency parse (deprel, head) and
+        # lemma, only upos is replaced. Applied to ALL Cantonese morphotag,
+        # not just retokenize, because the POS accuracy problem affects all
+        # Cantonese output.
+        apply_pyc_pos = pipeline is MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
 
-            if len(sents) != len(indices):
-                # Stanza returned a different number of sentences than the
-                # utterances we sent, so no sentence can be attributed to any
-                # utterance. That is a failure of the whole group, not a
-                # licence to publish empty tiers for it.
-                failure = LanguageGroupFailure(
-                    kind=MorphosyntaxFailure.SENTENCE_COUNT_MISMATCH,
-                    lang=lang_code,
-                    detail=f"expected {len(indices)} sentences, got {len(sents)}",
-                )
-                L.warning("%s", failure.message())
+        # Two stages with two failure units. The group stage (one Stanza call)
+        # yields either a sentence per item or the group's failure; only a
+        # parsed group reaches the item stage, which runs OUTSIDE the group's
+        # handler, so nothing one item does can relabel the others (an item's
+        # raise once overwrote every result of its group, successes included).
+        match _parse_group(entry, combined, mode, lang_code, indices):
+            case LanguageGroupFailure() as failure:
+                L.warning("%s (%d items)", failure.message(), len(indices))
                 for idx in indices:
                     results[idx] = failure.response()
-            else:
-                # For Cantonese, override Stanza POS with PyCantonese.
-                # Stanza's Mandarin model scores ~50% on Cantonese vocabulary;
-                # PyCantonese scores ~94%. We keep Stanza's dependency parse
-                # (deprel, head) and lemma, only upos is replaced.
-                # Applied to ALL Cantonese morphotag, not just retokenize,
-                # because the POS accuracy problem affects all Cantonese output.
-                apply_pyc_pos = (
-                    pipeline is MorphosyntaxPipelineV2.CANTONESE_PYCANTONESE_POS
-                )
-
+            case _ParsedGroup(items=items):
                 retry_cue_free = (
                     partial(
                         _reanalyze_without_cue,
@@ -1421,43 +1615,46 @@ def batch_infer_morphosyntax(
                     if isinstance(mode, Realigned)
                     else None
                 )
-
-                for i, idx in enumerate(indices):
-                    # Measured as it runs, so the duration this item reports is
-                    # the one it earned. `_analyzed_item` keeps the terminator
-                    # strip and the relation repair on the only route to a
-                    # response: Stanza does not promise UD-conformant labels,
-                    # and for months nothing on the production path checked,
-                    # because `doc.to_dict()` went straight into the response
-                    # while the validators sat unit-tested and uncalled, and
-                    # `PAD` and `IOB` reached the published corpora. A step the
-                    # type system requires cannot be dropped again.
-                    results[idx] = InferResponse.timed(
-                        partial(
-                            _analyzed_item,
-                            i,
-                            sents[i],
-                            mode=mode,
-                            apply_pyc_pos=apply_pyc_pos,
-                            lang=lang_code,
-                            stanza_version=stanza_version,
-                            pipeline=pipeline,
-                            retry_cue_free=retry_cue_free,
-                        )
-                    )
-        except Exception as e:
-            # The narration stays, but it is no longer the only place the fact
-            # goes: a log line is where lost information looks like it was
-            # handled. Every item of the group carries the failure home, so
-            # the Rust side fails the file instead of writing empty tiers.
-            failure = LanguageGroupFailure(
-                kind=MorphosyntaxFailure.PIPELINE_RAISED,
-                lang=lang_code,
-                detail=str(e),
-            )
-            L.warning("%s (%d items)", failure.message(), len(indices))
-            for idx in indices:
-                results[idx] = failure.response()
+                for item in items:
+                    match item.parse:
+                        case RealignRefused(reason=reason):
+                            # Its own item is answered with the refusal and
+                            # declined.
+                            results[item.result_index] = InferResponse.unexecuted(
+                                ItemFailed(error=f"token realignment: {reason}")
+                            )
+                        case list() as sentence:
+                            # Measured as it runs, so the duration this item
+                            # reports is the one it earned. `_analyzed_item`
+                            # keeps the terminator strip and the relation
+                            # repair on the only route to a response: Stanza
+                            # does not promise UD-conformant labels, and for
+                            # months nothing on the production path checked,
+                            # because `doc.to_dict()` went straight into the
+                            # response while the validators sat unit-tested
+                            # and uncalled, and `PAD` and `IOB` reached the
+                            # published corpora. A step the type system
+                            # requires cannot be dropped again.
+                            results[item.result_index] = InferResponse.timed(
+                                partial(
+                                    _contained_item,
+                                    partial(
+                                        _analyzed_item,
+                                        item.position,
+                                        sentence,
+                                        mode=mode,
+                                        apply_pyc_pos=apply_pyc_pos,
+                                        lang=lang_code,
+                                        stanza_version=stanza_version,
+                                        pipeline=pipeline,
+                                        retry_cue_free=retry_cue_free,
+                                    ),
+                                )
+                            )
+                        case _ as unreachable:
+                            assert_never(unreachable)
+            case _ as unreachable:
+                assert_never(unreachable)
 
         # Report progress: how many items have been decided so far
         # (across all language groups), whether they succeeded or failed.

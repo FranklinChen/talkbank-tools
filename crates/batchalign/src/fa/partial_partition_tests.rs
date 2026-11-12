@@ -177,9 +177,12 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
             let namespace = FaCacheNamespace::for_test("test-fa-wave-v1");
             let plan = units::DispatchPlan::build(
                 &grouping.groups,
-                &identity,
-                crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
-                FaEngineName::Wave2Vec,
+                crate::fa::units::RequestKeying::new(
+                    &identity,
+                    crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
+                    FaEngineName::Wave2Vec,
+                    &crate::api::LanguageCode3::eng(),
+                ),
             );
             let mut expected_timings = vec![None; 5];
             if label == "short_anchored_tail" {
@@ -227,6 +230,10 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
                     piece.ownership_window().end().get(),
                     crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
                     FaEngineName::Wave2Vec,
+                    &crate::chat_ops::fa::FaKeyLanguage::for_engine(
+                        FaEngineName::Wave2Vec,
+                        &crate::api::LanguageCode3::eng(),
+                    ),
                 );
                 if piece.words() != piece.request_words() {
                     assert_ne!(

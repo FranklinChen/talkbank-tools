@@ -46,6 +46,9 @@ pub(super) enum MorphosyntaxResponseSource {
     },
     /// The worker had no words to analyze for this item, so no model ran.
     NoWordsToAnalyze,
+    /// The worker reported a failure for this item alone; its reason travels
+    /// in the response, and no model's output was applied.
+    WorkerFailed,
 }
 
 /// One morphosyntax response admitted at the worker boundary, paired with
@@ -73,6 +76,15 @@ impl AdmittedMorphosyntaxResponse {
                 repairs: MorphosyntaxRepairs(repairs),
             },
         })
+    }
+
+    /// A failure the worker reported for this one item, or an analysis that
+    /// could not be admitted. It declines this item's utterance only.
+    pub(crate) fn worker_failed(reason: String) -> Self {
+        Self {
+            response: AdmittedUdResponse::worker_failed(reason),
+            source: MorphosyntaxResponseSource::WorkerFailed,
+        }
     }
 
     /// The empty response for an item the worker had no words to analyze.
@@ -243,7 +255,8 @@ impl AppliedAnalyses {
                         applied.engines.0.insert(model);
                         applied.repairs.extend(repairs);
                     }
-                    MorphosyntaxResponseSource::NoWordsToAnalyze => {}
+                    MorphosyntaxResponseSource::NoWordsToAnalyze
+                    | MorphosyntaxResponseSource::WorkerFailed => {}
                 }
                 admitted.response
             })
@@ -265,7 +278,8 @@ impl AppliedAnalyses {
                 }
                 self.repairs.extend(repairs.clone());
             }
-            MorphosyntaxResponseSource::NoWordsToAnalyze => {}
+            MorphosyntaxResponseSource::NoWordsToAnalyze
+            | MorphosyntaxResponseSource::WorkerFailed => {}
         }
     }
 
@@ -285,11 +299,16 @@ impl AppliedAnalyses {
         self.primary.declined(declined);
     }
 
-    pub(crate) fn annotate_secondary(
+    /// Mark this run's localized shortfalls in `chat`: a `%xbatchalign`
+    /// note on each declined utterance, and the file-level comment for
+    /// secondary analysis. Called once per output, after every write.
+    pub(crate) fn annotate(
         &self,
         chat: &mut crate::chat_ops::ChatFile,
-    ) -> Result<(), talkbank_model::model::BlankContent> {
-        self.secondary.annotate(chat)
+    ) -> Result<(), crate::error::ServerError> {
+        self.primary.annotate(chat)?;
+        self.secondary.annotate(chat)?;
+        Ok(())
     }
 
     pub(super) fn secondary_mut(&mut self) -> &mut super::report::SecondaryReport {
@@ -342,6 +361,7 @@ mod tests {
     use crate::types::worker_v2::{
         MorphosyntaxPipelineV2, UdRelationRepairKindV2, UdRelationRepairV2, UdRepairKindV2,
     };
+    use batchalign_transform::morphosyntax::UdAnalysis;
 
     fn empty() -> UdResponse {
         UdResponse {
@@ -389,10 +409,16 @@ mod tests {
                 );
             } else {
                 let admitted = result.expect("empty or single analysis");
-                assert_eq!(admitted.response().sentence().is_some(), count == 1);
+                assert_eq!(
+                    matches!(admitted.response().analysis(), UdAnalysis::Sentence(_)),
+                    count == 1
+                );
                 let (responses, applied) = AppliedAnalyses::take_applied(vec![admitted]);
                 assert_eq!(responses.len(), 1);
-                assert_eq!(responses[0].sentence().is_some(), count == 1);
+                assert_eq!(
+                    matches!(responses[0].analysis(), UdAnalysis::Sentence(_)),
+                    count == 1
+                );
                 assert_eq!(
                     joined(&applied).as_deref(),
                     Some("stanza-test:eng:standard")

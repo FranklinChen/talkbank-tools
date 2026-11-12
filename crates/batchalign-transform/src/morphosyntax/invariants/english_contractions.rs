@@ -323,7 +323,7 @@ fn expand_at(
     };
     let host_id = id.after(host_offset);
     let original = sentence.words[i].clone();
-    let governed = governed_verb(sentence, &original, id, contraction.complement);
+    let governance = Governance::read(sentence, &original, id, contraction.complement);
     let host_already_has_object = sentence
         .words
         .iter()
@@ -331,16 +331,21 @@ fn expand_at(
 
     renumber(sentence, id, shift, host_id);
     let shifted = |word: UdWordId| if word > id { word.after(shift) } else { word };
-    let governed = governed.map(shifted);
-    let attachment = match governed {
-        // Raised when Stanza made the token a dependent of the very verb it
-        // governs.
-        Some(verb) if original.head.map_word(shifted).is(verb) => {
-            raise_host(sentence, verb, host_id)
+    let as_parsed = || (original.head.map_word(shifted), original.deprel.clone());
+    let (attachment, governed) = match governance {
+        Governance::ClauseHead { verb } => (as_parsed(), Some(shifted(verb))),
+        // Raised when Stanza made the token a dependent of the verb it
+        // governs: the one route to `raise_host`, since only
+        // `Governance::read` makes this variant.
+        Governance::Raisable { verb } => {
+            let verb = shifted(verb);
+            (
+                raise_host(sentence, verb, host_id).unwrap_or_else(as_parsed),
+                Some(verb),
+            )
         }
-        _ => None,
-    }
-    .unwrap_or_else(|| (original.head.map_word(shifted), original.deprel.clone()));
+        Governance::StandsAlone => (as_parsed(), None),
+    };
 
     let replacement = build_parts(
         parts,
@@ -463,25 +468,94 @@ fn build_parts(
     replacement
 }
 
-/// The verb the host governs, by the token's original ids: the host's
-/// `xcomp` child when Stanza already parsed the token as the clause head,
-/// else the token's head when Stanza attached it to the verb. `None` when
-/// the host governs nothing, or stands alone (`hafta .`).
-fn governed_verb(
-    sentence: &UdSentence,
-    original: &UdWord,
-    id: UdWordId,
-    complement: Complement,
-) -> Option<UdWordId> {
-    match complement {
-        Complement::None => return None,
-        Complement::Infinitive | Complement::BareInfinitive => {}
+/// What the contraction token governs, read once from Stanza's parse by the
+/// token's original ids ([`Governance::read`], its only constructor and the
+/// one checked edge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Governance {
+    /// Stanza already parsed the token as the clause head: `verb` is its
+    /// `xcomp` (or `ccomp`) child, which the marker `to` attaches to.
+    /// Nothing is raised.
+    ClauseHead {
+        /// The governed verb.
+        verb: UdWordId,
+    },
+    /// Stanza attached the token to the predicate it governs, after it, as
+    /// the kind of dependent a misread contraction becomes (a verb, or a
+    /// copular predicate such as `good` in `you hafta be good`): the host is
+    /// raised over that predicate.
+    Raisable {
+        /// The governed predicate, the token's head in Stanza's parse.
+        verb: UdWordId,
+    },
+    /// Nothing to raise over: no infinitival complement, the token stands
+    /// alone (`hafta .`), or Stanza made it anything other than a dependent
+    /// of a following predicate (a relative-clause head with no complement
+    /// child, a verb's subject or object).
+    StandsAlone,
+}
+
+/// The relations by which Stanza attaches a whole contraction to the verb
+/// it governs: what a misread `hafta` or `sposta` becomes (an auxiliary, an
+/// adverb, an interjection, an unlabelled dependent, a copula). A positive,
+/// closed set: any other relation (`nsubj`, `obj`, `nmod`, `acl:relcl`...)
+/// says the token is an argument or modifier of a word it does not govern,
+/// and raising over that word built a wrong `%gra` (2026-11-12 reviews).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RaisableRelation {
+    Aux,
+    Advmod,
+    Discourse,
+    Dep,
+    Cop,
+}
+
+impl RaisableRelation {
+    /// The raisable relation `deprel` names, by its universal part (so
+    /// `aux:pass` is `aux`), or `None`.
+    fn of(deprel: &str) -> Option<Self> {
+        let universal = deprel
+            .split_once(':')
+            .map_or(deprel, |(universal, _)| universal);
+        match universal {
+            "aux" => Some(Self::Aux),
+            "advmod" => Some(Self::Advmod),
+            "discourse" => Some(Self::Discourse),
+            "dep" => Some(Self::Dep),
+            "cop" => Some(Self::Cop),
+            _ => None,
+        }
     }
-    let xcomp_child = sentence.words.iter().find_map(|w| match w.id {
-        UdId::Single(_) if w.head.is(id) && w.deprel == "xcomp" => UdWordId::of_row(w),
-        UdId::Single(_) | UdId::Range(..) | UdId::Decimal(_) => None,
-    });
-    xcomp_child.or(original.head.word())
+}
+
+impl Governance {
+    /// Read what the token governs from Stanza's parse, by its original ids.
+    fn read(
+        sentence: &UdSentence,
+        original: &UdWord,
+        id: UdWordId,
+        complement: Complement,
+    ) -> Self {
+        match complement {
+            Complement::None => return Self::StandsAlone,
+            Complement::Infinitive | Complement::BareInfinitive => {}
+        }
+        let complement_child = sentence.words.iter().find_map(|w| match w.id {
+            UdId::Single(_) if w.head.is(id) && matches!(w.deprel.as_str(), "xcomp" | "ccomp") => {
+                UdWordId::of_row(w)
+            }
+            UdId::Single(_) | UdId::Range(..) | UdId::Decimal(_) => None,
+        });
+        if let Some(verb) = complement_child {
+            return Self::ClauseHead { verb };
+        }
+        // The governed predicate always follows an English contraction; a
+        // head before the token is a word it modifies, never one it governs.
+        match (RaisableRelation::of(&original.deprel), original.head.word()) {
+            (Some(_), Some(verb)) if verb > id => Self::Raisable { verb },
+            (Some(_) | None, Some(_) | None) => Self::StandsAlone,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +621,164 @@ mod tests {
                 punct(7, ".", 3),
             ],
         }
+    }
+
+    /// `the one you hafta read .`: `hafta` heads a relative clause on the
+    /// NOUN `one` (`acl:relcl`), with `read` as its `ccomp` child. The host
+    /// keeps the token's own attachment and is the clause head, so `to`
+    /// marks the governed verb `read`, as UD parses `have to read`; nothing
+    /// is attached under the noun as if it were a verb. Raising over
+    /// whatever head the token had rewrote `one` as the host's `xcomp`.
+    #[test]
+    fn a_contraction_heading_a_relative_clause_is_not_raised_over_the_noun() {
+        let sentence = UdSentence {
+            words: vec![
+                word(1, "the", "the", UniversalPos::Det, None, 2, "det"),
+                word(
+                    2,
+                    "one",
+                    "one",
+                    UniversalPos::Noun,
+                    Some("Number=Sing"),
+                    0,
+                    "root",
+                ),
+                word(
+                    3,
+                    "you",
+                    "you",
+                    UniversalPos::Pron,
+                    Some("Case=Nom|Person=2|PronType=Prs"),
+                    4,
+                    "nsubj",
+                ),
+                word(
+                    4,
+                    "hafta",
+                    "hafta",
+                    UniversalPos::Verb,
+                    Some("Mood=Ind|Tense=Pres|VerbForm=Fin"),
+                    2,
+                    "acl:relcl",
+                ),
+                word(
+                    5,
+                    "read",
+                    "read",
+                    UniversalPos::Verb,
+                    Some("VerbForm=Inf"),
+                    4,
+                    "ccomp",
+                ),
+                punct(6, ".", 2),
+            ],
+        };
+        let out = expand_english_contractions(sentence);
+        let one = out
+            .words
+            .iter()
+            .find(|w| w.text == "one")
+            .expect("the noun");
+        assert_eq!(one.deprel, "root", "the noun keeps its own relation");
+        assert!(one.head.word().is_none(), "the noun stays the root");
+        let have = out
+            .words
+            .iter()
+            .find(|w| w.text == "have")
+            .expect("the host");
+        assert_eq!(
+            have.deprel, "acl:relcl",
+            "the host keeps the token's attachment"
+        );
+        let read = out
+            .words
+            .iter()
+            .find(|w| w.text == "read")
+            .expect("the governed verb");
+        let to = out
+            .words
+            .iter()
+            .find(|w| w.text == "to")
+            .expect("the marker");
+        assert!(
+            to.head
+                .word()
+                .is_some_and(|head| UdId::Single(head.get()) == read.id),
+            "`to` marks the governed verb, not the noun or the host: {to:?}"
+        );
+    }
+
+    /// A contraction Stanza made the SUBJECT or OBJECT of a following verb
+    /// (a mention, or a misrecognition: `what hafta means`) is an argument of
+    /// that verb, not its governor, so nothing is raised over it.
+    #[test]
+    fn a_contraction_that_is_an_argument_of_a_verb_stands_alone() {
+        for relation in ["nsubj", "obj"] {
+            let sentence = UdSentence {
+                words: vec![
+                    word(1, "what", "what", UniversalPos::Pron, None, 3, "obj"),
+                    word(
+                        2,
+                        "hafta",
+                        "hafta",
+                        UniversalPos::Noun,
+                        Some("Number=Sing"),
+                        3,
+                        relation,
+                    ),
+                    word(
+                        3,
+                        "means",
+                        "mean",
+                        UniversalPos::Verb,
+                        Some("Mood=Ind|Tense=Pres|VerbForm=Fin"),
+                        0,
+                        "root",
+                    ),
+                    punct(4, ".", 3),
+                ],
+            };
+            assert_eq!(
+                Governance::read(
+                    &sentence,
+                    &sentence.words[1],
+                    UdWordId::of_row(&sentence.words[1]).expect("id"),
+                    Complement::Infinitive,
+                ),
+                Governance::StandsAlone,
+                "{relation}"
+            );
+        }
+    }
+
+    /// A raisable relation whose head comes BEFORE the token is a word the
+    /// token modifies, never the predicate it governs.
+    #[test]
+    fn a_head_before_the_token_is_never_raised_over() {
+        let sentence = UdSentence {
+            words: vec![
+                word(
+                    1,
+                    "go",
+                    "go",
+                    UniversalPos::Verb,
+                    Some("VerbForm=Inf"),
+                    0,
+                    "root",
+                ),
+                word(2, "hafta", "hafta", UniversalPos::Adv, None, 1, "advmod"),
+                punct(3, ".", 1),
+            ],
+        };
+        assert_eq!(
+            Governance::read(
+                &sentence,
+                &sentence.words[1],
+                UdWordId::of_row(&sentence.words[1]).expect("id"),
+                Complement::Infinitive,
+            ),
+            Governance::StandsAlone
+        );
     }
 
     /// The production seam: Stanza's whole-token analysis in, `%mor` out.

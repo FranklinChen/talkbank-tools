@@ -910,30 +910,108 @@ impl<'c> LocalRegionPlan<'c> {
         self.utterances
             .iter()
             .take(self.span.owned())
-            .flat_map(|planned| {
-                // The two admitting states hold different proof types; one of
-                // the two options is filled, so nothing is allocated.
-                let (bound, interior) = match &planned.evidence {
-                    UtrUtteranceAlignmentEvidence::Matched {
-                        admitted_matches, ..
-                    } => (Some(admitted_matches), None),
-                    UtrUtteranceAlignmentEvidence::InteriorOnly {
-                        admitted_matches, ..
-                    } => (None, Some(admitted_matches)),
-                    UtrUtteranceAlignmentEvidence::SelectedOnly { .. }
-                    | UtrUtteranceAlignmentEvidence::Refused { .. }
-                    | UtrUtteranceAlignmentEvidence::RetainedUnsearched { .. }
-                    | UtrUtteranceAlignmentEvidence::Unmatched { .. }
-                    | UtrUtteranceAlignmentEvidence::Uninspected { .. }
-                    | UtrUtteranceAlignmentEvidence::ExcludedMarkedOverlap { .. }
-                    | UtrUtteranceAlignmentEvidence::NoAlignableWords { .. } => (None, None),
-                };
-                bound
-                    .into_iter()
-                    .flat_map(|matches| matches.iter())
-                    .chain(interior.into_iter().flat_map(|matches| matches.iter()))
+            .flat_map(|planned| planned.evidence.claimed_tokens())
+    }
+}
+
+impl UtrUtteranceAlignmentEvidence {
+    /// The provider tokens this utterance's admitted correspondences hold.
+    fn claimed_tokens(&self) -> impl Iterator<Item = UtrAsrTokenOrdinal> + '_ {
+        // The two admitting states hold different proof types; one of the two
+        // options is filled, so nothing is allocated.
+        let (bound, interior) = match self {
+            Self::Matched {
+                admitted_matches, ..
+            } => (Some(admitted_matches), None),
+            Self::InteriorOnly {
+                admitted_matches, ..
+            } => (None, Some(admitted_matches)),
+            Self::SelectedOnly { .. }
+            | Self::Refused { .. }
+            | Self::RetainedUnsearched { .. }
+            | Self::Unmatched { .. }
+            | Self::Uninspected { .. }
+            | Self::ExcludedMarkedOverlap { .. }
+            | Self::NoAlignableWords { .. } => (None, None),
+        };
+        bound
+            .into_iter()
+            .flat_map(|matches| matches.iter())
+            .chain(interior.into_iter().flat_map(|matches| matches.iter()))
+            .map(|matched| matched.matched().token.token_index)
+    }
+}
+
+/// The provider tokens already given to utterances: built only from a
+/// first pass's evidence ([`UtrAlignmentEvidence::claimed_tokens`]), grown
+/// only by [`Self::claim`], and required by the overlap pass's window, so no
+/// search can match a token another utterance already holds. Not `Clone`:
+/// one ledger per pass, so no search claims against a copy.
+#[derive(Debug)]
+pub(super) struct ClaimedTokens(std::collections::BTreeSet<UtrAsrTokenOrdinal>);
+
+impl ClaimedTokens {
+    /// No token claimed: for tests of the overlap window alone.
+    #[cfg(test)]
+    pub(super) fn none() -> Self {
+        Self(std::collections::BTreeSet::new())
+    }
+
+    /// Whether another utterance holds `token`.
+    pub(super) fn holds(&self, token: UtrAsrTokenOrdinal) -> bool {
+        self.0.contains(&token)
+    }
+
+    /// Take an overlap recovery's interval, claiming the tokens it used: the
+    /// only way to open an [`OverlapRecovery`], so no later overlap recovery
+    /// can match those tokens again and one measured token cannot time two
+    /// utterances.
+    pub(super) fn claim(&mut self, recovery: OverlapRecovery) -> PositiveUtrInterval {
+        self.0.extend(recovery.tokens);
+        recovery.interval
+    }
+}
+
+/// One overlap utterance's recovered timing, still bound to the provider
+/// tokens its admitted correspondences used. Made only from those matches
+/// ([`Self::of`]) and opened only by [`ClaimedTokens::claim`].
+#[must_use = "an overlap recovery's interval is taken only by claiming its tokens"]
+pub(super) struct OverlapRecovery {
+    interval: PositiveUtrInterval,
+    tokens: Vec<UtrAsrTokenOrdinal>,
+}
+
+impl OverlapRecovery {
+    /// The recovery the endpoint-bound `matches` prove, if their timing is
+    /// positive: the interval and the tokens come from the same matches.
+    pub(super) fn of(matches: &super::lexical::EndpointBoundUtrWordMatches) -> Option<Self> {
+        match matches.proposal() {
+            UtrTimingProposal::Positive { interval } => Some(Self {
+                interval,
+                tokens: matches
+                    .iter()
                     .map(|matched| matched.matched().token.token_index)
-            })
+                    .collect(),
+            }),
+            UtrTimingProposal::NonPositive { .. } => None,
+        }
+    }
+}
+
+impl UtrAlignmentEvidence {
+    /// The tokens this pass's admitted correspondences gave to utterances.
+    pub(super) fn claimed_tokens(&self) -> ClaimedTokens {
+        ClaimedTokens(match self {
+            Self::NotRunNoUntimed => std::collections::BTreeSet::new(),
+            Self::Global { plan }
+            | Self::TwoPass {
+                first_pass: plan, ..
+            } => plan
+                .utterances
+                .iter()
+                .flat_map(UtrUtteranceAlignmentEvidence::claimed_tokens)
+                .collect(),
+        })
     }
 }
 

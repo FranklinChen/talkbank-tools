@@ -1643,6 +1643,7 @@ decision strategies have different severity and review priority:
 | `end_clamped_coverage_only` | Only the bullet's inherited coverage overshot the next utterance's start; no measured word conflicted | **No** | Informational; automatic |
 | `end_clamped_boundary_from_words` | Both bullets' inherited boundary replaced by their measured word hulls; the words never conflicted | **No** | Informational; automatic |
 | `end_clamped_interleaved_words` | The words themselves interleave, or the next utterance has none: a genuine conflict | **Yes** | Adjudicate; the bullet and every affected word were clamped together |
+| `timing_stripped` (start ahead, `reason="ahead_of_following_start ..."`) | Utterance start comes after the next start of the chosen chain of in-order starts, which left it out (a mistyped start, or a `+<` start above such a chain start); full timing removed, every later utterance keeps its timing | **Yes** | Check the utterance's original start |
 | `timing_stripped` (start regression) | Utterance start precedes the previous accepted start and the utterance carries no `+<` overlap marker (or carries one but has no timed extent after that start); full timing removed | **Yes** | Review utterance; may indicate transcript/audio reordering |
 | `start_raised_to_preceding_start` | Utterance start precedes the previous accepted start and the transcriber marked the utterance `+<` (it overlaps the previous one); the start is raised to the previous start, words wholly before it lose their timing, the word straddling it is cut to it, the rest keep their measured times | **Yes** | Review the dropped and trimmed words; the raise itself is what CHAT's start-order rule allows of a transcribed overlap |
 | `kept_bullet_left_unresolved` | Under `--main-bullets keep`, two kept bullets overlap, or one starts before an earlier one; neither changed | **Yes** for a same-speaker overlap or a backward start; **No** for a cross-speaker overlap | Review the input's own bullets; the run did not touch them |
@@ -1760,6 +1761,52 @@ utterance's start, after `%wor` had already been written, so the measured
 words ended after their own bullet (in one 253-file corpus, 30,858 word slots
 did) and, under the former any-speaker default, real cross-speaker overlap
 was cut as well.
+
+Which starts are accepted is planned for a whole segment at once (between
+two kept bullets; with no kept bullet, the whole file), then carried out in
+file order (`plan_segment` and `weighted_chain` in
+`fa/orchestrate/start_order.rs`):
+
+1. **Plan.** The unmarked starts kept form a chain whose starts do not go
+   backwards, chosen to keep the most timings: the chain's own utterances,
+   plus every `+<` utterance that would keep its timing next to it. A `+<`
+   start below the chain start before it keeps its timing if a raise to that
+   start leaves it something (its bullet and the latest end of its timed
+   words reach past it: `RaiseReach`, the same rule the raise itself applies); a `+<` start
+   above the next chain start does not. So one outlier start (a typed
+   `600000` for `6000`) is the one stripped (`ahead_of_following_start`),
+   where accepting the first start in document order made it the floor and
+   stripped every utterance after it; two `+<` backchannels below a turn
+   never outvote it; and one mistyped turn does not cost the backchannels
+   above it their timing.
+2. **Carry out.** Every start is then judged in file order against the
+   greatest start accepted so far (the kept floor at first): a chain start is
+   accepted; a start below the accepted one regresses (a `+<` start is
+   raised, an unmarked one stripped; see below); a start above the next chain
+   start is ahead and stripped; anything else is in order and accepted.
+
+Ties: where chains keep equally many timings, nothing measured says which
+start is wrong, and the one through the earlier utterances wins (two starts
+out of order keep the first and strip the second, as before); the empty
+chain wins a tie with any chain.
+
+**Known limit.** The plan judges a `+<` start against the chain start before
+it, but the file-order step judges it against the greatest start accepted so
+far, which an accepted start between two chain starts can raise: an accepted
+`+<` start, or an unmarked start the plan left out that turns out to be in
+order. Then a `+<` start the plan counted as kept is raised further, and
+stripped if its timing does not reach that far. Example, in file order:
+`turn 1000, turn 2000, +< 1500-1600, +< 1550-1650, turn 3000`. The plan
+leaves the 2000 turn out (keeping both backchannels, four timings); the
+file-order step finds 2000 in order and accepts it, and both backchannels,
+timed before the turn they mark as overlapping, are stripped: three timings
+kept, the turn among them. The result is never worse than the greedy rule
+this replaced, which kept the same three. Stripping such an in-order turn to
+honour the plan was considered and rejected: it would drop a correctly
+ordered turn for backchannels whose timing contradicts their own marker.
+An exact plan would replay the file-order step for
+every candidate chain, at a cost not justified until this appears in real
+data.
 
 A start regression (`reason="non_monotonic ..."`) is a genuine alignment
 concern: the utterance's measured start precedes the previous accepted start,
@@ -1944,7 +1991,7 @@ The phases, and what each does with a kept bullet:
 | Bullet update after post-processing | Union with (or rebuild from) the word hull | Not run |
 | `impose` at the head of finalization | Nothing | Restore the given bullet; `clamp_words_within` cuts each word on the main tier and on `%wor` to it (a straddling word to the edge; a word wholly outside or left with no extent loses its timing), recorded as `words_clamped_to_kept_bullet`. Main-tier cuts are folded into the `%wor` plan; under a suppressed `%wor` write the existing tier has already been clamped in place |
 | Bullet repair | Gap fill, boundary averaging, LIS removal | Never a gap-fill target, never averaged; a fixed LIS anchor, with the LIS solved on the revisable entries between consecutive anchors |
-| Monotonicity pass 1 (start order) | Strip every start below the greatest accepted start | Kept starts are a fixed skeleton: a revisable bullet below the accepted start or above the next kept start is stripped (the latter recorded as `yielded_to_kept_start`); a kept start below an earlier kept start is recorded as `kept_bullet_left_unresolved` |
+| Monotonicity pass 1 (start order) | Keep the planned chain of in-order starts; judge every other start against the greatest accepted start (raise a `+<` start below it, strip an unmarked one; strip a start ahead of the next chain start) | Kept starts are a fixed skeleton: a revisable bullet below the accepted start or above the next kept start is stripped (the latter recorded as `yielded_to_kept_start`); a kept start below an earlier kept start is recorded as `kept_bullet_left_unresolved` |
 | Monotonicity pass 2, revisable earlier, kept later | May move the later start (`BoundaryFromWords`) | `BoundaryFromWords` becomes `InterleavedWords`, cutting only the earlier side; a zero-width strip of the earlier side cites `yielded_to_kept_start` |
 | Monotonicity pass 2, kept earlier, revisable later | Cut or strip the earlier bullet | `KeptEndYield`: the later start moves forward to the kept end (cutting leading words that reach back before it), or the later timing is stripped if nothing would remain; effect `YieldedToKeptBullet` |
 | Monotonicity pass 2, both kept | Cut or strip the earlier bullet | Left in place, recorded once per pair as `kept_bullet_left_unresolved` |
@@ -3007,6 +3054,12 @@ unchanged utterances).
   returns `EmptyAudioSegment`, and the group is skipped with all-`None` timings.
   Review the window and original recording before changing timing. Keep the
   words untimed when no source-supported correction is available.
+- **The start-order plan can over-count backchannels.** The plan that picks
+  which out-of-order starts to strip can count a `+<` backchannel as kept
+  that the file-order step then strips, when an in-order start between two
+  chain starts is accepted after all (see "Which starts are accepted" above
+  for the worked example). The result is never worse than the earlier greedy
+  rule; correctly ordered turns are never stripped to match the plan.
 - **Same-speaker overlap windows can lose timing.** If two utterances
   from the same speaker overlap (E704), `strip_e704_same_speaker_overlaps()`
   drops the earlier one's timing rather than emit a contradiction.

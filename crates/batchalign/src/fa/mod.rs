@@ -559,14 +559,7 @@ impl<'a> FaCacheUnitAdmission<'a> {
             .iter()
             .map(|word| word.text.clone())
             .collect();
-        let key = crate::chat_ops::fa::cache_key(
-            &words,
-            context.audio.audio_identity,
-            request.window().audio_start().get(),
-            request.window().end().get(),
-            context.params.whisper_text,
-            context.params.engine,
-        );
+        let key = units::RequestKeying::of(&context).key(&words, request.window());
         Self {
             request,
             key,

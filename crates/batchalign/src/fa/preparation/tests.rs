@@ -92,9 +92,12 @@ async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_r
         let keys = {
             let plan = super::super::units::DispatchPlan::build(
                 &population.groups,
-                &identity,
-                params.whisper_text,
-                params.engine,
+                crate::fa::units::RequestKeying::new(
+                    &identity,
+                    params.whisper_text,
+                    params.engine,
+                    &crate::api::LanguageCode3::eng(),
+                ),
             );
             plan.units()
                 .map(|unit| unit.cache_key().as_str().to_owned())
@@ -210,9 +213,12 @@ async fn admitted_cached_geometry_requires_neither_a_decoder_nor_a_model_prepare
     let key = {
         let plan = super::super::units::DispatchPlan::build(
             &groups,
-            &identity,
-            params.whisper_text,
-            params.engine,
+            crate::fa::units::RequestKeying::new(
+                &identity,
+                params.whisper_text,
+                params.engine,
+                &crate::api::LanguageCode3::eng(),
+            ),
         );
         plan.units().next().unwrap().cache_key().clone()
     };
@@ -492,9 +498,12 @@ async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_o
         let groups = vec![FaGroup::from_resource_split(split)];
         let plan = super::super::units::DispatchPlan::build(
             &groups,
-            &identity,
-            params.whisper_text,
-            params.engine,
+            crate::fa::units::RequestKeying::new(
+                &identity,
+                params.whisper_text,
+                params.engine,
+                &crate::api::LanguageCode3::eng(),
+            ),
         );
         let units: Vec<_> = plan.units().collect();
         assert_eq!(units.len(), 2);

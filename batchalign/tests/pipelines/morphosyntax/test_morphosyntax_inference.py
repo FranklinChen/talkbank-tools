@@ -39,10 +39,14 @@ class _RecordingNlp:
         rows: list[list[dict[str, Any]]],
         *,
         error: Exception | None = None,
+        refuse: dict[int, str] | None = None,
     ) -> None:
         self.ctx = ctx
         self.rows = rows
         self.error = error
+        # Sentences the realigner refuses during the call, as the real
+        # tokenizer postprocessor records them on the context.
+        self.refuse = refuse or {}
         self.calls: list[tuple[str, list[list[str]]]] = []
 
     def __call__(self, text: str) -> _FakeDoc:
@@ -54,6 +58,11 @@ class _RecordingNlp:
         self.calls.append((text, original_words))
         if self.error is not None:
             raise self.error
+        if self.ctx is not None:
+            from batchalign.inference._tokenizer_realign import RealignRefused
+
+            for sentence, reason in self.refuse.items():
+                self.ctx.refusals[sentence] = RealignRefused(reason=reason)
         return _FakeDoc(self.rows)
 
 
@@ -166,8 +175,8 @@ def test_batch_infer_morphosyntax_groups_by_language_and_uses_lock(monkeypatch) 
         lambda: next(monotonic),
     )
 
-    eng_ctx = SimpleNamespace(original_words=[])
-    fra_ctx = SimpleNamespace(original_words=[])
+    eng_ctx = SimpleNamespace(original_words=[], refusals={})
+    fra_ctx = SimpleNamespace(original_words=[], refusals={})
     # Stanza is given the terminator, so it returns a word for it; these
     # fakes therefore return N+1 words, and the assertions below expect the
     # terminator to have been dropped again on the way out.
@@ -272,7 +281,7 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
         lambda: next(monotonic),
     )
 
-    fallback_ctx = SimpleNamespace(original_words=[])
+    fallback_ctx = SimpleNamespace(original_words=[], refusals={})
     fra_nlp = _RecordingNlp(
         fallback_ctx,
         [],
@@ -313,6 +322,56 @@ def test_batch_infer_morphosyntax_uses_fallback_context_and_resets_after_failure
     assert response.results[0].elapsed_s is None
 
 
+def test_a_refused_realignment_fails_its_own_item_only(monkeypatch) -> None:
+    """A sentence the realigner could not bind to its words answers its own
+    item with the refusal; the group's other items are analysed. One such
+    sentence used to raise out of the group's Stanza call and fail them all."""
+    monotonic = iter([1.0, 2.0, 2.5, 3.0])
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax.time.monotonic",
+        lambda: next(monotonic),
+    )
+    eng_ctx = SimpleNamespace(original_words=[], refusals={})
+    eng_nlp = _RecordingNlp(
+        eng_ctx,
+        [
+            _raw_sentence(["hello", "world", "."]),
+            _raw_sentence(["goodbye", "moon", "."]),
+        ],
+        refuse={1: "native token 0 does not fit word 0"},
+    )
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax",
+            lang="eng",
+            items=[
+                {
+                    "words": ["hello", "world"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "runs": [2],
+                    "lang": "eng",
+                },
+                {
+                    "words": ["goodbye", "moon"],
+                    "terminator": ".",
+                    "special_forms": [],
+                    "runs": [2],
+                    "lang": "eng",
+                },
+            ],
+        ),
+        static_pipelines({"eng": eng_nlp}, {"eng": eng_ctx}),
+    )
+    assert response.results[0].error is None
+    assert response.results[0].result == _analyzed(["hello", "world"], "eng")
+    refused = response.results[1]
+    assert refused.result is None
+    assert refused.error is not None
+    assert "token realignment" in refused.error
+    assert "does not fit" in refused.error
+
+
 def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
     monkeypatch,
 ) -> None:
@@ -320,10 +379,10 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
 
     The fact that Stanza failed has to travel in the response, because the
     Rust consumer branches on it: `morphosyntax/worker.rs` turns a per-item
-    `error` into a failed file, and its own comment says why, "so the
-    affected file fails rather than silently producing empty %mor tiers".
-    An empty result carries no such fact, so the file used to be WRITTEN with
-    empty `%mor` and `%gra` and nothing anywhere said the analysis never ran.
+    `error` into `UdAnalysis::WorkerFailed`, which declines that utterance
+    with the reason instead of writing empty `%mor` tiers. An empty result
+    carries no such fact, so the file used to be WRITTEN with empty `%mor`
+    and `%gra` and nothing anywhere said the analysis never ran.
 
     Items in a language whose pipeline SUCCEEDED are unaffected: the failure
     is scoped to its own group.
@@ -338,8 +397,8 @@ def test_batch_infer_morphosyntax_reports_a_failed_language_group_as_an_error(
         lambda: next(monotonic),
     )
 
-    eng_ctx = SimpleNamespace(original_words=[])
-    fra_ctx = SimpleNamespace(original_words=[])
+    eng_ctx = SimpleNamespace(original_words=[], refusals={})
+    fra_ctx = SimpleNamespace(original_words=[], refusals={})
     # The fake returns the terminator too, as Stanza does; it is stripped on
     # the way out, which is why the expectation below is the CHAT words alone.
     eng_nlp = _RecordingNlp(eng_ctx, [_raw_sentence(["hello", "world", "."])])
@@ -418,7 +477,7 @@ def test_batch_infer_morphosyntax_reloads_a_language_that_is_not_resident(
         lambda: next(monotonic),
     )
 
-    fra_ctx = SimpleNamespace(original_words=[])
+    fra_ctx = SimpleNamespace(original_words=[], refusals={})
     fra_nlp = _RecordingNlp(fra_ctx, [_raw_sentence(["salut", "."])])
     # Empty: stands for a cache that has evicted `fra` since the host loaded it.
     entries: dict[str, LoadedPipeline] = {}
@@ -520,7 +579,7 @@ def test_batch_infer_morphosyntax_reports_missing_pipelines_and_mismatches(
         lambda: next(monotonic),
     )
 
-    eng_ctx = SimpleNamespace(original_words=[])
+    eng_ctx = SimpleNamespace(original_words=[], refusals={})
     mismatch_nlp = _RecordingNlp(
         eng_ctx,
         [_raw_sentence(["only", "one"])],
@@ -628,7 +687,7 @@ def test_batch_infer_morphosyntax_normalizes_deprels_on_the_production_path() ->
     relation. A unit test on `UdWord` cannot catch the wiring gap; only a test
     at this seam can.
     """
-    ctx = SimpleNamespace(original_words=[])
+    ctx = SimpleNamespace(original_words=[], refusals={})
     nlp = _RecordingNlp(
         ctx,
         [
@@ -712,7 +771,7 @@ def test_batch_infer_morphosyntax_removes_padding_feature_values_and_reports_the
     ``noun|кітап-<PAD>``. The repair boundary removes the value, keeps the
     rest of FEATS, and reports the removal so the file's provenance counts it.
     """
-    ctx = SimpleNamespace(original_words=[])
+    ctx = SimpleNamespace(original_words=[], refusals={})
     nlp = _RecordingNlp(
         ctx,
         [
@@ -779,7 +838,7 @@ def _run_eng(
     items: list[dict[str, Any]], sentences: list[list[dict[str, Any]]]
 ) -> tuple[Any, _RecordingNlp]:
     """Run one English batch through the boundary and hand back both sides."""
-    ctx = SimpleNamespace(original_words=[])
+    ctx = SimpleNamespace(original_words=[], refusals={})
     nlp = _RecordingNlp(ctx, sentences)
     response = batch_infer_morphosyntax(
         BatchInferRequest(task="morphosyntax", lang="eng", items=items),
@@ -891,7 +950,7 @@ def test_batch_infer_morphosyntax_names_the_cantonese_variant(monkeypatch) -> No
         "batchalign.inference.morphosyntax._override_pos_with_pycantonese",
         _record_override,
     )
-    yue_ctx = SimpleNamespace(original_words=[])
+    yue_ctx = SimpleNamespace(original_words=[], refusals={})
     yue_nlp = _RecordingNlp(yue_ctx, [_raw_sentence(["食", "."])])
 
     response = batch_infer_morphosyntax(
@@ -917,3 +976,108 @@ def test_batch_infer_morphosyntax_names_the_cantonese_variant(monkeypatch) -> No
     assert result["kind"] == "analyzed"
     assert result["model"]["pipeline"] == "cantonese_pycantonese_pos"
     assert len(overridden) == 1, "the override runs exactly when the variant says so"
+
+
+def test_one_cantonese_pos_refusal_declines_only_its_item(monkeypatch) -> None:
+    """A PyCantonese refusal on one utterance declines that utterance alone.
+
+    The override once raised `ValueError`, which escaped the per-item stage
+    and overwrote every result of the language group, the ones already
+    analysed included. Now the tagger returns a refusal value and the item
+    stage runs outside the group's handler.
+    """
+    from batchalign.inference._morphosyntax_graph import PosTaggerRefused
+
+    def _refuse_the_second(rows):
+        if rows[0]["text"] == "飲":
+            return PosTaggerRefused(
+                "PyCantonese tagged '飲水' where the analysis has '飲'"
+            )
+        return rows
+
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax._override_pos_with_pycantonese",
+        _refuse_the_second,
+    )
+    yue_ctx = SimpleNamespace(original_words=[], refusals={})
+    yue_nlp = _RecordingNlp(
+        yue_ctx, [_raw_sentence(["食", "."]), _raw_sentence(["飲", "."])]
+    )
+
+    def _item(word: str) -> dict[str, object]:
+        return {
+            "words": [word],
+            "terminator": ".",
+            "special_forms": [],
+            "runs": [1],
+            "lang": "yue",
+        }
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(
+            task="morphosyntax", lang="yue", items=[_item("食"), _item("飲")]
+        ),
+        static_pipelines({"yue": yue_nlp}, {"yue": yue_ctx}),
+    )
+
+    first, second = response.results
+    assert first.error is None, "the analysed item keeps its analysis"
+    assert isinstance(first.result, dict) and first.result["kind"] == "analyzed"
+    assert second.result is None
+    assert second.error is not None and "飲水" in second.error
+
+
+def test_an_item_that_raises_fails_only_itself(monkeypatch) -> None:
+    """Whatever an item's own work raises is that item's failure: the item
+    stage is contained, so an exception nobody named cannot reach the group's
+    handler and relabel the other items."""
+
+    def _raise_on_the_second(rows):
+        if rows[0]["text"] == "飲":
+            raise RuntimeError("tagger crashed")
+        return rows
+
+    monkeypatch.setattr(
+        "batchalign.inference.morphosyntax._override_pos_with_pycantonese",
+        _raise_on_the_second,
+    )
+    yue_ctx = SimpleNamespace(original_words=[], refusals={})
+    yue_nlp = _RecordingNlp(
+        yue_ctx, [_raw_sentence(["食", "."]), _raw_sentence(["飲", "."])]
+    )
+    items = [
+        {
+            "words": [w],
+            "terminator": ".",
+            "special_forms": [],
+            "runs": [1],
+            "lang": "yue",
+        }
+        for w in ("食", "飲")
+    ]
+
+    response = batch_infer_morphosyntax(
+        BatchInferRequest(task="morphosyntax", lang="yue", items=items),
+        static_pipelines({"yue": yue_nlp}, {"yue": yue_ctx}),
+    )
+
+    first, second = response.results
+    assert first.error is None
+    assert second.error is not None and "RuntimeError: tagger crashed" in second.error
+
+
+def test_a_refusal_for_a_sentence_the_call_did_not_have_fails_the_group() -> None:
+    """A realigner refusal keyed past the call's sentences cannot be paired
+    with any item, so the group fails with that reason instead of dropping
+    the refusal and analysing an item it refused."""
+    from batchalign.inference._tokenizer_realign import RealignRefused
+    from batchalign.inference.morphosyntax import LanguageGroupFailure, _ParsedGroup
+
+    parsed = _ParsedGroup.of(
+        [7],
+        [_raw_sentence(["hello", "."])],
+        {3: RealignRefused("no binding")},
+        lang="eng",
+    )
+    assert isinstance(parsed, LanguageGroupFailure)
+    assert "[3]" in parsed.message()

@@ -169,3 +169,22 @@ def test_other_retokenize_is_stanza_owned_and_plain_morphotag_is_chat():
         context=None, owner=TokenizationOwner.STANZA, inputs=[], lang_code="eng"
     )
     assert isinstance(mode, StanzaOwnsTokenization)
+
+
+def test_extension_b_characters_reach_the_segmenter_with_their_neighbours():
+    """A Cantonese character outside the basic CJK block (𡃁, Extension B)
+    is segmented with the characters around it: one stretch, so 𡃁仔 can be
+    formed. The basic block alone made it a verbatim piece between two
+    one-character segmentations."""
+    from batchalign.inference.morphosyntax import _CjkCharacters, _run_pieces
+
+    assert _run_pieces(["佢", "𡃁", "仔"]) == [_CjkCharacters(("佢", "𡃁", "仔"))]
+
+
+def test_han_is_decided_by_unicode_not_by_one_block():
+    from batchalign.inference.morphosyntax import _is_cjk
+
+    for han in ("佢", "㐀", "𡃁", "𠮶", "﨑"):
+        assert _is_cjk(han), han
+    for other in ("a", "1", "⺀", "。", "　"):
+        assert not _is_cjk(other), other

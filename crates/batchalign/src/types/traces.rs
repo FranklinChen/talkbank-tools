@@ -701,6 +701,28 @@ impl From<batchalign_transform::decisions::DecisionRecord> for FaDecisionTrace {
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaTimingDecisionTrace {
+    /// An utterance's start came after a later utterance's accepted start:
+    /// the outlier, stripped so the later utterances keep their timing.
+    StartAheadStripped {
+        /// Affected line index, including headers.
+        line_idx: usize,
+        /// Stable ordinal among utterances only.
+        utterance_idx: usize,
+        /// Speaker on the affected utterance.
+        speaker: String,
+        /// Its measured start.
+        start_ms: u64,
+        /// The next accepted start after it.
+        following_start_ms: u64,
+        /// Line that supplied `following_start_ms`.
+        following_line_idx: usize,
+        /// Stable ordinal of that utterance.
+        following_utterance_idx: usize,
+        /// Speaker on that line.
+        following_speaker: String,
+        /// The measured word intervals the strip removed.
+        words_dropped: Vec<DroppedWordTimingTrace>,
+    },
     /// A later utterance's start went backward in document order.
     StartRegressionStripped {
         /// Affected line index, including headers.
@@ -1035,6 +1057,18 @@ pub struct WordTimingRemovalTrace {
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemovalEffectTrace {
+    /// Pass 1: the utterance's measured start came after the next accepted
+    /// start, and the whole utterance's timing was stripped.
+    StartAheadStripped {
+        /// The utterance's own measured start, the outlier.
+        utterance_start_ms: u64,
+        /// The next accepted start, which this one came after.
+        following_start_ms: u64,
+        /// Index into `ChatFile.lines` of the utterance that supplied it.
+        following_line_idx: usize,
+        /// Speaker on that line.
+        following_speaker: String,
+    },
     /// Pass 1: the utterance's measured start preceded the greatest start
     /// accepted before it, and the whole utterance's timing was stripped.
     StartRegressionStripped {
@@ -1120,6 +1154,9 @@ impl RemovalEffectTrace {
             | Self::StartRegressionRaised {
                 preceding_start_ms, ..
             } => *preceding_start_ms,
+            Self::StartAheadStripped {
+                following_start_ms, ..
+            } => *following_start_ms,
             Self::ZeroDurationClampStripped { next_start_ms, .. } => *next_start_ms,
             Self::EndClampedInterleavedWords { bound_ms, .. } => *bound_ms,
             Self::YieldedToKeptBulletStripped {
@@ -1149,6 +1186,17 @@ impl std::fmt::Display for WordTimingRemovalTrace {
             }
         }
         match &self.effect {
+            RemovalEffectTrace::StartAheadStripped {
+                utterance_start_ms,
+                following_start_ms,
+                following_line_idx,
+                following_speaker,
+            } => write!(
+                f,
+                " removed, utterance stripped: its start {utterance_start_ms} follows the \
+                 {following_speaker} start {following_start_ms} (line index {following_line_idx}) \
+                 that comes after it"
+            ),
             RemovalEffectTrace::StartRegressionStripped {
                 utterance_start_ms,
                 preceding_start_ms,
@@ -1297,6 +1345,28 @@ impl FaTimingDecisionTrace {
     pub fn word_timing_removal(&self) -> Option<LocatedWordTimingRemoval> {
         match self {
             Self::EndClampedCoverageOnly { .. } | Self::EndClampedBoundaryFromWords { .. } => None,
+            Self::StartAheadStripped {
+                line_idx,
+                utterance_idx,
+                speaker,
+                start_ms,
+                following_start_ms,
+                following_line_idx,
+                following_utterance_idx: _,
+                following_speaker,
+                words_dropped,
+            } => LocatedWordTimingRemoval::of(
+                *line_idx,
+                *utterance_idx,
+                speaker,
+                RemovalEffectTrace::StartAheadStripped {
+                    utterance_start_ms: *start_ms,
+                    following_start_ms: *following_start_ms,
+                    following_line_idx: *following_line_idx,
+                    following_speaker: following_speaker.clone(),
+                },
+                words_dropped,
+            ),
             Self::StartRegressionStripped {
                 line_idx,
                 utterance_idx,
@@ -1493,6 +1563,30 @@ impl From<crate::chat_ops::fa::MonotonicityEffect> for FaTimingDecisionTrace {
     fn from(effect: crate::chat_ops::fa::MonotonicityEffect) -> Self {
         use crate::chat_ops::fa::MonotonicityEffect;
         match effect {
+            MonotonicityEffect::StartAheadStripped {
+                line_idx,
+                utterance_idx,
+                speaker,
+                start_ms,
+                following_start_ms,
+                following_line_idx,
+                following_utterance_idx,
+                following_speaker,
+                words_dropped,
+            } => Self::StartAheadStripped {
+                line_idx,
+                utterance_idx: utterance_idx.raw(),
+                speaker,
+                start_ms,
+                following_start_ms,
+                following_line_idx,
+                following_utterance_idx: following_utterance_idx.raw(),
+                following_speaker,
+                words_dropped: words_dropped
+                    .iter()
+                    .map(DroppedWordTimingTrace::from)
+                    .collect(),
+            },
             MonotonicityEffect::StartRegressionStripped {
                 line_idx,
                 utterance_idx,

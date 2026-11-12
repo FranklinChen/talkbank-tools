@@ -106,6 +106,31 @@ impl PrimaryReport {
         self.declined.extend(other.declined);
     }
 
+    /// Write a `%xbatchalign` note on every declined utterance of `chat`,
+    /// replacing morphotag's notes from earlier runs: the notes and the
+    /// job record's shortfall are read from this one list, so they cannot
+    /// disagree. Runs on every morphotag output, so a rerun with nothing
+    /// declined clears the old notes.
+    pub(crate) fn annotate(
+        &self,
+        chat: &mut crate::chat_ops::ChatFile,
+    ) -> Result<(), batchalign_transform::notes::NoteError> {
+        use batchalign_transform::notes::{NoteCommand, UtteranceNote, replace_notes};
+        // By utterance position, which the provenance stamps written before
+        // this do not move; `replace_notes` finds the line.
+        let notes = self.declined.iter().map(|declined| {
+            UtteranceNote::new(
+                declined.utterance,
+                format!(
+                    "not analysed; {} ({})",
+                    declined.cause.describe(),
+                    declined.detail
+                ),
+            )
+        });
+        replace_notes(chat, NoteCommand::Morphotag, notes)
+    }
+
     /// The shortfall, located against `chat`, when any utterance was declined.
     fn into_record(
         mut self,

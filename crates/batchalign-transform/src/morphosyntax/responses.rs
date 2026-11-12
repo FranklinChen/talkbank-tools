@@ -10,14 +10,29 @@ pub struct UnexpectedSentenceCount {
     pub actual: usize,
 }
 
-/// One admitted analysis: explicitly empty, or exactly one complete sentence.
+/// One admitted analysis: exactly one complete sentence, explicitly empty, or
+/// a failure the worker reported for this one item.
 ///
 /// This proves response cardinality, not lexical coverage or linguistic
 /// correctness. No raw sentence vector survives admission for consumers to
 /// truncate. Empty analyses remain available for typed special-form synthesis.
+/// A failed item is an answer about its own utterance only: it is declined
+/// (or its span refused) with the worker's reason, and every other item of
+/// the batch is applied, so one bad utterance never fails a file.
 #[derive(Debug, Clone)]
 pub struct AdmittedUdResponse {
-    sentence: Option<UdSentence>,
+    analysis: UdAnalysis,
+}
+
+/// What the worker answered for one item.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UdAnalysis {
+    /// One complete sentence.
+    Sentence(UdSentence),
+    /// No analysis: the item had no words, or the model returned none.
+    Empty,
+    /// The worker could not analyse this item; the bounded reason it gave.
+    WorkerFailed(String),
 }
 
 impl TryFrom<UdResponse> for AdmittedUdResponse {
@@ -26,7 +41,10 @@ impl TryFrom<UdResponse> for AdmittedUdResponse {
     fn try_from(mut response: UdResponse) -> Result<Self, Self::Error> {
         match response.sentences.len() {
             0 | 1 => Ok(Self {
-                sentence: response.sentences.pop(),
+                analysis: response
+                    .sentences
+                    .pop()
+                    .map_or(UdAnalysis::Empty, UdAnalysis::Sentence),
             }),
             actual => Err(UnexpectedSentenceCount { actual }),
         }
@@ -36,12 +54,21 @@ impl TryFrom<UdResponse> for AdmittedUdResponse {
 impl AdmittedUdResponse {
     /// An explicit absence of model analysis, not completed morphology.
     pub fn empty() -> Self {
-        Self { sentence: None }
+        Self {
+            analysis: UdAnalysis::Empty,
+        }
     }
 
-    /// The entire admitted sentence, if the model supplied an analysis.
-    pub fn sentence(&self) -> Option<&UdSentence> {
-        self.sentence.as_ref()
+    /// The worker's failure for this one item, with its reason.
+    pub fn worker_failed(reason: String) -> Self {
+        Self {
+            analysis: UdAnalysis::WorkerFailed(reason),
+        }
+    }
+
+    /// What the worker answered.
+    pub fn analysis(&self) -> &UdAnalysis {
+        &self.analysis
     }
 }
 

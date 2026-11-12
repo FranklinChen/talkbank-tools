@@ -392,7 +392,7 @@ pub(super) enum BoundaryAdmission {
 
 impl<'source> UtrLexicalStream<'source> {
     pub(super) fn from_tokens(prepared: &'source super::PreparedUtrTokens) -> Self {
-        Self::project(prepared, |_| true)
+        Self::project(prepared, |_, _| true)
     }
 
     /// The tokens an anchored region may match: onsets inside its window,
@@ -401,18 +401,22 @@ impl<'source> UtrLexicalStream<'source> {
         prepared: &'source super::PreparedUtrTokens,
         region: &super::regions::UtrRegion,
     ) -> Self {
-        Self::project(prepared, |token| region.admits(token))
+        Self::project(prepared, |_, token| region.admits(token))
     }
 
     /// Filter in provider coordinates before projecting units, preserving
     /// original token ordinals even in a local overlap-recovery window.
+    /// Only tokens no other utterance holds: a token the first pass gave to
+    /// another utterance is not this window's to match, so one speaker's word
+    /// cannot time another speaker's utterance (2026-11-12 review).
     pub(super) fn within_window(
         prepared: &'source super::PreparedUtrTokens,
         start_ms: u64,
         end_ms: u64,
+        claimed: &super::evidence::ClaimedTokens,
     ) -> Self {
-        Self::project(prepared, |token| {
-            token.start_ms < end_ms && token.end_ms > start_ms
+        Self::project(prepared, |ordinal, token| {
+            token.start_ms < end_ms && token.end_ms > start_ms && !claimed.holds(ordinal)
         })
     }
 
@@ -420,14 +424,14 @@ impl<'source> UtrLexicalStream<'source> {
     /// were prepared with; every unit keeps its token's address and interval.
     fn project(
         prepared: &'source super::PreparedUtrTokens,
-        include: impl Fn(&AsrTimingToken) -> bool,
+        include: impl Fn(super::evidence::UtrAsrTokenOrdinal, &AsrTimingToken) -> bool,
     ) -> Self {
         let tokens = prepared.tokens();
         let units = prepared.units();
         let words = tokens
             .iter()
             .enumerate()
-            .filter(|(_, token)| include(token))
+            .filter(|(index, token)| include(super::evidence::UtrAsrTokenOrdinal(*index), token))
             .flat_map(|(token_index, token)| {
                 let surfaces = units.split(&token.text);
                 // A token with no unit (punctuation only) offers nothing to

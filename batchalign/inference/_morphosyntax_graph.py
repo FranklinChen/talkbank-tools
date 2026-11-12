@@ -28,6 +28,20 @@ class ProjectionFailure(StrEnum):
     POS_ALIGNMENT = "POS override does not preserve word identity"
 
 
+@dataclass(frozen=True, slots=True)
+class PosTaggerRefused:
+    """A POS tagger's answer that it cannot tag these rows as given (it
+    returned other words, or another count). A value in the tagger's return
+    type, so a caller of [`AnalyzableSentence.with_pos`] cannot treat a refusal
+    as tags, and a tagger cannot signal one by an exception nothing names."""
+
+    reason: str
+
+
+type PosTagging = list[JSONObject] | PosTaggerRefused
+"""What a POS tagger returns: tagged rows, or why it refused."""
+
+
 class DependencyProjectionError(ValueError):
     """A named admission/projection failure, serialized at the item boundary."""
 
@@ -241,14 +255,20 @@ class AnalyzableSentence:
 
     def with_pos(
         self,
-        tagger: Callable[[list[JSONObject]], list[JSONObject]],
+        tagger: Callable[[list[JSONObject]], PosTagging],
     ) -> AnalyzableSentence:
         """Apply only POS values; a tagger cannot replace admitted heads/IDs.
 
         Runs on the projected lexical rows, as the established POS procedure
         does. The returned JSON is external evidence, never a replacement graph.
+        A refusal is this item's projection failure (`POS_ALIGNMENT`), which
+        the item stage declines on its own.
         """
-        tagged = tagger(self.wire_rows())
+        match tagger(self.wire_rows()):
+            case PosTaggerRefused(reason=reason):
+                raise DependencyProjectionError(ProjectionFailure.POS_ALIGNMENT, reason)
+            case list() as tagged:
+                pass
         if len(tagged) != len(self._rows):
             raise DependencyProjectionError(
                 ProjectionFailure.POS_ALIGNMENT, "row count"

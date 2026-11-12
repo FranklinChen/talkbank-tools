@@ -459,6 +459,9 @@ pub enum UtrStrategy {
     ZeroDurationSkipped,
     /// A positive matched interval was exhausted by non-overlap projection.
     ProjectionExhausted,
+    /// A positive matched interval was narrowed by non-overlap projection:
+    /// the hint kept only the part inside its neighbours' bounds.
+    ProjectionCropped,
     /// No selected match was common to every optimal lexical alignment.
     AmbiguousCorrespondence,
     /// Correspondence proof exceeded its bounded work budget.
@@ -480,6 +483,7 @@ impl UtrStrategy {
         match self {
             Self::ZeroDurationSkipped => "zero_duration_skipped",
             Self::ProjectionExhausted => "projection_exhausted",
+            Self::ProjectionCropped => "projection_cropped",
             Self::AmbiguousCorrespondence => "ambiguous_correspondence",
             Self::CorrespondenceBudgetExhausted => "correspondence_budget_exhausted",
             Self::CorrespondenceSearchInconsistent => "correspondence_search_inconsistent",

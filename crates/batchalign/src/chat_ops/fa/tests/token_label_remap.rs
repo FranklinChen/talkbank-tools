@@ -624,3 +624,60 @@ fn ascii_text_is_untouched_by_composition() {
     assert_eq!(normalize_fa_alignment_unit("don't"), "dont");
     assert_eq!(normalize_fa_alignment_unit(","), "");
 }
+
+/// Two words that share one label (`in to` against `into`): the earlier word
+/// wins the tie and the label, but the label's other characters were matched
+/// by `to`, so `in` carries them as label-only edits and is not an exact
+/// match. It used to be charged only for characters NO word matched, zero
+/// here, and so was timed over `to`'s speech while reported exact.
+#[test]
+fn a_word_that_wins_a_shared_label_is_charged_for_its_neighbour_s_characters() {
+    let words = make_fa_words(&["in", "to", "school"]);
+    let tokens = labels(&[("into", 0.1), ("school", 0.5)]);
+    let (_recording, window) = remap_window();
+
+    let mapping = map_labels_to_words(&words, &tokens, &window, &remap_engine());
+
+    let WordTimingOutcome::Timed { edits, .. } = &mapping.outcomes()[0] else {
+        panic!("`in` owns the shared label: {:?}", mapping.outcomes()[0])
+    };
+    assert_eq!(
+        *edits,
+        CharEdits {
+            transcript_only: 0,
+            label_only: 2,
+        },
+        "`to` matched two of the label's characters, not `in`"
+    );
+    assert_ne!(
+        *edits,
+        CharEdits::ZERO,
+        "a shared label is never an exact match"
+    );
+}
+
+/// The other side of a shared label: `top` matched two characters of `into`,
+/// which `in` owns, and then owns `p`. Its timing comes from `p` alone while
+/// part of the word sits under `in`'s label, so those two characters are its
+/// transcript-only edits and its fold is not exact. It used to be charged
+/// nothing and reported as exact as a stitch.
+#[test]
+fn a_word_that_loses_part_of_a_shared_label_is_charged_for_it() {
+    let words = make_fa_words(&["in", "top"]);
+    let tokens = labels(&[("into", 0.1), ("p", 0.5)]);
+    let (_recording, window) = remap_window();
+
+    let mapping = map_labels_to_words(&words, &tokens, &window, &remap_engine());
+
+    let WordTimingOutcome::Timed { edits, .. } = &mapping.outcomes()[1] else {
+        panic!("`top` owns `p`: {:?}", mapping.outcomes()[1])
+    };
+    assert_eq!(
+        *edits,
+        CharEdits {
+            transcript_only: 2,
+            label_only: 0,
+        },
+        "`t` and `o` of `top` were placed under `in`'s label"
+    );
+}

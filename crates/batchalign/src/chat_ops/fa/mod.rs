@@ -1003,6 +1003,10 @@ pub fn remove_wor_tier(utterance: &mut Utterance) {
 /// and exist only to build test fixtures with `%wor` written from
 /// refreshed-but-not-yet-resolved state, documented at their own
 /// definition.
+///
+/// Test-only since 2026-11-12: production writes `%wor` only through the
+/// write phase's `TimedWorTier`, which writes a tier only if it is timed.
+#[cfg(test)]
 pub(crate) fn add_wor_tier(utterance: &mut Utterance) {
     let wor_tier = utterance.main.generate_wor_tier();
     batchalign_transform::inject::replace_or_add_tier(
@@ -1451,9 +1455,42 @@ impl std::fmt::Display for AudioIdentity {
 // Cache key computation
 // ---------------------------------------------------------------------------
 
+/// The language an FA cache key must carry: decided once from the engine's
+/// declared [`LanguageSupport`](crate::types::engines::LanguageSupport) and
+/// built only by [`Self::for_engine`], so no caller can key a
+/// language-dependent engine without its language. An `Any` engine "never
+/// sees the `@Languages:` header", so its key carries none and its entries
+/// stay reachable; an `Only` engine (Qwen3) is "handed ONE language label for
+/// a whole group", so its timings depend on it and its key includes it.
+/// Qwen3 keys used to omit it, so timings measured under one language could
+/// be replayed under another (2026-11-12 review).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaKeyLanguage(KeyScope);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyScope {
+    Independent,
+    Scoped(String),
+}
+
+impl FaKeyLanguage {
+    /// The key language for `engine` aligning in `language`.
+    pub fn for_engine(
+        engine: crate::types::engines::FaEngineName,
+        language: &crate::api::LanguageCode3,
+    ) -> Self {
+        use crate::types::engines::LanguageSupport;
+        Self(match engine.language_support() {
+            LanguageSupport::Any => KeyScope::Independent,
+            LanguageSupport::Only(_) => KeyScope::Scoped(language.as_ref().to_owned()),
+        })
+    }
+}
+
 /// Compute cache key for an FA result.
 ///
-/// Key = `BLAKE3("{audio_identity}|{start}|{end}|{text}|{text_mode}|{engine}{schema}")`.
+/// Key = `BLAKE3("{audio_identity}|{start}|{end}|{text}|{text_mode}|{engine}{schema}[|lang={code}]")`,
+/// the language only for an engine whose timings depend on it.
 pub fn cache_key(
     words: &[String],
     audio_identity: &AudioIdentity,
@@ -1461,6 +1498,7 @@ pub fn cache_key(
     end_ms: u64,
     whisper_text: WhisperTextMode,
     engine: crate::types::engines::FaEngineName,
+    language: &FaKeyLanguage,
 ) -> crate::chat_ops::CacheKey {
     let text = words.join(" ");
     // What is CACHED is the parsed `Vec<Option<WordTiming>>`, not the raw
@@ -1506,8 +1544,12 @@ pub fn cache_key(
         FaTimingResolution::WordIntervals => "|model_score_v1",
         FaTimingResolution::TokenOnsets => "",
     };
+    let language_key = match &language.0 {
+        KeyScope::Independent => String::new(),
+        KeyScope::Scoped(code) => format!("|lang={code}"),
+    };
     let input = format!(
-        "{}|{start_ms}|{end_ms}|{text}|{text_mode_key}|{engine_str}{result_schema}",
+        "{}|{start_ms}|{end_ms}|{text}|{text_mode_key}|{engine_str}{result_schema}{language_key}",
         audio_identity.0
     );
     crate::chat_ops::CacheKey::from_content(&input)
