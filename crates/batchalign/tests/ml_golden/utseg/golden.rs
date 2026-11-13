@@ -1,6 +1,6 @@
 use crate::common::assert_completed_without_errors;
 use crate::ml_golden::golden::fixtures::{ENG_MULTI_SPEAKER_PARITY, ENG_MULTI_UTT, SPA_MULTI_UTT};
-use crate::ml_golden::golden::helpers::{assert_golden_snapshot, require_direct_session_warmed};
+use crate::ml_golden::golden::helpers::{assert_golden_snapshot, require_managed_session_warmed};
 use batchalign::api::{JobStatus, ReleasedCommand};
 use batchalign::options::{CommandOptions, CommonOptions, UtsegOptions};
 use batchalign::worker::InferTask;
@@ -26,13 +26,20 @@ fn utseg_options_with_fallback(allow_stanza_fallback: bool) -> CommandOptions {
     })
 }
 
+/// Guards: English dog-running, cat and store utterances retaining their segmentation output.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English dog-running, cat and store utterances retaining their segmentation output from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_utseg_eng_multi_utt() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Utseg,
         ReleasedCommand::Utseg,
         "eng",
-        "Direct session does not support utseg infer",
+        "Managed session does not support utseg infer",
     )
     .await;
 
@@ -53,13 +60,20 @@ async fn golden_utseg_eng_multi_utt() {
     );
 }
 
+/// Guards: Spanish perro/gatos utterances using the explicitly selected Stanza constituency fallback.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Spanish perro/gatos utterances using the explicitly selected Stanza constituency fallback from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_utseg_spa() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Utseg,
         ReleasedCommand::Utseg,
         "spa",
-        "Direct session does not support utseg infer",
+        "Managed session does not support utseg infer",
     )
     .await;
 
@@ -86,13 +100,20 @@ async fn golden_utseg_spa() {
     );
 }
 
+/// Guards: child/father/mother turn order, participant roster and NAK timing bullets surviving segmentation.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove child/father/mother turn order, participant roster and NAK timing bullets surviving segmentation from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn utseg_multispeaker_preserves_turns_and_timing_bullets() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Utseg,
         ReleasedCommand::Utseg,
         "eng",
-        "Direct session does not support utseg infer",
+        "Managed session does not support utseg infer",
     )
     .await;
 

@@ -15,16 +15,14 @@ write-up (Ignas's BA2 ``fec893e1`` history, the BA3 regression,
 the capability-driven fix, and per-language behavior).
 
 Pattern source: ``test_preserve_mwt_end_to_end.py`` (one CLI
-invocation per fixture, module-scoped to amortize cargo cost).
+submission per fixture, with completed output shared across assertions).
 """
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
-
 import pytest
+
+from ._managed_morphotag import ManagedMorphotag
 
 # Minimal valid CHAT requires @UTF8, @Begin, @Languages, @Participants,
 # @ID, utterances, @End. The constructions are the same ones whose
@@ -72,50 +70,6 @@ _GREEK_MWT_SURFACES_PER_LINE: list[list[str]] = [
 ]
 
 
-def _run_morphotag(chat_text: str, lang: str) -> str:
-    """Run ``batchalign3 morphotag --sequential`` on ``chat_text``.
-
-    Returns the output CHAT text. Raises via ``assert`` on non-zero
-    exit (the CLI runs validation internally, so a non-zero exit
-    means either pipeline failure or invalid output CHAT).
-    """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / f"mwt_e2e_{lang}.cha"
-        output_dir = Path(tmpdir) / "output"
-        input_path.write_text(chat_text)
-
-        result = subprocess.run(
-            [
-                "cargo",
-                "run",
-                "-p",
-                "batchalign",
-                "--",
-                "--no-open-dashboard",
-                "--override-media-cache",
-                "morphotag",
-                str(input_path),
-                "-o",
-                str(output_dir),
-                "--sequential",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=240,
-            cwd=str(Path(__file__).resolve().parents[4]),  # batchalign3 root
-        )
-        assert result.returncode == 0, (
-            f"morphotag CLI failed for lang={lang} (exit "
-            f"{result.returncode}):\nSTDOUT: {result.stdout[-500:]}\n"
-            f"STDERR: {result.stderr[-500:]}"
-        )
-        output_file = output_dir / input_path.name
-        assert output_file.exists(), (
-            f"Output file not created for lang={lang}: {output_dir}"
-        )
-        return output_file.read_text()
-
-
 def _mor_lines(chat_text: str) -> list[str]:
     """Return the ``%mor:`` tier lines from a CHAT document, in order."""
     return [line for line in chat_text.splitlines() if line.startswith("%mor:")]
@@ -128,7 +82,7 @@ def _mor_lines(chat_text: str) -> list[str]:
 
 @pytest.fixture(scope="module")
 def hebrew_morphotag_output() -> str:
-    return _run_morphotag(_HEBREW_FIXTURE, "heb")
+    return ManagedMorphotag.from_environment().run(_HEBREW_FIXTURE)
 
 
 @pytest.mark.golden
@@ -142,6 +96,12 @@ def test_hebrew_mwt_emits_tilde_joined_mor(
     MWT for Hebrew (e.g., a hardcoded list reappears, or the
     capability table breaks), the contracted forms would surface
     as single morph items with no ``~`` and this test fails.
+
+    Guards: hebrew mwt emits tilde joined mor for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is hebrew mwt emits tilde joined mor for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
     """
     mor_lines = _mor_lines(hebrew_morphotag_output)
     assert len(mor_lines) == len(_HEBREW_MWT_SURFACES_PER_LINE), (
@@ -169,6 +129,12 @@ def test_hebrew_mwt_does_not_emit_unsplit_surface_as_lemma(
     single morph item; that would mean MWT was silently suppressed
     and the surface was tagged whole. Stanza's split components
     (e.g., ב, בית) are the correct lemmas after MWT fires.
+
+    Guards: hebrew mwt does not emit unsplit surface as lemma for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is hebrew mwt does not emit unsplit surface as lemma for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
     """
     mor_lines = _mor_lines(hebrew_morphotag_output)
     for utterance_idx, (mor_line, surfaces) in enumerate(
@@ -197,7 +163,7 @@ def test_hebrew_mwt_does_not_emit_unsplit_surface_as_lemma(
 
 @pytest.fixture(scope="module")
 def greek_morphotag_output() -> str:
-    return _run_morphotag(_GREEK_FIXTURE, "ell")
+    return ManagedMorphotag.from_environment().run(_GREEK_FIXTURE)
 
 
 @pytest.mark.golden
@@ -207,6 +173,12 @@ def test_greek_mwt_emits_tilde_joined_mor(
 ) -> None:
     """Same shape as the Hebrew test: every Greek utterance with a
     σε+article contraction must have a ``~`` in its ``%mor`` line.
+
+    Guards: greek mwt emits tilde joined mor for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is greek mwt emits tilde joined mor for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
     """
     mor_lines = _mor_lines(greek_morphotag_output)
     assert len(mor_lines) == len(_GREEK_MWT_SURFACES_PER_LINE), (
@@ -230,7 +202,14 @@ def test_greek_mwt_emits_tilde_joined_mor(
 def test_greek_mwt_does_not_emit_unsplit_surface_as_lemma(
     greek_morphotag_output: str,
 ) -> None:
-    """Negative assertion mirroring the Hebrew counterpart."""
+    """Negative assertion mirroring the Hebrew counterpart.
+
+    Guards: greek mwt does not emit unsplit surface as lemma for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is greek mwt does not emit unsplit surface as lemma for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     mor_lines = _mor_lines(greek_morphotag_output)
     for utterance_idx, (mor_line, surfaces) in enumerate(
         zip(mor_lines, _GREEK_MWT_SURFACES_PER_LINE, strict=True)

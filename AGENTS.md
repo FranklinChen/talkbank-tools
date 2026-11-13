@@ -14,6 +14,12 @@ test harnesses alike. Nothing below overrides this. Every project here is
 long-term, never a one-off: a type is paid for once, while a bug the
 architecture permits recurs for the life of the project.
 
+- Test work is aggressive typestate discovery. Ask "What types and consuming transitions can I invent so this invalid setup or operation fails to compile?"
+  Invent the missing types and consuming transitions across production code,
+  harnesses and fixtures. A retained test's justification must explain the
+  residual gap after that design search. Remove the checks and setup that the
+  new graph makes redundant, and count those reductions separately from rubric
+  annotations.
 - Before writing code or a test, ask which type change makes the defect
   unrepresentable, and make it. The compiler is the first test.
 - Give each distinct meaning its own type and each step a transition

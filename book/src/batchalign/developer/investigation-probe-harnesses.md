@@ -1,7 +1,7 @@
 # Investigation Probe Harnesses
 
 **Status:** Current
-**Last updated:** 2026-10-01 17:34 EDT
+**Last updated:** 2026-11-14 EST
 
 batchalign3 uses Stanza as an oracle for investigation tests,
 small, per-case probes that pin Stanza's current behavior so a
@@ -40,12 +40,12 @@ RED expectations.
 ```mermaid
 flowchart TD
     Probe["Need to probe Stanza behavior"] --> Q["What question?"]
-    Q -->|"'Does Stanza split/merge\nthis input token correctly?'"| MWT["MWT Probe Harness\n(_probe_types.py + _cases/)"]
-    Q -->|"'Does normalization rule X\nchange Stanza's POS output?'"| Decision["Decision Probe Harness\n(_decision_probe_types.py +\n_decision_cases/)"]
-    MWT --> MWTGrain["Grain: ProbeCase\n- one input word sequence\n- expected_post_mwt_count"]
-    Decision --> DecGrain["Grain: DecisionProbeCase\n- pre/post word sequences\n- per-side Gold (UPOS+text)\n- n-to-m TokenMapping"]
-    MWTGrain --> MWTRunner["@pytest.mark.mwt_probe\ntest_stanza_mwt_probe_matrix.py"]
-    DecGrain --> DecRunner["@pytest.mark.decision_probe\ntest_stanza_decision_probe_matrix.py"]
+    Q -->|"'Does Stanza split/merge<br/>this input token correctly?'"| MWT["MWT Probe Harness<br/>(_probe_types.py + _cases/)"]
+    Q -->|"'Does normalization rule X<br/>change Stanza's POS output?'"| Decision["Decision Probe Harness<br/>(_decision_probe_types.py +<br/>_decision_cases/)"]
+    MWT --> MWTGrain["Grain: ProbeCase<br/>- one input word sequence<br/>- closed expectation payload"]
+    Decision --> DecGrain["Grain: DecisionProbeCase<br/>- pre/post word sequences<br/>- per-side Gold (UPOS+text)<br/>- n-to-m TokenMapping"]
+    MWTGrain --> MWTRunner["@pytest.mark.mwt_probe<br/>test_stanza_mwt_probe_matrix.py"]
+    DecGrain --> DecRunner["@pytest.mark.decision_probe<br/>test_stanza_decision_probe_matrix.py"]
 ```
 
 ### MWT probe harness
@@ -53,13 +53,14 @@ flowchart TD
 Lives at:
 
 - `batchalign/tests/investigations/_probe_types.py`: types
-  (`ProbeCase`, `Phenomenon`, `XfailMark`).
+  (`ProbeCase`, `ObserveOnly`, `ExpectedWords`, `KnownDefect`,
+  `CheckedProbe`, `Phenomenon`, `XfailMark`).
 - `batchalign/tests/investigations/_cases/<lang>.py`: per-language
   case tables.
 - `batchalign/tests/investigations/_cases/__init__.py`: the
   `LANGUAGE_MATRIX` registry.
 - `batchalign/tests/investigations/test_stanza_mwt_probe_matrix.py`
- , runner, paired (free-tokenize, with-postprocessor) per case.
+ , runner for admitted with-postprocessor count checks and explicit paired measurements.
 
 **Use when**: you need to know "how many UD words does Stanza
 produce for this input token sequence?" Typical questions:
@@ -78,8 +79,35 @@ ProbeCase(
     words=("don't",),
     phenomenon=Phenomenon.CONTRACTION,
     expected_post_mwt_count=2,  # None = observe-only
-    xfail=None,                  # or XfailMark(defect_slug, reason)
+    xfail=None,                  # a defect mark requires a count
 )
+```
+
+The constructor admits the established case notation into one closed payload.
+Its overloads reject a known defect without an expected count. `ObserveOnly`
+has no predicate, `ExpectedWords` owns its count, and `KnownDefect` owns both
+an `ExpectedWords` predicate and its defect record. `CheckedProbe.admit` issues an immutable source-bound check only for
+`ExpectedWords` or `KnownDefect`. Observation-only cases cannot inhabit the
+pytest parameter type. Runners match the admitted payload exhaustively. A known defect executes its count check under a strict pytest
+xfail mark. Only `StanzaCountMismatch` is expected. Model-loading errors and
+unrelated assertion failures remain failures. An upstream fix produces strict
+XPASS and requires adjudication.
+
+```mermaid
+flowchart TD
+    case["ProbeCase admission"] --> observe["ObserveOnly"]
+    case --> expected["ExpectedWords"]
+    case --> defect["KnownDefect<br/>count and reason"]
+    observe --> record["Explicit measurement"]
+    expected --> admitted["CheckedProbe<br/>source and predicate"]
+    defect --> admitted
+    admitted --> policy{"Retained expectation"}
+    policy -->|"ExpectedWords"| check["Run count comparison"]
+    policy -->|"KnownDefect"| strict["Run count comparison<br/>under strict xfail"]
+    check --> ordinary["Pass or count mismatch"]
+    strict --> mismatch["Count mismatch<br/>XFAIL"]
+    strict --> fixed["Matching count<br/>XPASS failure"]
+    strict --> error["Other exception<br/>Failure"]
 ```
 
 ### Decision probe harness
@@ -128,22 +156,28 @@ DecisionProbeCase(
 )
 ```
 
+`CheckedDecisionProbe` admits only the four adjudicated verdicts. The
+observation-only `letter_i_in_alphabet` case uses `observe_stanza_decision`
+explicitly. Its `DecisionObservation` retains both completed token projections,
+the source and the comparison. Thirty adjudicated cases enter pytest. The
+unused nullable xfail field and unconditional xfail path were removed.
+
 ## Lifecycle of a probe case
 
 ```mermaid
 stateDiagram-v2
     [*] --> Seed: Author writes case
-    Seed --> Observe: Golden run
+    Seed --> Observe: Explicit measurement
     Observe --> Adjudicate: Linguistic review
     Adjudicate --> Locked: expected value set
     Adjudicate --> Observe: Back to observation
     Locked --> [*]: CI enforces
     Locked --> Adjudicate: Library upgrade breaks assertion
 
-    Seed: "Seed\n(OBSERVE_ONLY or expected=None)"
-    Observe: "Observe\n(runner prints Stanza output;\nno assertion)"
-    Adjudicate: "Adjudicate\n(compare observation with\nexpected linguistic behavior)"
-    Locked: "Locked\n(expected_post_mwt_count set\nor expected_outcome non-OBSERVE_ONLY)"
+    Seed: Observation-only case
+    Observe: Recorded model observation
+    Adjudicate: Linguistic review
+    Locked: Admitted expected result
 ```
 
 ## Running probes
@@ -159,41 +193,56 @@ default CI. Sub-markers allow fine-grained selection:
 | `uv run pytest -m "golden and mwt_probe" -k "fra or ita"` | French + Italian MWT only |
 | `uv run pytest -m golden` | All golden tests (includes probe matrices + other ML goldens) |
 
-Use `-n0 -s` to serialize and show print output for observation.
+Use `-n0 -s` to serialize and retain the checked probes' observations.
+Free-tokenize measurements and the 57 observation-only postprocessor cases
+have no count assertion, so they run explicitly when investigating a question.
+The former 279 free-tokenize pytest cases, 57 assertion-free postprocessor
+cases and one undecided pre/post case were removed from the suite. Their
+measurement functions remain callable. `ProbeObservation` retains the source,
+language and completed token
+projection. The word count uses that projection's length, avoiding a second
+walk over the Stanza document.
+
+For example, record the Italian cases with both configurations into a log.
+Use the intended environment and `STANZA_RESOURCES_DIR` for reproducibility.
+
+```bash
+python - <<'PYPROBE' > italian-probes.log
+from batchalign.tests.investigations._cases import all_cases
+from batchalign.tests.investigations.conftest import (
+    _pipeline_free, _pipeline_with_postprocessor,
+)
+from batchalign.tests.investigations.test_stanza_mwt_probe_matrix import (
+    observe_stanza_mwt_free_tokenize, observe_stanza_mwt_with_postprocessor,
+)
+
+free = _pipeline_free("it")
+post = _pipeline_with_postprocessor("it")
+for language, case in all_cases():
+    if language.alpha3 == "ita":
+        observe_stanza_mwt_free_tokenize((language, case), free)
+        observe_stanza_mwt_with_postprocessor((language, case), lambda _: post)
+PYPROBE
+```
+
+The five remaining Italian expected failures execute their exact count
+predicates. Three obsolete marks were retired after strict XPASS on both
+1.15.0 and 1.15.1. Their checks now run normally.
 
 ## Adding a new language to the MWT matrix
 
-Five mechanical steps:
+1. Add the language key in `_cases/__init__.py`.
 
-1. **Add `LanguageKey` in `_cases/__init__.py`.**
    ```python
    CAT = LanguageKey(alpha2="ca", alpha3="cat")
    ```
 
-2. **Add pipeline fixtures in `conftest.py`.** Pattern:
-   ```python
-   @pytest.fixture(scope="module")
-   def catalan_pipeline_with_postprocessor():
-       return _pipeline_with_postprocessor("ca", "ca")
+2. Write `_cases/<lang>.py` with a tuple of `ProbeCase`. Start with
+   `ObserveOnly` through the constructor's omitted count, measure the output,
+   then adjudicate the expected counts.
 
-   @pytest.fixture(scope="module")
-   def catalan_pipeline_free_tokenize():
-       return _pipeline_free("ca")
-   ```
-   `_pipeline_with_postprocessor` / `_pipeline_free` query Stanza's
-   runtime resources via `_processors_for(lang)` and include
-   `mwt` only if the language has a model. No need to hardcode.
+3. Register the language and its cases in `LANGUAGE_MATRIX`.
 
-3. **Wire the language key into both resolvers** (`post_pipeline_for`
-   and `free_pipeline_for`). Add an entry to each resolver's
-   fixture-name dict.
-
-4. **Write `_cases/<lang>.py`** with a tuple of `ProbeCase`. Start
-   with observe-only (no `expected_post_mwt_count`), the golden
-   run tells you what Stanza produces; lock afterwards.
-
-5. **Register the language in `LANGUAGE_MATRIX`** in
-   `_cases/__init__.py`:
    ```python
    LANGUAGE_MATRIX = {
        ...,
@@ -201,37 +250,14 @@ Five mechanical steps:
    }
    ```
 
-Run `uv run pytest -m "golden and mwt_probe" -k <alpha3>` to
-observe Stanza's behavior and lock the expected counts.
+`post_pipeline_for` creates and caches the pipeline from the language key's
+`alpha2`. It requires no per-language fixture or resolver entry. Explicit free
+measurements use `_pipeline_free(alpha2)`. Both builders query Stanza's runtime
+resources through `_processors_for` and select `mwt` when the language has a model.
 
-## Harness architecture
-
-```mermaid
-flowchart LR
-    subgraph Case["Case table\n_cases/<lang>.py"]
-        ProbeCase["ProbeCase\n(label, words, phenomenon,\nexpected_post_mwt_count,\nxfail)"]
-    end
-    subgraph Registry["Registry\n_cases/__init__.py"]
-        Matrix["LANGUAGE_MATRIX:\n{LanguageKey: tuple[ProbeCase]}"]
-        Flatten["all_cases() → [(LanguageKey, ProbeCase)]"]
-    end
-    subgraph Runner["Runner\ntest_stanza_mwt_probe_matrix.py"]
-        R1["test_stanza_mwt_probe_free_tokenize\n@pytest.mark.mwt_probe"]
-        R2["test_stanza_mwt_probe_with_postprocessor\n@pytest.mark.mwt_probe"]
-    end
-    subgraph Fixtures["Fixtures\nconftest.py"]
-        ResPost["post_pipeline_for(lang_key)"]
-        ResFree["free_pipeline_for(lang_key)"]
-        Proc["_processors_for(lang) →\ntokenize,pos,lemma,depparse[,mwt]"]
-    end
-    ProbeCase --> Matrix --> Flatten --> R1
-    Flatten --> R2
-    R2 -->|"lang_key"| ResPost
-    R1 -->|"lang_key"| ResFree
-    ResPost --> Proc
-    ResFree --> Proc
-    Proc -->|"queries Stanza\nresources.json"| Stanza["Stanza pipeline"]
-```
+Use the explicit measurement example above to observe new cases, then lock
+their expected counts. Run `uv run pytest -m "golden and mwt_probe" -k <alpha3>`
+to check the admitted expectations.
 
 ## Parity-audit pattern
 
@@ -291,16 +317,16 @@ travelled this loop:
 
 ```mermaid
 flowchart TD
-    Seed["Seed probe cases\n_decision_cases/<lang>.py"]
-    Run["Run probe matrix\npytest -m decision_probe"]
-    Classify["Classify verdicts\nPOST_NEUTRAL / POST_STRICTLY_BETTER /\nPOST_STRICTLY_WORSE / MIXED"]
+    Seed["Seed probe cases<br/>_decision_cases/<lang>.py"]
+    Run["Measure source inputs<br/>observe_stanza_decision"]
+    Classify["Classify verdicts<br/>POST_NEUTRAL / POST_STRICTLY_BETTER /<br/>POST_STRICTLY_WORSE / MIXED"]
     Adjudicate{"Verdict?"}
-    Ship["Implement narrow rule\n(asr_postprocess/cleanup.rs,\nnlp/lang_&lt;lang&gt;.rs)"]
-    Lock["Lock verdict in case table\n(verdict= annotation)"]
-    Unit["Unit tests\n(allowlist + rule behavior)"]
-    Int["Pipeline integration tests\n(stage-ordering constraints)"]
-    E2E["End-to-end golden tests\n(AsrOutput → CHAT, or\nCHAT → %mor)"]
-    Defer["Defer / surface for review\n(xfail or adjudication queue)"]
+    Ship["Implement narrow rule<br/>(asr_postprocess/cleanup.rs,<br/>nlp/lang_&lt;lang&gt;.rs)"]
+    Lock["Lock verdict in case table<br/>(verdict= annotation)"]
+    Unit["Unit tests<br/>(allowlist + rule behavior)"]
+    Int["Pipeline integration tests<br/>(stage-ordering constraints)"]
+    E2E["End-to-end golden tests<br/>(AsrOutput → CHAT, or<br/>CHAT → %mor)"]
+    Defer["Defer / surface for review<br/>(xfail or adjudication queue)"]
 
     Seed --> Run --> Classify --> Adjudicate
     Adjudicate -->|"NEUTRAL / BETTER"| Ship

@@ -8,7 +8,7 @@ use crate::ml_golden::golden::fixtures::{
     FRA_NLD_L2,
 };
 use crate::ml_golden::golden::helpers::{
-    assert_golden_snapshot, find_mor_line_for, require_direct_session_warmed_many,
+    assert_golden_snapshot, find_mor_line_for, require_managed_session_warmed_many,
 };
 
 fn l2_enabled_options() -> CommandOptions {
@@ -75,15 +75,22 @@ fn assert_no_placeholder(output: &str) {
     );
 }
 
+/// Guards: Spanish tienda, muy and niños analyses inside English CHAT.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Spanish tienda, muy and niños analyses inside English CHAT from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_eng_spa() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
             (ReleasedCommand::Morphotag, "spa"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -104,15 +111,22 @@ async fn golden_l2_morphotag_eng_spa() {
     assert_golden_snapshot!("l2_morphotag_eng_spa", output);
 }
 
+/// Guards: English film and drug analyses inside German CHAT.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English film and drug analyses inside German CHAT from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_deu_eng() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
             (ReleasedCommand::Morphotag, "eng"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -132,15 +146,22 @@ async fn golden_l2_morphotag_deu_eng() {
     assert_golden_snapshot!("l2_morphotag_deu_eng", output);
 }
 
+/// Guards: English contracted auxiliaries and working inside German CHAT.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English contracted auxiliaries and working inside German CHAT from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_eng_contractions() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
             (ReleasedCommand::Morphotag, "eng"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -163,15 +184,22 @@ async fn golden_l2_morphotag_eng_contractions() {
     assert_golden_snapshot!("l2_morphotag_eng_contractions", output);
 }
 
+/// Guards: English particle and phrasal-verb analyses inside German CHAT.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English particle and phrasal-verb analyses inside German CHAT from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_phrasal_verbs() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "deu"),
             (ReleasedCommand::Morphotag, "eng"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -200,15 +228,22 @@ async fn golden_l2_morphotag_phrasal_verbs() {
     assert_golden_snapshot!("l2_morphotag_phrasal_verbs", output);
 }
 
+/// Guards: explicitly disabled L2 analysis producing the retained L2 placeholder convention.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove explicitly disabled L2 analysis producing the retained L2 placeholder convention from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_off_produces_l2_xxx() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "eng"),
             (ReleasedCommand::Morphotag, "spa"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -229,15 +264,22 @@ async fn golden_l2_morphotag_off_produces_l2_xxx() {
     assert_mor_has(output, "tienda@s:spa", "L2|xxx");
 }
 
+/// Guards: Catalan and Spanish code-switch analyses without missing L2 placeholders.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Catalan and Spanish code-switch analyses without missing L2 placeholders from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_cat_spa() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "cat"),
             (ReleasedCommand::Morphotag, "spa"),
         ],
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
     let (info, results) = jobs
@@ -257,15 +299,22 @@ async fn golden_l2_morphotag_cat_spa() {
     assert_golden_snapshot!("l2_morphotag_cat_spa", output);
 }
 
+/// Guards: Danish and English code-switch analyses without missing L2 placeholders.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Danish and English code-switch analyses without missing L2 placeholders from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_dan_eng() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "dan"),
             (ReleasedCommand::Morphotag, "eng"),
         ],
-        "Direct session does not support morphotag infer",
+        "Managed session does not support morphotag infer",
     )
     .await;
     let (info, results) = jobs
@@ -285,15 +334,22 @@ async fn golden_l2_morphotag_dan_eng() {
     assert_golden_snapshot!("l2_morphotag_dan_eng", output);
 }
 
+/// Guards: French and Dutch code-switch analyses without missing L2 placeholders.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove French and Dutch code-switch analyses without missing L2 placeholders from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_l2_morphotag_fra_nld() {
-    let jobs = require_direct_session_warmed_many(
+    let jobs = require_managed_session_warmed_many(
         InferTask::Morphosyntax,
         vec![
             (ReleasedCommand::Morphotag, "fra"),
             (ReleasedCommand::Morphotag, "nld"),
         ],
-        "Direct session does not support morphotag infer",
+        "Managed session does not support morphotag infer",
     )
     .await;
     let (info, results) = jobs

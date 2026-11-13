@@ -49,8 +49,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from ._probe_types import XfailMark
-
 # ─── Outcome + candidate-class enums (unchanged from v1) ─────────────
 
 
@@ -251,8 +249,6 @@ class DecisionProbeCase:
         verdict.
     candidate_class
         Which normalization rule the probe speaks to.
-    xfail
-        If set, the runner marks itself xfail with the defect slug.
     """
 
     label: str
@@ -263,7 +259,6 @@ class DecisionProbeCase:
     expected_outcome: DecisionOutcome
     rationale: str
     candidate_class: CandidateClass
-    xfail: XfailMark | None = None
 
     def __post_init__(self) -> None:
         if not self.affected_mappings:

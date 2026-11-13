@@ -1,7 +1,8 @@
 use crate::common::assert_completed_without_errors;
 use crate::ml_golden::golden::fixtures::{ENG_SIMPLE, SPA_SIMPLE};
 use crate::ml_golden::golden::helpers::{
-    assert_golden_snapshot, has_user_defined_tier, parse_output, require_direct_session_warmed,
+    assert_golden_snapshot, has_user_defined_tier, parse_output, require_managed_session,
+    require_managed_session_warmed,
 };
 use batchalign::api::{JobStatus, ReleasedCommand};
 use batchalign::options::{CommandOptions, CommonOptions, TranslateOptions};
@@ -17,13 +18,16 @@ fn translate_options() -> CommandOptions {
     })
 }
 
+/// Guards: English @Languages source bytes select the English-target pass-through and preserve the emitted CHAT.
+/// Kind: contract
+/// Not a type: Managed session ownership cannot prove that the English translation header bytes choose the pass-through route or preserve the serialized file exactly.
+/// State: An unwarmed managed HTTP backend stages and returns the supplied CHAT source through real admission and routing.
+/// Concurrency: The shared session semaphore and private job staging isolate the source and output paths.
 #[tokio::test]
 async fn golden_translate_eng_simple() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session(
         InferTask::Translate,
-        ReleasedCommand::Translate,
-        "eng",
-        "Direct session does not support translate infer",
+        "Managed session does not support translate infer",
     )
     .await;
 
@@ -44,13 +48,20 @@ async fn golden_translate_eng_simple() {
     );
 }
 
+/// Guards: Spanish el gato es grande producing the observed English translation tier.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Spanish el gato es grande producing the observed English translation tier from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_translate_spa_to_eng() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Translate,
         ReleasedCommand::Translate,
         "spa",
-        "Direct session does not support translate infer",
+        "Managed session does not support translate infer",
     )
     .await;
 

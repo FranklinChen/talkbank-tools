@@ -1,18 +1,18 @@
 ---
 source: crates/batchalign/tests/ml_golden/morphotag/golden.rs
-expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(results[0].content.as_text().expect(\"text command result\"))"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
-@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.14.0:eng:standard ; lang=eng | <timestamp>]
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:eng:standard ; lang=eng | <timestamp>]
 *PAR:	the dog is running .
-%mor:	det|the-Def-Art noun|dog aux|be-Fin-Ind-Pres-S3 verb|run-Part-Pres-S .
+%mor:	det|the-Def-Art noun|dog aux|be-Fin-Ind-Pres-S3 verb|run-Part-Pres .
 %gra:	1|2|DET 2|4|NSUBJ 3|4|AUX 4|0|ROOT 5|4|PUNCT
 *PAR:	I like cats .
-%mor:	pron|I-Prs-Nom-S1 verb|like-Fin-Ind-Pres-S1 noun|cat-Plur-Acc .
+%mor:	pron|I-Prs-Nom-S1 verb|like-Fin-Ind-Pres-S1 noun|cat-Plur .
 %gra:	1|2|NSUBJ 2|0|ROOT 3|2|OBJ 4|2|PUNCT
 *PAR:	she went to the store .
 %mor:	pron|she-Prs-Nom-S3 verb|go-Fin-Ind-Past-S3-irr adp|to det|the-Def-Art noun|store .

@@ -1,7 +1,7 @@
 [package]
 name = "batchalign-fa-core"
 version = "0.1.0"
-description = "Dependency-free numeric core for Whisper forced alignment (median filter, column standardization, DTW). Leaf crate shared by the batchalign server and the whisper pilot so the two cannot drift numerically."
+description = "Model-independent open-begin, fixed-end lexical alignment for Whisper ASR and forced alignment."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -1,13 +1,14 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/morphotag/golden_l2.rs
-expression: output
+source: crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs
+expression: "crate :: ml_golden :: golden :: helpers :: pin_provenance_timestamps(output)"
 ---
 @UTF8
 @Begin
 @Languages:	deu, eng
 @Participants:	PAR Participant
 @ID:	deu|test|PAR|||||Participant|||
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:deu:standard+stanza-1.15.1:eng:standard ; lang=deu | <timestamp>]
 *PAR:	ich glaube it's@s:eng working@s:eng und don't@s:eng stop@s:eng .
-%mor:	pron|ich-Prs-Nom-S1 verb|glauben-Fin-Ind-Pres-S1 pron|it-Prs-Nom-S3~aux|be-Fin-Ind-Pres-S3 noun|work-Part-Pres-S cconj|und aux|do-Fin-Imp-S~part|not verb|stop-Fin-Imp-S .
-%gra:	1|2|NSUBJ 2|0|ROOT 3|4|ADVMOD 4|2|OBJ 5|7|CC 6|7|ADVMOD 7|4|CONJ 8|2|PUNCT
+%mor:	pron|ich-Prs-Nom-S1 verb|glauben-Fin-Ind-Pres-S1 pron|it-Prs-Nom-S3~aux|be-Fin-Ind-Pres-S3 verb|work-Part-Pres cconj|und aux|do-Fin-Imp~part|not verb|stop-Inf .
+%gra:	1|2|NSUBJ 2|0|ROOT 3|5|NSUBJ 4|5|AUX 5|2|OBJ 6|9|CC 7|9|AUX 8|9|ADVMOD 9|5|CONJ 10|2|PUNCT
 @End

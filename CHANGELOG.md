@@ -5,6 +5,25 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- Whisper lexical alignment now carries its completed traceback into row-entry
+  projection and transfers the resulting frame vector directly to Python.
+  Traceback uses a closed move type and stores only interior cells. Removed
+  unused Rust normalization, filtering, closed-begin and fixed-rate helpers
+  with six obsolete tests. The independent optimality and tie-policy controls
+  remain.
+
+- Updated Stanza to 1.15.1, including its contextual lemma fixes and lemma
+  result cache. Qualification covers managed morphotag/L2, comparison,
+  coreference, translation and segmentation, with primary and retained model
+  caches. Catalog and weight identities accompany the package version because
+  this patch still uses resource version 1.15.0.
+
+- Model qualification now admits an explicit worker interpreter and managed
+  HTTP session. Probe checks require a source-bound count predicate. Strict
+  expected failures exposed three obsolete Italian marks, whose checks now run
+  normally. Assertion-free observations use explicit diagnostic functions,
+  removing 337 automatic probe instances and 338 model calls.
+
 - `align` utterance timing recovery no longer lets one timed utterance whose
   bullet is out of place (it starts after later ones, or ends far beyond
   them) block or crop the recovery of every untimed utterance around it. Only

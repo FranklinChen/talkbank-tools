@@ -13,7 +13,7 @@
 //! the one before it:
 //!
 //! ```text
-//! repo .venv interpreter ──> imports batchalign.worker ──> extension current
+//! selected interpreter ──> imports batchalign.worker ──> extension current
 //!        (NoEnvironment)        (WorkerNotImportable)       (StaleExtension)
 //! ```
 //!
@@ -44,6 +44,8 @@ pub fn repo_root() -> PathBuf {
 pub enum Missing {
     /// The checkout has no development environment.
     NoEnvironment { venv: PathBuf },
+    /// An explicitly requested interpreter cannot be used.
+    ExplicitInterpreterUnavailable { interpreter: PathBuf },
     /// The environment's interpreter cannot import the worker package.
     WorkerNotImportable {
         interpreter: PathBuf,
@@ -74,6 +76,11 @@ impl fmt::Display for Missing {
                 f,
                 "no Python development environment at {}; {DEVELOP}",
                 venv.display()
+            ),
+            Self::ExplicitInterpreterUnavailable { interpreter } => write!(
+                f,
+                "explicit BATCHALIGN_PYTHON is not a file: {}; correct the selection",
+                interpreter.display()
             ),
             Self::WorkerNotImportable {
                 interpreter,
@@ -108,9 +115,10 @@ impl fmt::Display for Missing {
     }
 }
 
-/// The Python environment worker tests spawn: the checkout's own interpreter,
+/// The selected Python environment worker tests spawn,
 /// importing `batchalign.worker`, with a current extension. Only
-/// [`PythonWorker::require`] makes one.
+/// the shared admission transition makes one. Explicit qualification runtimes
+/// must pass the same current-extension evidence check as the checkout environment.
 #[derive(Debug)]
 pub struct PythonWorker {
     interpreter: PathBuf,
@@ -139,7 +147,7 @@ impl PythonWorker {
 
     fn establish() -> Result<Self, Missing> {
         let root = repo_root();
-        let interpreter = venv_interpreter(&root)?;
+        let interpreter = InterpreterSelection::from_environment(&root).resolve()?;
         import(&interpreter, "batchalign.worker").map_err(|stderr| {
             Missing::WorkerNotImportable {
                 interpreter: interpreter.clone(),
@@ -172,21 +180,48 @@ impl PythonWorker {
     }
 }
 
-/// The checkout's `.venv` interpreter. Only this one: the freshness evidence
-/// is recorded for the checkout's environment, so an interpreter found
-/// elsewhere on `PATH` could not be shown to import a current extension.
-fn venv_interpreter(root: &Path) -> Result<PathBuf, Missing> {
-    let venv = root.join(".venv");
-    let candidates: &[&str] = if cfg!(windows) {
-        &["Scripts/python.exe"]
-    } else {
-        &["bin/python3.14", "bin/python3", "bin/python"]
-    };
-    candidates
-        .iter()
-        .map(|candidate| venv.join(candidate))
-        .find(|path| path.is_file())
-        .ok_or(Missing::NoEnvironment { venv })
+/// The requested environment is resolved once, before import and content-bound
+/// extension admission. An explicit selection cannot fall back to the checkout.
+enum InterpreterSelection {
+    Checkout(PathBuf),
+    Explicit(PathBuf),
+}
+
+impl InterpreterSelection {
+    fn from_environment(root: &Path) -> Self {
+        match std::env::var_os("BATCHALIGN_PYTHON") {
+            Some(path) => Self::Explicit(PathBuf::from(path)),
+            None => Self::Checkout(root.join(".venv")),
+        }
+    }
+
+    fn resolve(self) -> Result<PathBuf, Missing> {
+        match self {
+            Self::Explicit(interpreter) => {
+                // Preserve the final virtualenv symlink while removing caller-CWD
+                // dependence before the proof is carried into worker spawning.
+                let interpreter = std::path::absolute(&interpreter)
+                    .map_err(|_| Missing::ExplicitInterpreterUnavailable { interpreter })?;
+                if interpreter.is_file() {
+                    Ok(interpreter)
+                } else {
+                    Err(Missing::ExplicitInterpreterUnavailable { interpreter })
+                }
+            }
+            Self::Checkout(venv) => {
+                let candidates: &[&str] = if cfg!(windows) {
+                    &["Scripts/python.exe"]
+                } else {
+                    &["bin/python3.14", "bin/python3", "bin/python"]
+                };
+                candidates
+                    .iter()
+                    .map(|candidate| venv.join(candidate))
+                    .find(|path| path.is_file())
+                    .ok_or(Missing::NoEnvironment { venv })
+            }
+        }
+    }
 }
 
 /// Import `module` with `interpreter`; the error is Python's own stderr.

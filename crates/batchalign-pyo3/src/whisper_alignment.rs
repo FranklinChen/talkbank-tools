@@ -17,5 +17,5 @@ pub(crate) fn whisper_lexical_frame_indices(
         costs.as_array().iter().copied().collect(),
     )
     .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    Ok(py.detach(move || LexicalFrameAlignment::align(&matrix).row_entries().to_vec()))
+    Ok(py.detach(move || LexicalFrameAlignment::align(matrix).into_row_entries()))
 }

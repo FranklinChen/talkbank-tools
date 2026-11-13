@@ -45,6 +45,9 @@ Covers:
 
 from __future__ import annotations
 
+# 2026-11-14: strict execution exposed three stale xfail marks. Counts for
+# parla_3sg_storia_context, arancione_noun_bogus_verb and divano_noun_bogus_verb
+# already match on both 1.15.0 and 1.15.1. Keep their count assertions active.
 from .._probe_types import Phenomenon, ProbeCase, XfailMark
 
 
@@ -202,19 +205,6 @@ CASES: tuple[ProbeCase, ...] = (
         ("la", "storia", "parla", "di", "un", "bambino"),
         Phenomenon.CLITIC_ELISION,
         6,
-        xfail=XfailMark(
-            defect_slug="stanza-it-la-sentence-initial-split",
-            reason=(
-                "UD-level pin: Stanza expands sentence-initial `la` "
-                "into `il + i` (both DET, both lemma=`il`), yielding 7 "
-                "UD words for 6 CHAT words. `parla` itself is NOT "
-                "mis-analyzed in this mid-sentence position, gets "
-                "correct `parlare` lemma. End-to-end `%mor` injection "
-                "SUCCEEDS but `la`'s %mor item is junk: "
-                "`det|il-Masc-Def-Art-Sing~det|il-Masc-Def-Art-Plur` "
-                "for what should be `det|la-Fem-Def-Art-Sing`. Defect 7."
-            ),
-        ),
     ),
     # Source: childes-other-data/Frogs/Italian-Roma/06/06danbov.cha
     #   "parla forte" as a bare 2sg imperative without any clitic
@@ -276,18 +266,6 @@ CASES: tuple[ProbeCase, ...] = (
         ("arancione",),
         Phenomenon.CLITIC_ELISION,
         1,
-        xfail=XfailMark(
-            defect_slug="stanza-it-verb-clitic-pos-split",
-            reason=(
-                'UD-level pin: `arancione` (noun, "orange") is '
-                "spuriously split by Stanza's POS layer into "
-                "`arancio + ne` (lemma=`arancio`, clitic=`ne`), "
-                "tagged verb+pron with Part Past features. The "
-                "committed %mor in the Italian corpus ships as "
-                "`verb|arancio~pron|ne`. Should be `noun|arancione` "
-                "or `adj|arancione`. Defect 6 non-verb subclass."
-            ),
-        ),
     ),
     ProbeCase(
         "piccolo_adj_bogus_verb",
@@ -325,17 +303,6 @@ CASES: tuple[ProbeCase, ...] = (
         ("divano",),
         Phenomenon.CLITIC_ELISION,
         1,
-        xfail=XfailMark(
-            defect_slug="stanza-it-verb-clitic-pos-split",
-            reason=(
-                'UD-level pin: `divano` (noun, "sofa") is '
-                "spuriously split into `diva + no`, `no` is not "
-                "even a valid Italian clitic ending for verbs, yet "
-                "Stanza tags this as verb+pron with Part Past. "
-                "Committed corpus ships `verb|diva~pron|no`; should "
-                "be `noun|divano-Masc-Sing`. Defect 6 non-verb subclass."
-            ),
-        ),
     ),
     # ── Genuine verb-clitic compounds (correctness control group) ──
     # Stanza handles bare-compound imperatives correctly (e.g.,

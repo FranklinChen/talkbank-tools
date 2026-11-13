@@ -1,16 +1,17 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/morphotag/golden_l2.rs
-expression: output
+source: crates/batchalign/tests/ml_golden/morphotag/golden_l2.rs
+expression: "crate :: ml_golden :: golden :: helpers :: pin_provenance_timestamps(output)"
 ---
 @UTF8
 @Begin
 @Languages:	fra, nld
 @Participants:	CHI Target_Child
 @ID:	fra|test|CHI|||||Target_Child|||
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:fra:standard+stanza-1.15.1:nld:standard ; lang=fra | <timestamp>]
 *CHI:	voici opa@s et oma@s .
-%mor:	verb|voici-Inf-S noun|opa cconj|et noun|oma .
-%gra:	1|0|ROOT 2|1|OBJ 3|4|CC 4|1|OBJ 5|1|PUNCT
+%mor:	verb|voici noun|opa cconj|et noun|oma .
+%gra:	1|0|ROOT 2|1|OBJ 3|4|CC 4|2|CONJ 5|1|PUNCT
 *CHI:	je dis ja@s:nld maintenant .
-%mor:	pron|moi-Prs-Nom-S1 verb|dire-Fin-Ind-Pres-S1 verb|ja adv|maintenant .
-%gra:	1|2|NSUBJ 2|0|ROOT 3|2|XCOMP 4|2|ADVMOD 5|2|PUNCT
+%mor:	pron|moi-Prs-Nom-S1 verb|dire-Fin-Ind-Pres-S1 intj|ja adv|maintenant .
+%gra:	1|2|NSUBJ 2|0|ROOT 3|2|OBJ 4|2|ADVMOD 5|2|PUNCT
 @End

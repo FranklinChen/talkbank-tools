@@ -1,7 +1,7 @@
 # Tauri + React Dashboard
 
 **Status:** Current
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-15
 
 ## Overview
 
@@ -70,6 +70,17 @@ flowchart TD
     progress -->|"GET /jobs/id"| stream
     progress -->|"Tauri IPC"| reveal
 ```
+
+## Compiler and API generator compatibility
+
+`openapi-typescript` 7.13.0 declares TypeScript 5.x as its compiler peer.
+The frontend selects TypeScript 5.9.3 within that supported major. Its CLI
+typecheck and OpenAPI generation share the compiler dependency. TypeScript 7's
+package entry point lacks the compiler factory API this generator calls.
+
+Qualify compiler upgrades through API regeneration, generated-source drift
+checking, the dashboard build and managed-server end-to-end checks. These
+exercise the generated types and their consumers across the complete toolchain.
 
 ## Web Dashboard Development
 

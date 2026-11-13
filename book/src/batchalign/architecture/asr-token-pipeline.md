@@ -1,7 +1,7 @@
 # ASR Token Pipeline
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** 2026-11-15 09:05 EST
 
 This page documents the complete lifecycle of text tokens as they flow from
 ASR providers through post-processing into the CHAT AST. Each stage has a
@@ -29,6 +29,30 @@ geometry contract, not a silence detector or a claim of acoustic accuracy.
 Repeated labels are not deduplicated. Existing terminal-token handling stays
 with each caller. ASR and FA cache identities distinguish these outputs from
 closed-begin alignment outputs.
+
+The admitted `CostMatrix` has immutable private storage and carries no clone
+capability. Alignment consumes it. Traceback records a
+closed `Step` for each interior cell, owning its exact matrix in private
+`WarpedPath`. Consuming that completed path computes `LexicalFrameAlignment`
+without rerunning DTW. PyO3 consumes the completed frame vector directly.
+The exhaustive numerical oracle also consumes its measured path, avoiding a
+second alignment of the same matrix.
+
+```mermaid
+flowchart TD
+    raw[NumPy dimensions and cost bytes] --> admission[CostMatrix admission]
+    admission --> matrix[Immutable admitted CostMatrix]
+    matrix -->|consume admitted matrix| path[Private WarpedPath owns matrix and traceback]
+    path -->|consume completed traceback| alignment[LexicalFrameAlignment]
+    alignment -->|consume frame vector| python[Python model geometry and seconds]
+```
+
+Python owns normalization and median filtering. The former unused Rust filter,
+standardizer, closed-begin entry point and fixed-20-ms conversion were removed.
+There is one lexical alignment policy in the leaf crate. Its private path
+points and exhaustive moves keep arbitrary raw paths outside the public API.
+Shape and non-finite admission, independent optimal-cost enumeration and
+explicit tie-policy checks retain focused numerical coverage.
 
 `AdmittedTranscribePlan<P>` owns the ASR plan and its segmentation admission.
 The constructor resolves a requested language before inference, records a

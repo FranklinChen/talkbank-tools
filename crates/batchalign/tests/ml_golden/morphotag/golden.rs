@@ -4,12 +4,12 @@ use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use batchalign::worker::InferTask;
 
 use crate::ml_golden::golden::fixtures::{
-    ENG_DISFLUENCY_PARITY, ENG_MULTI_UTT, ENG_RETOKENIZE, ENG_SIMPLE, ITA_MULTI_WORD_UTTERANCES,
+    ENG_DISFLUENCY, ENG_MULTI_UTT, ENG_RETOKENIZE, ENG_SIMPLE, ITA_MULTI_WORD_UTTERANCES,
     ITA_SINGLE_WORD_UTTERANCES, SPA_SIMPLE,
 };
 use crate::ml_golden::golden::helpers::{
     assert_golden_snapshot, find_mor_line_for, has_gra_tier, has_mor_tier, parse_output,
-    pin_provenance_timestamps, require_direct_session_warmed,
+    pin_provenance_timestamps, require_managed_session_warmed,
 };
 
 fn morphotag_options(override_media_cache: bool, retokenize: bool) -> CommandOptions {
@@ -24,13 +24,20 @@ fn morphotag_options(override_media_cache: bool, retokenize: bool) -> CommandOpt
     })
 }
 
+/// Guards: English subject, verb and object MOR/GRA bytes for ENG_SIMPLE.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English subject, verb and object MOR/GRA bytes for ENG_SIMPLE from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_eng_simple() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -52,13 +59,20 @@ async fn golden_morphotag_eng_simple() {
     assert_golden_snapshot!("morphotag_eng_simple", output);
 }
 
+/// Guards: utterance ordering and English MOR/GRA bytes for ENG_MULTI_UTT.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove utterance ordering and English MOR/GRA bytes for ENG_MULTI_UTT from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_eng_multi_utt() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -79,13 +93,26 @@ async fn golden_morphotag_eng_multi_utt() {
     );
 }
 
+/// Guards: dictionary lemmas and normalized CHAT equality across repeated mixed-length contextual analyses.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove dictionary lemmas and normalized CHAT equality across repeated mixed-length contextual analyses from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
-async fn golden_morphotag_with_cache() {
-    let jobs = require_direct_session_warmed(
+async fn golden_morphotag_repeated_analysis() {
+    const TARGET: &str = "she's gone home .";
+    const PREFIX: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n";
+    let mixed = format!(
+        "{PREFIX}*PAR:\t{TARGET}\n*PAR:\tthat's her book .\n*PAR:\tthe housewives made deep dives .\n@End\n"
+    );
+    let alone = format!("{PREFIX}*PAR:\t{TARGET}\n@End\n");
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -93,23 +120,23 @@ async fn golden_morphotag_with_cache() {
         .submit_content_job(
             ReleasedCommand::Morphotag,
             "eng",
-            "cache_test.cha",
-            ENG_SIMPLE,
+            "lemma_repeated.cha",
+            &mixed,
             morphotag_options(false, false),
         )
         .await;
-    assert_completed_without_errors("morphotag_with_cache_cold", &info1, &results1);
+    assert_completed_without_errors("morphotag_first_analysis", &info1, &results1);
 
     let (info2, results2) = jobs
         .submit_content_job(
             ReleasedCommand::Morphotag,
             "eng",
-            "cache_test.cha",
-            ENG_SIMPLE,
+            "lemma_repeated.cha",
+            &mixed,
             morphotag_options(false, false),
         )
         .await;
-    assert_completed_without_errors("morphotag_with_cache_warm", &info2, &results2);
+    assert_completed_without_errors("morphotag_repeated_analysis", &info2, &results2);
 
     // The two runs may stamp different seconds; everything else, the stamp's
     // fields included, must be identical.
@@ -117,15 +144,49 @@ async fn golden_morphotag_with_cache() {
         pin_provenance_timestamps(results1[0].content.as_text().expect("text command result")),
         pin_provenance_timestamps(results2[0].content.as_text().expect("text command result"))
     );
+    let first = results1[0].content.as_text().expect("text command result");
+    let lexicon_line = find_mor_line_for(first, "the housewives made deep dives")
+        .expect("dictionary probe MOR tier");
+    assert!(
+        lexicon_line.contains("noun|housewife-Plur"),
+        "{lexicon_line}"
+    );
+    assert!(lexicon_line.contains("noun|dive-Plur"), "{lexicon_line}");
+    let (alone_info, alone_results) = jobs
+        .submit_content_job(
+            ReleasedCommand::Morphotag,
+            "eng",
+            "lemma_alone.cha",
+            &alone,
+            morphotag_options(false, false),
+        )
+        .await;
+    assert_completed_without_errors("morphotag_context_alone", &alone_info, &alone_results);
+    let alone_output = alone_results[0]
+        .content
+        .as_text()
+        .expect("text command result");
+    assert_eq!(
+        find_mor_line_for(first, TARGET).expect("mixed target MOR tier"),
+        find_mor_line_for(alone_output, TARGET).expect("single target MOR tier"),
+        "contextual lemma output must be independent of other utterance lengths"
+    );
 }
 
+/// Guards: Spanish inflection and dependency bytes for SPA_SIMPLE.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Spanish inflection and dependency bytes for SPA_SIMPLE from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_spa_simple() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "spa",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -154,13 +215,20 @@ async fn golden_morphotag_spa_simple() {
     );
 }
 
+/// Guards: English contraction splitting and dependent-tier bytes in retokenize mode.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English contraction splitting and dependent-tier bytes in retokenize mode from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_retokenize_eng() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -185,13 +253,20 @@ async fn golden_morphotag_retokenize_eng() {
     );
 }
 
+/// Guards: the explicit that subject plus be copula after mm-hmm disfluency.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove the explicit that subject plus be copula after mm-hmm disfluency from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "eng",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -200,7 +275,7 @@ async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
             ReleasedCommand::Morphotag,
             "eng",
             "eng_disfluency.cha",
-            ENG_DISFLUENCY_PARITY,
+            ENG_DISFLUENCY,
             morphotag_options(true, false),
         )
         .await;
@@ -225,60 +300,6 @@ async fn morphotag_disfluency_preserves_thats_subject_and_copula() {
         !mmhmm_mor.contains("aux|that-Fin-Ind-Pres-S3"),
         "unexpected collapsed auxiliary-only analysis for \"that's right\": {mmhmm_mor}"
     );
-}
-
-#[tokio::test]
-async fn golden_morphotag_cache_is_faster() {
-    let jobs = require_direct_session_warmed(
-        InferTask::Morphosyntax,
-        ReleasedCommand::Morphotag,
-        "eng",
-        "Direct session does not support morphosyntax infer",
-    )
-    .await;
-
-    let start1 = std::time::Instant::now();
-    let (info1, results1) = jobs
-        .submit_content_job(
-            ReleasedCommand::Morphotag,
-            "eng",
-            "cache_speed.cha",
-            ENG_SIMPLE,
-            morphotag_options(false, false),
-        )
-        .await;
-    let elapsed1 = start1.elapsed();
-    assert_completed_without_errors("morphotag_cache_is_faster_cold", &info1, &results1);
-
-    let start2 = std::time::Instant::now();
-    let (info2, results2) = jobs
-        .submit_content_job(
-            ReleasedCommand::Morphotag,
-            "eng",
-            "cache_speed.cha",
-            ENG_SIMPLE,
-            morphotag_options(false, false),
-        )
-        .await;
-    let elapsed2 = start2.elapsed();
-    assert_completed_without_errors("morphotag_cache_is_faster_warm", &info2, &results2);
-
-    assert_eq!(
-        results1[0].content.as_text().expect("text command result"),
-        results2[0].content.as_text().expect("text command result")
-    );
-    eprintln!(
-        "Cache timing: cold={:?}, warm={:?} (speedup: {:.1}x)",
-        elapsed1,
-        elapsed2,
-        elapsed1.as_secs_f64() / elapsed2.as_secs_f64()
-    );
-    if elapsed1.as_secs_f64() > 1.0 {
-        assert!(
-            elapsed2 < elapsed1,
-            "the warm run must be faster: cold={elapsed1:?}, warm={elapsed2:?}"
-        );
-    }
 }
 
 /// Italian single-word utterances must not be shredded into invented verbs.
@@ -312,13 +333,20 @@ async fn golden_morphotag_cache_is_faster() {
 ///
 /// Between them these controls fail BOTH tempting cheap fixes, which is why they
 /// are here.
+/// Guards: Italian isolated lexical words and legitimate enclitic controls through the model.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Italian isolated lexical words and legitimate enclitic controls through the model from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "ita",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 
@@ -390,13 +418,20 @@ async fn golden_morphotag_ita_single_word_utterances_are_not_split() {
 /// *dare* ("dai il libro a me") and as the contraction *da* + *il* ("vieni dai
 /// bambini"). `hai` is subjectless because Italian is pro-drop, which is the
 /// normal spoken form and the context where a mis-analysis is most likely.
+/// Guards: Italian multiword utterances retaining legitimate MWT components.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove Italian multiword utterances retaining legitimate MWT components from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_morphotag_ita_multi_word_keeps_genuine_mwts() {
-    let jobs = require_direct_session_warmed(
+    let jobs = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Morphotag,
         "ita",
-        "Direct session does not support morphosyntax infer",
+        "Managed session does not support morphosyntax infer",
     )
     .await;
 

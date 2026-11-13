@@ -1,13 +1,14 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/morphotag/golden.rs
-expression: output
+source: crates/batchalign/tests/ml_golden/morphotag/golden.rs
+expression: "crate :: ml_golden :: golden :: helpers :: pin_provenance_timestamps(output)"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:eng:standard ; lang=eng | <timestamp>]
 *PAR:	hello world .
 %mor:	intj|hello noun|world .
-%gra:	1|2|DISCOURSE 2|0|ROOT 3|2|PUNCT
+%gra:	1|0|ROOT 2|1|VOCATIVE 3|1|PUNCT
 @End

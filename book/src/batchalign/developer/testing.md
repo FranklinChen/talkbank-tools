@@ -438,6 +438,81 @@ whose insta snapshots (L2 included) change with the model:
 cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
 ```
 
+## Stanza qualification through managed sessions
+
+A Stanza update compares the same BA3 source and native extension in two
+isolated Python environments. Keep each environment's resource catalog and
+model files separate. Record their hashes and selected packages alongside the
+package version, both before and after execution. Worker bootstrap refreshes a
+present resource manifest, so an isolated copy alone does not freeze its catalog.
+Stanza 1.15.1 still declares resource version 1.15.0. Normal `REUSE_RESOURCES`
+pipeline construction checks the primary hash of each selected model and
+downloads mismatches. Alternate hashes are accepted when validating downloaded
+bytes. Record the resulting asset hashes explicitly. Primary and retained
+populations can converge during loading, as the 1.15.1 qualification did.
+
+Rust golden journeys acquire `ManagedGoldenSession`, whose private payload is a
+`LiveServerSession`. Its submission methods use the ordinary managed HTTP job
+route. The shared backend retains warmed workers across isolated sessions.
+Pass-through controls admit a managed session without requesting model warmup.
+English translation and Spanish coreference exercise their real HTTP/source-byte
+contracts through that path.
+`PythonWorker` admits the selected interpreter's worker import and current
+native-extension build evidence once per test binary. `BATCHALIGN_PYTHON`
+selects an explicit qualification interpreter. A missing explicit path fails
+admission. With no selection, the fixture resolves the checkout's `.venv`.
+Run the baseline and candidate as separate test processes so each owns its
+selected interpreter and warmed model state.
+
+Python CLI golden journeys use `ManagedMorphotag`. Set `BATCHALIGN_TEST_CLI`
+to the built CLI and `BATCHALIGN_SERVER` to the local managed endpoint. The
+caller starts and owns that service with the intended `--python` interpreter
+and `STANZA_RESOURCES_DIR`. If using a private `BATCHALIGN_STATE_DIR`, give the
+client the same value so the existing same-user admission can sign requests.
+The fixture stages a private CHAT file and exposes preserve or retokenize
+submission. It performs no Cargo build or server startup. The CLI checks live
+build compatibility on each request and failures retain subprocess diagnostics.
+
+```mermaid
+flowchart TD
+    selection["Explicit BATCHALIGN_PYTHON or checkout environment"] --> resolve{"Resolve selected interpreter"}
+    resolve -->|"missing"| refused["Admission error"]
+    resolve -->|"existing"| imported["Import worker"]
+    imported --> evidence["Verify native extension build evidence"]
+    evidence --> worker["PythonWorker proof retained once per binary"]
+    worker --> backend["Prepare shared managed worker backend"]
+    backend --> session["ManagedGoldenSession owns isolated HTTP session"]
+    session --> submit["Submit CHAT through ordinary job admission"]
+    submit --> result["Completed or diagnosed file results"]
+    result --> compare["Compare output plus package, catalog and model identities"]
+```
+
+The repeated-analysis golden compares normalized output across two mixed-length
+requests on one warmed worker, checks housewife/dive dictionary lemmas, then
+compares the contextual target against a single-utterance job. The lemma LRU introduced by Stanza 1.15.1 must preserve
+those results. Text NLP jobs have no BA3 result-cache speed guarantee, so the
+former `golden_morphotag_cache_is_faster` timing assertion was removed. Its two
+extra model submissions duplicated the repeated-analysis journey. The stronger
+surviving journey adds one single-utterance submission, for one fewer job overall.
+
+Probe admission separates observation-only measurements from real count checks.
+The checked-probe types remove 337 assertion-free parameter instances from
+pytest, together with 338 model calls and the free-pipeline fixture cache.
+Explicit measurement functions preserve the diagnostic route and carry the
+source and completed projection in `ProbeObservation`. Known defects execute
+their count predicate under a strict, count-mismatch-only expected-failure policy.
+Three obsolete Italian marks were retired after paired XPASS. See the
+[probe admission flow](investigation-probe-harnesses.md#mwt-probe-harness).
+
+The test rubric remains part of this change. Session types exclude direct
+execution and explicit interpreter fallback. Submission helpers reuse the shared
+HTTP client and the production command-language policy. The former copied
+command list omitted compare, causing HTTP rejection that direct execution
+had bypassed. Reusing the production predicate removes that second policy table
+and preserves server rejection diagnostics. Real-model tests retain the
+linguistic output and HTTP/file effects that those ownership proofs cannot
+establish. Keep reduction counts separate from rubric annotations.
+
 ## Mapping identity harness
 
 A change to the UD-to-`%mor` mapping should be proved output-identical, or its
@@ -495,7 +570,7 @@ is green, `make batchalign-test-ml-golden` is a diagnostic, and adding it to
 
 ### ML golden tests fail rather than skip
 
-`require_direct_session_warmed` in the ml_golden suite **panics** when a live
+`require_managed_session_warmed` in the ml_golden suite **panics** when a live
 session cannot be acquired. It used to return `None`, and every call site did
 `else { return; }`, so a test that never executed reported `ok`.
 
@@ -1115,3 +1190,18 @@ etc.) detect completion without polling the filesystem. The
 A Makefile glue layer (`make test-bg` / `test-bg-status` /
 `test-bg-smoke`) was discussed but is not landed; `scripts/test-bg.sh`
 is the current entry point.
+
+## Lexical alignment test-debt review
+
+The numerical core retains five tests for external shape/f32 admission,
+independently enumerated optimal cost, open-begin endpoint selection and the
+explicit tie policy. Their rubric explains each residual claim. The private
+`WarpedPath` retains its producing matrix and is consumed into frame entries.
+The oracle reuses that path for its projection instead of running DTW again.
+PyO3 transfers the completed vector through `into_row_entries`.
+
+Six tests and their unreachable filter, standardization, closed-begin and
+fixed-rate conversion entry points were removed after caller review. This
+review covers the leaf core and its PyO3 consumer. Model/acoustic qualification
+continues through the managed-server journeys above. See the
+[source-bound alignment flow](../architecture/asr-token-pipeline.md#segmentation-admission-travels-with-the-asr-plan).

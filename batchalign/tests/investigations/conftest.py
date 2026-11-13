@@ -5,14 +5,11 @@ ProbeCase)`` pairs. Each test needs a Stanza pipeline matching
 the pair's language: loaded once per language per session, not
 per test invocation (pipeline load is ~5s).
 
-The two fixtures here (:func:`post_pipeline_for` and
-:func:`free_pipeline_for`) are module-scoped factories: they
-return a callable that takes a ``LanguageKey`` and returns the
-appropriate pipeline, caching per session in a closure dict.
-Adding a new language requires no changes here, the factory
-builds the pipeline on first request using the language's
-alpha-2 code and the shared capability-aware processor selector
-:func:`_processors_for`.
+The postprocessor factory loads each requested language once per test module.
+Free-tokenize pipelines are built explicitly by diagnostic measurements through
+``_pipeline_free``. Assertion-free observations have no automatic pytest fixture
+or model cache. Both builders use the production capability-aware processor
+selection so languages resolve their own installed MWT support.
 """
 
 from __future__ import annotations
@@ -70,7 +67,7 @@ def _pipeline_with_postprocessor(alpha2: str) -> tuple:
 
     Simulates production Preserve-mode: the ``TokenizerContext`` is
     populated with the CHAT word list before each ``nlp()`` call so
-    the BA2-ported MWT override table applies.
+    the source-bound realigner retains the input word boundaries.
     """
     import stanza
     from stanza import DownloadMethod
@@ -133,20 +130,6 @@ def post_pipeline_for():
         key = lang_key.alpha2
         if key not in cache:
             cache[key] = _pipeline_with_postprocessor(key)
-        return cache[key]
-
-    return resolver
-
-
-@pytest.fixture(scope="module")
-def free_pipeline_for():
-    """Factory: ``LanguageKey → nlp`` with no postprocessor."""
-    cache: dict[str, object] = {}
-
-    def resolver(lang_key):
-        key = lang_key.alpha2
-        if key not in cache:
-            cache[key] = _pipeline_free(key)
         return cache[key]
 
     return resolver

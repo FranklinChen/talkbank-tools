@@ -11,11 +11,9 @@ Source: data/childes-other-data/Chinese/Cantonese/MOST/10002/40415b.cha
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
-
 import pytest
+
+from ._managed_morphotag import ManagedMorphotag, Tokenization
 
 CHAT_WITH_RETRACE = (
     "@UTF8\n"
@@ -34,51 +32,17 @@ CHAT_WITH_RETRACE = (
 @pytest.mark.golden
 @pytest.mark.integration
 def test_morphotag_retokenize_with_retrace_succeeds() -> None:
-    """morphotag --retokenize must not crash on utterances with retraces."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / "retrace_test.cha"
-        output_dir = Path(tmpdir) / "output"
-        input_path.write_text(CHAT_WITH_RETRACE)
+    """morphotag --retokenize must not crash on utterances with retraces.
 
-        result = subprocess.run(
-            [
-                "cargo",
-                "run",
-                "-p",
-                "batchalign",
-                "--",
-                "--no-open-dashboard",
-                "--override-media-cache",
-                "morphotag",
-                "--retokenize",
-                str(input_path),
-                "-o",
-                str(output_dir),
-                # In process, as the sibling end-to-end tests run. Without it
-                # the CLI this test builds finds any local server, whose build
-                # stamp it never matches, and refuses: the test then passed
-                # only when no server happened to be running.
-                "--sequential",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(Path(__file__).resolve().parents[4]),  # batchalign3 root
-        )
-
-        # Check the output
-        output_file = output_dir / "retrace_test.cha"
-
-        if result.returncode != 0:
-            # THIS IS THE BUG, if it fails, capture the error
-            raise AssertionError(
-                f"morphotag --retokenize failed (exit {result.returncode}):\n"
-                f"STDOUT: {result.stdout[-500:]}\n"
-                f"STDERR: {result.stderr[-500:]}"
-            )
-
-        assert output_file.exists(), f"Output file not created: {output_dir}"
-
-        output_text = output_file.read_text()
-        assert "%mor:" in output_text, f"Output should have %mor tiers:\n{output_text}"
-        assert "[/]" in output_text, f"Retrace should be preserved:\n{output_text}"
+    Guards: morphotag retokenize with retrace succeeds for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is morphotag retokenize with retrace succeeds for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
+    output_text = ManagedMorphotag.from_environment().run(
+        CHAT_WITH_RETRACE,
+        Tokenization.RETOKENIZE,
+    )
+    assert "%mor:" in output_text, f"Output should have %mor tiers:\n{output_text}"
+    assert "[/]" in output_text, f"Retrace should be preserved:\n{output_text}"

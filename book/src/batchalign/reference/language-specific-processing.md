@@ -1,7 +1,7 @@
 # Language-Specific Processing Overview
 
 **Status:** Current
-**Last updated:** 2026-10-21 14:20 EDT
+**Last updated:** 2026-11-15 10:02 EST
 
 This page is the single entry point for understanding how batchalign3 handles
 non-English languages. It maps every stage of the processing pipeline to the
@@ -137,23 +137,23 @@ See [Utterance Segmentation](utterance-segmentation.md).
 ### Stage 6: Morphosyntax (Stanza + Workarounds)
 
 Stanza is the backbone for POS tagging, lemmatization, and dependency parsing.
-Language-specific workarounds correct systematic errors:
+Source correspondence, language-specific mapping and registered repairs share
+that analysis. The current responsibilities are recorded below.
 
-| Language | Workarounds | Reference |
-|----------|-------------|-----------|
-| English | 201-entry irregular-form table, contraction MWT hints, GUM package | [Non-English Workarounds](../developer/non-english-workarounds.md) §E1-E3 |
-| French | 20-entry pronoun-case lookup, 158 APM noun forms, MWT overrides | §F1-F3 |
-| Japanese | Order-dependent verb-form override chain, combined package, comma normalization | [Japanese Morphosyntax](japanese-morphosyntax.md), §J1-J3 |
-| Hebrew | HebBinyan/HebExistential feature extraction | [Hebrew Morphosyntax](hebrew-morphosyntax.md) |
-| Italian | "l'" MWT suppression, "lei" merge | §I1-I2 |
-| Portuguese | "d'água" MWT forcing | §P1 |
-| Dutch | Possessive "'s" MWT suppression | §D1 |
+| Language | Processing responsibility | Reference |
+| --- | --- | --- |
+| English | GUM MWT package, typed UD content repairs and CHAT morphology conventions | [Stanza mitigation map](../architecture/stanza-defect-mitigation-map.md) |
+| French | Native MWT components aligned to CHAT source words and French feature mapping | [French support](languages/french.md) |
+| Japanese | Configured combined package and Japanese feature mapping | [Japanese morphosyntax](japanese-morphosyntax.md) |
+| Hebrew | Hebrew UD feature extraction | [Hebrew morphosyntax](hebrew-morphosyntax.md) |
+| Italian | Curated per-token repairs for registered word/clitic misanalyses | [Italian support](languages/italian.md) |
+| Portuguese and Dutch | Source-bound realignment of native tokenizer/MWT output | [Stanza mitigation map](../architecture/stanza-defect-mitigation-map.md) |
 
 Cross-language infrastructure:
 
 | Feature | What | Reference |
 |---------|------|-----------|
-| MWT dispatch | Capability-driven: the language's entry in the cached Stanza catalog (`has("mwt")`) | §X1 + [Stanza Limitations Defect 5](stanza-limitations.md) |
+| MWT dispatch | Capability-driven: the language's entry in the cached Stanza catalog (`has("mwt")`) | [Stanza Limitations Defect 5](stanza-limitations.md#defect-5-mwt-processor-selection-must-come-from-the-live-capability-table-not-a-hardcoded-mirror) |
 | ISO 639-3 → Stanza code mapping | The capability table: Rust's ISO 639-1 table plus the catalog and its aliases (`zho` → `zh-hans`, `nor` → `nb`), with `_STANZA_CODE_POLICY` for `cmn`/`yue` → `zh-hans` | [Language Code Resolution](language-code-resolution.md) |
 | Number expansion | Table-driven via chatter's `num2lang.json` + built-in CJK numerals | [Number Expansion](number-expansion.md) |
 
@@ -213,7 +213,7 @@ transformation is not idempotent: `聯繫` normalized twice becomes `聯係`.
 - [Japanese Morphosyntax](japanese-morphosyntax.md), verb forms, combined package
 - [Number Expansion](number-expansion.md), chatter's cardinal tables and CJK numerals
 - [Utterance Segmentation](utterance-segmentation.md), per-language models
-- [Non-English Workarounds](../developer/non-english-workarounds.md), workaround and convention catalog
+- [Upstream defects and retirement](../developer/upstream-defect-policy.md), qualification and removal criteria
 - [Whisper ASR](whisper-asr.md), engine selection, model IDs
 - [Cantonese Language Support](languages/cantonese.md), engines, normalization, word segmentation, FA
 - [Cantonese and CJK, Architecture](../../architecture/language-and-multilingual/cantonese-and-cjk.md), engine dispatch, normalization pipeline, segmenter selection

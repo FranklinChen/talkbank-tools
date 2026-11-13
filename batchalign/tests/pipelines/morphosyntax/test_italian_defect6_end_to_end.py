@@ -12,7 +12,7 @@ serialization) must also produce the corrected forms.
 
 The test is ``@pytest.mark.golden`` because it loads real Stanza
 models. It is ``@pytest.mark.integration`` because it invokes the
-``cargo run -p batchalign`` binary path. Both markers mirror
+explicitly selected managed CLI path. Both markers mirror
 the sibling ``test_preserve_mwt_end_to_end.py`` pattern.
 
 Why this pairing matters
@@ -33,11 +33,9 @@ asserts the reconciler actually catches the production case.
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
-
 import pytest
+
+from ._managed_morphotag import ManagedMorphotag
 
 # Minimal Italian CHAT covering the six allowlist entries:
 #
@@ -83,39 +81,7 @@ def morphotag_output() -> str:
     has no ``--lang`` flag (see ``MorphotagArgs`` docstring re: the
     2026-05-03 incident).
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / "ita_defect6.cha"
-        output_dir = Path(tmpdir) / "output"
-        input_path.write_text(CHAT_FIXTURE)
-
-        result = subprocess.run(
-            [
-                "cargo",
-                "run",
-                "-p",
-                "batchalign",
-                "--",
-                "--no-open-dashboard",
-                "--override-media-cache",
-                "morphotag",
-                str(input_path),
-                "-o",
-                str(output_dir),
-                "--sequential",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=str(Path(__file__).resolve().parents[4]),  # batchalign3 root
-        )
-        assert result.returncode == 0, (
-            f"morphotag CLI failed (exit {result.returncode}):\n"
-            f"STDOUT: {result.stdout[-500:]}\n"
-            f"STDERR: {result.stderr[-500:]}"
-        )
-        output_file = output_dir / "ita_defect6.cha"
-        assert output_file.exists(), f"Output file not created: {output_dir}"
-        return output_file.read_text()
+    return ManagedMorphotag.from_environment().run(CHAT_FIXTURE)
 
 
 def _mor_lines(output: str) -> list[str]:
@@ -140,7 +106,14 @@ JUNK_PATTERNS = [
 @pytest.mark.integration
 def test_parla_produces_verb_parlare(morphotag_output: str) -> None:
     """`parla forte` must emit `v|parlare` (or `verb|parlare`), not
-    `verb|par~pron|la`."""
+    `verb|par~pron|la`.
+
+    Guards: parla produces verb parlare for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is parla produces verb parlare for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     assert len(lines) >= 1, f"No %mor lines: {morphotag_output}"
     # Find the utterance containing `parla`, should be utterance 0
@@ -159,6 +132,12 @@ def test_parla_produces_verb_parlare(morphotag_output: str) -> None:
 @pytest.mark.golden
 @pytest.mark.integration
 def test_arancione_produces_noun(morphotag_output: str) -> None:
+    """Guards: arancione produces noun for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is arancione produces noun for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     arancione_lines = [
         line for line in lines if "arancione" in line or "arancio" in line
@@ -173,6 +152,12 @@ def test_arancione_produces_noun(morphotag_output: str) -> None:
 @pytest.mark.golden
 @pytest.mark.integration
 def test_piccolo_produces_adj(morphotag_output: str) -> None:
+    """Guards: piccolo produces adj for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is piccolo produces adj for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     piccolo_lines = [line for line in lines if "piccolo" in line or "picco~" in line]
     assert piccolo_lines, f"No line mentions piccolo: {morphotag_output}"
@@ -185,6 +170,12 @@ def test_piccolo_produces_adj(morphotag_output: str) -> None:
 @pytest.mark.golden
 @pytest.mark.integration
 def test_gomitolo_produces_noun(morphotag_output: str) -> None:
+    """Guards: gomitolo produces noun for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is gomitolo produces noun for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     relevant = [line for line in lines if "gomitolo" in line or "gomito~" in line]
     assert relevant, f"No line mentions gomitolo: {morphotag_output}"
@@ -197,6 +188,12 @@ def test_gomitolo_produces_noun(morphotag_output: str) -> None:
 @pytest.mark.golden
 @pytest.mark.integration
 def test_divano_produces_noun(morphotag_output: str) -> None:
+    """Guards: divano produces noun for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is divano produces noun for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     relevant = [line for line in lines if "divano" in line or "diva~" in line]
     assert relevant, f"No line mentions divano: {morphotag_output}"
@@ -208,7 +205,14 @@ def test_divano_produces_noun(morphotag_output: str) -> None:
 @pytest.mark.integration
 def test_dammela_mid_sentence_becomes_verb(morphotag_output: str) -> None:
     """Defect 8: `per favore dammela` must emit `verb|dare` (or
-    `v|dare`), not `adj|dammelo`."""
+    `v|dare`), not `adj|dammelo`.
+
+    Guards: dammela mid sentence becomes verb for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is dammela mid sentence becomes verb for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     # Find the %mor line containing `dare` or `dammelo`; tests
     # should not assume positional index because adding more
@@ -228,7 +232,14 @@ def test_dammela_mid_sentence_becomes_verb(morphotag_output: str) -> None:
 @pytest.mark.integration
 def test_prendilo_mid_sentence_becomes_verb(morphotag_output: str) -> None:
     """Defect 8 (corpus-sourced): `per favore prendilo` must emit
-    `verb|prendere`, not `adj|prendilo`."""
+    `verb|prendere`, not `adj|prendilo`.
+
+    Guards: prendilo mid sentence becomes verb for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is prendilo mid sentence becomes verb for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     prendilo_lines = [
         line for line in lines if "prendere" in line or "prendilo" in line
@@ -244,7 +255,14 @@ def test_prendilo_mid_sentence_becomes_verb(morphotag_output: str) -> None:
 @pytest.mark.integration
 def test_no_junk_pattern_anywhere(morphotag_output: str) -> None:
     """Belt-and-suspenders: no %mor line anywhere in the output
-    carries a junk reconciler-miss pattern."""
+    carries a junk reconciler-miss pattern.
+
+    Guards: no junk pattern anywhere for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is no junk pattern anywhere for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     lines = _mor_lines(morphotag_output)
     for line in lines:
         for pattern in JUNK_PATTERNS:

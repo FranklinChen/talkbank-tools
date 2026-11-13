@@ -77,6 +77,19 @@ jobs:
   # happened to Batchalign Python, whose `- name: Smoke test: ...` (an
   # unquoted colon) took the entire Python CI offline. actionlint finds it in
   # one second, and also shellchecks every embedded `run:` script.
+  # Tests are a last resort, after types: every new or changed test states
+  # what it guards, its kind, why no type can replace it, its state and its
+  # concurrency. Tests from before the policy are baselined until edited.
+  test-rubric:
+    name: Test rubric
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Check the test rubric
+        run: make test-rubric
+
   workflow-lint:
     name: Workflow files (actionlint)
     runs-on: ubuntu-latest
@@ -94,6 +107,7 @@ jobs:
     needs:
       - shellcheck
       - formatting
+      - test-rubric
       - workflow-lint
 
     steps:
@@ -116,6 +130,7 @@ jobs:
             echo "|------|--------|"
             echo "| Shell scripts (shellcheck, strictest) | $(result_to_badge '${{ needs.shellcheck.result }}') |"
             echo "| Rust formatting (rustfmt) | $(result_to_badge '${{ needs.formatting.result }}') |"
+            echo "| Test rubric | $(result_to_badge '${{ needs.test-rubric.result }}') |"
             echo "| Workflow files (actionlint) | $(result_to_badge '${{ needs.workflow-lint.result }}') |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -123,6 +138,7 @@ jobs:
           # Single merge-gate: fail if any dependency failed or was cancelled.
           if [[ "${{ needs.shellcheck.result }}"        != "success" ||
                 "${{ needs.formatting.result }}"        != "success" ||
+                "${{ needs.test-rubric.result }}"       != "success" ||
                 "${{ needs.workflow-lint.result }}"     != "success" ]]; then
               echo "### One or more gates failed, see job logs above" >> "$GITHUB_STEP_SUMMARY"
               exit 1

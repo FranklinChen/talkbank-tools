@@ -22,6 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import assert_never, overload
+
+from batchalign.inference._admission import _FactoryAdmission
 
 
 class Phenomenon(Enum):
@@ -79,39 +82,82 @@ class XfailMark:
 
 
 @dataclass(frozen=True)
-class ProbeCase:
-    """A single investigation probe case.
+class ObserveOnly:
+    """Record external model behavior without asserting a word count."""
 
-    Attributes
-    ----------
-    label
-        Short identifier: used in pytest test IDs and in the rendered
-        per-language book tables.
-    words
-        CHAT-derived word sequence fed to the Stanza pipeline. A tuple
-        (not a list) so the dataclass stays hashable/frozen.
-    phenomenon
-        The linguistic construction class; see :class:`Phenomenon`.
-    expected_post_mwt_count
-        If set, the test asserts that the post-MWT-expansion Stanza
-        word count equals this integer. Use ``len(words)`` for strict
-        1-to-1 cases. If ``None``, the case is observe-only, the
-        pipeline output is pinned via print but no assertion fires.
-    xfail
-        If set, the test marks itself xfail with the defect slug and
-        reason. Applies only to the with-postprocessor path;
-        free-tokenize always runs observe-only.
+
+@dataclass(frozen=True)
+class ExpectedWords:
+    count: int
+
+
+@dataclass(frozen=True)
+class KnownDefect:
+    """An expected failure always owns the count predicate it must exercise."""
+
+    expected: ExpectedWords
+    defect: XfailMark
+
+
+ProbeExpectation = ObserveOnly | ExpectedWords | KnownDefect
+
+
+@dataclass(frozen=True, init=False)
+class ProbeCase:
+    """Source words and one closed observation/check/known-defect intent.
+
+    The existing positional and keyword case notation is admitted here once.
+    Its overloads exclude a defect without an expected count. Consumers receive
+    the closed payload and never reconstruct it from independent nullable fields.
     """
 
     label: str
     words: tuple[str, ...]
     phenomenon: Phenomenon
-    expected_post_mwt_count: int | None = None
-    xfail: XfailMark | None = None
+    expectation: ProbeExpectation
 
-    def is_observe_only(self) -> bool:
-        """True if this case does not assert post-MWT word count."""
-        return self.expected_post_mwt_count is None
+    @overload
+    def __init__(
+        self,
+        label: str,
+        words: tuple[str, ...],
+        phenomenon: Phenomenon,
+        expected_post_mwt_count: int,
+        xfail: XfailMark | None = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        label: str,
+        words: tuple[str, ...],
+        phenomenon: Phenomenon,
+        expected_post_mwt_count: None = None,
+        xfail: None = None,
+    ) -> None: ...
+
+    def __init__(
+        self,
+        label: str,
+        words: tuple[str, ...],
+        phenomenon: Phenomenon,
+        expected_post_mwt_count: int | None = None,
+        xfail: XfailMark | None = None,
+    ) -> None:
+        expectation: ProbeExpectation
+        match expected_post_mwt_count, xfail:
+            case None, None:
+                expectation = ObserveOnly()
+            case int(count), None:
+                expectation = ExpectedWords(count)
+            case int(count), XfailMark() as defect:
+                expectation = KnownDefect(ExpectedWords(count), defect)
+            case None, XfailMark():
+                raise ValueError("a known defect requires an expected word count")
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "words", words)
+        object.__setattr__(self, "phenomenon", phenomenon)
+        object.__setattr__(self, "expectation", expectation)
 
     @classmethod
     def observation_alone(
@@ -155,3 +201,34 @@ class ProbeCase:
             phenomenon=phenomenon,
             expected_post_mwt_count=1,
         )
+
+
+@dataclass(frozen=True, init=False)
+class CheckedProbe(_FactoryAdmission):
+    """A source case whose immutable expectation contains a real predicate."""
+
+    source: ProbeCase
+    expectation: ExpectedWords | KnownDefect
+
+    @classmethod
+    def admit(cls, source: ProbeCase) -> CheckedProbe | ObserveOnly:
+        match source.expectation:
+            case ObserveOnly() as observation:
+                return observation
+            case ExpectedWords() | KnownDefect() as expectation:
+                checked = object.__new__(cls)
+                object.__setattr__(checked, "source", source)
+                object.__setattr__(checked, "expectation", expectation)
+                return checked
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    @property
+    def expected(self) -> ExpectedWords:
+        match self.expectation:
+            case ExpectedWords() as expected:
+                return expected
+            case KnownDefect(expected=expected):
+                return expected
+            case _ as unreachable:
+                assert_never(unreachable)

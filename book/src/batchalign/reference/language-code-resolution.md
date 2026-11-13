@@ -1,7 +1,7 @@
 # Language Code Resolution
 
 **Status:** Current
-**Last updated:** 2026-11-05 19:37 EST
+**Last updated:** 2026-11-15 10:02 EST
 
 This page documents how batchalign3 maps language codes to models, Stanza
 pipelines, and processing behavior.
@@ -235,8 +235,9 @@ language; no language list decides it. See
 rationale, and `test_stanza_config_parity.py` for the AST scan that
 forbids such a list.
 
-See [Non-English Workarounds](../developer/non-english-workarounds.md) §X1 for the
-per-language consequences.
+The [current intervention map](../architecture/stanza-defect-mitigation-map.md)
+records pipeline ownership. The [retirement procedure](../developer/upstream-defect-policy.md)
+records the evidence required when changing a model-dependent repair.
 
 ## Rev.AI Language Codes
 

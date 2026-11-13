@@ -4,17 +4,24 @@ use batchalign::worker::InferTask;
 
 use crate::ml_golden::golden::fixtures::{COMPARE_GOLD, COMPARE_MAIN};
 use crate::ml_golden::golden::helpers::{
-    assert_golden_snapshot, has_user_defined_tier, parse_output, require_direct_session_warmed,
+    assert_golden_snapshot, has_user_defined_tier, parse_output, require_managed_session_warmed,
     unique_test_dir,
 };
 
+/// Guards: English compare output containing xsrep and removing intermediate MOR/GRA tiers.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove English compare output containing xsrep and removing intermediate MOR/GRA tiers from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_compare_eng() {
-    let session = require_direct_session_warmed(
+    let session = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
-        "Direct session does not support morphosyntax infer (required for compare)",
+        "Managed session does not support morphosyntax infer (required for compare)",
     )
     .await;
 
@@ -73,13 +80,20 @@ async fn golden_compare_eng() {
     );
 }
 
+/// Guards: compare matching an input to template.gold.cha through staged HTTP files.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove compare matching an input to template.gold.cha through staged HTTP files from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_compare_uses_template_gold_fallback() {
-    let session = require_direct_session_warmed(
+    let session = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
-        "Direct session does not support morphosyntax infer (required for compare)",
+        "Managed session does not support morphosyntax infer (required for compare)",
     )
     .await;
 
@@ -134,13 +148,20 @@ async fn golden_compare_uses_template_gold_fallback() {
     );
 }
 
+/// Guards: successive compare submissions resolving only their own staged gold files.
+/// Kind: journey
+/// Not a type: The managed session owns transport and staging, but its types cannot prove successive compare submissions resolving only their own staged gold files from the loaded model weights and serialized response.
+/// State: A managed HTTP session, isolated job staging and real model workers
+/// exercise serialization, inference and injection together.
+/// Concurrency: The shared backend serializes sessions and retains warmed models;
+/// job-local staging keeps submitted sources and outputs isolated.
 #[tokio::test]
 async fn golden_compare_sequential_jobs_stay_isolated() {
-    let session = require_direct_session_warmed(
+    let session = require_managed_session_warmed(
         InferTask::Morphosyntax,
         ReleasedCommand::Compare,
         "eng",
-        "Direct session does not support morphosyntax infer (required for compare)",
+        "Managed session does not support morphosyntax infer (required for compare)",
     )
     .await;
 
@@ -196,6 +217,11 @@ async fn golden_compare_sequential_jobs_stay_isolated() {
     assert!(second_results[0].error.is_none(), "{second_results:#?}");
 }
 
+/// Guards: A warmed compare backend remains usable after its caller Tokio runtime closes.
+/// Kind: journey
+/// Not a type: Owning the dedicated runtime cannot prove OS sockets and worker IPC remain usable across the caller runtime destruction.
+/// State: Two caller runtimes submit real HTTP compare jobs using one shared warmed backend.
+/// Concurrency: The backend has a dedicated runtime and session semaphore; each job owns separate staging paths.
 #[test]
 fn golden_compare_warmed_session_survives_tokio_runtime_restart() {
     let build_runtime = || {
@@ -207,11 +233,11 @@ fn golden_compare_warmed_session_survives_tokio_runtime_restart() {
 
     let run_once = |label: &str, filename: &str| {
         build_runtime().block_on(async move {
-            let session = require_direct_session_warmed(
+            let session = require_managed_session_warmed(
                 InferTask::Morphosyntax,
                 ReleasedCommand::Compare,
                 "eng",
-                "Direct session does not support morphosyntax infer (required for compare)",
+                "Managed session does not support morphosyntax infer (required for compare)",
             )
             .await;
 

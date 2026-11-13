@@ -4,10 +4,10 @@ Covers the four phenomena that the 2026-04-21 MWT-override audit
 examined for French:
 
 * Elision-prefix words (``jusqu'à``, ``puisqu'il``, ``quelqu'un``)
-  the Wave 4 invariant-break family. Strict 1-to-1.
+  the Wave 4 invariant-break family. Native components are retained.
 * Multi-clitic stacks (``d'l'attraper``), same invariant family.
 * Clitic-apostrophe contractions (``c'est``, ``qu'il``, ``l'ami``)
-  strict 1-to-1, protected from regression.
+  native component expansions, protected from regression.
 * ``aujourd'hui`` in various positions, strict 1-to-1 to confirm the
   removed PlainText rule is not load-bearing.
 * Preposition+article natives (``au``, ``du``, ``des``), observe
@@ -17,6 +17,11 @@ examined for French:
 The seed case ``seed_040802_1620`` pins the specific absorbed-failure
 utterance from ``phon-eng-french-data/French/Paris/Antoine/040802.cha``
 line 1620.
+
+2026-11-14: the source-bound French elision repair retains native
+components within a single CHAT token. Counts below measure UD words,
+so c’est has two components and d’l’attraper has three. The same
+counts were verified on Stanza 1.15.0 before qualifying 1.15.1.
 
 2026-10-01 (Stanza 1.15.0): isolated ``au`` now MWT-expands
 (``à``+``le``); isolated ``des`` no longer does and is read as the
@@ -42,18 +47,13 @@ SEED_040802_1620_WORDS: tuple[str, ...] = (
 )
 
 
-def _strict(words: tuple[str, ...]) -> int:
-    """Shorthand: strict 1-to-1 expected count = len(words)."""
-    return len(words)
-
-
 CASES: tuple[ProbeCase, ...] = (
     # ── Seed utterance from the Wave 4 absorbed-failure investigation ──
     ProbeCase(
         label="seed_040802_1620",
         words=SEED_040802_1620_WORDS,
         phenomenon=Phenomenon.ELISION_PREFIX,
-        expected_post_mwt_count=_strict(SEED_040802_1620_WORDS),
+        expected_post_mwt_count=11,
     ),
     # ── Elision prefix family (the invariant-break root cause) ──
     ProbeCase(
@@ -66,19 +66,19 @@ CASES: tuple[ProbeCase, ...] = (
         label="jusqu_a_alone",
         words=("jusqu'à",),
         phenomenon=Phenomenon.ELISION_PREFIX,
-        expected_post_mwt_count=1,
+        expected_post_mwt_count=2,
     ),
     ProbeCase(
         label="jusqu_en_alone",
         words=("jusqu'en",),
         phenomenon=Phenomenon.ELISION_PREFIX,
-        expected_post_mwt_count=1,
+        expected_post_mwt_count=2,
     ),
     ProbeCase(
         label="puisqu_il_alone",
         words=("puisqu'il",),
         phenomenon=Phenomenon.ELISION_PREFIX,
-        expected_post_mwt_count=1,
+        expected_post_mwt_count=2,
     ),
     ProbeCase(
         label="quelqu_un_in_context",
@@ -90,48 +90,48 @@ CASES: tuple[ProbeCase, ...] = (
         label="jusqu_a_in_context",
         words=("elle", "a", "attendu", "jusqu'à", "minuit", "."),
         phenomenon=Phenomenon.ELISION_PREFIX,
-        expected_post_mwt_count=6,
+        expected_post_mwt_count=7,
     ),
     ProbeCase(
         label="multi_clitic_triple",
         words=("d'l'attraper",),
         phenomenon=Phenomenon.MULTI_CLITIC,
-        expected_post_mwt_count=1,
+        expected_post_mwt_count=3,
     ),
     # ── Protected contractions (must round-trip) ──
-    ProbeCase("c_est_alone", ("c'est",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("qu_il_alone", ("qu'il",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("l_ami_alone", ("l'ami",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("d_un_alone", ("d'un",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("n_avait_alone", ("n'avait",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("s_il_alone", ("s'il",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("t_as_alone", ("t'as",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("m_a_alone", ("m'a",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("j_ai_alone", ("j'ai",), Phenomenon.CLITIC_ELISION, 1),
-    ProbeCase("c_est_in_context", ("c'est", "ouvert"), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("c_est_alone", ("c'est",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("qu_il_alone", ("qu'il",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("l_ami_alone", ("l'ami",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("d_un_alone", ("d'un",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("n_avait_alone", ("n'avait",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("s_il_alone", ("s'il",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("t_as_alone", ("t'as",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("m_a_alone", ("m'a",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("j_ai_alone", ("j'ai",), Phenomenon.CLITIC_ELISION, 2),
+    ProbeCase("c_est_in_context", ("c'est", "ouvert"), Phenomenon.CLITIC_ELISION, 3),
     ProbeCase(
         "qu_il_in_context",
         ("il", "dit", "qu'il", "part"),
         Phenomenon.CLITIC_ELISION,
-        4,
+        5,
     ),
     ProbeCase(
         "l_ami_in_context",
         ("voici", "l'ami", "de", "Marie"),
         Phenomenon.CLITIC_ELISION,
-        4,
+        5,
     ),
     ProbeCase(
         "s_il_in_context",
         ("s'il", "vient", "demain"),
         Phenomenon.CLITIC_ELISION,
-        3,
+        4,
     ),
     ProbeCase(
         "j_ai_in_context",
         ("j'ai", "vu", "Paul"),
         Phenomenon.CLITIC_ELISION,
-        3,
+        4,
     ),
     # ── aujourd'hui in various positions ──
     ProbeCase(
@@ -170,7 +170,7 @@ CASES: tuple[ProbeCase, ...] = (
         "du_in_context",
         ("j'ai", "pris", "du", "pain", "."),
         Phenomenon.NATIVE_MWT,
-        6,
+        7,
     ),
     ProbeCase(
         "au_in_context",

@@ -1,12 +1,13 @@
 ---
-source: crates/batchalign-app/tests/ml_golden/utseg/golden.rs
-expression: "&results[0].content"
+source: crates/batchalign/tests/ml_golden/utseg/golden.rs
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(results[0].content.as_text().expect(\"text command result\"))"
 ---
 @UTF8
 @Begin
 @Languages:	spa
 @Participants:	PAR Participant
 @ID:	spa|test|PAR|||||Participant|||
+@Comment:	[fc-ba3 utseg | build=<build> ; engine=stanza-constituency ; lang=spa | <timestamp>]
 *PAR:	el perro corre .
 *PAR:	me gustan los gatos .
 @End

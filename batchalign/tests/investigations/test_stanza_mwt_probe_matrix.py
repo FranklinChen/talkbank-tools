@@ -4,20 +4,19 @@ One test module for all languages. Reads the typed
 :data:`_cases.LANGUAGE_MATRIX` registry and parametrizes every
 :class:`_probe_types.ProbeCase` through the paired pipelines:
 
-* ``test_stanza_mwt_probe_free_tokenize``, no postprocessor active.
-  Always observe-only: pins what Stanza's native tokenizer + MWT
-  processor emit for the case. A Stanza-version upgrade that changes
-  behavior surfaces as a diff.
+* ``observe_stanza_mwt_free_tokenize`` records the native tokenizer and
+  MWT output for explicit investigations. It is a measurement function.
 
 * ``test_stanza_mwt_probe_with_postprocessor``: BA3's tokenizer
   postprocessor (char-DP realigner, no per-language override rules
   as of 2026-04-22) active. Enforces the case's
-  ``expected_post_mwt_count`` if set, observes otherwise. Xfail cases
+  declared count predicate, observes otherwise. Known defects
   marked via :class:`_probe_types.XfailMark` surface the pinned
   Stanza limitation without failing the suite.
 
-Both test functions are marked ``@pytest.mark.golden`` so they don't
-run in the default test suite, they require real Stanza models.
+Only admitted count checks enter pytest. The free-tokenize measurements
+and observation-only postprocessor cases remain available for explicit reports.
+Both measurement paths require real Stanza models.
 
 History
 -------
@@ -32,106 +31,155 @@ records the probes support.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, assert_never
 
 import pytest
 
+from batchalign.inference._admission import _FactoryAdmission
+
 from ._cases import LanguageKey, all_cases
-from ._probe_types import ProbeCase
+from ._probe_types import (
+    CheckedProbe,
+    ExpectedWords,
+    KnownDefect,
+    ObserveOnly,
+    ProbeCase,
+)
+
+TokenSummary = tuple[str, str | None, str | None]
 
 
-def _token_summary(doc: Any) -> list[tuple[str, str, str]]:
-    """Flatten a Stanza Document to ``(text, upos, lemma)`` triples.
-
-    The lemma column exists so lemma-quality defects (e.g. Italian
-    Defect 8 surface-echo: ``mettilo`` → lemma ``mettilo`` instead of
-    ``mettere``) are visible alongside the POS-layer defects the
-    original ``(text, upos)`` pairs surface. Word.lemma can legally be
-    ``None`` for unknown tokens; fall back to the literal string
-    ``"None"`` so the probe-log line stays a tuple of strings.
-    """
-    return [
-        (word.text, word.upos, word.lemma if word.lemma is not None else "None")
-        for sent in doc.sentences
-        for word in sent.words
-    ]
+def _token_summary(doc: Any) -> tuple[TokenSummary, ...]:
+    """Retain the model's words and actual missing fields without sentinels."""
+    return tuple(
+        (word.text, word.upos, word.lemma)
+        for sentence in doc.sentences
+        for word in sentence.words
+    )
 
 
-def _post_mwt_count(doc: Any) -> int:
-    """Number of UD ``words`` across all sentences after MWT expansion."""
-    return sum(len(s.words) for s in doc.sentences)
+@dataclass(frozen=True, init=False)
+class ProbeObservation(_FactoryAdmission):
+    """The source and completed token projection of one real model call."""
+
+    language: LanguageKey
+    source: ProbeCase
+    tokens: tuple[TokenSummary, ...]
+
+    @property
+    def word_count(self) -> int:
+        return len(self.tokens)
+
+
+def _record(language: LanguageKey, source: ProbeCase, doc: Any) -> ProbeObservation:
+    observation = object.__new__(ProbeObservation)
+    object.__setattr__(observation, "language", language)
+    object.__setattr__(observation, "source", source)
+    object.__setattr__(observation, "tokens", _token_summary(doc))
+    return observation
 
 
 def _case_id(pair: tuple[LanguageKey, ProbeCase]) -> str:
-    """Pytest test-ID formatter: ``<alpha3>__<label>``."""
     lang, case = pair
     return f"{lang.alpha3}__{case.label}"
 
 
-_MATRIX = all_cases()
+class StanzaCountMismatch(AssertionError):
+    """Only the declared count comparison may produce an expected failure."""
 
 
-@pytest.mark.golden
-@pytest.mark.mwt_probe
-@pytest.mark.parametrize("pair", _MATRIX, ids=_case_id)
-def test_stanza_mwt_probe_free_tokenize(
+_POST_PARAMETERS = []
+marks: tuple[pytest.MarkDecorator, ...]
+for language, source in all_cases():
+    match CheckedProbe.admit(source):
+        case ObserveOnly():
+            # Observation-only measurements have no assertion to qualify.
+            continue
+        case CheckedProbe() as checked:
+            match checked.expectation:
+                case KnownDefect(defect=defect):
+                    marks = (
+                        pytest.mark.xfail(
+                            strict=True,
+                            raises=StanzaCountMismatch,
+                            reason=f"{defect.defect_slug}: {defect.reason}",
+                        ),
+                    )
+                case ExpectedWords():
+                    marks = ()
+                case _ as remaining_expectation:
+                    assert_never(remaining_expectation)
+            _POST_PARAMETERS.append(
+                pytest.param(
+                    (language, checked),
+                    marks=marks,
+                    id=_case_id((language, source)),
+                )
+            )
+        case _ as remaining_admission:
+            assert_never(remaining_admission)
+
+
+def observe_stanza_mwt_free_tokenize(
     pair: tuple[LanguageKey, ProbeCase],
-    free_pipeline_for: Callable[[LanguageKey], Any],
-) -> None:
-    """Observe-only pin of Stanza's free-tokenize output for every case.
-
-    A Stanza upgrade that changes tokenization surfaces here as
-    print-only output (no assertion). Pair with the
-    with-postprocessor variant to diff the two paths.
-    """
-    lang, case = pair
-    nlp = free_pipeline_for(lang)
-    text = " ".join(case.words)
-    doc = nlp(text)
-    observed = _token_summary(doc)
+    pipeline: Any,
+) -> ProbeObservation:
+    """Explicit diagnostic measurement for the matching free-tokenize pipeline."""
+    language, source = pair
+    observation = _record(language, source, pipeline(" ".join(source.words)))
     print(
-        f"\n{case.label} {lang.alpha2} free "
-        f"(chat={len(case.words)}) stanza_words={_post_mwt_count(doc)} "
-        f"observed={observed}"
+        f"{source.label} {language.alpha2} free "
+        f"(chat={len(source.words)}) stanza_words={observation.word_count} "
+        f"observed={observation.tokens}"
     )
+    return observation
+
+
+def observe_stanza_mwt_with_postprocessor(
+    pair: tuple[LanguageKey, ProbeCase],
+    pipeline_for: Callable[[LanguageKey], tuple[Any, Any]],
+) -> ProbeObservation:
+    """Measure once and retain the exact source and completed token projection."""
+    language, source = pair
+    pipeline, context = pipeline_for(language)
+    context.original_words = [list(source.words)]
+    try:
+        document = pipeline(" ".join(source.words))
+    finally:
+        context.original_words = []
+    observation = _record(language, source, document)
+    print(
+        f"{source.label} {language.alpha2} post "
+        f"(chat={len(source.words)}) stanza_words={observation.word_count} "
+        f"observed={observation.tokens}"
+    )
+    return observation
 
 
 @pytest.mark.golden
 @pytest.mark.mwt_probe
-@pytest.mark.parametrize("pair", _MATRIX, ids=_case_id)
+@pytest.mark.parametrize("pair", _POST_PARAMETERS)
 def test_stanza_mwt_probe_with_postprocessor(
-    pair: tuple[LanguageKey, ProbeCase],
+    pair: tuple[LanguageKey, CheckedProbe],
     post_pipeline_for: Callable[[LanguageKey], tuple[Any, Any]],
 ) -> None:
-    """Invariant-enforcing probe with our tokenizer postprocessor active.
-
-    Enforces ``case.expected_post_mwt_count`` if set; observes
-    otherwise. ``case.xfail`` cases mark themselves xfail with the
-    defect slug so the failure is linked to its registered Stanza
-    limitation.
+    """Guards: Bound CHAT source words produce the declared expanded UD word count.
+    Kind: measurement
+    Not a type: CheckedProbe excludes observation-only cases and requires a count predicate, but external neural weights still determine the actual tokenizer and MWT components.
+    State: The real Stanza pipeline and trained weights supply the UD words, projected once into a source-bound ProbeObservation.
+    Concurrency: Module-owned pipelines execute serially; each call binds its own source words and clears the context on exit.
     """
-    lang, case = pair
-    nlp, ctx = post_pipeline_for(lang)
-    ctx.original_words = [list(case.words)]
-    try:
-        doc = nlp(" ".join(case.words))
-    finally:
-        ctx.original_words = []
-    observed = _token_summary(doc)
-    stanza_count = _post_mwt_count(doc)
-    print(
-        f"\n{case.label} {lang.alpha2} post "
-        f"(chat={len(case.words)}) stanza_words={stanza_count} "
-        f"observed={observed}"
+    language, checked = pair
+    observation = observe_stanza_mwt_with_postprocessor(
+        (language, checked.source),
+        post_pipeline_for,
     )
-    if case.xfail is not None:
-        pytest.xfail(
-            f"{case.xfail.defect_slug}: {case.xfail.reason}: observed={observed}"
-        )
-    if case.expected_post_mwt_count is not None:
-        assert stanza_count == case.expected_post_mwt_count, (
-            f"{lang.alpha3} {case.label}: "
-            f"CHAT={len(case.words)} "
-            f"expected_stanza={case.expected_post_mwt_count} "
-            f"got_stanza={stanza_count} observed={observed}"
+    expected = checked.expected
+    if observation.word_count != expected.count:
+        raise StanzaCountMismatch(
+            f"{language.alpha3} {observation.source.label}: "
+            f"CHAT={len(observation.source.words)} "
+            f"expected_stanza={expected.count} "
+            f"got_stanza={observation.word_count} observed={observation.tokens}"
         )

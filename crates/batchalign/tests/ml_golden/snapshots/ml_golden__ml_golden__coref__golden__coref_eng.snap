@@ -1,13 +1,13 @@
 ---
 source: crates/batchalign/tests/ml_golden/coref/golden.rs
-expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(results[0].content.as_text().expect(\"text command result\"))"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	CHI Target_Child
 @ID:	eng|test|CHI||female|||Target_Child|||
-@Comment:	[fc-ba3 coref | build=<build> ; engine=stanza-1.14.0/ontonotes-singletons_roberta-large-lora ; lang=eng | <timestamp>]
+@Comment:	[fc-ba3 coref | build=<build> ; engine=stanza-1.15.1/ontonotes-singletons_roberta-large-lora ; lang=eng | <timestamp>]
 *CHI:	the dog ran .
 %xcoref:	(0, 0), -
 *CHI:	it was fast .

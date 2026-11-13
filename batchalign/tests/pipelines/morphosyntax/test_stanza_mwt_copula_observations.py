@@ -53,7 +53,7 @@ from batchalign.worker._pipeline_cache import static_pipelines
 #
 # The CHAT-correct analysis for every clitic is AUX/be. Stanza gets this
 # right for stool/he but commits to a possessive (PART/'s) reading for
-# sink/lady: see ``book/src/reference/stanza-limitations.md`` Defect 1.
+# lady with the current English model: see ``book/src/reference/stanza-limitations.md`` Defect 1.
 # BA3 corrects Stanza's wrong call downstream in Rust via the
 # ``nlp::invariants::finite_verb_main_clause`` rule. The tests in this
 # file document what Stanza itself produces; end-to-end correctness of
@@ -75,12 +75,12 @@ COPULA_CONTRACTION_SENTENCES: list[tuple[str, str, list[str], str, str]] = [
         "be",
     ),
     (
-        # Stanza emits PART/'s (wrong). BA3 rewrites to AUX/be downstream.
+        # Retrained 1.15.1 English POS model resolves this as AUX/be.
         "sink",
         "and the sink's overflowing .",
         ["and", "the", "sink's", "overflowing", "."],
-        "PART",
-        "'s",
+        "AUX",
+        "be",
     ),
     (
         # Stanza emits PART/'s (wrong). BA3 rewrites to AUX/be downstream.
@@ -138,6 +138,12 @@ class TestFreeTokenizeBaseline:
         _upos,
         _lemma,
     ):
+        """Guards: contraction becomes mwt range for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is contraction becomes mwt range for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
+        """
         doc = english_pipeline_free_tokenize(text)
         sent = doc.to_dict()[0]
 
@@ -170,11 +176,19 @@ class TestFreeTokenizeBaseline:
 
         Observed 2026-04-13 (Stanza 1.x, GUM MWT package):
           stool's, he's → AUX/be  (copula, correct)
-          sink's, lady's → PART/'s (Stanza mis-disambiguates as possessive)
+          sink's, lady's → PART/'s (historical possessive misreading)
+        With the retrained 1.15.1 English POS model, sink's is AUX/be.
+        The lady's observation remains PART/'s before BA3's rescue.
 
         If a future Stanza upgrade changes any of these, the fixture must
         be updated: that *is* the test's purpose: to make Stanza behavior
         visible in the test suite rather than silently buried.
+
+        Guards: clitic tagging matches observation for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is clitic tagging matches observation for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
         """
         doc = english_pipeline_free_tokenize(text)
         sent = doc.to_dict()[0]
@@ -199,8 +213,7 @@ class TestFreeTokenizeBaseline:
     # Note: a previous iteration of this file had a test asserting Stanza
     # itself should emit AUX/be for sink/lady. That driven-fix test has
     # been removed because BA3 now corrects Stanza's mis-reading via the
-    # Rust ``nlp::invariants::finite_verb_main_clause`` rewrite. Stanza
-    # itself is still wrong on these cases, that's documented in
+    # Rust ``nlp::invariants::finite_verb_main_clause`` rewrite. The current lady example still needs that rescue, documented in
     # ``book/src/reference/stanza-limitations.md`` Defect 1. The
     # correctness of BA3's final output is verified end-to-end elsewhere.
 
@@ -237,6 +250,12 @@ class TestPostprocessorWithOriginalWords:
         _upos,
         _lemma,
     ):
+        """Guards: contraction preserved as range token for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is contraction preserved as range token for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
+        """
         nlp, ctx = english_pipeline_with_postprocessor
         ctx.original_words = [words]
         try:
@@ -273,6 +292,12 @@ class TestPostprocessorWithOriginalWords:
 
         Regression for the observed BA3 output difference on:
         ``mm-hmm that's right .``
+
+        Guards: preceding merge does not strip following contraction range for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is preceding merge does not strip following contraction range for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
         """
         nlp, ctx = english_pipeline_with_postprocessor
         words = ["mm-hmm", "that's", "right", "."]
@@ -324,6 +349,12 @@ class TestPostprocessorWithoutOriginalWords:
         _upos,
         _lemma,
     ):
+        """Guards: contraction stays range for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is contraction stays range for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
+        """
         nlp, ctx = english_pipeline_with_postprocessor
         # Explicitly clear: some prior test may have leaked state.
         ctx.original_words = []
@@ -361,6 +392,12 @@ class TestPostprocessorWithoutOriginalWords:
         clitic: it only gates whether Range is preserved. Any
         divergence between this test and the free-tokenize baseline
         would point at the postprocessor doing more than we expect.
+
+        Guards: clitic tagging matches observation for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is clitic tagging matches observation for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
         """
         nlp, ctx = english_pipeline_with_postprocessor
         ctx.original_words = []
@@ -420,6 +457,12 @@ class TestPostprocessorEmitsMWTHint:
         ],
     )
     def test_contraction_receives_hint_true(self, contracted, stanza_split):
+        """Guards: The real native-to-Python callback emits the exact contraction tuple with a true MWT hint accepted by Stanza.
+        Kind: wire
+        Not a type: Rust's admitted token choice excludes unbound components, but a Python annotation cannot prove PyO3 marshals that choice into the required tuple and boolean identity.
+        State: The current compiled extension supplies real marshalled values; this control loads no model or worker process.
+        Concurrency: Each call owns its TokenizerContext and callback, with no shared pipeline or mutable fixture.
+        """
         ctx = TokenizerContext(StanzaCode("en"))
         pp = make_tokenizer_postprocessor(ctx)
         ctx.original_words = [[contracted]]
@@ -487,6 +530,12 @@ class TestBatchInferPreservePayloadToRust:
         INVERSE: that Range tokens were absent from the payload (the
         bug). After the fix, Range tokens survive, so the assertion is
         inverted.
+
+        Guards: preserve payload has range tokens for the supplied linguistic source.
+        Kind: journey
+        Not a type: The source-bound realigner carries admitted components, but cannot prove the external model emits these ranges, lemmas and tags. The residual observation is preserve payload has range tokens for the supplied linguistic source.
+        State: Real Stanza weights and the configured tokenizer callback expose MWT IDs and tags.
+        Concurrency: Module fixtures reuse pipelines serially and clear bound words after each call.
         """
 
         from batchalign.inference.morphosyntax import batch_infer_morphosyntax

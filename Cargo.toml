@@ -154,18 +154,17 @@ hf-hub = { version = "1.0", features = ["blocking", "rustls-tls"] }
 # Codecs limited to the actual audio workload (WAV/PCM, MP3, M4A/MP4 AAC, FLAC)
 # to trim build time and binary size.
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "wav", "isomp4", "aac", "pcm", "flac"] }
-# rubato 4.0's synchronous FFT resampler (Fft) is behind the fft_resampler
+# rubato's synchronous FFT resampler (Fft) is behind the fft_resampler
 # feature; its buffer adapters come from the companion audioadapter_buffers crate.
-rubato = { version = "5.0", features = ["fft_resampler"] }
+rubato = { version = "5.1", features = ["fft_resampler"] }
 # PINNED TO RUBATO'S OWN MAJOR, AND NOT A STALE VERSION. We hand these buffers
 # straight to rubato, so the two must resolve to ONE major or the trait impls
 # live on different types and the default Whisper build fails to compile with
-# "multiple different versions of crate audioadapter_buffers". rubato 4.0.0 is
-# the LATEST published rubato (verified against the crates.io sparse index
-# 2026-08-04) and it requires audioadapter-buffers ^4.0, so 5.0 has nothing in
-# this graph that can consume it. Bump this only together with rubato, after
-# checking rubato's own requirement. A currency sweep raised it to 5.0 on
-# 2026-08-04 and broke the build; that is what this comment exists to prevent.
+# "multiple different versions of crate audioadapter_buffers". Bump this only
+# together with rubato, after checking rubato's own requirement: on 2026-08-04
+# a currency sweep raised this alone, while rubato still required ^4.0, and
+# broke the build. rubato 5.1.0 requires audioadapter-buffers 5.2 (checked
+# with `cargo tree -p rubato` on 2026-11-13).
 audioadapter-buffers = "5.2"
 byteorder = "1.5"
 anyhow = "1"

@@ -52,8 +52,8 @@ use std::thread;
 use std::time::Duration;
 
 use batchalign::api::{
-    FilePayload, FileResult, HealthResponse, JobInfo, JobListItem, JobResultResponse, JobStatus,
-    JobSubmission, LanguageSpec, MemoryMb, NumSpeakers, ReleasedCommand, WorkerLanguage,
+    FilePayload, FileResult, HealthResponse, JobInfo, JobListItem, JobStatus, JobSubmission,
+    LanguageSpec, MemoryMb, NumSpeakers, ReleasedCommand, WorkerLanguage,
 };
 use batchalign::config::{RuntimeLayout, ServerConfig};
 use batchalign::host_facts::PerProfile;
@@ -465,7 +465,16 @@ pub async fn require_live_server_warmed(
     lang: &str,
     requirement: &str,
 ) -> LiveServerSession {
-    let server = LiveServerSession::acquire_with_warmups(vec![(command, lang)]).await;
+    require_live_server_warmed_many(task, vec![(command, lang)], requirement).await
+}
+
+/// Acquire one isolated managed server session with several warmed language routes.
+pub async fn require_live_server_warmed_many(
+    task: InferTask,
+    warmups: Vec<(ReleasedCommand, &str)>,
+    requirement: &str,
+) -> LiveServerSession {
+    let server = LiveServerSession::acquire_with_warmups(warmups).await;
     require_task(server.has_infer_task(task), task, requirement);
     server
 }
@@ -567,44 +576,12 @@ pub async fn submit_and_complete(
     files: Vec<FilePayload>,
     options: CommandOptions,
 ) -> (JobInfo, Vec<FileResult>) {
-    let submission = JobSubmission {
-        command,
-        lang: submission_lang(command, lang),
-        num_speakers: NumSpeakers(1),
-        files,
-        media_files: vec![],
-        media_mapping: Default::default(),
-        media_subdir: Default::default(),
-        source_dir: Default::default(),
-        options,
-        paths_mode: false,
-        source_paths: vec![],
-        output_paths: vec![],
-        display_names: vec![],
-        debug_traces: false,
-        before_paths: vec![],
-    };
-
-    let resp = client
-        .post(format!("{base_url}/jobs"))
-        .json(&submission)
-        .send()
-        .await
-        .expect("POST /jobs");
-    assert_eq!(resp.status(), 200, "Job submission should succeed");
-    let info: JobInfo = resp.json().await.expect("parse initial JobInfo");
-
-    let final_info = poll_job_done(client, base_url, &info.job_id).await;
-
-    let results: JobResultResponse = client
-        .get(format!("{base_url}/jobs/{}/results", info.job_id))
-        .send()
-        .await
-        .expect("GET results")
-        .json()
-        .await
-        .expect("parse results");
-
+    let jobs = LiveServerJobClient::new(client, base_url);
+    let info = jobs
+        .submit_content_job(command, submission_lang(command, lang), files, options)
+        .await;
+    let final_info = jobs.poll_done(&info.job_id).await;
+    let results = jobs.job_results(&info.job_id).await;
     (final_info, results.files)
 }
 
@@ -652,12 +629,10 @@ pub async fn submit_and_complete_direct(
 /// `Resolved(lang)`, which makes morphotag/translate/coref tests panic on a
 /// warmed backend and silently skip everywhere else.
 pub(crate) fn submission_lang(command: ReleasedCommand, lang: &str) -> LanguageSpec {
-    match command {
-        ReleasedCommand::Morphotag | ReleasedCommand::Translate | ReleasedCommand::Coref => {
-            LanguageSpec::PerFile
-        }
-        _ => LanguageSpec::try_from(lang)
-            .expect("test lang must be a valid ISO 639-3 code or \"auto\""),
+    if batchalign::takes_no_job_language(command) {
+        LanguageSpec::PerFile
+    } else {
+        LanguageSpec::try_from(lang).expect("test lang must be a valid ISO 639-3 code or \"auto\"")
     }
 }
 

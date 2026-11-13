@@ -578,6 +578,14 @@ ci-full:
 gate:
 	bash scripts/gate.sh
 
+# Every new or changed test carries the rubric (Guards, Kind, Not a type,
+# State, Concurrency): tests are a last resort, after types. Tests that
+# existed before the policy are listed in the baseline until their body
+# changes; the list only shrinks. The checker is a copy of the workspace
+# master; never edit it here.
+test-rubric:
+	python3 scripts/test_rubric.py check . --baseline test-rubric-baseline.tsv
+
 gate-receipts-test:
 	python3 scripts/test_push_gate_sync.py
 	bash scripts/test-gate-receipts.sh

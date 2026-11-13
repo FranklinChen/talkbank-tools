@@ -97,6 +97,23 @@ flowchart TD
     retain --> ready
 ```
 
+## Stanza 1.15.1 review
+
+The dependency update affects model-derived morphotag content and provenance.
+Qualification exercises the ordinary managed HTTP route and the CLI's existing
+same-user path admission. The shared golden-session type owns an admitted HTTP
+session, while the Python CLI fixture admits an explicitly selected local
+endpoint and executable. Individual jobs keep private staging paths and the
+server owns model preparation and scheduling. Source words and selected model
+identities remain associated with the recorded output comparisons.
+
+The command spellings and retained legacy direct CLI pathways keep their
+compatibility contracts. Local qualification uses managed execution. A
+package-version change can retain earlier Stanza model weights because the
+resource namespace remains 1.15.0, so release evidence must name the actual
+catalog and model files used. This is a dependency and real-model review.
+A new CLIARE measurement has not been performed for this candidate.
+
 ## Retained legacy pathways
 
 Compatibility is a product requirement, not an automatic compliance failure.

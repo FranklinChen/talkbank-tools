@@ -25,6 +25,12 @@ from batchalign.tests._stanza_confirmation import (
 
 
 def test_installed_stanza_version_has_been_adjudicated() -> None:
+    """Guards: The installed dependency has an explicit human-reviewed qualification entry.
+    Kind: policy
+    Not a type: A parsed semantic version cannot prove that reviewers attributed real model outputs for that installed release and resource population.
+    State: Installed package metadata supplies the actual runtime version under review.
+    Concurrency: Read-only package metadata and an immutable confirmation registry are shared safely.
+    """
     installed = StanzaVersion.installed()
     # Sorted as VERSIONS, not as strings: "1.10.1" sorts before "1.9.0".
     confirmed = ", ".join(str(v) for v in sorted(CONFIRMED_STANZA_VERSIONS))

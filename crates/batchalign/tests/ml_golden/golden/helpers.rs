@@ -1,5 +1,6 @@
 use crate::common::{
-    LiveDirectSession, require_live_direct_warmed, require_live_direct_warmed_many,
+    LiveServerSession, require_live_server, require_live_server_warmed,
+    require_live_server_warmed_many,
 };
 use batchalign::api::{FilePayload, FileResult, JobInfo, ReleasedCommand};
 use batchalign::chat_ops::{ChatFile, DependentTier};
@@ -10,11 +11,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static LIVE_NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) struct DirectGoldenSession {
-    session: LiveDirectSession,
+/// A golden journey owns a managed HTTP session and its shared worker backend.
+/// The private payload cannot hold a direct-execution session.
+pub(crate) struct ManagedGoldenSession {
+    session: LiveServerSession,
 }
 
-impl DirectGoldenSession {
+impl ManagedGoldenSession {
     pub(crate) async fn submit_content_job(
         &self,
         command: ReleasedCommand,
@@ -23,8 +26,9 @@ impl DirectGoldenSession {
         content: &str,
         options: CommandOptions,
     ) -> (JobInfo, Vec<FileResult>) {
-        crate::common::submit_and_complete_direct(
-            &self.session,
+        crate::common::submit_and_complete(
+            self.session.client(),
+            self.session.base_url(),
             command,
             lang,
             vec![FilePayload {
@@ -43,8 +47,25 @@ impl DirectGoldenSession {
         files: Vec<FilePayload>,
         options: CommandOptions,
     ) -> (JobInfo, Vec<FileResult>) {
-        crate::common::submit_and_complete_direct(&self.session, command, lang, files, options)
-            .await
+        crate::common::submit_and_complete(
+            self.session.client(),
+            self.session.base_url(),
+            command,
+            lang,
+            files,
+            options,
+        )
+        .await
+    }
+}
+
+/// Admit managed HTTP capability for a pass-through journey without preloading a model.
+pub(crate) async fn require_managed_session(
+    task: InferTask,
+    requirement: &str,
+) -> ManagedGoldenSession {
+    ManagedGoldenSession {
+        session: require_live_server(task, requirement).await,
     }
 }
 
@@ -66,23 +87,23 @@ impl DirectGoldenSession {
 /// If the environment genuinely cannot host these tests (no Python worker, no
 /// model weights, no credentials), do not run the suite: it is feature-gated
 /// precisely so a plain `cargo test` never reaches it.
-pub(crate) async fn require_direct_session_warmed(
+pub(crate) async fn require_managed_session_warmed(
     task: InferTask,
     command: ReleasedCommand,
     lang: &str,
     requirement: &str,
-) -> DirectGoldenSession {
-    let session = require_live_direct_warmed(task, command, lang, requirement).await;
-    DirectGoldenSession { session }
+) -> ManagedGoldenSession {
+    let session = require_live_server_warmed(task, command, lang, requirement).await;
+    ManagedGoldenSession { session }
 }
 
-pub(crate) async fn require_direct_session_warmed_many(
+pub(crate) async fn require_managed_session_warmed_many(
     task: InferTask,
     warmups: Vec<(ReleasedCommand, &str)>,
     requirement: &str,
-) -> DirectGoldenSession {
-    let session = require_live_direct_warmed_many(task, warmups, requirement).await;
-    DirectGoldenSession { session }
+) -> ManagedGoldenSession {
+    let session = require_live_server_warmed_many(task, warmups, requirement).await;
+    ManagedGoldenSession { session }
 }
 
 pub(crate) fn unique_test_dir(prefix: &str) -> String {

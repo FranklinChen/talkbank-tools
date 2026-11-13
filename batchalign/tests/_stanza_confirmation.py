@@ -68,15 +68,20 @@ def _v(raw: str) -> StanzaVersion:
 
 
 BUMP_PROCEDURE = """Finishing a Stanza bump:
-  1. Run the Python golden suite: pytest batchalign/tests -m golden
-  2. Run the Rust ML golden morphotag suite (its snapshots, L2 included):
-     cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
-  3. Account for EVERY failure, every XPASS and every changed snapshot line. A
-     failure may predate the bump, so establish that by running it on a
-     confirmed version before blaming the new one. Accept a snapshot only for
-     lines whose change is explained.
-  4. Update book/src/batchalign/architecture/stanza-defect-mitigation-map.md
-  5. Add the version to CONFIRMED_STANZA_VERSIONS."""
+  1. Follow book/src/batchalign/developer/upstream-defect-policy.md and the
+     managed qualification procedure in developer/testing.md. Select explicit
+     interpreter/resources and record loaded catalog and checkpoint identities.
+  2. Run the admitted Python golden population serially:
+     pytest batchalign/tests -m golden -n0
+  3. Run the managed Rust morphotag/L2 snapshots using that selected worker:
+     cargo test --locked -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
+  4. Adjudicate every failure, strict XPASS and changed snapshot line against
+     the confirmed baseline on matching BA3 source. Record each defect's scope.
+     A proposed workaround removal needs raw/unmitigated results and surviving
+     linguistic/output obligations across the supported model populations.
+  5. Update the limitation registry, mitigation map and release observations.
+     Add the version to CONFIRMED_STANZA_VERSIONS after that adjudication.
+     Package confirmation retains the per-defect scope of its evidence."""
 
 # Versions the golden suite has been run against with its results adjudicated.
 #
@@ -95,5 +100,9 @@ CONFIRMED_STANZA_VERSIONS: frozenset[StanzaVersion] = frozenset(
         # 2026-10-01: golden suite attributed on 1.14.0 vs 1.15.0 with the same
         # BA3 code; see stanza-limitations.md, "Stanza 1.15.0 upgrade".
         _v("1.15.0"),
+        # 2026-11-14: paired Python and managed Rust/L2 qualification,
+        # strict probe expectations and retained-cache compatibility.
+        # Catalog/model identities and observed changes are recorded in the book.
+        _v("1.15.1"),
     }
 )

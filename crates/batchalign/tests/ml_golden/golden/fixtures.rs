@@ -177,8 +177,16 @@ pub(crate) const SPA_MULTI_UTT: &str = "\
 pub(crate) const ENG_MULTI_SPEAKER_PARITY: &str =
     include_str!("../../../../../batchalign/tests/support/parity/eng_multi_speaker.cha");
 
-pub(crate) const ENG_DISFLUENCY_PARITY: &str =
-    include_str!("../../../../../batchalign/tests/support/parity/eng_disfluency.cha");
+/// The one valid utterance whose subject/copula analysis this control checks.
+pub(crate) const ENG_DISFLUENCY: &str = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
+*PAR:\tmm-hmm that's right .
+@End
+";
 
 pub(crate) const ENG_SPA_L2: &str = "\
 @UTF8

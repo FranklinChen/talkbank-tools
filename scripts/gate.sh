@@ -8,6 +8,7 @@ gate_begin
 cargo metadata --locked --format-version 1 >/dev/null
 make lint-shell
 make lint-actionlint
+make test-rubric
 make gate-receipts-test
 make batchalign-ci-rust
 make batchalign-lint-python-source

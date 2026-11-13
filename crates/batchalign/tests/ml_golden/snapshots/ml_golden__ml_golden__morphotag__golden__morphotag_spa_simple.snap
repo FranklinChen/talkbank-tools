@@ -1,14 +1,14 @@
 ---
 source: crates/batchalign/tests/ml_golden/morphotag/golden.rs
-expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(results[0].content.as_text().expect(\"text command result\"))"
 ---
 @UTF8
 @Begin
 @Languages:	spa
 @Participants:	PAR Participant
 @ID:	spa|test|PAR|||||Participant|||
-@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.14.0:spa:standard ; lang=spa | <timestamp>]
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:spa:standard ; lang=spa | <timestamp>]
 *PAR:	el gato es grande .
-%mor:	det|el-Masc-Def-Art-Sing noun|gato-Masc aux|ser-Fin-Ind-Pres-S3 adj|grande-S1 .
+%mor:	det|el-Masc-Def-Art-Sing noun|gato-Masc aux|ser-Fin-Ind-Pres-S3 adj|grande-S .
 %gra:	1|2|DET 2|4|NSUBJ 3|4|COP 4|0|ROOT 5|4|PUNCT
 @End

@@ -1,14 +1,14 @@
 ---
 source: crates/batchalign/tests/ml_golden/morphotag/golden.rs
-expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(&results[0].content)"
+expression: "crate :: ml_golden :: golden :: helpers ::\npin_provenance_timestamps(results[0].content.as_text().expect(\"text command result\"))"
 ---
 @UTF8
 @Begin
 @Languages:	eng
 @Participants:	PAR Participant
 @ID:	eng|test|PAR|||||Participant|||
-@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.14.0:eng:standard ; lang=eng ; retokenize=true | <timestamp>]
+@Comment:	[fc-ba3 morphotag | build=<build> ; engine=stanza-1.15.1:eng:standard ; lang=eng ; retokenize=true | <timestamp>]
 *PAR:	gon na eat cookies .
-%mor:	verb|go-Part-Pres-S part|to verb|eat-Inf-S noun|cookie-Plur-Acc .
+%mor:	verb|go-Part-Pres part|to verb|eat-Inf noun|cookie-Plur .
 %gra:	1|0|ROOT 2|3|MARK 3|1|XCOMP 4|3|OBJ 5|1|PUNCT
 @End

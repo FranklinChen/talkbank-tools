@@ -11,16 +11,40 @@ BA3's final output regardless of what Stanza did along the way.
 
 Both assertions share a single CLI invocation via the
 ``morphotag_output`` fixture to keep test runtime bounded, one
-``cargo run`` dominates the cost here.
+managed analysis supplies both assertions.
 """
 
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
+from dataclasses import dataclass
+from enum import Enum
 
 import pytest
+
+from ._managed_morphotag import ManagedMorphotag
+
+
+class PredicateRelation(Enum):
+    VERBAL = "AUX"
+    NOMINAL = "COP"
+
+
+@dataclass(frozen=True)
+class CopulaExample:
+    surface: str
+    utterance: str
+    predicate: PredicateRelation
+
+
+# The sink analysis retains the model's nominal overflow predicate. Both
+# 1.15.0 and 1.15.1 emit COP there; manufacturing an AUX relation would detach
+# it from that predicate analysis. The other three predicates are verbal.
+COPULA_EXAMPLES = (
+    CopulaExample("stool's", "the stool's going over .", PredicateRelation.VERBAL),
+    CopulaExample("he's", "and he's falling over .", PredicateRelation.VERBAL),
+    CopulaExample("sink's", "and the sink's overflowing .", PredicateRelation.NOMINAL),
+    CopulaExample("lady's", "the lady's washing dishes .", PredicateRelation.VERBAL),
+)
 
 CHAT_FIXTURE = (
     "@UTF8\n"
@@ -28,11 +52,8 @@ CHAT_FIXTURE = (
     "@Languages:\teng\n"
     "@Participants:\tPAR Adult\n"
     "@ID:\teng|test|PAR|||||Adult|||\n"
-    "*PAR:\tthe stool's going over .\n"
-    "*PAR:\tand he's falling over .\n"
-    "*PAR:\tand the sink's overflowing .\n"
-    "*PAR:\tthe lady's washing dishes .\n"
-    "@End\n"
+    + "".join(f"*PAR:\t{case.utterance}\n" for case in COPULA_EXAMPLES)
+    + "@End\n"
 )
 
 
@@ -46,42 +67,9 @@ REQUIRED_CLITIC_MOR = "~aux|be-Fin-Ind-Pres-S3"
 def morphotag_output() -> str:
     """Run ``batchalign3 morphotag`` once per module; return the output CHAT text.
 
-    The CLI build + run dominates the cost; running it twice (once per
-    test function) would double end-to-end test time for no coverage gain.
+    One completed managed analysis is shared by the MOR and GRA assertions.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / "copula_contractions.cha"
-        output_dir = Path(tmpdir) / "output"
-        input_path.write_text(CHAT_FIXTURE)
-
-        result = subprocess.run(
-            [
-                "cargo",
-                "run",
-                "-p",
-                "batchalign",
-                "--",
-                "--no-open-dashboard",
-                "--override-media-cache",
-                "morphotag",
-                str(input_path),
-                "-o",
-                str(output_dir),
-                "--sequential",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            cwd=str(Path(__file__).resolve().parents[4]),  # batchalign3 root
-        )
-        assert result.returncode == 0, (
-            f"morphotag CLI failed (exit {result.returncode}):\n"
-            f"STDOUT: {result.stdout[-500:]}\n"
-            f"STDERR: {result.stderr[-500:]}"
-        )
-        output_file = output_dir / "copula_contractions.cha"
-        assert output_file.exists(), f"Output file not created: {output_dir}"
-        return output_file.read_text()
+    return ManagedMorphotag.from_environment().run(CHAT_FIXTURE)
 
 
 @pytest.mark.golden
@@ -91,18 +79,24 @@ def test_all_four_copula_contractions_produce_correct_mor(
 ) -> None:
     """Every ``<subject>'s <present-participle>`` utterance must emit
     tilde-joined ``~aux|be-Fin-Ind-Pres-S3``, no exceptions, no
-    possessive readings allowed through."""
+    possessive readings allowed through.
+
+    Guards: all four copula contractions produce correct mor for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is all four copula contractions produce correct mor for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     mor_lines = [
         line for line in morphotag_output.splitlines() if line.startswith("%mor:")
     ]
-    assert len(mor_lines) == 4, (
-        f"Expected 4 %mor lines, got {len(mor_lines)}. Output:\n{morphotag_output}"
+    assert len(mor_lines) == len(COPULA_EXAMPLES), (
+        f"Expected {len(COPULA_EXAMPLES)} %mor lines, got {len(mor_lines)}. Output:\n{morphotag_output}"
     )
 
-    surface_labels = ["stool's", "he's", "sink's", "lady's"]
-    for surface, mor_line in zip(surface_labels, mor_lines, strict=True):
+    for example, mor_line in zip(COPULA_EXAMPLES, mor_lines, strict=True):
         assert REQUIRED_CLITIC_MOR in mor_line, (
-            f"[{surface}] BA3 did not produce {REQUIRED_CLITIC_MOR!r} for "
+            f"[{example.surface}] BA3 did not produce {REQUIRED_CLITIC_MOR!r} for "
             f"the contracted 's. Full %mor line:\n  {mor_line}\n"
             f"Full output:\n{morphotag_output}"
         )
@@ -113,7 +107,7 @@ def test_all_four_copula_contractions_produce_correct_mor(
             "~part|s",  # possessive reading leaking through
         ):
             assert bad not in mor_line, (
-                f"[{surface}] Degraded analysis {bad!r} present in "
+                f"[{example.surface}] Degraded analysis {bad!r} present in "
                 f"%mor. BA3 emitted:\n  {mor_line}\n"
             )
 
@@ -123,17 +117,27 @@ def test_all_four_copula_contractions_produce_correct_mor(
 def test_gra_tier_consistent_with_rewritten_mor(
     morphotag_output: str,
 ) -> None:
-    """Every utterance's %gra must declare AUX, NSUBJ, and ROOT relations
-    matching the rewritten copula-progressive structure. Catches the
-    class of bug where %mor and %gra diverge after a rewrite."""
+    """Every utterance's %gra must attach its finite be component according
+    to the model's verbal or nominal predicate, with NSUBJ and ROOT. Catches the
+    class of bug where %mor and %gra diverge after a rewrite.
+
+    Guards: gra tier consistent with rewritten mor for the supplied linguistic source.
+    Kind: journey
+    Not a type: ManagedMorphotag excludes direct-mode composition, but cannot prove subprocess success or these model-derived serialized MOR and GRA bytes. The residual observation is gra tier consistent with rewritten mor for the supplied linguistic source.
+    State: The shared managed CLI fixture stages one CHAT source and reads its real output file.
+    Concurrency: Each submission has private temporary paths while the server owns shared model scheduling.
+    """
     gra_lines = [
         line for line in morphotag_output.splitlines() if line.startswith("%gra:")
     ]
-    assert len(gra_lines) == 4, f"Expected 4 %gra lines, got {len(gra_lines)}"
+    assert len(gra_lines) == len(COPULA_EXAMPLES), (
+        f"Expected {len(COPULA_EXAMPLES)} %gra lines, got {len(gra_lines)}"
+    )
 
-    for gra_line in gra_lines:
-        assert "AUX" in gra_line, (
-            f"%gra line missing AUX relation for copula 's:\n  {gra_line}"
+    for example, gra_line in zip(COPULA_EXAMPLES, gra_lines, strict=True):
+        assert example.predicate.value in gra_line, (
+            f"{example.surface}: expected {example.predicate.value} for "
+            f"{example.predicate.name.lower()} predicate:\n  {gra_line}"
         )
         assert "NSUBJ" in gra_line, (
             f"%gra line missing NSUBJ (subject) relation:\n  {gra_line}"
