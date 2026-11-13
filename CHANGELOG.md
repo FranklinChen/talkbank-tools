@@ -61,9 +61,14 @@ design; this file records how it changed.
   longer aligned against audio that contains its untranscribed speech. A
   window `align` itself refuses (an end before its start, or past the end
   of the recording) no longer lets the previous window be padded toward
-  it. **What changes:** timings near such turns can differ from earlier
-  runs, and those windows are aligned afresh rather than read from the
-  cache. **What does not change:** files without such turns.
+  it. **What changes:** windows are formed in file order, so one such turn
+  can move every later window's boundaries: word timings after the first
+  such turn can differ from earlier runs, mostly by a few milliseconds and
+  occasionally by seconds in long bullets with overlapping speech, and those
+  windows are aligned afresh rather than read from the cache. The change
+  starts in the window just before the first such turn, which now ends at
+  it. **What does not change:** files without such turns, and every window
+  before that one.
 - `align`: a word whose letters were partly recognized inside a
   neighbouring word's label now reports those letters as edits, so its
   timing is no longer marked as an exact match.
