@@ -1,7 +1,7 @@
 # Investigation Probe Harnesses
 
 **Status:** Current
-**Last updated:** 2026-11-14 EST
+**Last updated:** 2026-11-15 EST
 
 batchalign3 uses Stanza as an oracle for investigation tests,
 small, per-case probes that pin Stanza's current behavior so a
@@ -31,9 +31,8 @@ This pattern matters for batchalign3 because:
    upgrade that changes tokenization on 5% of Italian inputs
    would be noticed only by users in production, not CI.
 
-See `feedback_empirical_before_assertions` in memory for the
-design principle: run real libraries in isolation before baking
-RED expectations.
+The [upstream defect policy](upstream-defect-policy.md) records the required
+source-bound observations and expectation adjudication.
 
 ## Two harnesses, two purposes
 
@@ -93,9 +92,27 @@ xfail mark. Only `StanzaCountMismatch` is expected. Model-loading errors and
 unrelated assertion failures remain failures. An upstream fix produces strict
 XPASS and requires adjudication.
 
+The English fixtures declare contractions through `ContractionProbe`, whose
+admission requires a count and fixes the phenomenon. `EnglishMwtSeed.prepare`
+requires a nonempty tuple of those declarations and constructs both o'clock
+controls itself. It retains the completed case tuple. The registry constructor
+requires that prepared seed and returns an immutable mapping. A caller cannot
+omit English preparation, mutate the registered population or construct an
+empty seed through the typed API.
+
+The shared Python typecheck target covers these fixture and runner modules in
+both the local gate and hosted CI. The four former seed-metadata tests are
+retired. Their arbitrary minimum case count and label scans supplied no model
+observation. The existing golden predicates retain the exact lexical inputs and
+their external Stanza count obligations.
+
 ```mermaid
 flowchart TD
-    case["ProbeCase admission"] --> observe["ObserveOnly"]
+    contractions["Nonempty counted contraction declarations"] --> seed["EnglishMwtSeed.prepare"]
+    seed --> prepared["Completed tuple with o'clock controls"]
+    prepared --> registry["Immutable language registry"]
+    registry --> case
+    case["Registered ProbeCase"] --> observe["ObserveOnly"]
     case --> expected["ExpectedWords"]
     case --> defect["KnownDefect<br/>count and reason"]
     observe --> record["Explicit measurement"]

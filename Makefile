@@ -322,6 +322,8 @@ batchalign-typecheck-python-source:
 	@echo "==> Running Batchalign Python strict typecheck (Linux and macOS)..."
 	uv run --no-sync mypy --platform linux
 	uv run --no-sync mypy --platform darwin
+	@echo "==> Checking admitted probe fixtures and their consuming runner..."
+	uv run --no-sync mypy --strict --explicit-package-bases batchalign/tests/investigations/_probe_types.py batchalign/tests/investigations/_cases/__init__.py batchalign/tests/investigations/_cases/english.py batchalign/tests/investigations/test_stanza_mwt_probe_matrix.py
 
 # The hand-written batchalign_core stub against the BUILT extension. mypy
 # trusts the stub; this is what makes the stub true: a function the extension

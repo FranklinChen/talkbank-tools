@@ -32,139 +32,192 @@ the contraction back together after Stanza split it. BA3 has no
 equivalent; Stanza's native MWT processor is expected to handle
 these cases. These probes confirm whether Stanza does.
 
-Observe-only today
-------------------
-All counts below reflect what Stanza *should* emit based on linguistic
-expectation. A first golden run will pin what Stanza actually does;
-if the observed count matches the expected, the probe locks. If it
-diverges, that's a BA2-parity regression to adjudicate.
+The prepared seed owns a nonempty contraction population and both o'clock
+controls. The registry consumes that seed. Model count predicates remain in
+the shared golden runner.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Final, final
+
+from batchalign.inference._admission import _FactoryAdmission
+
 from .._probe_types import Phenomenon, ProbeCase
 
-CASES: tuple[ProbeCase, ...] = (
-    # ── Standard contractions (MWT should expand to 2 UD words) ─────
-    ProbeCase(
-        label="dont_alone",
-        words=("don't",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
+
+@final
+@dataclass(frozen=True, init=False)
+class ContractionProbe(_FactoryAdmission):
+    """A declared contraction always owns a count predicate."""
+
+    source: ProbeCase
+
+    @classmethod
+    def declare(
+        cls,
+        *,
+        label: str,
+        words: tuple[str, *tuple[str, ...]],
+        expected_post_mwt_count: int,
+    ) -> ContractionProbe:
+        source = ProbeCase(
+            label=label,
+            words=words,
+            phenomenon=Phenomenon.CONTRACTION,
+            expected_post_mwt_count=expected_post_mwt_count,
+        )
+        declaration = object.__new__(cls)
+        object.__setattr__(declaration, "source", source)
+        return declaration
+
+
+@final
+@dataclass(frozen=True, init=False)
+class EnglishMwtSeed(_FactoryAdmission):
+    """Completed English fixture preparation, with required contraction coverage."""
+
+    cases: tuple[ProbeCase, ...]
+
+    @classmethod
+    def prepare(
+        cls,
+        *,
+        contractions: tuple[ContractionProbe, *tuple[ContractionProbe, ...]],
+        possessives: tuple[ProbeCase, ...],
+        compounds: tuple[ContractionProbe, ...],
+        controls: tuple[ProbeCase, ...],
+    ) -> EnglishMwtSeed:
+        seed = object.__new__(cls)
+        object.__setattr__(
+            seed,
+            "cases",
+            (
+                *(probe.source for probe in contractions),
+                *possessives,
+                *(probe.source for probe in compounds),
+                ProbeCase(
+                    label="oclock_alone",
+                    words=("o'clock",),
+                    phenomenon=Phenomenon.CONTROL,
+                    expected_post_mwt_count=1,
+                ),
+                ProbeCase(
+                    label="oclock_in_context",
+                    words=("at", "six", "o'clock"),
+                    phenomenon=Phenomenon.CONTROL,
+                    expected_post_mwt_count=3,
+                ),
+                *controls,
+            ),
+        )
+        return seed
+
+
+SEED: Final = EnglishMwtSeed.prepare(
+    contractions=(
+        # ── Standard contractions (MWT should expand to 2 UD words) ─────
+        ContractionProbe.declare(
+            label="dont_alone",
+            words=("don't",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="im_alone",
+            words=("I'm",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="cant_alone",
+            words=("can't",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="youre_alone",
+            words=("you're",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="its_alone",
+            words=("it's",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="theyve_alone",
+            words=("they've",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="wed_alone",
+            words=("we'd",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="shell_alone",
+            words=("she'll",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="wont_alone",
+            words=("won't",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="isnt_alone",
+            words=("isn't",),
+            expected_post_mwt_count=2,
+        ),
+        # ── Contraction in context ─────────────────────────────────────
+        ContractionProbe.declare(
+            label="dont_in_context",
+            # 4 CHAT words → expect 5 UD words (don't expands to 2)
+            words=("I", "don't", "know", "that"),
+            expected_post_mwt_count=5,
+        ),
     ),
-    ProbeCase(
-        label="im_alone",
-        words=("I'm",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
+    possessives=(
+        # ── Possessives (MWT-expansion family, 2 UD words) ─────────────
+        ProbeCase(
+            label="johns_possessive",
+            words=("John's", "book"),
+            phenomenon=Phenomenon.POSSESSIVE,
+            expected_post_mwt_count=3,
+        ),
+        ProbeCase(
+            label="dogs_possessive",
+            words=("the", "dog's", "tail"),
+            phenomenon=Phenomenon.POSSESSIVE,
+            expected_post_mwt_count=4,
+        ),
     ),
-    ProbeCase(
-        label="cant_alone",
-        words=("can't",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
+    compounds=(
+        # ── Compound MWT (Stanza expands even without apostrophe) ──────
+        ContractionProbe.declare(
+            label="gonna_alone",
+            words=("gonna",),
+            expected_post_mwt_count=2,
+        ),
+        ContractionProbe.declare(
+            label="gonna_in_context",
+            words=("I'm", "gonna", "go"),
+            # I'm → 2, gonna → 2, go → 1: total 5 UD
+            expected_post_mwt_count=5,
+        ),
     ),
-    ProbeCase(
-        label="youre_alone",
-        words=("you're",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="its_alone",
-        words=("it's",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="theyve_alone",
-        words=("they've",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="wed_alone",
-        words=("we'd",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="shell_alone",
-        words=("she'll",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="wont_alone",
-        words=("won't",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="isnt_alone",
-        words=("isn't",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    # ── Contraction in context ─────────────────────────────────────
-    ProbeCase(
-        label="dont_in_context",
-        # 4 CHAT words → expect 5 UD words (don't expands to 2)
-        words=("I", "don't", "know", "that"),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=5,
-    ),
-    # ── Possessives (MWT-expansion family, 2 UD words) ─────────────
-    ProbeCase(
-        label="johns_possessive",
-        words=("John's", "book"),
-        phenomenon=Phenomenon.POSSESSIVE,
-        expected_post_mwt_count=3,
-    ),
-    ProbeCase(
-        label="dogs_possessive",
-        words=("the", "dog's", "tail"),
-        phenomenon=Phenomenon.POSSESSIVE,
-        expected_post_mwt_count=4,
-    ),
-    # ── Compound MWT (Stanza expands even without apostrophe) ──────
-    ProbeCase(
-        label="gonna_alone",
-        words=("gonna",),
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=2,
-    ),
-    ProbeCase(
-        label="gonna_in_context",
-        words=("I'm", "gonna", "go"),
-        # I'm → 2, gonna → 2, go → 1: total 5 UD
-        phenomenon=Phenomenon.CONTRACTION,
-        expected_post_mwt_count=5,
-    ),
-    # ── o'clock control (BA2 explicitly excluded, must NOT expand) ─
-    ProbeCase(
-        label="oclock_alone",
-        words=("o'clock",),
-        phenomenon=Phenomenon.CONTROL,
-        expected_post_mwt_count=1,
-    ),
-    ProbeCase(
-        label="oclock_in_context",
-        words=("at", "six", "o'clock"),
-        phenomenon=Phenomenon.CONTROL,
-        expected_post_mwt_count=3,
-    ),
-    # ── Native MWT / plain-word controls ───────────────────────────
-    ProbeCase(
-        label="hello_alone",
-        words=("hello",),
-        phenomenon=Phenomenon.CONTROL,
-        expected_post_mwt_count=1,
-    ),
-    ProbeCase(
-        label="the_dog_plain",
-        words=("the", "dog", "ran"),
-        phenomenon=Phenomenon.CONTROL,
-        expected_post_mwt_count=3,
+    controls=(
+        # ── Native MWT / plain-word controls ───────────────────────────
+        ProbeCase(
+            label="hello_alone",
+            words=("hello",),
+            phenomenon=Phenomenon.CONTROL,
+            expected_post_mwt_count=1,
+        ),
+        ProbeCase(
+            label="the_dog_plain",
+            words=("the", "dog", "ran"),
+            phenomenon=Phenomenon.CONTROL,
+            expected_post_mwt_count=3,
+        ),
     ),
 )

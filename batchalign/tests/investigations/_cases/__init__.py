@@ -2,8 +2,8 @@
 
 The :data:`LANGUAGE_MATRIX` maps each supported language to its tuple
 of :class:`~.._probe_types.ProbeCase` instances. Adding a new language
-means creating a new ``_cases/<lang>.py`` module and appending an entry
-to this dict.
+means creating a new ``_cases/<lang>.py`` module and extending the registry
+constructor. The immutable registry requires a prepared English seed.
 
 Language codes are kept as ``(alpha2, alpha3)`` pairs so the matrix
 harness can feed both Stanza (which wants alpha2) and the per-language
@@ -13,7 +13,10 @@ book chapters (which use alpha3 conventions from
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Final
 
 from .._probe_types import ProbeCase
 from . import (
@@ -65,8 +68,6 @@ POR = LanguageKey(alpha2="pt", alpha3="por")
 NLD = LanguageKey(alpha2="nl", alpha3="nld")
 SPA = LanguageKey(alpha2="es", alpha3="spa")
 DEU = LanguageKey(alpha2="de", alpha3="deu")
-# English joins the shared key registry for decision probes; there
-# are no English MWT cases, so it does not appear in LANGUAGE_MATRIX.
 ENG = LanguageKey(alpha2="en", alpha3="eng")
 
 # Tier B pilot (2026-04-23): three typologies validated
@@ -99,37 +100,46 @@ THA = LanguageKey(alpha2="th", alpha3="tha")
 VIE = LanguageKey(alpha2="vi", alpha3="vie")
 
 
-LANGUAGE_MATRIX: dict[LanguageKey, tuple[ProbeCase, ...]] = {
-    FRA: french.CASES,
-    ITA: italian.CASES,
-    POR: portuguese.CASES,
-    NLD: dutch.CASES,
-    SPA: spanish.CASES,
-    DEU: german.CASES,
-    ENG: english.CASES,
-    # Tier B pilot (Phase 3):
-    CAT: catalan.CASES,
-    RUS: russian.CASES,
-    ARA: arabic.CASES,
-    # Tier B second batch:
-    POL: polish.CASES,
-    HEB: hebrew.CASES,
-    ELL: greek.CASES,
-    TUR: turkish.CASES,
-    SWE: swedish.CASES,
-    IND: indonesian.CASES,
-    # Tier B third batch:
-    CES: czech.CASES,
-    UKR: ukrainian.CASES,
-    RON: romanian.CASES,
-    FIN: finnish.CASES,
-    EST: estonian.CASES,
-    NOB: norwegian.CASES,
-    DAN: danish.CASES,
-    KOR: korean.CASES,
-    THA: thai.CASES,
-    VIE: vietnamese.CASES,
-}
+def _language_matrix(
+    english_seed: english.EnglishMwtSeed,
+) -> Mapping[LanguageKey, tuple[ProbeCase, ...]]:
+    """A registry requires the completed English seed and retains its cases."""
+    return MappingProxyType(
+        {
+            FRA: french.CASES,
+            ITA: italian.CASES,
+            POR: portuguese.CASES,
+            NLD: dutch.CASES,
+            SPA: spanish.CASES,
+            DEU: german.CASES,
+            ENG: english_seed.cases,
+            # Tier B pilot (Phase 3):
+            CAT: catalan.CASES,
+            RUS: russian.CASES,
+            ARA: arabic.CASES,
+            # Tier B second batch:
+            POL: polish.CASES,
+            HEB: hebrew.CASES,
+            ELL: greek.CASES,
+            TUR: turkish.CASES,
+            SWE: swedish.CASES,
+            IND: indonesian.CASES,
+            # Tier B third batch:
+            CES: czech.CASES,
+            UKR: ukrainian.CASES,
+            RON: romanian.CASES,
+            FIN: finnish.CASES,
+            EST: estonian.CASES,
+            NOB: norwegian.CASES,
+            DAN: danish.CASES,
+            KOR: korean.CASES,
+            THA: thai.CASES,
+            VIE: vietnamese.CASES,
+        }
+    )
+
+
+LANGUAGE_MATRIX: Final = _language_matrix(english.SEED)
 
 
 def all_cases() -> list[tuple[LanguageKey, ProbeCase]]:

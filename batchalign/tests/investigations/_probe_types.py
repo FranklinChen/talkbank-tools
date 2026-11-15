@@ -1,11 +1,10 @@
 """Typed data model for the Stanza MWT probe matrix.
 
-Every investigation probe case is a :class:`ProbeCase`. The 6-language
+Every investigation probe case is a :class:`ProbeCase`. The per-language
 registry (``_cases/__init__.py``) aggregates per-language tuples into a
 single :data:`LANGUAGE_MATRIX`. The matrix-driven test module
-(``test_stanza_mwt_probe_matrix.py``) reads the registry, runs each case
-through the paired (free-tokenize vs postprocessor) pipelines, and
-enforces the per-case invariant.
+(``test_stanza_mwt_probe_matrix.py``) consumes admitted count predicates.
+Explicit diagnostic functions retain paired model observations.
 
 Why typed data
 --------------
