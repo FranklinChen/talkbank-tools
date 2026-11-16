@@ -747,6 +747,34 @@ Prefer explicit fake seams over `monkeypatch` when touching production code.
 If a test needs to replace runtime behavior, the first question should be
 whether the production boundary wants a typed injected dependency instead.
 
+The cache-write failure policy cases use Mockall through a test-only
+`MockCacheBackend` generated from the real `CacheBackend` trait. Their script
+explicitly describes an empty store followed by a failed write. Request identity,
+inference authorization, language classification, evidence admission and
+storage serialization continue through their production owners. The synthetic
+request fixture carries media observations in memory; native probing has its own
+adapter contracts.
+
+Prepare an owned failure once and transfer it with `return_once`. The captured
+error can be non-Clone. An explicit one-call expectation observes whether the
+write occurred. The owning production commit permit continues to restrict
+which phase may request that write.
+
+```mermaid
+flowchart TD
+    Error[Owned non-Clone error] -->|Move| Ready[Configured one-shot write]
+    Permit[Consuming commit permit] --> Ready
+    Ready -->|Transfer error| Failure[Typed persistence failure]
+    Failure --> Resolver[Resolver propagates refusal]
+```
+
+Each case owns its mock instance. Use consuming production capabilities for
+phase restrictions and configure mocks for the external outcomes that remain.
+Add call counts only when the number of actual effects is the policy being
+checked. Stateful cache and transport doubles retain their shared admission and
+storage behavior. Actual SQLite persistence and transport contracts keep their
+native adapters.
+
 ### Worker protocol V2 drift suite
 
 ```bash

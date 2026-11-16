@@ -106,6 +106,8 @@ mod noop;
 mod sqlite;
 mod tiered;
 
+#[cfg(test)]
+pub(crate) use backend::MockCacheBackend;
 pub use backend::{CacheBackend, CacheStats};
 pub(crate) use inference_lease::InferenceLease;
 pub use sqlite::SqliteBackend;

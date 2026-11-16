@@ -72,6 +72,7 @@ pub struct CacheStats {
 ///
 /// Designed for future Postgres/Redis implementations alongside the
 /// initial SQLite backend.
+#[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait CacheBackend: Send + Sync {
     /// Retrieve a cached entry if it exists and engine version matches.

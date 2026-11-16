@@ -1600,7 +1600,21 @@ mod tests {
         delay_ms: u64,
     }
 
-    struct FailingCommitBackend;
+    fn failing_commit_cache() -> UtteranceCache {
+        let mut backend = crate::cache::MockCacheBackend::new();
+        let commit_failure = CacheError::Io(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "injected durable commit failure",
+        ));
+        // This store has no retained rows. The actual resolver still owns
+        // request identity, lookup policy, inference admission and serialization.
+        backend.expect_get().returning(|_, _, _| Ok(None));
+        backend
+            .expect_put()
+            .once()
+            .return_once(move |_, _, _, _, _| Err(commit_failure));
+        UtteranceCache::from_backend(Box::new(backend))
+    }
 
     #[derive(Clone, Default)]
     struct RecordingBackend(std::sync::Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>);
@@ -1674,7 +1688,10 @@ mod tests {
         }
     }
 
-    fn language_request() -> RevAsrEvidenceRequest {
+    fn evidence_request(
+        language: &RevLanguage,
+        speakers: crate::transcribe::SpeakerCount,
+    ) -> RevAsrEvidenceRequest {
         let digest = RevProviderMediaDigest::from_bytes(b"provider media");
         let media = PreparedRevProviderMedia::new(
             PathBuf::from("fixture.wav"),
@@ -1682,13 +1699,15 @@ mod tests {
             ProviderMediaContainer::Wav,
             digest,
         );
-        RevAsrEvidenceRequest::new(
-            media,
+        RevAsrEvidenceRequest::new(media, language, speakers, &RevAsrModelRevision::current())
+            .unwrap()
+    }
+
+    fn language_request() -> RevAsrEvidenceRequest {
+        evidence_request(
             &RevLanguage::detect(),
             crate::transcribe::SpeakerCount::Auto,
-            &RevAsrModelRevision::current(),
         )
-        .unwrap()
     }
 
     /// A code-switched request is its own evidence: it keys apart from each
@@ -1821,10 +1840,15 @@ mod tests {
         );
     }
 
+    /// Guards: Failed storage of unresolved-language evidence retains its diagnostic key and persistence error.
+    /// Kind: policy
+    /// Not a type: Request admission and the consuming commit permit bind the language and evidence identity. The storage adapter can still fail after classification, and error projection must retain that actual failure instead of reporting a completed language diagnostic.
+    /// State: An in-memory backend explicitly models an empty store and one failed write through the real resolver. Provider bytes pass through actual language classification. No files, processes, databases or sockets are required.
+    /// Concurrency: Each case owns its mock. The shared request-key lease tracks committed observations by cache instance, while mock expectations and environment state stay local to this case.
     #[tokio::test]
     async fn rejected_language_response_persistence_failure_is_not_masked() {
-        let cache = UtteranceCache::from_backend(Box::new(FailingCommitBackend));
         let request = language_request();
+        let cache = failing_commit_cache();
         let service = LanguageResponseService {
             raw: r#"{"monologues":[]}"#,
             detected: None,
@@ -1843,59 +1867,6 @@ mod tests {
             rev_asr_resolution_error_to_server_error(error),
             ServerError::Persistence(_)
         ));
-    }
-
-    #[async_trait::async_trait]
-    impl CacheBackend for FailingCommitBackend {
-        async fn get(
-            &self,
-            _key: &str,
-            _task: &str,
-            _engine_version: &str,
-        ) -> Result<Option<serde_json::Value>, CacheError> {
-            Ok(None)
-        }
-
-        async fn get_batch(
-            &self,
-            _keys: &[String],
-            _task: &str,
-            _engine_version: &str,
-        ) -> Result<HashMap<String, serde_json::Value>, CacheError> {
-            Ok(HashMap::new())
-        }
-
-        async fn put(
-            &self,
-            _key: &str,
-            _task: &str,
-            _engine_version: &str,
-            _ba_version: &str,
-            _data: &serde_json::Value,
-        ) -> Result<(), CacheError> {
-            Err(CacheError::Io(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "injected durable commit failure",
-            )))
-        }
-
-        async fn put_batch(
-            &self,
-            _entries: &[(String, serde_json::Value)],
-            _task: &str,
-            _engine_version: &str,
-            _ba_version: &str,
-        ) -> Result<(), CacheError> {
-            unreachable!("evidence commits are single-entry writes")
-        }
-
-        async fn delete_batch(&self, _keys: &[String], _task: &str) -> Result<usize, CacheError> {
-            unreachable!("evidence resolution does not delete cache entries")
-        }
-
-        async fn stats(&self) -> Result<CacheStats, CacheError> {
-            unreachable!("evidence resolution does not request cache statistics")
-        }
     }
 
     #[async_trait::async_trait]
@@ -2700,20 +2671,15 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Guards: A failed evidence write prevents successful resolution after exactly one admitted inference.
+    /// Kind: policy
+    /// Not a type: The private admitted evidence and consuming commit operation withhold success before persistence. A backend write can still fail, so the real resolver must propagate that effect failure and preserve the inference count.
+    /// State: Pure provider-presentation observations enter the real request constructor without a WAV file or native probe. An in-memory mock models an empty store and transfers its owned failure from the actual serialized transcript write. The provider adapter retains its separate source-verification contract.
+    /// Concurrency: The test owns its mock and atomic inference counter. Its committed observations have a distinct cache identity within the shared request-key lease, and its script uses no timers or global expectations.
     #[tokio::test]
     async fn successful_inference_with_failed_commit_is_not_reported_as_resolved() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let audio = tempdir.path().join("audio.wav");
-        write_pcm_wav(&audio, 0);
-        let cache = UtteranceCache::from_backend(Box::new(FailingCommitBackend));
-        let request = RevAsrEvidenceRequest::from_audio(
-            &audio,
-            &english(),
-            speakers(2),
-            &RevAsrModelRevision::current(),
-        )
-        .await
-        .expect("request");
+        let request = evidence_request(&english(), speakers(2));
+        let cache = failing_commit_cache();
         let service = CountingRevService {
             calls: AtomicUsize::new(0),
             delay_ms: 0,
