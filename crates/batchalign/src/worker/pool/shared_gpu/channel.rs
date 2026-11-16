@@ -7,6 +7,7 @@
 //! so they live here once. [`super::SharedGpuWorker`] (stdio) adds process
 //! ownership; [`super::SharedGpuTcpWorker`] adds the connection.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
@@ -62,7 +63,58 @@ pub(crate) struct SharedGpuChannel<W> {
     /// `tests/gpu_concurrent_dispatch.rs::gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout`).
     /// The permit is taken BEFORE registration and the timer, so the timer
     /// runs only for work issued to the worker.
-    dispatch_semaphore: Semaphore,
+    dispatch_semaphore: Arc<Semaphore>,
+}
+
+/// The pending map owns both execution memory and actual executor capacity.
+pub(crate) struct ScheduledInvocation {
+    permit: crate::worker::pool::RunPermit,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+    _registration: crate::worker::pool::job_tracker::TrackerGuard,
+}
+
+impl ScheduledInvocation {
+    pub(super) fn request(&self) -> &crate::types::worker_v2::ExecuteRequestV2 {
+        self.permit.request()
+    }
+}
+
+impl super::routes::DispatchOwner for ScheduledInvocation {
+    fn request_id(&self) -> &crate::types::worker_v2::WorkerRequestIdV2 {
+        &self.permit.request().request_id
+    }
+    fn finish(self, reply: super::routes::DispatchReply) -> super::routes::DispatchReply {
+        self.permit.finish(reply)
+    }
+}
+
+/// The external write can finish or become uncertain. Only sent() consumes
+/// successful writing authority. Every other exit retires the actual routes.
+struct WritingInvocation(WriteDisposition);
+enum WriteDisposition {
+    Uncertain {
+        routes: Routes,
+        reader: tokio::task::AbortHandle,
+    },
+    Sent,
+}
+impl WritingInvocation {
+    fn begin(routes: Routes, reader: tokio::task::AbortHandle) -> Self {
+        Self(WriteDisposition::Uncertain { routes, reader })
+    }
+    fn sent(mut self) {
+        self.0 = WriteDisposition::Sent;
+    }
+}
+impl Drop for WritingInvocation {
+    fn drop(&mut self) {
+        if let WriteDisposition::Uncertain { routes, reader } = &self.0 {
+            routes.close(StreamClosed::ReadFailed(
+                "request write ended before completion".into(),
+            ));
+            reader.abort();
+        }
+    }
 }
 
 impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
@@ -87,7 +139,9 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
             reader_task,
             pid,
             task_timeouts,
-            dispatch_semaphore: Semaphore::new(super::dispatch_permits_from(gpu_thread_pool_size)),
+            dispatch_semaphore: Arc::new(Semaphore::new(super::dispatch_permits_from(
+                gpu_thread_pool_size,
+            ))),
         }
     }
 
@@ -119,32 +173,68 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
     /// permit before their timer starts.
     pub(super) async fn execute_v2(
         &self,
-        permit: &crate::worker::pool::RunPermit<'_>,
+        prepared: crate::worker::pool::ReadyRequest,
+        preparation: &crate::worker::pool::LoadPreparation,
+        registration: crate::worker::pool::job_tracker::TrackerGuard,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        let request = permit.request();
+        if let Some(receipt) = self.routes.pending.rejoin(prepared.request())? {
+            let request = prepared.request();
+            return Self::await_reply(
+                receipt,
+                request.task,
+                request.transport_timeout(self.task_timeouts),
+            )
+            .await;
+        }
+        let permit = preparation.prepare_on(prepared, &mut &*self).await?;
+        self.execute_admitted(permit, registration).await
+    }
+
+    async fn execute_admitted(
+        &self,
+        permit: crate::worker::pool::RunPermit,
+        registration: crate::worker::pool::job_tracker::TrackerGuard,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
         self.check_available()?;
-        let _permit = self
+        let slot = self
             .dispatch_semaphore
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| WorkerError::PoolShuttingDown)?;
-
-        // Registered before the write so the reader can route the reply as
-        // soon as it arrives; refused if the stream closed while we waited.
-        let receipt = self.routes.pending.register(request.request_id.clone())?;
-        if let Err(error) = self
-            .write_request(&WorkerRequest::ExecuteV2 { request })
-            .await
-        {
-            self.routes.pending.withdraw(&request.request_id);
-            return Err(error);
-        }
-
+        let request = permit.request();
+        let task = request.task;
         let limit = request.transport_timeout(self.task_timeouts);
+        let mut bytes = serde_json::to_vec(&WorkerRequest::ExecuteV2 { request })
+            .map_err(|error| WorkerError::Protocol(format!("failed to encode request: {error}")))?;
+        bytes.push(b'\n');
+        // Waiting for the writer has no wire effect. After ownership is
+        // registered, any incomplete write retires the stream through its
+        // consuming guard, including future cancellation and partial writes.
+        let mut writer = self.writer.lock().await;
+        let receipt = self.routes.pending.register(ScheduledInvocation {
+            permit,
+            _slot: slot,
+            _registration: registration,
+        })?;
+        let writing =
+            WritingInvocation::begin(self.routes.clone(), self.reader_task.abort_handle());
+        writer.write_all(&bytes).await?;
+        writer.flush().await?;
+        writing.sent();
+        drop(writer);
+        Self::await_reply(receipt, task, limit).await
+    }
+
+    async fn await_reply(
+        receipt: super::routes::DispatchReceipt,
+        task: crate::types::worker_v2::InferenceTaskV2,
+        limit: crate::api::PositiveSeconds,
+    ) -> Result<ExecuteResponseV2, WorkerError> {
         match receipt.reply_within(limit.duration()).await {
             Some(reply) => reply,
             None => Err(WorkerError::Timeout {
-                waited_for: WorkerWait::ExecuteV2 { task: request.task },
+                waited_for: WorkerWait::ExecuteV2 { task },
                 limit,
             }),
         }
@@ -191,22 +281,21 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
                         Some(event) = next_progress => Step::Progress(event),
                     }
                 })
-                .await;
+                .await?;
             match step {
-                Some(Step::Answer(Ok(answered))) => return Ok(answered),
+                Step::Answer(Ok(answered)) => return Ok(answered),
                 // Every route out of the slot answers its waiter (a reply, a
                 // failure, or the close reason); a dropped sender means the
                 // slot went away with the reader that owned it.
-                Some(Step::Answer(Err(_))) => {
+                Step::Answer(Err(_)) => {
                     return Err(StreamClosed::ReaderStopped.to_worker_error());
                 }
-                Some(Step::Progress(event)) => {
+                Step::Progress(event) => {
                     running.observe_load(&event);
                     if let Some(loading) = &loading {
                         loading.report(&event);
                     }
                 }
-                None => return Err(running.expired()),
             }
         }
     }
@@ -242,7 +331,7 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
     /// The load's host-memory lease is granted under the control gate, after
     /// the second look, so concurrent first requests for one load take one
     /// lease, not one each; the proof owns it.
-    pub(super) async fn ensure_task(
+    pub(in crate::worker::pool) async fn ensure_task(
         &self,
         load: &crate::worker::pool::TaskLoad,
         preparation: &crate::worker::pool::LoadPreparation,
@@ -353,3 +442,6 @@ impl<W> Drop for SharedGpuChannel<W> {
         self.routes.control.close(why);
     }
 }
+
+#[cfg(test)]
+mod invocation_contract;

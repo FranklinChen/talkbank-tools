@@ -10,7 +10,7 @@
 //! AdmittedLoad --the transport's ensure_task round trip,
 //!                then AdmittedLoad::confirm (the lease settles)----------> ConfirmedLoad
 //! ConfirmedLoad --TaskLoads::record----------------------------------------> Loaded
-//! Loaded --Loaded::run (a per-batch model's batch lease; may queue)-------> RunPermit
+//! ReadyRequest --LoadPreparation::prepare_on (actual transport and batch lease)--> RunPermit
 //! ```
 //!
 //! - [`TaskLoad`] is one load's identity: the task, the engine overrides its
@@ -38,6 +38,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::api::MemoryMb;
@@ -58,27 +59,48 @@ use super::fa_preparation::ReadyRequest;
 
 /// One on-demand load: a task, the engine overrides its load reads, and what
 /// it keeps resident.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TaskLoad {
+#[derive(Debug, Clone)]
+pub struct TaskLoad(Arc<LoadFacts>);
+
+#[derive(Debug)]
+struct LoadFacts {
+    identity: LoadIdentity,
+    selection: EngineSelection,
+}
+
+/// Cache identity preserves the pre-existing wire/residency relation. The
+/// carried typed selection is a computed artifact with the same private producer.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct LoadIdentity {
     task: InferTask,
-    /// The task's own keys in the worker's dispatch spelling; empty when the
-    /// task's load reads none.
     overrides: BTreeMap<String, String>,
-    /// What the load keeps resident, from the same typed keys the overrides
-    /// were written from: a function of the two fields above, so it never
-    /// makes two loads differ that they do not.
     residency: Residency,
+}
+
+impl PartialEq for TaskLoad {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity == other.0.identity
+    }
+}
+impl Eq for TaskLoad {}
+impl Hash for TaskLoad {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.identity.hash(state);
+    }
 }
 
 impl TaskLoad {
     /// The load `task` needs, given the engines `selected` names.
     pub(super) fn new(task: InferTask, selected: EngineOverrides) -> Self {
         let keys = EngineSelection::task_keys(task, selected);
-        Self {
-            task,
-            residency: Residency::of(task, &keys),
-            overrides: keys.dispatch_overrides(),
-        }
+        Self(Arc::new(LoadFacts {
+            identity: LoadIdentity {
+                task,
+                residency: Residency::of(task, &keys),
+                overrides: keys.dispatch_overrides(),
+            },
+            selection: EngineSelection::from_overrides(keys),
+        }))
     }
 
     /// The load a request needs: its pool task and the engines it names.
@@ -89,23 +111,35 @@ impl TaskLoad {
 
     /// The task loaded.
     pub fn task(&self) -> InferTask {
-        self.task
+        self.0.identity.task
     }
 
     /// What the load keeps resident in its worker.
     pub fn residency(&self) -> Residency {
-        self.residency
+        self.0.identity.residency
     }
 
     /// The overrides the `ensure_task` request carries, `None` when empty.
     pub(crate) fn wire_overrides(&self) -> Option<&BTreeMap<String, String>> {
-        (!self.overrides.is_empty()).then_some(&self.overrides)
+        (!self.0.identity.overrides.is_empty()).then_some(&self.0.identity.overrides)
+    }
+
+    pub(super) fn worker_key(
+        &self,
+        language: crate::api::WorkerLanguage,
+        mode: crate::worker::WorkerBootstrapMode,
+    ) -> super::WorkerKey {
+        super::WorkerKey {
+            target: crate::worker::WorkerTarget::from_infer_task(self.task(), mode),
+            language,
+            engine_selection: self.0.selection.clone(),
+        }
     }
 
     /// The load as a ledger label names it: the task and its engines.
     fn describe(&self) -> String {
-        let mut what = self.task.wire_name().to_owned();
-        for (key, value) in &self.overrides {
+        let mut what = self.task().wire_name().to_owned();
+        for (key, value) in &self.0.identity.overrides {
             // Writing to a `String` cannot fail.
             let _ = write!(what, ":{key}={value}");
         }
@@ -143,6 +177,14 @@ impl std::fmt::Debug for LoadAdmission {
 }
 
 impl LoadAdmission {
+    #[cfg(test)]
+    pub(crate) fn reserved_for_test(&self) -> MemoryMb {
+        self.coordinator
+            .snapshot()
+            .expect("isolated ledger snapshot")
+            .active_reserved_mb
+    }
+
     /// Loads admitted by `coordinator` for workers that host as `hosting`; a
     /// load that has to queue retires idle workers through `reclaim`.
     pub fn new(
@@ -170,7 +212,7 @@ impl LoadAdmission {
         load: &TaskLoad,
         worker: WorkerPid,
     ) -> Result<AdmittedLoad, WorkerError> {
-        let hold = match (self.hosting, load.residency.loading()) {
+        let hold = match (self.hosting, load.residency().loading()) {
             (ModelHosting::TestEcho, _) | (ModelHosting::Models, None) => Hold::Unleased,
             (ModelHosting::Models, Some(reserved)) => {
                 let request = WorkerLeaseRequest::model_load(worker, &load.describe(), reserved);
@@ -308,7 +350,7 @@ impl AdmittedLoad {
     pub(crate) async fn confirm(self) -> ConfirmedLoad {
         if let Hold::Leased(lease) = &self.hold {
             let settler = lease.settler();
-            let resident = self.load.residency.resident();
+            let resident = self.load.residency().resident();
             let outcome = crate::blocking::spawn_in_span(move || settler.settle(resident)).await;
             match outcome {
                 Ok(Ok(())) => {}
@@ -351,7 +393,7 @@ pub(super) struct ModelLeaseCoverage(MemoryMb);
 
 impl ModelLeaseCoverage {
     fn for_loaded(loaded: &Loaded) -> Self {
-        Self(loaded.load.residency.resident())
+        Self(loaded.load.residency().resident())
     }
 
     pub(super) fn reserved(self) -> MemoryMb {
@@ -370,35 +412,19 @@ impl Loaded {
         &self.load
     }
 
-    /// Refuse to run `request` on this proof unless it is the request's own
-    /// load: the one place a proof and a request are paired.
-    fn admit(&self, request: &ExecuteRequestV2) -> Result<(), WorkerError> {
-        let needed = TaskLoad::for_request(request);
-        if needed == self.load {
-            Ok(())
-        } else {
-            Err(WorkerError::Protocol(format!(
-                "request {} needs {needed:?}, but the worker was prepared for {:?}",
-                request.request_id, self.load
-            )))
-        }
-    }
-
     /// Pair an admitted request with its loaded model and take its additional
     /// lease before granting execution. Raw execute packets have no route
     /// through this transition. FA preparation owns the candidate/input
     /// relation; this transition owns the request's host-memory grant.
-    pub async fn run<'a>(
-        &'a self,
+    async fn run(
+        self: &Arc<Self>,
         prepared: ReadyRequest,
         admission: &LoadAdmission,
-    ) -> Result<RunPermit<'a>, WorkerError> {
-        let request = prepared.request();
-        self.admit(request)?;
+    ) -> Result<RunPermit, WorkerError> {
         // A batch lease only for a per-batch model the worker really built.
         let hold = match prepared.fa_memory() {
             Some(memory) => admission.fa_request(self, memory).await?,
-            None => match (&self.hold, self.load.residency.batch()) {
+            None => match (&self.hold, self.load.residency().batch()) {
                 (Hold::Unleased, _) | (Hold::Leased(_), None) => RequestHold::CoveredByLoad,
                 (Hold::Leased(_), Some(reserved)) => {
                     let request = WorkerLeaseRequest::model_batch(
@@ -413,10 +439,71 @@ impl Loaded {
             },
         };
         Ok(RunPermit {
-            loaded: self,
+            loaded: self.clone(),
             prepared,
             _hold: hold,
         })
+    }
+}
+
+/// The actual transport that performs a load. Implementations are sealed to the
+/// three production adapters and the shared declared-effect fixture.
+pub(crate) trait TaskLoader: loader_seal::Sealed {
+    fn ensure_load(
+        &mut self,
+        load: &TaskLoad,
+        preparation: &LoadPreparation,
+    ) -> impl std::future::Future<Output = Result<Arc<Loaded>, WorkerError>> + Send;
+}
+
+mod loader_seal {
+    pub(crate) trait Sealed {}
+    impl Sealed for crate::worker::handle::WorkerHandle {}
+    impl Sealed for crate::worker::tcp_handle::TcpWorkerHandle {}
+    impl<W> Sealed for &super::super::shared_gpu::channel::SharedGpuChannel<W> {}
+}
+
+impl TaskLoader for crate::worker::handle::WorkerHandle {
+    async fn ensure_load(
+        &mut self,
+        load: &TaskLoad,
+        preparation: &LoadPreparation,
+    ) -> Result<Arc<Loaded>, WorkerError> {
+        self.ensure_task(load, preparation).await
+    }
+}
+
+impl TaskLoader for crate::worker::tcp_handle::TcpWorkerHandle {
+    async fn ensure_load(
+        &mut self,
+        load: &TaskLoad,
+        preparation: &LoadPreparation,
+    ) -> Result<Arc<Loaded>, WorkerError> {
+        self.ensure_task(load, preparation).await
+    }
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin + Send> TaskLoader
+    for &super::shared_gpu::channel::SharedGpuChannel<W>
+{
+    async fn ensure_load(
+        &mut self,
+        load: &TaskLoad,
+        preparation: &LoadPreparation,
+    ) -> Result<Arc<Loaded>, WorkerError> {
+        self.ensure_task(load, preparation).await
+    }
+}
+
+impl LoadPreparation {
+    /// Consume preparation on the same adapter that supplies its confirmed load.
+    pub(in crate::worker) async fn prepare_on(
+        &self,
+        prepared: ReadyRequest,
+        worker: &mut impl TaskLoader,
+    ) -> Result<RunPermit, WorkerError> {
+        let loaded = worker.ensure_load(prepared.load(), self).await?;
+        loaded.run(prepared, &self.admission).await
     }
 }
 
@@ -424,8 +511,8 @@ impl Loaded {
 /// any batch lease its model needs. Made only by [`Loaded::run`]; every
 /// transport's execute takes one.
 #[derive(Debug)]
-pub struct RunPermit<'a> {
-    loaded: &'a Loaded,
+pub struct RunPermit {
+    loaded: Arc<Loaded>,
     prepared: ReadyRequest,
     /// Any additional per-batch or request lease is held until the permit
     /// ends, including cancellation and errors.
@@ -438,15 +525,59 @@ enum RequestHold {
     Additional { _lease: HostMemoryLease },
 }
 
-impl<'a> RunPermit<'a> {
+impl RunPermit {
     /// The request to send.
     pub fn request(&self) -> &ExecuteRequestV2 {
         self.prepared.request()
     }
 
+    /// Consume execution authority when admitting this invocation's terminal reply.
+    pub(in crate::worker) fn finish(
+        self,
+        reply: Result<crate::types::worker_v2::ExecuteResponseV2, WorkerError>,
+    ) -> Result<crate::types::worker_v2::ExecuteResponseV2, WorkerError> {
+        use crate::types::worker_v2::{ExecuteOutcomeRef, TaskResultV2};
+        let response = reply?;
+        let request = self.request();
+        if response.request_id() != &request.request_id {
+            return Err(WorkerError::Protocol(format!(
+                "execute reply {} does not answer request {}",
+                response.request_id(),
+                request.request_id
+            )));
+        }
+        if let ExecuteOutcomeRef::Success(result) = response.read() {
+            use crate::types::worker_v2::InferenceTaskV2 as Task;
+            let actual = match result {
+                TaskResultV2::FaPreparation(_)
+                | TaskResultV2::WhisperTokenTimingResult(_)
+                | TaskResultV2::IndexedWordTimingResult(_) => Task::ForcedAlignment,
+                TaskResultV2::WhisperChunkResult(_) | TaskResultV2::MonologueAsrResult(_) => {
+                    Task::Asr
+                }
+                TaskResultV2::MorphosyntaxResult(_) => Task::Morphosyntax,
+                TaskResultV2::UtsegResult(_) => Task::Utseg,
+                TaskResultV2::TranslationResult(_) => Task::Translate,
+                TaskResultV2::CorefResult(_) => Task::Coref,
+                TaskResultV2::WordSegmentationResult(_) => Task::WordSegmentation,
+                TaskResultV2::SpeakerResult(_) => Task::Speaker,
+                TaskResultV2::SpeakerEmbeddingResult(_) => Task::SpeakerEmbedding,
+                TaskResultV2::OpensmileResult(_) => Task::Opensmile,
+                TaskResultV2::AvqiResult(_) => Task::Avqi,
+            };
+            if actual != request.task {
+                return Err(WorkerError::Protocol(format!(
+                    "execute reply for {} returned {actual:?}, expected {:?}",
+                    request.request_id, request.task
+                )));
+            }
+        }
+        Ok(response)
+    }
+
     /// The load it runs on.
-    pub fn loaded(&self) -> &'a Loaded {
-        self.loaded
+    pub fn loaded(&self) -> &Loaded {
+        &self.loaded
     }
 }
 
@@ -478,377 +609,4 @@ impl TaskLoads {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::api::MemoryMb;
-    use crate::types::engines::SpeakerEngineName;
-    use crate::types::worker_v2::SpeakerEmbeddingBackendV2;
-
-    /// An admission against a fresh ledger on the declared test host (14,000
-    /// MB available, 8,000 MB reserve), and the directory holding it.
-    pub(crate) fn test_admission() -> (tempfile::TempDir, LoadAdmission) {
-        let dir = tempfile::tempdir().expect("ledger dir");
-        let host =
-            crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
-                .runtime_host()
-                .with_ledger(crate::host_memory::HostMemoryRuntimeConfig::from_sources(
-                    dir.path().join("ledger.json"),
-                    MemoryMb(8_000),
-                    crate::config::WorkerStartupLimit::literal::<1>(),
-                ));
-        (
-            dir,
-            LoadAdmission::new(
-                host.memory_coordinator(),
-                ModelHosting::Models,
-                Arc::new(crate::host_memory::NoIdleWorkers),
-            ),
-        )
-    }
-
-    fn reserved(admission: &LoadAdmission) -> MemoryMb {
-        admission
-            .coordinator
-            .snapshot()
-            .expect("snapshot")
-            .active_reserved_mb
-    }
-
-    pub(crate) fn ready(request: &ExecuteRequestV2) -> ReadyRequest {
-        match super::super::fa_preparation::DispatchPreparation::begin(request)
-            .expect("ordinary request")
-        {
-            super::super::fa_preparation::DispatchPreparation::Ready(ready) => ready,
-            super::super::fa_preparation::DispatchPreparation::ForcedAlignment(_) => {
-                panic!("FA requires its preparation reply")
-            }
-        }
-    }
-
-    fn this_worker() -> WorkerPid {
-        WorkerPid(std::process::id())
-    }
-
-    fn speaker(selected: EngineOverrides) -> TaskLoad {
-        TaskLoad::new(InferTask::Speaker, selected)
-    }
-
-    fn local_pyannote() -> TaskLoad {
-        speaker(EngineOverrides {
-            speaker: Some(SpeakerEngineName::Pyannote),
-            ..EngineOverrides::default()
-        })
-    }
-
-    /// Two speaker models on one worker are two loads; a repeated record is
-    /// the same proof and takes no second lease.
-    #[tokio::test]
-    async fn a_load_is_its_task_and_model() {
-        let (_dir, admission) = test_admission();
-        let local = local_pyannote();
-        let embedding = speaker(EngineOverrides {
-            speaker_embedding: Some(SpeakerEmbeddingBackendV2::Pyannote),
-            ..EngineOverrides::default()
-        });
-        assert_ne!(local, embedding);
-
-        let mut loads = TaskLoads::default();
-        assert!(loads.get(&local).is_none());
-        let first = loads.record(
-            admission
-                .admit(&local, this_worker())
-                .await
-                .expect("fits")
-                .confirm()
-                .await,
-        );
-        let again = loads.record(
-            admission
-                .admit(&local, this_worker())
-                .await
-                .expect("fits")
-                .confirm()
-                .await,
-        );
-        assert!(Arc::ptr_eq(&first, &again));
-        assert!(loads.get(&embedding).is_none());
-        assert!(Arc::ptr_eq(&first, &loads.get(&local).expect("recorded")));
-        assert_eq!(
-            reserved(&admission),
-            local.residency().resident(),
-            "one resident lease, settled to its margin; the repeat's lease is gone"
-        );
-    }
-
-    /// The order, end to end: the lease is taken BEFORE the worker is asked
-    /// (counted in full while the model loads), the proof takes it over and
-    /// settles it, and it is released when the proof is dropped.
-    #[tokio::test]
-    async fn a_proof_owns_its_load_lease() {
-        let (_dir, admission) = test_admission();
-        let load = local_pyannote();
-        let residency = load.residency();
-
-        let admitted = admission.admit(&load, this_worker()).await.expect("fits");
-        assert_eq!(
-            Some(reserved(&admission)),
-            residency.loading(),
-            "the lease is held before the worker is asked to load"
-        );
-
-        let mut loads = TaskLoads::default();
-        let loaded = loads.record(admitted.confirm().await);
-        assert_eq!(reserved(&admission), residency.resident());
-
-        drop(loads);
-        drop(loaded);
-        assert_eq!(reserved(&admission), MemoryMb(0), "released with the proof");
-    }
-
-    /// A load that fails after its lease was taken drops the admitted load,
-    /// and the lease with it; no `Loaded` exists.
-    #[tokio::test]
-    async fn a_failed_load_releases_its_lease() {
-        let (_dir, admission) = test_admission();
-        let load = local_pyannote();
-        let mut loads = TaskLoads::default();
-
-        async fn failing_round_trip(_load: &TaskLoad) -> Result<(), WorkerError> {
-            Err(WorkerError::Protocol("the worker refused the load".into()))
-        }
-        let outcome: Result<Arc<Loaded>, WorkerError> = async {
-            let admitted = admission.admit(&load, this_worker()).await?;
-            failing_round_trip(admitted.load()).await?;
-            Ok(loads.record(admitted.confirm().await))
-        }
-        .await;
-
-        assert!(outcome.is_err());
-        assert!(loads.get(&load).is_none(), "no proof for a failed load");
-        assert_eq!(reserved(&admission), MemoryMb(0), "no lease outlives it");
-    }
-
-    /// A load that builds nothing, and any load on a test-echo worker, takes
-    /// no lease.
-    #[tokio::test]
-    async fn a_load_with_nothing_resident_takes_no_lease() {
-        let (_dir, admission) = test_admission();
-        let hosted = speaker(EngineOverrides::default());
-        assert_eq!(hosted.residency(), Residency::Nothing);
-        let mut loads = TaskLoads::default();
-        let _hosted = loads.record(
-            admission
-                .admit(&hosted, this_worker())
-                .await
-                .expect("no lease")
-                .confirm()
-                .await,
-        );
-        let echo = LoadAdmission::new(
-            admission.coordinator.clone(),
-            ModelHosting::TestEcho,
-            Arc::new(crate::host_memory::NoIdleWorkers),
-        );
-        let _echo = loads.record(
-            echo.admit(&local_pyannote(), this_worker())
-                .await
-                .expect("echo")
-                .confirm()
-                .await,
-        );
-        assert_eq!(reserved(&admission), MemoryMb(0));
-    }
-
-    fn speaker_request(backend: crate::types::worker_v2::SpeakerBackendV2) -> ExecuteRequestV2 {
-        use crate::types::worker_v2::{
-            InferenceTaskV2, SpeakerInputV2, SpeakerPreparedAudioInputV2, SpeakerRequestV2,
-            TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
-        };
-        ExecuteRequestV2 {
-            request_id: WorkerRequestIdV2::from("task-load-test"),
-            task: InferenceTaskV2::Speaker,
-            payload: TaskRequestV2::Speaker(SpeakerRequestV2 {
-                backend,
-                input: SpeakerInputV2::PreparedAudio(SpeakerPreparedAudioInputV2 {
-                    audio_ref_id: WorkerArtifactIdV2::from("audio-1"),
-                }),
-                expected_speakers: None,
-            }),
-            attachments: Vec::new(),
-        }
-    }
-
-    /// A proof runs only the request it was prepared for: a worker prepared
-    /// for pyannoteAI (nothing loaded) cannot run a local-pyannote request.
-    #[tokio::test]
-    async fn a_proof_admits_only_its_own_load() {
-        use crate::types::worker_v2::SpeakerBackendV2;
-        let (_dir, admission) = test_admission();
-        let hosted = speaker_request(SpeakerBackendV2::PyannoteAi);
-        let local = speaker_request(SpeakerBackendV2::Pyannote);
-        let loaded = TaskLoads::default().record(
-            admission
-                .admit(&TaskLoad::for_request(&hosted), this_worker())
-                .await
-                .expect("no lease")
-                .confirm()
-                .await,
-        );
-        assert!(loaded.run(ready(&hosted), &admission).await.is_ok());
-        assert!(matches!(
-            loaded.run(ready(&local), &admission).await,
-            Err(WorkerError::Protocol(_))
-        ));
-    }
-
-    /// A per-batch model (coreference) reserves nothing once loaded, and each
-    /// request holds its batch's own lease for as long as the permit lives.
-    #[tokio::test]
-    async fn a_per_batch_model_leases_each_batch() {
-        let (_dir, admission) = test_admission();
-        let request = coref_request();
-        let load = TaskLoad::for_request(&request);
-        let residency = load.residency();
-        let loaded = TaskLoads::default().record(
-            admission
-                .admit(&load, this_worker())
-                .await
-                .expect("fits")
-                .confirm()
-                .await,
-        );
-        assert_eq!(reserved(&admission), MemoryMb(0));
-
-        let permit = loaded
-            .run(ready(&request), &admission)
-            .await
-            .expect("the batch fits");
-        assert_eq!(Some(reserved(&admission)), residency.batch());
-        drop(permit);
-        assert_eq!(reserved(&admission), MemoryMb(0), "released with the batch");
-    }
-
-    fn projected_fa_request(workspace_mb: u64) -> ReadyRequest {
-        use crate::types::worker_v2::{FaAllocationBasisV2, FaModelBytesV2, FaWorkspaceBytesV2};
-        super::super::fa_preparation::tests::prepared_request(FaRequestMemoryV2::Projected {
-            workspace: FaWorkspaceBytesV2::try_from(workspace_mb * 1024 * 1024)
-                .expect("positive workspace"),
-            model: FaModelBytesV2::try_from(1024 * 1024).expect("declared model storage"),
-            basis: FaAllocationBasisV2::MmsCpu {
-                torch_version: "declared-test-encoder".into(),
-                torchaudio_revision: "declared-test-layout".into(),
-            },
-        })
-    }
-
-    #[tokio::test]
-    async fn fa_execution_owns_its_additional_lease_and_releases_it_on_drop() {
-        let (_dir, admission) = test_admission();
-        let prepared = projected_fa_request(64);
-        let load = TaskLoad::for_request(prepared.request());
-        let loaded = TaskLoads::default().record(
-            admission
-                .admit(&load, this_worker())
-                .await
-                .expect("load fits")
-                .confirm()
-                .await,
-        );
-        let resident = reserved(&admission);
-        let permit = loaded
-            .run(prepared, &admission)
-            .await
-            .expect("request fits");
-        assert_eq!(
-            reserved(&admission).0 - resident.0,
-            80,
-            "64 MiB workspace plus the existing 25 percent estimate"
-        );
-        drop(permit);
-        assert_eq!(
-            reserved(&admission),
-            resident,
-            "the request lease cannot outlive its permit"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_real_model_cannot_run_with_a_model_free_preparation() {
-        let (_dir, admission) = test_admission();
-        let prepared =
-            super::super::fa_preparation::tests::prepared_request(FaRequestMemoryV2::NoModel);
-        let load = TaskLoad::for_request(prepared.request());
-        let loaded = TaskLoads::default().record(
-            admission
-                .admit(&load, this_worker())
-                .await
-                .expect("load fits")
-                .confirm()
-                .await,
-        );
-        assert!(matches!(
-            loaded.run(prepared, &admission).await,
-            Err(WorkerError::Protocol(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_prepared_fa_request_that_cannot_fit_the_host_never_queues() {
-        let (_dir, admission) = test_admission();
-        let prepared = projected_fa_request(1_000_000);
-        let load = TaskLoad::for_request(prepared.request());
-        let loaded = TaskLoads::default().record(
-            admission
-                .admit(&load, this_worker())
-                .await
-                .expect("load fits")
-                .confirm()
-                .await,
-        );
-        assert!(matches!(
-            loaded.run(prepared, &admission).await,
-            Err(WorkerError::MemoryGuard(
-                MemoryGuardError::ExceedsHost { .. }
-            ))
-        ));
-    }
-
-    fn coref_request() -> ExecuteRequestV2 {
-        use crate::types::worker_v2::{
-            CorefRequestV2, InferenceTaskV2, TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
-        };
-        ExecuteRequestV2 {
-            request_id: WorkerRequestIdV2::from("coref-test"),
-            task: InferenceTaskV2::Coref,
-            payload: TaskRequestV2::Coref(CorefRequestV2 {
-                lang: crate::api::LanguageCode3::eng(),
-                payload_ref_id: WorkerArtifactIdV2::from("payload"),
-                item_count: 1,
-            }),
-            attachments: Vec::new(),
-        }
-    }
-
-    /// A task's load reads only its own keys, so an FA load is the same
-    /// whatever else the worker's selection names.
-    #[test]
-    fn a_load_keeps_only_its_tasks_keys() {
-        let named = EngineOverrides {
-            fa: Some(crate::types::engines::FaEngineName::Wave2Vec),
-            asr: Some(crate::types::engines::AsrEngineName::Whisper),
-            ..EngineOverrides::default()
-        };
-        let fa_only = EngineOverrides {
-            fa: Some(crate::types::engines::FaEngineName::Wave2Vec),
-            ..EngineOverrides::default()
-        };
-        assert_eq!(
-            TaskLoad::new(InferTask::Fa, named),
-            TaskLoad::new(InferTask::Fa, fa_only)
-        );
-        assert_eq!(
-            TaskLoad::new(InferTask::Coref, EngineOverrides::default()).wire_overrides(),
-            None
-        );
-    }
-}
+pub(crate) mod tests;

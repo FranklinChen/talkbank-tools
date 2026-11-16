@@ -22,8 +22,7 @@ pub(crate) use crate::recipe_runner::command_spec::{
 };
 #[allow(unused_imports)]
 pub(crate) use crate::recipe_runner::materialize::{
-    FileNamingPolicy, MaterializedArtifactRole, OutputPolicy, PlannedMaterializedFile,
-    SidecarPolicy, StemRewrite,
+    FileNamingPolicy, MaterializedArtifactRole, OutputPolicy, PlannedMaterializedFile, StemRewrite,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::recipe_runner::recipe::{

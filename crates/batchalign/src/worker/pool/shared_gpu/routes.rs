@@ -119,108 +119,103 @@ impl ReplyFailure {
 /// or the error the sequential path returns for the same line.
 pub(crate) type DispatchReply = Result<ExecuteResponseV2, WorkerError>;
 
-/// The V2 dispatches waiting for a reply, keyed by the typed request id.
-#[derive(Clone, Default)]
-pub(crate) struct PendingDispatches(Arc<Mutex<PendingState>>);
+/// A pending invocation owns its resources until the terminal effect consumes it.
+/// The reader's policy contracts use the same graph with an observation-only double.
+pub(crate) trait DispatchOwner: Send + 'static {
+    fn request_id(&self) -> &WorkerRequestIdV2;
+    fn finish(self, reply: DispatchReply) -> DispatchReply;
+}
 
-enum PendingState {
-    Open(HashMap<WorkerRequestIdV2, oneshot::Sender<DispatchReply>>),
+/// Shared routing retains execution ownership independently of caller interest.
+pub(crate) struct PendingDispatches<O: DispatchOwner = super::channel::ScheduledInvocation>(
+    Arc<Mutex<PendingState<O>>>,
+);
+
+impl<O: DispatchOwner> Clone for PendingDispatches<O> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<O: DispatchOwner> Default for PendingDispatches<O> {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(PendingState::Open(HashMap::new()))))
+    }
+}
+
+struct PendingInvocation<O> {
+    owner: O,
+    reply: oneshot::Sender<DispatchReply>,
+}
+
+enum PendingState<O> {
+    Open(HashMap<WorkerRequestIdV2, PendingInvocation<O>>),
     Closed(StreamClosed),
 }
 
-impl Default for PendingState {
-    fn default() -> Self {
-        Self::Open(HashMap::new())
-    }
-}
-
-/// A registered dispatch's claim on its reply.
+/// Caller interest in the reply carries no authority over submitted work.
 pub(crate) struct DispatchReceipt {
-    request_id: WorkerRequestIdV2,
     reply: oneshot::Receiver<DispatchReply>,
-    pending: PendingDispatches,
 }
 
 impl DispatchReceipt {
-    /// Wait for the reply. `None` when the time limit passed first; the
-    /// registration is withdrawn then, so a late reply is logged as orphaned
-    /// rather than delivered to nobody.
+    /// A timeout ends reply interest. The pending owner survives until its own
+    /// terminal line or stream retirement, including when this future is dropped.
     pub(crate) async fn reply_within(self, limit: std::time::Duration) -> Option<DispatchReply> {
         match tokio::time::timeout(limit, self.reply).await {
             Ok(Ok(reply)) => Some(reply),
-            // Every route out of the pending map answers its waiter (a reply,
-            // a routed failure, or the close reason), so a dropped sender
-            // means the map itself is gone with the reader that owned it.
             Ok(Err(_)) => Some(Err(StreamClosed::ReaderStopped.to_worker_error())),
-            Err(_) => {
-                self.pending.withdraw(&self.request_id);
-                None
-            }
+            Err(_) => None,
         }
     }
 }
 
-impl PendingDispatches {
-    /// Register a dispatch before its request is written, so the reader can
-    /// route the reply as soon as it arrives. Refused at once when the stream
-    /// has closed, and refused for an id already waiting (a second sender
-    /// would silently orphan the first).
-    pub(crate) fn register(
-        &self,
-        request_id: WorkerRequestIdV2,
-    ) -> Result<DispatchReceipt, WorkerError> {
+impl<O: DispatchOwner> PendingDispatches<O> {
+    /// Transfer execution ownership before the first write. The channel's
+    /// consuming write guard retires uncertain writes, including cancellation.
+    pub(crate) fn register(&self, owner: O) -> Result<DispatchReceipt, WorkerError> {
         let (tx, rx) = oneshot::channel();
+        let request_id = owner.request_id().clone();
         match &mut *lock_recovered(&self.0) {
             PendingState::Closed(reason) => return Err(reason.to_worker_error()),
-            PendingState::Open(waiting) => {
-                if waiting.contains_key(&request_id) {
+            PendingState::Open(waiting) => match waiting.entry(request_id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(PendingInvocation { owner, reply: tx });
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
                     return Err(WorkerError::Protocol(format!(
-                        "request id {request_id} is already waiting for a GPU worker reply"
+                        "request id {} is already waiting for a GPU worker reply",
+                        entry.key()
                     )));
                 }
-                waiting.insert(request_id.clone(), tx);
-            }
+            },
         }
-        Ok(DispatchReceipt {
-            request_id,
-            reply: rx,
-            pending: self.clone(),
-        })
+        Ok(DispatchReceipt { reply: rx })
     }
 
-    /// Withdraw a registration whose request was never written, or whose
-    /// caller stopped waiting.
-    pub(crate) fn withdraw(&self, request_id: &WorkerRequestIdV2) {
-        if let PendingState::Open(waiting) = &mut *lock_recovered(&self.0) {
-            waiting.remove(request_id);
-        }
-    }
-
-    /// Answer the dispatch `request_id`; hand the reply back when nobody is
-    /// waiting for that id.
+    /// Consume the original owner's terminal binding and resources once.
     pub(crate) fn answer(
         &self,
         request_id: &str,
         reply: DispatchReply,
     ) -> Result<(), DispatchReply> {
-        let waiter = match &mut *lock_recovered(&self.0) {
+        let invocation = match &mut *lock_recovered(&self.0) {
             PendingState::Open(waiting) => waiting.remove(request_id),
             PendingState::Closed(_) => None,
         };
-        match waiter {
-            Some(tx) => {
-                // A receiver dropped since its registration is a caller that
-                // stopped waiting; nothing is owed to it.
-                let _ = tx.send(reply);
+        match invocation {
+            Some(PendingInvocation {
+                owner,
+                reply: sender,
+            }) => {
+                let _ = sender.send(owner.finish(reply));
                 Ok(())
             }
             None => Err(reply),
         }
     }
 
-    /// Close: answer every waiter with `reason` and refuse every later
-    /// registration. The first reason stands; returns whether this call
-    /// closed the map.
+    /// Close once with the original reason and settle every remaining owner.
     pub(crate) fn close(&self, reason: StreamClosed) -> bool {
         let stranded = {
             let mut state = lock_recovered(&self.0);
@@ -232,14 +227,12 @@ impl PendingDispatches {
                 }
             }
         };
-        for (_, tx) in stranded {
-            let _ = tx.send(Err(reason.to_worker_error()));
+        for (_, PendingInvocation { owner, reply }) in stranded {
+            let _ = reply.send(owner.finish(Err(reason.to_worker_error())));
         }
         true
     }
 
-    /// Whether the worker can still take requests: `Ok` while the stream is
-    /// open, the close reason's error after.
     pub(crate) fn liveness(&self) -> Result<(), WorkerError> {
         match &*lock_recovered(&self.0) {
             PendingState::Open(_) => Ok(()),
@@ -247,12 +240,67 @@ impl PendingDispatches {
         }
     }
 
-    /// How many dispatches are waiting (tests and logs).
     #[cfg(test)]
     pub(crate) fn waiting(&self) -> usize {
         match &*lock_recovered(&self.0) {
             PendingState::Open(waiting) => waiting.len(),
             PendingState::Closed(_) => 0,
+        }
+    }
+}
+
+impl PendingDispatches<super::channel::ScheduledInvocation> {
+    /// A retry may reclaim a detached reply only for the exact packet still
+    /// running. Active duplicate IDs and changed input remain protocol errors.
+    /// This observation precedes new memory admission and executor acquisition.
+    pub(super) fn rejoin(
+        &self,
+        request: &crate::types::worker_v2::ExecuteRequestV2,
+    ) -> Result<Option<DispatchReceipt>, WorkerError> {
+        match &mut *lock_recovered(&self.0) {
+            PendingState::Closed(reason) => Err(reason.to_worker_error()),
+            PendingState::Open(waiting) => match waiting.get_mut(&request.request_id) {
+                None => Ok(None),
+                Some(invocation)
+                    if invocation.reply.is_closed() && invocation.owner.request() == request =>
+                {
+                    let (tx, rx) = oneshot::channel();
+                    invocation.reply = tx;
+                    Ok(Some(DispatchReceipt { reply: rx }))
+                }
+                Some(_) => Err(WorkerError::Protocol(format!(
+                    "request id {} already owns different work or an active caller",
+                    request.request_id
+                ))),
+            },
+        }
+    }
+}
+
+/// The observation-only owner for route decisions. This double exercises the
+/// same consuming registration/answer/retirement graph without inventing a
+/// model load, kernel process or memory lease for byte-routing assertions.
+#[cfg(test)]
+pub(super) mod observations {
+    use super::*;
+    pub(crate) struct ObservedDispatch(WorkerRequestIdV2);
+    impl ObservedDispatch {
+        pub(crate) fn named(id: impl Into<WorkerRequestIdV2>) -> Self {
+            Self(id.into())
+        }
+    }
+    impl DispatchOwner for ObservedDispatch {
+        fn request_id(&self) -> &WorkerRequestIdV2 {
+            &self.0
+        }
+        fn finish(self, reply: DispatchReply) -> DispatchReply {
+            reply.and_then(|reply| {
+                if reply.request_id() == &self.0 {
+                    Ok(reply)
+                } else {
+                    Err(WorkerError::Protocol("observed reply id mismatch".into()))
+                }
+            })
         }
     }
 }
@@ -590,15 +638,20 @@ impl ControlSlot {
 
 #[cfg(test)]
 mod tests {
+    use super::observations::ObservedDispatch;
     use super::*;
+    type PendingDispatches = super::PendingDispatches<ObservedDispatch>;
 
-    /// Closing answers every waiter through its own reply and refuses every
-    /// later registration at once, instead of leaving it on its timeout.
+    /// Guards: Closing answers every waiter through its own reply and refuses every later registration at once, instead of leaving it on its timeout.
+    /// Kind: policy
+    /// Not a type: the first externally observed EOF must settle existing reply owners and remain authoritative when a later shutdown reason arrives.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn closing_answers_waiters_and_refuses_new_registrations() {
         let pending = PendingDispatches::default();
         let receipt = pending
-            .register(WorkerRequestIdV2::from("r-1"))
+            .register(ObservedDispatch::named("r-1"))
             .expect("an open map registers");
         assert!(pending.close(StreamClosed::Eof));
         assert!(
@@ -616,22 +669,23 @@ mod tests {
         );
 
         assert!(matches!(
-            pending.register(WorkerRequestIdV2::from("r-2")),
+            pending.register(ObservedDispatch::named("r-2")),
             Err(WorkerError::ProcessExited { .. })
         ));
         assert!(pending.liveness().is_err());
     }
 
-    /// A dispatch in flight on a worker the pool retires (a refused
-    /// capability report, a replaced worker) while the pool keeps running is
-    /// answered with a retryable error: the work was not refused, its worker
-    /// went away.
+    /// Guards: A dispatch in flight on a worker the pool retires (a refused capability report, a replaced worker) while the pool keeps running is answered with a retryable error: the work was not refused, its worker went away.
+    /// Kind: policy
+    /// Not a type: worker retirement during live routing selects retryable failure policy, whose classification remains a semantic decision after ownership is consumed.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn retiring_a_live_worker_answers_its_dispatches_retryably() {
         use crate::runner::util::classify_worker_error;
         let pending = PendingDispatches::default();
         let receipt = pending
-            .register(WorkerRequestIdV2::from("r-1"))
+            .register(ObservedDispatch::named("r-1"))
             .expect("an open map registers");
         pending.close(StreamClosed::Stopped(Retirement::WorkerRetired));
         let error = receipt
@@ -646,22 +700,28 @@ mod tests {
         );
     }
 
-    /// A second registration under an id already waiting is refused rather
-    /// than orphaning the first waiter.
+    /// Guards: A second registration under an id already waiting is refused rather than orphaning the first waiter.
+    /// Kind: policy
+    /// Not a type: distinct admitted external requests can repeat the same correlation string, requiring map admission to refuse the second live owner.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[test]
     fn a_duplicate_request_id_is_refused() {
         let pending = PendingDispatches::default();
         let _first = pending
-            .register(WorkerRequestIdV2::from("r-1"))
+            .register(ObservedDispatch::named("r-1"))
             .expect("first registration");
         assert!(matches!(
-            pending.register(WorkerRequestIdV2::from("r-1")),
+            pending.register(ObservedDispatch::named("r-1")),
             Err(WorkerError::Protocol(_))
         ));
     }
 
-    /// Shutdown supersedes a live control waiter, receives the ack itself,
-    /// and refuses later ops.
+    /// Guards: Shutdown supersedes a live control waiter, receives the ack itself, and refuses later ops.
+    /// Kind: policy
+    /// Not a type: shutdown overtakes a current control operation and its actual acknowledgement must settle only the shutdown owner before future operations are refused.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn shutdown_supersedes_the_control_waiter_and_closes_after_its_ack() {
         let slot = ControlSlot::default();
@@ -693,8 +753,11 @@ mod tests {
         );
     }
 
-    /// Retiring one worker refuses its later ops retryably, unlike a pool
-    /// shutdown.
+    /// Guards: Retiring one worker refuses its later ops retryably, unlike a pool shutdown.
+    /// Kind: policy
+    /// Not a type: the WorkerRetired reason selects retryable refusal for later load attempts, independently of the different PoolShutdown policy.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[test]
     fn a_retired_worker_refuses_later_ops_retryably() {
         let slot = ControlSlot::default();

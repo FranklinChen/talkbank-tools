@@ -108,15 +108,31 @@ impl ProviderAccounts {
     /// three accounts describe one state of it.
     pub(crate) fn read(sources: &HkAsrCredentialSources) -> Self {
         let section = sources.read_legacy_ini_asr_section();
-        let section = section.as_ref();
+        Self::admit_sources(
+            sources,
+            section.as_ref(),
+            crate::revai::load_revai_api_key().ok(),
+        )
+    }
+
+    fn admit_sources(
+        sources: &HkAsrCredentialSources,
+        section: Option<&BTreeMap<String, String>>,
+        revai: Option<crate::revai::RevAiApiKey>,
+    ) -> Self {
         Self {
-            // Rev.AI's key has its own reader (`revai::credentials`), shared
-            // with the Rust Rev.AI client.
-            revai: crate::revai::load_revai_api_key().ok(),
+            revai,
             tencent: sources.load_tencent(section),
             tencent_engine: HkAsrCredentialSources::tencent_engine_setting(section),
             aliyun: sources.load_aliyun(section),
         }
+    }
+
+    /// Admit an explicit synthetic account snapshot through the production readers,
+    /// without consulting the process environment or any credential file.
+    #[cfg(test)]
+    pub(crate) fn from_explicit_hk_sources(sources: &HkAsrCredentialSources) -> Self {
+        Self::admit_sources(sources, None, None)
     }
 
     /// No provider account: what a test or an offline replay runs as, which

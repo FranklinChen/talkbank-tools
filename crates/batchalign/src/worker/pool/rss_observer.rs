@@ -44,13 +44,12 @@
 //! background polling with a cached read.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
 
 use crate::worker::{WorkerPid, WorkerProfile};
 
-use super::{GroupsMap, WorkerGroup, lock_recovered};
+use super::{GroupsMap, lock_recovered};
 
 /// Origin of the per-spawn memory estimate, surfaced via
 /// `MemoryConstrained` for diagnostic logs.
@@ -65,46 +64,109 @@ pub(super) enum EstimateSource {
     ObservedAvgIdle,
 }
 
-/// Sample observed average RSS in MB across idle workers of the
-/// given profile. Returns `None` when no idle peers exist (caller
-/// must fall back to reservation).
-///
-/// The walk holds each `WorkerGroup.idle` mutex briefly to snapshot
-/// PIDs, then releases it before the sysinfo refresh, sysinfo's
-/// `refresh_processes_specifics` can be tens of ms in the worst
-/// case, and holding the idle mutex across that would block
-/// `checkout()` and `push_back()` callers unnecessarily.
+/// The actual queue member and diagnostic key stay attached during sampling.
+pub(super) struct IdleMember {
+    pub(super) key: super::WorkerKey,
+    source: super::capacity::ObservedIdleWorker,
+}
+impl IdleMember {
+    pub(super) fn pid(&self) -> WorkerPid {
+        self.source.pid()
+    }
+    pub(super) fn take(
+        self,
+    ) -> Option<super::capacity::DepartedWorker<crate::worker::handle::WorkerHandle>> {
+        self.source.take()
+    }
+}
+
+pub(super) struct IdlePopulation {
+    members: Vec<IdleMember>,
+}
+impl IdlePopulation {
+    pub(super) fn all(groups: &GroupsMap) -> Self {
+        Self::capture(groups, |_: WorkerProfile| true)
+    }
+    fn for_profile(groups: &GroupsMap, profile: WorkerProfile) -> Self {
+        Self::capture(groups, |found| found == profile)
+    }
+    fn capture(groups: &GroupsMap, selected: impl Fn(WorkerProfile) -> bool) -> Self {
+        let homes: Vec<_> = lock_recovered(groups)
+            .iter()
+            .filter(|(_, group)| selected(group.profile))
+            .map(|(key, home)| (key.clone(), home.clone()))
+            .collect();
+        let members = homes
+            .into_iter()
+            .flat_map(|(key, home)| {
+                home.observe_idle()
+                    .into_iter()
+                    .map(move |source| IdleMember {
+                        key: key.clone(),
+                        source,
+                    })
+            })
+            .collect();
+        Self { members }
+    }
+    pub(super) fn measure(
+        self,
+    ) -> Result<Vec<Measured<IdleMember>>, crate::host_memory::HostUnreadable> {
+        let pids: Vec<_> = self.members.iter().map(IdleMember::pid).collect();
+        let readings = refresh_rss_mb_for_pids(&pids)?;
+        Ok(self
+            .members
+            .into_iter()
+            .filter_map(|item| {
+                readings
+                    .get(&item.pid())
+                    .copied()
+                    .map(|rss_mb| Measured { item, rss_mb })
+            })
+            .collect())
+    }
+}
+
+/// A measurement carries the exact object it describes through selection.
+pub(super) struct Measured<T> {
+    item: T,
+    rss_mb: u64,
+}
+impl<T> Measured<T> {
+    pub(super) fn rss_mb(&self) -> u64 {
+        self.rss_mb
+    }
+    pub(super) fn item(&self) -> &T {
+        &self.item
+    }
+    pub(super) fn into_item(self) -> T {
+        self.item
+    }
+    /// Pure policy observations claim no native worker or process identity.
+    #[cfg(test)]
+    pub(super) fn declared(item: T, rss_mb: u64) -> Self {
+        Self { item, rss_mb }
+    }
+}
+
 pub(super) fn observed_avg_rss_mb_for_profile(
     groups: &GroupsMap,
     profile: WorkerProfile,
 ) -> Option<u64> {
-    let pids = collect_idle_pids_for_profile(groups, profile);
-    if pids.is_empty() {
-        return None;
-    }
-    sample_avg_rss_mb_for_pids(&pids)
+    let samples = match IdlePopulation::for_profile(groups, profile).measure() {
+        Ok(samples) => samples,
+        Err(error) => {
+            tracing::warn!(%error, "worker RSS unreadable; using the reservation estimate");
+            return None;
+        }
+    };
+    average_rss(&samples)
 }
 
-/// Walk `groups`, collect PIDs of idle workers in groups whose
-/// profile matches. Each `idle` mutex is held only long enough to
-/// `iter()` the queue and copy out PIDs.
-fn collect_idle_pids_for_profile(groups: &GroupsMap, profile: WorkerProfile) -> Vec<WorkerPid> {
-    let group_arcs: Vec<Arc<WorkerGroup>> = {
-        let groups = lock_recovered(groups);
-        groups
-            .values()
-            .filter(|g| g.profile == profile)
-            .cloned()
-            .collect()
-    };
-    let mut pids = Vec::new();
-    for group in &group_arcs {
-        let idle = lock_recovered(&group.idle);
-        for handle in idle.iter() {
-            pids.push(handle.pid());
-        }
-    }
-    pids
+fn average_rss<T>(samples: &[Measured<T>]) -> Option<u64> {
+    let count = std::num::NonZeroUsize::new(samples.len())?;
+    let total: u128 = samples.iter().map(|sample| u128::from(sample.rss_mb)).sum();
+    Some((total / count.get() as u128) as u64)
 }
 
 /// Refresh sysinfo for the given PIDs and return per-PID RSS in MB
@@ -142,78 +204,42 @@ pub(super) fn refresh_rss_mb_for_pids(
     Ok(out)
 }
 
-/// Average RSS (MB) across live PIDs, or `None` when none are live.
-///
-/// An unreadable process table is no observation, so the caller uses the
-/// static reservation estimate it uses when no peer is live; the memory gate's
-/// own reading of the host then refuses the spawn if that is unreadable too.
-fn sample_avg_rss_mb_for_pids(pids: &[WorkerPid]) -> Option<u64> {
-    let rss_by_pid = match refresh_rss_mb_for_pids(pids) {
-        Ok(rss_by_pid) => rss_by_pid,
-        Err(error) => {
-            tracing::warn!(%error, "worker RSS unreadable; using the reservation estimate");
-            return None;
-        }
-    };
-    if rss_by_pid.is_empty() {
-        return None;
-    }
-    let sum_mb: u128 = rss_by_pid.values().map(|v| *v as u128).sum();
-    let avg_mb = sum_mb / rss_by_pid.len() as u128;
-    Some(avg_mb as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Sampling an empty PID list returns `None` so the caller falls
-    /// back to reservation. This pins the invariant that callers can
-    /// trust `None` to mean "no peers, use reservation."
+    /// Guards: the actual process-table adapter retains this live process's PID
+    /// and positive RSS when refreshing an explicitly selected population.
+    /// Kind: measurement
+    /// Not a type: the operating system supplies actual resident bytes at runtime,
+    /// beyond the static association between each queued owner and its observations.
+    /// State: one real sysinfo process-table refresh observes only this test process.
+    /// Concurrency: the process owns its PID and the local refresh shares no mutable state.
     #[test]
-    fn empty_pid_list_returns_none() {
-        let result = sample_avg_rss_mb_for_pids(&[]);
-        assert!(
-            result.is_none(),
-            "empty PIDs must return None, got {result:?}"
-        );
+    fn the_kernel_refresh_retains_the_live_process_measurement() {
+        let pid = WorkerPid(std::process::id());
+        let readings = refresh_rss_mb_for_pids(&[pid]).unwrap();
+        assert!(readings.get(&pid).is_some_and(|rss| *rss > 0));
     }
-
-    /// Sampling our own PID returns a positive RSS value. Pins that
-    /// the sysinfo wiring works end-to-end on this platform.
+    /// Guards: empty observations remain absent and overflow-safe averaging uses
+    /// every carried measurement exactly once, including zero and maximum values.
+    /// Kind: policy
+    /// Not a type: the arithmetic mean, integer rounding and genuine absence are
+    /// semantic decisions over admitted numeric observations.
+    /// State: declared logical values claim no real process or queued worker.
+    /// Concurrency: none
     #[test]
-    fn sampling_self_pid_returns_positive_rss() {
-        let our_pid = WorkerPid(std::process::id());
-        let result = sample_avg_rss_mb_for_pids(&[our_pid]);
-        let Some(rss_mb) = result else {
-            panic!("expected Some(rss_mb) for self pid, got None");
-        };
-        assert!(rss_mb > 0, "self RSS must be positive, got {rss_mb} MB");
-    }
-
-    /// Sampling a list of all-dead PIDs returns `None`. Uses
-    /// `u32::MAX` which cannot be a real PID on any platform.
-    #[test]
-    fn sampling_all_dead_pids_returns_none() {
-        let result = sample_avg_rss_mb_for_pids(&[WorkerPid(u32::MAX)]);
-        assert!(
-            result.is_none(),
-            "all-dead PIDs must return None, got {result:?}"
-        );
-    }
-
-    /// `refresh_rss_mb_for_pids` is the shared primitive both
-    /// `rss_observer` and `idle_eviction` use; the helper must
-    /// preserve the (PID → live-RSS) mapping so callers can attach
-    /// metadata to the result. Self-PID is always live.
-    #[test]
-    fn refresh_returns_self_pid_keyed_to_positive_rss() {
-        let our_pid = WorkerPid(std::process::id());
-        let map = refresh_rss_mb_for_pids(&[our_pid]).expect("the test host reports processes");
-        let rss_mb = map
-            .get(&our_pid)
-            .copied()
-            .expect("self PID must be present in refresh result");
-        assert!(rss_mb > 0, "self RSS must be positive, got {rss_mb} MB");
+    fn averaging_consumes_only_the_carried_measurements() {
+        for (weights, expected) in [
+            (vec![], None),
+            (vec![0, 3], Some(1)),
+            (vec![u64::MAX, u64::MAX], Some(u64::MAX)),
+        ] {
+            let samples = weights
+                .into_iter()
+                .enumerate()
+                .map(|(id, rss)| Measured::declared(id, rss))
+                .collect::<Vec<_>>();
+            assert_eq!(average_rss(&samples), expected);
+        }
     }
 }

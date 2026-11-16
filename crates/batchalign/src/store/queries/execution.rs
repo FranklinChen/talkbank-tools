@@ -9,21 +9,22 @@ use crate::store::{AttemptFinishRecord, PersistedFileUpdate, RunCompletion, Runn
 
 impl JobStore {
     /// Re-queue a job after memory-gate rejection and persist the retry deadline.
-    pub(crate) async fn requeue_job_after_memory_gate(
+    pub(in crate::store) async fn requeue_job_after_memory_gate(
         &self,
         run: &crate::store::RunBinding,
         retry_at: MachineTime,
-    ) {
+    ) -> crate::store::MemoryRequeueOutcome {
         let Some(job_update) = self.registry.requeue_after_memory_gate(run, retry_at).await else {
-            return;
+            return crate::store::MemoryRequeueOutcome::NoLongerRunnable;
         };
         self.notify_job_item(job_update);
-
+        self.bump_counter(|c| c.deferred_work_units += 1).await;
         self.db_persist_job_status(run.job_id()).await;
+        crate::store::MemoryRequeueOutcome::Requeued(crate::store::DeferredRun::admitted(retry_at))
     }
 
     /// Mark a job as running and clear any deferred retry deadline.
-    pub(crate) async fn mark_job_running(&self, run: &crate::store::RunBinding) {
+    pub(in crate::store) async fn mark_job_running(&self, run: &crate::store::RunBinding) {
         let Some(job_update) = self.registry.mark_job_running(run).await else {
             return;
         };
@@ -33,7 +34,7 @@ impl JobStore {
     }
 
     /// Record the per-job worker count chosen for this run.
-    pub(crate) async fn record_job_worker_count(
+    pub(in crate::store) async fn record_job_worker_count(
         &self,
         run: &crate::store::RunBinding,
         num_workers: usize,
@@ -52,7 +53,7 @@ impl JobStore {
     }
 
     /// A cancelled-before-claim task has completion authority only.
-    pub(crate) async fn complete_stopped_run(
+    pub(in crate::store) async fn complete_stopped_run(
         &self,
         completion: crate::store::StoppedRun,
         finished_at: crate::store::EventTime,
@@ -63,7 +64,7 @@ impl JobStore {
 
     /// Consume a run claim. Only the registry can admit cleanup, so callers
     /// cannot pass a status inconsistent with the files or clean up a restart.
-    pub(crate) async fn complete_run(
+    pub(in crate::store) async fn complete_run(
         &self,
         claim: RunnerClaim,
         finished_at: crate::store::EventTime,
@@ -73,7 +74,7 @@ impl JobStore {
     }
 
     /// Dispatch failure still consumes the same generation-bound authority.
-    pub(crate) async fn fail_run(
+    pub(in crate::store) async fn fail_run(
         &self,
         claim: RunnerClaim,
         message: String,
@@ -147,13 +148,21 @@ impl JobStore {
 mod tests {
     use tokio::sync::broadcast;
 
-    use crate::api::{JobId, JobStatus, ReleasedCommand};
-    use crate::store::queries::tests::{claim_runner, make_job, test_config};
+    use crate::api::{JobId, JobStatus};
+    use crate::store::queries::tests::{claim_registry_runner, make_job, test_config};
     use crate::ws::BROADCAST_CAPACITY;
 
     use super::*;
 
-    /// Re-queued jobs retain queued status and gain the next retry timestamp.
+    /// Guards: accepted memory requeue returns a retry proof for the same
+    /// deadline stored on the queued job and records one deferred-work event.
+    /// Kind: policy
+    /// Not a type: the actor observes mutable job membership and generation.
+    /// The proof constructor is private, but its admission must still store
+    /// the requested deadline and return the corresponding observation.
+    /// State: an isolated in-memory registry performs real claim and requeue
+    /// transitions. No persistence claim requires a database in this case.
+    /// Concurrency: this case owns the registry and claim until explicit release.
     #[tokio::test]
     async fn requeue_job_after_memory_gate_sets_retry_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -166,26 +175,37 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
             .unwrap();
 
+        let id = JobId::from("job-1");
+        let claim = claim_registry_runner(&store, &id).await;
         let retry_at = crate::unix_time(321.0);
-        store
-            .requeue_job_after_memory_gate(
-                &crate::store::RunBinding::first_run_of(JobId::from("job-1")),
-                retry_at,
-            )
+        let outcome = store
+            .requeue_job_after_memory_gate(claim.binding(), retry_at)
             .await;
+        let crate::store::MemoryRequeueOutcome::Requeued(retry) = outcome else {
+            panic!("the current queued run admits its retry");
+        };
+        assert_eq!(retry.deadline(), retry_at);
+        let (_, _, _, deferred, _, _) = store.operational_counters().await;
+        assert_eq!(deferred, 1);
 
         let info = store.get(&JobId::from("job-1")).await.unwrap();
         assert_eq!(info.status, JobStatus::Queued);
         assert_eq!(info.next_eligible_at, Some(retry_at));
+        store.release_run(claim).await;
     }
 
     /// Finalization recomputes completed file counts from terminal file state.
+    /// Guards: Restart rejects old completion and current completion counts successful and unfinished files correctly.
+    /// Kind: contract
+    /// Not a type: A registry claim cannot freeze cancellation or restart observations arriving from other owners after admission.
+    /// State: The real in-memory registry actor exercises generation arbitration and terminal projection. Disk and worker processes contribute no effect.
+    /// Concurrency: This test owns its registry and broadcast channel. Restart and completion are awaited in the asserted order.
     #[tokio::test]
     async fn run_completion_accounts_for_success_and_unfinished_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -197,7 +217,7 @@ mod tests {
         );
         let mut job = make_job(
             "job-1",
-            ReleasedCommand::Morphotag,
+            crate::store::queries::tests::FixtureCommand::Morphotag,
             vec!["a.cha".into(), "b.cha".into()],
         );
         job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
@@ -209,7 +229,7 @@ mod tests {
         store.submit(job).await.unwrap();
 
         let id = JobId::from("job-1");
-        let old_claim = claim_runner(&store, &id).await;
+        let old_claim = claim_registry_runner(&store, &id).await;
         store
             .cancel(&id, crate::api::CancellationRequest::default())
             .await
@@ -239,7 +259,7 @@ mod tests {
         store.release_runner_claim(&id).await;
         store
             .complete_run(
-                claim_runner(&store, &id).await,
+                claim_registry_runner(&store, &id).await,
                 crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
             .await
@@ -271,6 +291,11 @@ mod tests {
     /// `error` column and no job-level reason, so the dashboard/jobs.db showed
     /// "failed" with no cause; the only place the real error appeared was the
     /// CLI client response.
+    /// Guards: File failure reasons reach the terminal job projection and survive database reload.
+    /// Kind: contract
+    /// Not a type: The admitted binding proves run ownership but cannot establish aggregated error text or persisted SQLite content.
+    /// State: One isolated SQLite database is shared with a fresh store to verify real persistence. Synthetic worker error text supplies the external message.
+    /// Concurrency: The directory and both registry actors belong to this test. Reload starts only after awaited completion persistence.
     #[tokio::test]
     async fn finalize_failed_job_records_reason_from_file_failures() {
         use std::sync::Arc;
@@ -293,11 +318,13 @@ mod tests {
         store
             .submit(make_job(
                 "job-fail",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into(), "b.cha".into()],
             ))
             .await
             .unwrap();
+
+        let claim = claim_registry_runner(&store, &job_id).await;
 
         // Both files fail with the verbatim worker message, the shape of the
         // Stanza manifest-skew failure that exposed this bug.
@@ -307,23 +334,15 @@ mod tests {
             finished_at: crate::store::EventTime::fixed(crate::unix_time(400.0)),
         };
         store
-            .mark_file_error(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
-                "a.cha",
-                &failure,
-            )
+            .mark_file_error(claim.binding(), "a.cha", &failure)
             .await;
         store
-            .mark_file_error(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
-                "b.cha",
-                &failure,
-            )
+            .mark_file_error(claim.binding(), "b.cha", &failure)
             .await;
 
         let completion = store
             .complete_run(
-                claim_runner(&store, &job_id).await,
+                claim,
                 crate::store::EventTime::fixed(crate::unix_time(500.0)),
             )
             .await

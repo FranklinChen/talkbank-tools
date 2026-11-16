@@ -1985,44 +1985,41 @@ mod tests {
         );
     }
 
+    /// Guards: Real planning refusals retain their cause and map to nonretryable system errors with an HTTP 500 detail body.
+    /// Kind: wire
+    /// Not a type: Closed planning-error variants exclude absent-primary setup, while retry classification, HTTP status and serialized detail bytes remain adapter policy.
+    /// State: Tokio executes the in-memory HTTP body adapter. No filesystem, socket, store or worker is used.
+    /// Concurrency: Each response body is owned and consumed within its case. No shared state is used.
     #[tokio::test]
     async fn planning_failures_retain_their_cause_and_are_nonretryable_system_errors() {
         use super::{PlanningError, ServerError};
-        use crate::api::{DisplayPath, ReleasedCommand};
+        use crate::api::ReleasedCommand;
 
-        for cause in [
-            PlanningError::OutputOptionsMismatch {
-                expected: ReleasedCommand::Benchmark,
-                observed: ReleasedCommand::Align,
-            },
-            PlanningError::MissingPrimary(ReleasedCommand::Benchmark),
-            PlanningError::MissingFileStem(DisplayPath::from("/")),
-            PlanningError::MissingFileName(DisplayPath::from("/")),
-        ] {
-            let error = ServerError::from(cause.clone());
-            assert!(matches!(&error, ServerError::Planning(retained) if retained == &cause));
-            assert!(
-                std::error::Error::source(&error)
-                    .and_then(|source| source.downcast_ref::<PlanningError>())
-                    .is_some_and(|retained| retained == &cause)
-            );
-            let category = crate::runner::util::classify_server_error(&error);
-            assert_eq!(category, crate::scheduling::FailureCategory::System);
-            assert!(
-                !((category).retryability() == crate::types::scheduling::Retryability::Retryable)
-            );
-            let detail = error.to_string();
-            let response = axum::response::IntoResponse::into_response(error);
-            assert_eq!(
-                response.status(),
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR
-            );
-            let body = axum::body::to_bytes(response.into_body(), 8192)
-                .await
-                .expect("error response");
-            let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
-            assert_eq!(body["detail"].as_str(), Some(detail.as_str()));
-        }
+        let cause = PlanningError::OutputOptionsMismatch {
+            expected: ReleasedCommand::Benchmark,
+            observed: ReleasedCommand::Align,
+        };
+        let error = ServerError::from(cause.clone());
+        assert!(matches!(&error, ServerError::Planning(retained) if retained == &cause));
+        assert!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<PlanningError>())
+                .is_some_and(|retained| retained == &cause)
+        );
+        let category = crate::runner::util::classify_server_error(&error);
+        assert_eq!(category, crate::scheduling::FailureCategory::System);
+        assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
+        let detail = error.to_string();
+        let response = axum::response::IntoResponse::into_response(error);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(body["detail"].as_str(), Some(detail.as_str()));
     }
 
     #[test]

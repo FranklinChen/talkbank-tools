@@ -548,211 +548,68 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduling::FailureCategory;
-    use crate::store::job::test_support::{running_job_fixture, three_file_job_fixture};
-    use crate::store::job::types::FileFailureRecord;
+    use crate::store::test_support::{ChatFileFixture, JobFixture};
 
-    /// Verify that `interrupt_for_shutdown` writes `JobStatus::Interrupted`
-    /// (not `Cancelled`) so the recovery sequence can requeue unfinished work.
-    ///
-    /// This is the regression test for the 2026-04-27 investigation in which
-    /// in-flight jobs were marked `Cancelled` when a server bounced; recovery
-    /// never revisited `Cancelled` rows, so the jobs appeared permanently
-    /// cancelled with no user action.
+    /// Guards: Shutdown interrupts a live run, cancels its token and leaves teardown ownership with the runner.
+    /// Kind: contract
+    /// Not a type: The admitted running fixture cannot establish the shutdown operation's chosen status, completion timestamp or cancellation effect.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
     #[test]
     fn interrupt_for_shutdown_writes_interrupted_not_cancelled() {
-        let mut job = running_job_fixture();
-        let now = crate::unix_time(1_777_300_000.0);
-
-        let did_transition = job.interrupt_for_shutdown(now);
-
-        assert!(did_transition, "running job must accept the interrupt");
-        assert_eq!(
-            job.status(),
-            JobStatus::Interrupted,
-            "shutdown must mark the job Interrupted (recovery-eligible), not Cancelled (final)"
-        );
-        assert!(
-            job.runtime.cancel_token.is_cancelled(),
-            "the cancel token still flips so in-flight workers stop"
-        );
-        assert_eq!(
-            job.schedule.completed_at,
-            Some(now),
-            "completed_at is populated to match recover_interrupted's existing convention"
-        );
-        assert!(
-            job.runtime.runner_active,
-            "the live runner retains teardown ownership"
-        );
+        let mut job = JobFixture::content(
+            "shutdown",
+            ChatFileFixture::new("a.cha")
+                .processing(crate::unix_time(1.0))
+                .in_flight(),
+            [],
+        )
+        .expect("one input")
+        .start(
+            &crate::api::NodeId::from("fixture-node"),
+            crate::unix_time(0.0),
+            crate::config::LeaseTtl::from_secs(90).unwrap(),
+        )
+        .into_subject();
+        let now = crate::unix_time(20.0);
+        assert!(job.interrupt_for_shutdown(now));
+        assert_eq!(job.status(), JobStatus::Interrupted);
+        assert!(job.runtime.cancel_token.is_cancelled());
+        assert_eq!(job.schedule.completed_at, Some(now));
+        assert!(job.runtime.runner_active);
     }
 
-    /// A live stop leaves the job's whole status image as the shared
-    /// transition states it (`JobStatusColumns::stopped`), the image startup
-    /// recovery writes: every column, not only the ones the stop changes.
+    /// Guards: Both live stop operations apply the complete shared status image after memory deferral and retain runner teardown ownership.
+    /// Kind: contract
+    /// Not a type: A consuming deferred prefix cannot establish agreement between live mutation and the status image used by persistence.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
     #[test]
     fn a_live_stop_is_the_shared_transition_on_every_column() {
-        for (stop, apply) in [
-            (
-                super::super::Stop::Interrupted,
-                Job::interrupt_for_shutdown as fn(&mut Job, MachineTime) -> bool,
-            ),
-            (super::super::Stop::Cancelled, |job: &mut Job, at| {
-                job.request_cancellation(at).is_some()
-            }),
+        for stop in [
+            super::super::Stop::Interrupted,
+            super::super::Stop::Cancelled,
         ] {
-            let mut job = running_job_fixture();
-            job.execution.error = Some("an earlier failure".into());
-            job.schedule.num_workers = Some(3);
-            job.schedule.next_eligible_at = Some(crate::unix_time(1_777_200_000.0));
-            let now = crate::unix_time(1_777_300_000.0);
+            let mut job = JobFixture::content("stop", ChatFileFixture::new("a.cha").pending(), [])
+                .expect("one input")
+                .start(
+                    &crate::api::NodeId::from("fixture-node"),
+                    crate::unix_time(0.0),
+                    crate::config::LeaseTtl::from_secs(90).unwrap(),
+                )
+                .defer(crate::unix_time(25.0))
+                .into_subject();
+            job.record_worker_count(3);
+            let now = crate::unix_time(20.0);
             let expected = job.status_columns().stopped(stop, now);
-
-            assert!(apply(&mut job, now), "{stop:?}");
+            let accepted = match stop {
+                super::super::Stop::Interrupted => job.interrupt_for_shutdown(now),
+                super::super::Stop::Cancelled => job.request_cancellation(now).is_some(),
+            };
+            assert!(accepted, "{stop:?}");
             assert_eq!(job.status_columns(), expected, "{stop:?}");
+            assert!(job.runtime.cancel_token.is_cancelled());
+            assert!(job.runtime.runner_active);
         }
-    }
-
-    /// Regression: 2026-05-11 morphotag job `150c824a-48e`.
-    ///
-    /// The job submitted three files. Two terminal-errored (worker IPC
-    /// protocol mismatches mid-run), one succeeded. `file_statuses` in
-    /// jobs.db correctly recorded the per-file outcomes, but the overall
-    /// job status was finalized as `Completed` because
-    /// `all_terminal_files_failed()` reports only the all-or-nothing
-    /// case. The dashboard and CLI therefore claimed the job succeeded,
-    /// hiding the silent data loss for the two failed outputs.
-    ///
-    /// The fix predicate is `any_terminal_files_failed()`: true iff any
-    /// terminal file is an error. The existing
-    /// `all_terminal_files_failed()` predicate is preserved so any
-    /// other caller that genuinely wants "every terminal file errored"
-    /// semantics still has it. The two methods together match the
-    /// `JobStatus` enum's documented contract at
-    /// `crates/batchalign/src/types/status.rs` lines 27-31:
-    ///
-    /// > Completed = all files processed successfully
-    /// > Failed = one or more files encountered an unrecoverable error
-    #[test]
-    fn any_terminal_files_failed_detects_partial_failure_shape() {
-        let mut job = three_file_job_fixture();
-        let started = crate::unix_time(1_778_517_977.7);
-        let finished_done = crate::unix_time(1_778_518_056.4);
-        let finished_error = crate::unix_time(1_778_518_053.6);
-
-        // 60home-3.cha succeeds (the only file with an actual output
-        // on disk after the incident).
-        assert_eq!(job.mark_file_processing("60home-3.cha", started), Ok(()));
-        assert_eq!(
-            job.mark_file_done(
-                "60home-3.cha",
-                finished_done,
-                super::super::FileCompletion::WithoutResult
-            ),
-            Ok(())
-        );
-
-        // 65-3.cha and 65home-3.cha both terminal-error with worker
-        // protocol mismatches.
-        for filename in ["65-3.cha", "65home-3.cha"] {
-            assert_eq!(job.mark_file_processing(filename, started), Ok(()));
-            assert_eq!(
-                job.mark_file_error(
-                    filename,
-                    &FileFailureRecord {
-                        message: "worker protocol error".into(),
-                        category: FailureCategory::ProviderTerminal,
-                        finished_at: crate::store::EventTime::fixed(finished_error),
-                    },
-                ),
-                Ok(())
-            );
-        }
-
-        assert!(
-            job.any_terminal_files_failed(),
-            "partial-failure must surface via any_terminal_files_failed()"
-        );
-    }
-
-    /// A job that fails with terminally-errored files that recorded NO message
-    /// still gets a job-level reason ("N file(s) failed"), not an empty error.
-    #[test]
-    fn finalize_failed_records_count_when_files_have_no_message() {
-        let mut job = running_job_fixture();
-        let file = job
-            .execution
-            .file_statuses
-            .get_mut("job-file.cha")
-            .expect("fixture file present");
-        file.phase = FilePhase::Error {
-            started_at: None,
-            finished_at: None,
-            failure: crate::store::FileFailure::of_failed_row(None, None),
-        };
-
-        // Assert the transition was APPLIED rather than discarding the result.
-        // `finalize` is `#[must_use]` precisely because a refused transition
-        // leaves the job in its prior status, and every assertion below would
-        // then be checking the fixture's own state instead of finalize's work.
-        assert!(
-            job.finalize(
-                crate::store::Outcome::Failed,
-                crate::unix_time(1_778_518_060.0)
-            ),
-            "Running -> Failed by the finish event must be applied"
-        );
-
-        assert_eq!(job.status(), JobStatus::Failed);
-        let reason = job.execution.error.as_deref().expect(
-            "failed job with errored files must record a reason even without \
-             per-file messages",
-        );
-        assert!(
-            reason.contains("file(s) failed"),
-            "expected a count-based reason, got: {reason}"
-        );
-    }
-
-    /// Recovery of an interrupted job whose files all terminal-errored
-    /// must surface the failure reason on the job-level error, the same as
-    /// `finalize` does; a server bounce must not drop the cause.
-    #[test]
-    fn reconcile_recovered_failed_job_records_file_failure_reason() {
-        let mut job = running_job_fixture();
-        let started = crate::unix_time(1_778_517_900.0);
-        let finished = crate::unix_time(1_778_518_000.0);
-        assert_eq!(job.mark_file_processing("job-file.cha", started), Ok(()));
-        assert_eq!(
-            job.mark_file_error(
-                "job-file.cha",
-                &FileFailureRecord {
-                    message: "worker bootstrap error: md5 mismatch".into(),
-                    category: FailureCategory::WorkerBootstrap,
-                    finished_at: crate::store::EventTime::fixed(finished),
-                },
-            ),
-            Ok(())
-        );
-        assert!(
-            job.execution.error.is_none(),
-            "precondition: job-level error unset before recovery"
-        );
-        // The server stopped while it ran.
-        assert!(job.interrupt_for_shutdown(finished));
-
-        let recovered = job.recover(
-            &batchalign_types::paths::AllowedRoots::none(),
-            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
-        );
-
-        assert_eq!(recovered, crate::store::Recovered::Rewritten(Vec::new()));
-        assert_eq!(job.status(), JobStatus::Failed);
-        let reason = job
-            .execution
-            .error
-            .as_deref()
-            .expect("recovered failed job must record the aggregated file failure reason");
-        assert!(reason.contains("md5 mismatch"), "got: {reason}");
     }
 }

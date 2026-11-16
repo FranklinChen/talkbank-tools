@@ -1,31 +1,24 @@
 //! Background tasks: health checking, idle timeout, worker spawning helpers.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use tracing::{error, info, warn};
 
 use crate::api::NumSpeakers;
 use crate::worker::error::WorkerError;
-use crate::worker::handle::{WorkerConfig, WorkerHandle};
+use crate::worker::handle::WorkerConfig;
 
+use super::capacity::{ClaimRejected, PermitRejected, ReservedWorkerSlot};
 use super::cpu_gate;
 use super::idle_eviction;
 use super::memory_gate;
-use super::permit::{PermitRejected, SpawnPermitGuard};
 use super::rss_observer;
 use super::spawn_runtime::PoolSpawnRuntime;
 use super::{GroupsMap, WorkerGroup, WorkerKey, WorkerPool, WorkerRejectionKind};
 
 /// Reason a `try_claim_spawn_slot` call was rejected. Distinguishes
-/// the admission stages so callers can treat them differently
-/// (per-key rejection means "wait for someone to return a worker for
-/// THIS key"; global rejection means "wait for ANY worker anywhere
-/// to exit"; CPU saturation and memory pressure mean "wait for the
-/// host to become less loaded, no permit wait will help"). The
-/// dispatch slow path uses the variant to choose between
-/// `group.available.acquire()`, `pool.spawn_permits.acquire()`, and
-/// a time-based retry.
+/// the admission stages so callers retain the actual cause while selecting
+/// the own-group availability, pool-wide return signal or host-pressure retry.
 #[derive(Debug)]
 pub(super) enum AdmissionRejection {
     /// Global permit pool exhausted. The acquisition increments
@@ -56,6 +49,33 @@ pub(super) enum AdmissionRejection {
     /// The host would not report its memory. Not counted as a capacity
     /// rejection and not waited on: the spawn fails with this error.
     HostUnreadable(crate::host_memory::HostUnreadable),
+}
+
+/// A completed publication or a retained reason to await another admission.
+pub(super) enum SpawnOutcome {
+    Published,
+    Deferred(SpawnDeferral),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SpawnDeferral {
+    GlobalCap,
+    PerKeyCap,
+    CpuSaturated,
+    MemoryConstrained,
+}
+
+impl SpawnDeferral {
+    /// A speculative refund changes global admission. It cannot unblock a
+    /// per-key or host-pressure refusal, so those waits retain their own event.
+    pub(super) async fn global_change(self, budget: &super::capacity::GlobalCapacity) {
+        match self {
+            Self::GlobalCap => budget.refund_event().await,
+            Self::PerKeyCap | Self::CpuSaturated | Self::MemoryConstrained => {
+                std::future::pending().await
+            }
+        }
+    }
 }
 
 impl From<PermitRejected> for AdmissionRejection {
@@ -141,7 +161,6 @@ impl WorkerPool {
             .entry(key.clone())
             .or_insert_with(|| {
                 Arc::new(WorkerGroup::new(
-                    self.worker_returned.clone(),
                     self.spawn_permits.clone(),
                     profile,
                     key.engine_selection.clone(),
@@ -160,8 +179,8 @@ impl WorkerPool {
     /// at capacity.
     pub(super) fn try_claim_spawn_slot(
         &self,
-        group: &WorkerGroup,
-    ) -> Result<(usize, SpawnPermitGuard), AdmissionRejection> {
+        group: &Arc<WorkerGroup>,
+    ) -> Result<ReservedWorkerSlot, AdmissionRejection> {
         let max = self.config.max_workers_per_key.get(group.profile);
 
         // Pressure gates (CPU loadavg, memory headroom) implement
@@ -191,11 +210,7 @@ impl WorkerPool {
         // readings: live in production, the declared (idle) host in test
         // pools, so their spawn counts never depend on the machine's load.
         let readings = self.config.runtime.host.readings();
-        let saturation = cpu_gate::check_cpu_saturation_with_state(
-            pool_state,
-            readings,
-            cpu_gate::cpu_count_threshold(readings),
-        );
+        let saturation = cpu_gate::check_cpu_saturation_with_state(pool_state, readings);
         if let Err(saturated) = saturation {
             let count = self
                 .rejection_counters
@@ -237,12 +252,7 @@ impl WorkerPool {
             memory_gate::host_min_free_mb_threshold_for_tier(&self.config.runtime.host.tier());
         // Engine-aware: lifts the reservation above the profile baseline
         // when the engine selection carries a heavy local model.
-        let reservation_mb = memory_gate::engine_aware_startup_reservation_mb(
-            group.profile,
-            group.engine_selection.overrides(),
-            &self.config.runtime.host.tier(),
-        )
-        .0;
+        let reservation_mb = group.startup_reservation.mb();
         let (estimate_mb, estimate_source) =
             match rss_observer::observed_avg_rss_mb_for_profile(&self.groups, group.profile) {
                 Some(observed) => (observed, rss_observer::EstimateSource::ObservedAvgIdle),
@@ -287,49 +297,29 @@ impl WorkerPool {
         // Layer 1: acquire a global-cap permit. Failure here means
         // every worker slot allowed by `max_total_workers` is in use
         // (or speculatively claimed by another concurrent admission)
-        // and the caller must wait on `spawn_permits.acquire()` rather
-        // than re-probe.
-        let guard = SpawnPermitGuard::try_acquire(&self.spawn_permits).map_err(|e| {
-            let count = self
-                .rejection_counters
-                .record(WorkerRejectionKind::GlobalPermit);
-            if should_log_saturation(count) {
-                warn!(
-                    permits_available = self.spawn_permits.available_permits(),
-                    max_total = self.config.effective_max_total_workers(),
-                    rejection_count = count,
-                    "Global permit pool exhausted, rejecting spawn"
-                );
+        // and the caller retains GlobalCap as its deferral cause when
+        // selecting a capacity-refund event or worker-return event.
+        ReservedWorkerSlot::try_claim(group, max).map_err(|rejection| match rejection {
+            ClaimRejected::Global => {
+                let count = self
+                    .rejection_counters
+                    .record(WorkerRejectionKind::GlobalPermit);
+                if should_log_saturation(count) {
+                    warn!(
+                        permits_available = self.spawn_permits.available_permits(),
+                        max_total = self.config.effective_max_total_workers(),
+                        rejection_count = count,
+                        "Global permit pool exhausted, rejecting spawn"
+                    );
+                }
+                AdmissionRejection::GlobalCap
             }
-            AdmissionRejection::from(e)
-        })?;
-
-        // Layer 2: per-key cap CAS. The permit guard is held across
-        // the loop; on per-key failure it drops here and refunds the
-        // permit so other groups can use it. The CAS retry path
-        // re-uses the same guard, we already paid for the global
-        // slot, just need to win the per-key race.
-        loop {
-            let current = group.total.load(Ordering::Relaxed);
-            if current >= max {
-                // Per-key cap saturated. Bump the per-key counter;
-                // the guard drops at function exit, refunding the
-                // global permit so other groups can use it.
+            ClaimRejected::PerKey => {
                 self.rejection_counters
                     .record(WorkerRejectionKind::PerKeyCap);
-                return Err(AdmissionRejection::PerKeyCap);
+                AdmissionRejection::PerKeyCap
             }
-
-            match group.total.compare_exchange(
-                current,
-                current + 1,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok((current + 1, guard)),
-                Err(_) => continue, // Lost the CAS race; retry without releasing the permit.
-            }
-        }
+        })
     }
 
     /// Spawn a worker into a group, using `try_claim_spawn_slot` for the
@@ -341,55 +331,46 @@ impl WorkerPool {
         &self,
         group: &Arc<WorkerGroup>,
         key: &WorkerKey,
-    ) -> Result<bool, WorkerError> {
+    ) -> Result<SpawnOutcome, WorkerError> {
         let guard = match self.try_claim_spawn_slot(group) {
-            Ok((_, g)) => g,
+            Ok(reservation) => reservation,
             Err(AdmissionRejection::HostUnreadable(error)) => return Err(error.into()),
-            // At capacity: a worker returning or the host freeing CPU or
-            // memory unblocks it.
-            Err(
-                AdmissionRejection::GlobalCap
-                | AdmissionRejection::PerKeyCap
-                | AdmissionRejection::CpuSaturated
-                | AdmissionRejection::MemoryConstrained,
-            ) => return Ok(false),
+            Err(AdmissionRejection::GlobalCap) => {
+                return Ok(SpawnOutcome::Deferred(SpawnDeferral::GlobalCap));
+            }
+            Err(AdmissionRejection::PerKeyCap) => {
+                return Ok(SpawnOutcome::Deferred(SpawnDeferral::PerKeyCap));
+            }
+            Err(AdmissionRejection::CpuSaturated) => {
+                return Ok(SpawnOutcome::Deferred(SpawnDeferral::CpuSaturated));
+            }
+            Err(AdmissionRejection::MemoryConstrained) => {
+                return Ok(SpawnOutcome::Deferred(SpawnDeferral::MemoryConstrained));
+            }
         };
-        // The claimed slot is counted in `total` from here until the worker
-        // is in the idle queue (or the claim is released): a spawn can take
-        // as long as a model load, and it must not look like a lost worker.
-        let _spawning = super::AwayFromQueue::new(group, 1);
-
+        // Reservation owns group/global counts and queue absence through every
+        // await and fallible preparation edge. Publication consumes it.
         let _bootstrap_guard = group.bootstrap.lock().await;
 
-        // Slot claimed -- now spawn. If spawn fails, release the slot.
-        // The permit guard stays in scope across the spawn await: on
-        // Ok we hand the permit's lifetime over to the worker (via
-        // `guard.forget()`); on Err the guard drops at function exit
-        // and refunds the permit alongside the per-key fetch_sub.
         match self
             .spawn_runtime
-            .spawn_worker(
+            .spawn_reserved_worker(
                 self.worker_config(key)?,
                 idle_eviction::IdleWorkers(self.groups.clone()),
+                guard,
             )
             .await
         {
             Ok(mut handle) => {
-                if let Err(error) = self.admit_worker_runtime(&handle) {
-                    group.total.fetch_sub(1, Ordering::Relaxed);
-                    return Err(error);
-                }
+                self.admit_worker_runtime(&handle)?;
                 // Lazily detect capabilities from the first spawned worker.
                 // This is a single IPC round-trip on an already-running worker.
                 if self.first_admitted_capabilities.get().is_none() {
                     match self.detect_capabilities_from_worker(key, &mut handle).await {
                         Ok(()) => {}
-                        // A refused report means this worker is not used, so
-                        // it is not pooled: its slot is released here (the
-                        // permit guard refunds on return) and `handle` drops,
-                        // which terminates the process.
+                        // A refused report drops the actual reservation and
+                        // handle, releasing capacity and terminating the process.
                         Err(super::CapabilityProbeFailure::Refused(refusal)) => {
-                            group.total.fetch_sub(1, Ordering::Relaxed);
                             return Err(refusal.into());
                         }
                         Err(super::CapabilityProbeFailure::Unanswered(error)) => {
@@ -397,20 +378,11 @@ impl WorkerPool {
                         }
                     }
                 }
-                // Don't use a separate push_spawned (which would double-increment
-                // total). We already incremented via compare_exchange.
-                super::lock_recovered(&group.idle).push_back(handle);
-                group.available.add_permits(1);
-                // Worker is officially counted; transfer permit
-                // ownership to the worker's lifetime. The matching
-                // release happens at the worker's exit point
-                // (eviction, reaper, take(), shutdown drain).
-                guard.forget();
-                Ok(true)
+                handle.publish();
+                Ok(SpawnOutcome::Published)
             }
             Err(e) => {
-                group.total.fetch_sub(1, Ordering::Relaxed);
-                // guard drops here at function exit, refunding the permit.
+                // The original reservation drops on this failure.
                 if matches!(e, WorkerError::MemoryGuard(_)) {
                     self.rejection_counters
                         .record(WorkerRejectionKind::MemoryGuard);
@@ -626,7 +598,7 @@ pub(super) async fn run_health_check(
     observed_worker_runtimes: &crate::worker::runtime_identity::ObservedWorkerRuntimes,
     spawn_runtime: &PoolSpawnRuntime,
 ) {
-    pressure_evict_idle_workers_if_needed(groups_ref, pool_config.runtime.host.readings()).await;
+    pressure_evict_idle_workers_if_needed(groups_ref, &pool_config.runtime.host).await;
 
     // Snapshot group Arcs so we don't hold the groups lock across awaits.
     let group_snapshot: Vec<(WorkerKey, Arc<WorkerGroup>)> = {
@@ -635,18 +607,10 @@ pub(super) async fn run_health_check(
     };
 
     for (key, group) in &group_snapshot {
-        // Drain the idle queue for health checking.
-        let workers_to_check: Vec<WorkerHandle> =
-            { super::lock_recovered(&group.idle).drain(..).collect() };
-        // Drained workers are still counted in `total` while they are
-        // checked; the guard accounts for them until the survivors are back.
-        let checking = super::AwayFromQueue::new(group, workers_to_check.len());
-        // We drained idle workers. Their permits are already consumed
-        // (no one can acquire them). We'll re-add permits for healthy ones.
+        let workers_to_check = group.drain_stdio();
 
         let mut to_return = Vec::new();
         let mut restart_count = 0usize;
-        let mut removed_count = 0usize;
 
         for mut worker in workers_to_check {
             // Check if process is alive
@@ -658,7 +622,6 @@ pub(super) async fn run_health_check(
                     pid = %worker.pid(),
                     "Worker process died, scheduling restart"
                 );
-                removed_count += 1;
                 restart_count += 1;
                 // worker dropped here (SIGTERM+SIGKILL via WorkerHandle::Drop)
                 continue;
@@ -678,24 +641,14 @@ pub(super) async fn run_health_check(
                         error = %e,
                         "Health check failed, scheduling restart"
                     );
-                    removed_count += 1;
                     restart_count += 1;
                 }
             }
         }
 
-        // Return healthy workers
-        {
-            let returned = to_return.len();
-            let mut idle = super::lock_recovered(&group.idle);
-            for w in to_return {
-                idle.push_back(w);
-            }
-            group.available.add_permits(returned);
+        for worker in to_return {
+            worker.return_idle();
         }
-
-        group.record_worker_removed(removed_count);
-        drop(checking);
 
         // Restart failed workers
         for _ in 0..restart_count {
@@ -703,17 +656,12 @@ pub(super) async fn run_health_check(
             // every permit has been grabbed by concurrent admissions
             // since the reaper refunded them, skip, a future
             // admission will spawn this worker on demand.
-            let Some(restart_guard) =
-                super::permit::SpawnPermitGuard::try_acquire_or_skip(&group.spawn_permits, || {
-                    warn!(
-                        target = %key.target.label(),
-                        lang = %key.language,
-                        engine_selection = %key.engine_selection,
-                        "Skipping reaper restart: global cap reached"
-                    );
-                })
-            else {
-                continue;
+            let restart_guard = match ReservedWorkerSlot::try_adopt(group) {
+                Ok(reservation) => reservation,
+                Err(_) => {
+                    warn!(target = %key.target.label(), "Skipping worker restart: global cap reached");
+                    continue;
+                }
             };
 
             info!(
@@ -742,7 +690,11 @@ pub(super) async fn run_health_check(
             };
 
             match spawn_runtime
-                .spawn_worker(config, idle_eviction::IdleWorkers(groups_ref.clone()))
+                .spawn_reserved_worker(
+                    config,
+                    idle_eviction::IdleWorkers(groups_ref.clone()),
+                    restart_guard,
+                )
                 .await
             {
                 Ok(handle) => {
@@ -756,12 +708,7 @@ pub(super) async fn run_health_check(
                         continue;
                     }
                     let pid = handle.pid();
-                    group.total.fetch_add(1, Ordering::Relaxed);
-                    super::lock_recovered(&group.idle).push_back(handle);
-                    group.available.add_permits(1);
-                    // Worker is officially counted; transfer permit
-                    // lifetime to the worker's exit paths.
-                    restart_guard.forget();
+                    handle.publish();
                     info!(
                         target = %key.target.label(),
                         lang = %key.language,
@@ -771,7 +718,7 @@ pub(super) async fn run_health_check(
                     );
                 }
                 Err(e) => {
-                    // restart_guard drops here, refunding the permit.
+                    // The original replacement reservation drops here.
                     error!(
                         target = %key.target.label(),
                         lang = %key.language,
@@ -787,7 +734,7 @@ pub(super) async fn run_health_check(
     // Clean up empty groups
     {
         let mut groups = super::lock_recovered(groups_ref);
-        groups.retain(|_, g| g.total.load(Ordering::Relaxed) > 0);
+        groups.retain(|_, g| g.total.count() > 0);
     }
 }
 
@@ -797,8 +744,8 @@ pub(super) async fn run_health_check(
 /// `rss_observer` uses for admission, picks victims via
 /// [`idle_eviction::select_pressure_evictions`] (largest-RSS first),
 /// and shuts them down with the same teardown sequence the
-/// time-based eviction loop uses (`shutdown_in_place` →
-/// `group.total.fetch_sub` → `SpawnPermitGuard::release_n`).
+/// time-based eviction loop uses. The original worker slot releases capacity
+/// when its owned handle is retired.
 ///
 /// Workers that were idle at snapshot time but checked out before
 /// the eviction commits are silently skipped, that's not a bug,
@@ -807,24 +754,24 @@ pub(super) async fn run_health_check(
 /// pressure persists.
 async fn pressure_evict_idle_workers_if_needed(
     groups_ref: &GroupsMap,
-    readings: &crate::host_memory::HostReadings,
+    host: &crate::host_facts::RuntimeHost,
 ) {
     // Pressure is measured, never assumed: an unreadable host evicts nothing.
-    let available_mb = match readings.memory() {
+    let available_mb = match host.readings().memory() {
         Ok(memory) => memory.available_mb.0,
         Err(error) => {
             tracing::warn!(%error, "host memory unreadable; skipping pressure eviction");
             return;
         }
     };
-    if available_mb >= idle_eviction::EVICTION_PRESSURE_THRESHOLD_MB {
+    if available_mb >= idle_eviction::pressure_threshold(host) {
         return;
     }
     let samples = idle_eviction::snapshot_idle_workers_with_rss(groups_ref);
     let to_evict = idle_eviction::select_pressure_evictions(
         samples,
         available_mb,
-        idle_eviction::EVICTION_PRESSURE_THRESHOLD_MB,
+        idle_eviction::pressure_threshold(host),
     );
     if to_evict.is_empty() {
         return;
@@ -832,22 +779,25 @@ async fn pressure_evict_idle_workers_if_needed(
 
     info!(
         available_mb,
-        threshold_mb = idle_eviction::EVICTION_PRESSURE_THRESHOLD_MB,
+        threshold_mb = idle_eviction::pressure_threshold(host),
         evict_count = to_evict.len(),
         "Memory pressure detected, evicting idle workers (largest-RSS first)"
     );
 
     for sample in to_evict {
-        if !idle_eviction::retire_sampled(&sample).await {
+        let pid = sample.item().pid();
+        let rss_mb = sample.rss_mb();
+        let key = sample.item().key.clone();
+        if !idle_eviction::retire_sampled(sample).await {
             // Checked out since the snapshot: left for the next round if
             // pressure persists.
             continue;
         }
         info!(
-            pid = %sample.pid,
-            rss_mb = sample.rss_mb,
-            target = %sample.key.target.label(),
-            lang = %sample.key.language,
+            pid = %pid,
+            rss_mb = rss_mb,
+            target = %key.target.label(),
+            lang = %key.language,
             "Evicted idle worker for memory pressure"
         );
     }
@@ -855,41 +805,112 @@ async fn pressure_evict_idle_workers_if_needed(
 
 #[cfg(test)]
 mod saturation_log_tests {
-    use super::should_log_saturation;
-
-    /// A 30-minute saturation window in development captured 664,937
-    /// rejection events (BUG-028). With logarithmic gating, the same
-    /// window emits at most one WARN per power of two, about 20
-    /// events, not 664k. This test pins the schedule.
+    /// Guards: saturation logging emits at powers of two across short and
+    /// high-volume runs, bounding repeated rejection reports logarithmically.
+    /// Kind: policy
+    /// Not a type: selecting a logarithmic notice schedule is a semantic logging
+    /// policy even when capacity and rejection ownership are statically bound.
+    /// State: integer observations require no pool, timer, filesystem or process.
+    /// Concurrency: none
     #[test]
-    fn logs_at_one_two_four_and_powers_of_two() {
-        for &n in &[1u64, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1_048_576] {
-            assert!(
-                should_log_saturation(n),
-                "should log at power-of-two rejection count {n}"
-            );
+    fn saturation_notices_follow_the_logarithmic_policy() {
+        for (count, expected) in [
+            (0, false),
+            (1, true),
+            (2, true),
+            (3, false),
+            (4, true),
+            (5, false),
+            (8, true),
+            (15, false),
+            (16, true),
+            (999, false),
+            (1_048_576, true),
+            (664_937, false),
+        ] {
+            assert_eq!(super::should_log_saturation(count), expected);
         }
     }
+}
 
-    #[test]
-    fn does_not_log_at_non_power_of_two_counts() {
-        for &n in &[3u64, 5, 6, 7, 9, 15, 17, 100, 999, 664_937] {
-            assert!(
-                !should_log_saturation(n),
-                "must not log at non-power-of-two rejection count {n}"
-            );
-        }
+#[cfg(test)]
+mod bootstrap_cancellation_contract {
+    use super::*;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    /// Guards: Cancelling an admitted spawn while it waits for bootstrap restores the original global and group capacity with zero launched workers.
+    /// Kind: contract
+    /// Not a type: A private slot owner can prevent forged refunds and duplicate publication. Its actual future drop must still release the shared semaphore and atomic observations at this cancellation point.
+    /// State: An isolated pool uses the declared test host and a held bootstrap mutex. The native future is polled once while spawning remains blocked, so this claim needs no process, model, socket or inference server.
+    /// Concurrency: One current-thread runtime owns the pool and lock. A noop waker and explicit Pending observation establish the cut without a sleep or background task.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_before_bootstrap_restores_both_capacity_owners() {
+        let pool = WorkerPool::new(super::super::PoolConfig {
+            max_total_workers: 4,
+            max_workers_per_key: crate::host_facts::PerProfile::uniform(4),
+            ..super::super::PoolConfig::for_tests()
+        });
+        let key = WorkerKey::without_engine_selection(
+            crate::worker::WorkerTarget::infer_task(crate::worker::InferTask::Morphosyntax),
+            crate::api::WorkerLanguage::from(crate::api::LanguageCode3::eng()),
+        );
+        let group = pool.get_or_create_group(&key);
+        let _bootstrap = group.bootstrap.lock().await;
+        let permits_before = pool.spawn_permits.available_permits();
+        let mut spawning = Box::pin(pool.try_spawn_into_group(&group, &key));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(spawning.as_mut().poll(&mut context).is_pending());
+        assert_eq!(group.total.count(), 1);
+        assert_eq!(pool.spawn_permits.available_permits(), permits_before - 1);
+        drop(spawning);
+        assert_eq!(pool.spawn_permits.available_permits(), permits_before);
+        assert_eq!(group.total.count(), 0);
+        assert!(group.idle.view().is_empty());
     }
+}
 
-    /// Across a high-volume saturation window, the logarithmic gate
-    /// emits a logarithmic number of events. For any cap N in
-    /// `[2^k, 2^(k+1))` the count is exactly `k + 1` (powers of two
-    /// from 2^0 through 2^k).
-    #[test]
-    fn high_volume_window_collapses_to_log2_events() {
-        let cap: u64 = 1_000_000;
-        let emitted: u64 = (1..=cap).filter(|&n| should_log_saturation(n)).count() as u64;
-        // 2^19 = 524,288 ≤ 1_000_000 < 2^20 = 1,048,576.
-        assert_eq!(emitted, 20);
+#[cfg(test)]
+mod health_cancellation_contract {
+    use super::*;
+    use crate::worker::handle::WorkerHandle;
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    /// Guards: Health checking consumes the queued worker's availability, and cancelling the check releases its actual worker and capacity owner.
+    /// Kind: contract
+    /// Not a type: The slot owns counts through the health future. The actual queue/semaphore handoff and an unread real worker pipe must still agree at cancellation, so later checkout cannot observe a phantom availability permit.
+    /// State: One isolated pool uses the declared test host and an owned shell worker with real ready bytes and no health reply. The real pipe establishes a pending health exchange. No model or inference server is used.
+    /// Concurrency: The stub reports its real shell PID. One explicit poll establishes Pending without sleeps. Dropping the native future retires its worker. The child handle owns teardown.
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_cancellation_releases_owned_worker_and_availability() {
+        let pool = WorkerPool::new(super::super::PoolConfig::for_tests());
+        let key = WorkerKey::without_engine_selection(
+            crate::worker::WorkerTarget::infer_task(crate::worker::InferTask::Morphosyntax),
+            crate::api::WorkerLanguage::from(crate::api::LanguageCode3::eng()),
+        );
+        let group = pool.get_or_create_group(&key);
+        let permits_before = pool.spawn_permits.available_permits();
+        let reservation = pool
+            .try_claim_spawn_slot(&group)
+            .expect("admit actual stub worker");
+        let script =
+            super::super::checkout::tests::never_responds_script().replace("424242", "'\"$$\"'");
+        let mut handle = WorkerHandle::spawn_stub_for_test(&script).await;
+        assert!(handle.is_alive());
+        reservation.publish_stdio(handle);
+        assert_eq!(group.idle.view().len(), 1);
+        let mut checking = Box::pin(run_health_check(
+            &pool.groups,
+            &pool.config,
+            &pool.observed_worker_runtimes,
+            &pool.spawn_runtime,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(checking.as_mut().poll(&mut context).is_pending());
+        assert!(group.idle.view().is_empty());
+        drop(checking);
+        assert_eq!(group.total.count(), 0);
+        assert_eq!(pool.spawn_permits.available_permits(), permits_before);
     }
 }

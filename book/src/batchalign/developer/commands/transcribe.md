@@ -238,7 +238,7 @@ CHAT assembly**:
   there is no pre-CHAT Stanza segmenter, so an authorized fallback segments
   only after CHAT is built
 - A language with no route at all cannot reach this function. For a resolved
-  `--lang`, `TranscribeDispatchPlan::from_job` refuses the job before ASR is
+  `--lang`, `TranscribeDispatchPlan::from_request` refuses the job before ASR is
   dispatched (`DispatchPlanRefusal::UtsegUnavailable`). Under `--lang auto` the
   language is unknown until ASR returns, so the same route resolution refuses
   here instead, which is as early as it can be known

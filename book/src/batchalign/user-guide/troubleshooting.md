@@ -219,6 +219,19 @@ The server auto-detects a memory tier from total RAM (Small &lt;24 GB,
 Medium 24-48 GB, Large 48-128 GB, Fleet &gt;128 GB). Use `memory_tier`
 to override. See [Worker Tuning](worker-tuning.md) for details.
 
+## A file fails media preflight
+
+For recordings read in place, preflight checks current filesystem metadata
+and the recognized filename suffix. `File not found` means the metadata read
+reported a missing source. `Cannot inspect media file` includes the underlying
+filesystem error, such as denied read access. Check that the server account
+can read the named path. `File is empty`, an unknown format or an absent
+extension requires correcting that input before retrying.
+
+The job detail records each rejected file as a failed setup attempt. Accepted
+files continue in their original input order. Later decoding can report a
+container or codec error after preflight has accepted the path and suffix.
+
 ## "Cannot find audio file" or "Media conversion failed"
 
 **Cannot find audio file:** The server could not locate a media file

@@ -28,35 +28,18 @@ pub(crate) use file_status::{
 
 #[cfg(test)]
 pub(super) use media::apply_result_filename;
+pub(super) use media::compute_audio_identity;
 pub(crate) use media::probe_audio_duration;
-pub(super) use media::{compute_audio_identity, preflight_validate_media};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
-    use crate::api::{DisplayPath, NumWorkers, ReleasedCommand};
+    use crate::api::{NumWorkers, ReleasedCommand};
     use crate::config::ServerConfig;
     use crate::error::{MissingForcedAlignmentEvidence, MissingRequiredEvidence, ServerError};
-    use crate::host_facts::EffectiveConfig;
-    use crate::runtime;
-
-    /// The [`EffectiveConfig`] `config` resolves to on the declared test host
-    /// ([`crate::host_facts::HostSnapshot::for_tests`]), so no assertion
-    /// depends on the machine running it.
-    fn effective_for_test(config: &ServerConfig) -> EffectiveConfig {
-        crate::host_facts::HostSnapshot::for_tests(config)
-            .effective()
-            .clone()
-    }
-
-    /// The tier `config` resolves to on the declared test host.
-    fn tier_for_test(config: &ServerConfig) -> crate::types::runtime::MemoryTier {
-        crate::host_facts::HostSnapshot::for_tests(config).tier()
-    }
     use crate::scheduling::FailureCategory;
-    use crate::store::PendingJobFile;
     use crate::worker::error::WorkerError;
 
     #[tokio::test]
@@ -106,187 +89,99 @@ mod tests {
         );
     }
 
+    /// Guards: File, CPU, operator, GPU and tier ceilings are resolved from the declared host even when the running machine has other resources.
+    /// Kind: policy
+    /// Not a type: HostSnapshot binds the facts together, while the chosen numerical allocation among valid policy alternatives requires checking the resulting worker counts.
+    /// State: None. Each row resolves the standard declared laptop with explicit policy overrides. No ledger lease or host observation is taken.
+    /// Concurrency: None. Snapshots and configuration values are owned by each row.
     #[test]
-    fn compute_workers_single_file() {
-        let config = ServerConfig::default();
-        let effective = effective_for_test(&config);
-        assert_eq!(
-            compute_job_workers(
+    fn worker_planning_uses_one_declared_host() {
+        use crate::types::runtime::MemoryTierKind;
+        let base = ServerConfig {
+            max_workers_per_job: Some(64),
+            memory_tier: Some(MemoryTierKind::Fleet),
+            force_cpu: Some(true),
+            ..Default::default()
+        };
+        let cases = [
+            (ReleasedCommand::Morphotag, 1, base.clone(), 1),
+            (ReleasedCommand::Morphotag, 2, base.clone(), 2),
+            (ReleasedCommand::Morphotag, 40, base.clone(), 4),
+            (
                 ReleasedCommand::Morphotag,
-                1,
-                &effective,
-                tier_for_test(&config)
+                40,
+                ServerConfig {
+                    max_workers_per_job: Some(3),
+                    ..base.clone()
+                },
+                3,
             ),
-            NumWorkers(1)
-        );
-    }
-
-    #[test]
-    fn compute_workers_explicit_config() {
-        // The explicit cap is a CEILING. `compute_job_workers` also
-        // clamps by `available_parallelism()` and per-category caps,
-        // both of which are host-derived and shrink on small CI
-        // runners. The right invariant is `1 <= result <= explicit`
-        //, same shape as `compute_workers_auto_tune_caps_at_max`
-        // below. Asserting `==` overspecified and only worked on
-        // many-core dev machines.
-        let config = ServerConfig {
-            max_workers_per_job: Some(3),
-            ..Default::default()
-        };
-        let effective = effective_for_test(&config);
-        let result = compute_job_workers(
-            ReleasedCommand::Morphotag,
-            10,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert!(*result >= 1 && *result <= 3, "got {result:?}");
-    }
-
-    #[test]
-    fn compute_workers_explicit_caps_at_file_count() {
-        // Same reasoning as `compute_workers_explicit_config`:
-        // ceiling, not equality. The intent is "explicit cap of 8 is
-        // honored AND further clamped to file count of 2".
-        let config = ServerConfig {
-            max_workers_per_job: Some(8),
-            ..Default::default()
-        };
-        let effective = effective_for_test(&config);
-        let result = compute_job_workers(
-            ReleasedCommand::Morphotag,
-            2,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert!(*result >= 1 && *result <= 2, "got {result:?}");
-    }
-
-    #[test]
-    fn compute_workers_auto_tune_caps_at_max() {
-        let config = ServerConfig::default();
-        let effective = effective_for_test(&config);
-        // Auto-tune should never exceed runtime::max_thread_workers()
-        let result = compute_job_workers(
-            ReleasedCommand::Opensmile,
-            100,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert!(*result <= runtime::max_thread_workers());
-        assert!(*result >= 1);
-    }
-
-    #[test]
-    fn compute_workers_gpu_commands_use_thread_pool_cap() {
-        let config = ServerConfig {
-            gpu_thread_pool_size: Some(2),
-            ..Default::default()
-        };
-        let effective = effective_for_test(&config);
-        let result = compute_job_workers(
-            ReleasedCommand::Transcribe,
-            47,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert!(
-            *result <= 2,
-            "GPU worker count must respect gpu_thread_pool_size, got {result}"
-        );
-    }
-
-    #[test]
-    fn compute_workers_force_cpu_treats_gpu_commands_as_cpu_bound() {
-        // When the host runs with `force_cpu=true` (Apple Silicon with
-        // MPS excluded, hosts without CUDA, operator-set CPU mode),
-        // GPU-tagged commands like Transcribe execute on CPU workers.
-        // There is no shared GPU model to contend on, so
-        // `gpu_thread_pool_size` must NOT clamp the worker count. The
-        // integration test `tests/serve_start_workers_persisted.rs` pins
-        // the same invariant at the CLI subprocess seam; this unit test
-        // guards it at the planner level.
-        //
-        // The absolute worker count is host-derived (`compute_job_workers`
-        // clamps by `available_parallelism()` and the resolved memory
-        // tier, both small on CI runners), so asserting `>= 2` baked in a
-        // many-core dev-box assumption that fails on a small runner.
-        // Assert the host-INDEPENDENT invariant instead: under force_cpu,
-        // `gpu_thread_pool_size` has no effect at all. With the force_cpu
-        // guard removed, a GPU command with a tiny pool would clamp to the
-        // pool size while a large pool would not, so the two results would
-        // diverge; this equality catches that regression on any core count.
-        let small_pool = ServerConfig {
-            max_workers_per_job: Some(4),
-            gpu_thread_pool_size: Some(1),
-            force_cpu: Some(true),
-            ..Default::default()
-        };
-        let large_pool = ServerConfig {
-            max_workers_per_job: Some(4),
-            gpu_thread_pool_size: Some(64),
-            force_cpu: Some(true),
-            ..Default::default()
-        };
-        let small = compute_job_workers(
-            ReleasedCommand::Transcribe,
-            6,
-            &effective_for_test(&small_pool),
-            tier_for_test(&small_pool),
-        );
-        let large = compute_job_workers(
-            ReleasedCommand::Transcribe,
-            6,
-            &effective_for_test(&large_pool),
-            tier_for_test(&large_pool),
-        );
-        assert_eq!(
-            small, large,
-            "under force_cpu, gpu_thread_pool_size must not affect the worker \
-             count (gpu_pool=1 gave {small:?}, gpu_pool=64 gave {large:?})"
-        );
-    }
-
-    #[test]
-    fn compute_workers_gpu_commands_respect_medium_tier_cap() {
-        let config = ServerConfig {
-            memory_tier: Some(crate::types::runtime::MemoryTierKind::Medium),
-            gpu_thread_pool_size: Some(4),
-            ..Default::default()
-        };
-        let effective = effective_for_test(&config);
-        let result = compute_job_workers(
-            ReleasedCommand::Align,
-            7,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert_eq!(
-            result,
-            NumWorkers(1),
-            "Medium tier GPU jobs should not exceed the tier worker cap (1 for LazyProfile)"
-        );
-    }
-
-    #[test]
-    fn compute_workers_cpu_commands_respect_medium_tier_cap() {
-        let config = ServerConfig {
-            memory_tier: Some(crate::types::runtime::MemoryTierKind::Medium),
-            ..Default::default()
-        };
-        let effective = effective_for_test(&config);
-        let result = compute_job_workers(
-            ReleasedCommand::Opensmile,
-            100,
-            &effective,
-            tier_for_test(&config),
-        );
-        assert_eq!(
-            result,
-            NumWorkers(1),
-            "Medium tier auto-tune should not exceed the tier worker cap (1 for LazyProfile)"
-        );
+            (
+                ReleasedCommand::Transcribe,
+                40,
+                ServerConfig {
+                    force_cpu: Some(false),
+                    gpu_thread_pool_size: Some(2),
+                    ..base.clone()
+                },
+                2,
+            ),
+            (
+                ReleasedCommand::Transcribe,
+                40,
+                ServerConfig {
+                    force_cpu: Some(false),
+                    gpu_thread_pool_size: Some(1),
+                    ..base.clone()
+                },
+                1,
+            ),
+            (
+                ReleasedCommand::Transcribe,
+                40,
+                ServerConfig {
+                    gpu_thread_pool_size: Some(1),
+                    ..base.clone()
+                },
+                4,
+            ),
+            (
+                ReleasedCommand::Transcribe,
+                40,
+                ServerConfig {
+                    gpu_thread_pool_size: Some(64),
+                    ..base.clone()
+                },
+                4,
+            ),
+            (
+                ReleasedCommand::Opensmile,
+                40,
+                ServerConfig {
+                    memory_tier: Some(MemoryTierKind::Medium),
+                    ..base.clone()
+                },
+                1,
+            ),
+            (
+                ReleasedCommand::Align,
+                40,
+                ServerConfig {
+                    memory_tier: Some(MemoryTierKind::Medium),
+                    force_cpu: Some(false),
+                    ..base
+                },
+                1,
+            ),
+        ];
+        for (command, files, config, expected) in cases {
+            let host = crate::host_facts::HostSnapshot::for_tests(&config);
+            assert_eq!(
+                compute_job_workers(command, files, &host),
+                NumWorkers(expected),
+                "{command} with {files} files and {config:?}"
+            );
+        }
     }
 
     #[test]
@@ -480,142 +375,6 @@ mod tests {
             "should include stderr detail: {msg}"
         );
         assert!(msg.contains("test.cha"), "should include filename: {msg}");
-    }
-
-    /// One pending file, from inputs built the way a job's are: a transcript
-    /// or recording named `display`, read in place from `source` (paths mode)
-    /// or staged.
-    fn media_pending(
-        display: DisplayPath,
-        chat: bool,
-        paths_mode: bool,
-        source: batchalign_types::paths::ClientPath,
-    ) -> Vec<PendingJobFile> {
-        crate::store::test_support::pending_files(&crate::store::test_support::inputs_from_parts(
-            vec![display],
-            vec![chat],
-            paths_mode,
-            vec![source],
-            vec![batchalign_types::paths::ClientPath::new("/tmp/out.cha")],
-            vec![],
-        ))
-    }
-
-    #[tokio::test]
-    async fn media_validate_not_paths_mode() {
-        let file_list = media_pending(
-            DisplayPath::from("audio.wav"),
-            false,
-            false,
-            batchalign_types::paths::ClientPath::new("/nonexistent/audio.wav"),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert!(
-            failures.is_empty(),
-            "Should skip validation when not paths_mode"
-        );
-    }
-
-    #[tokio::test]
-    async fn media_validate_skips_chat_files() {
-        let file_list = media_pending(
-            DisplayPath::from("test.cha"),
-            true,
-            true,
-            batchalign_types::paths::ClientPath::new("/nonexistent/test.cha"),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert!(failures.is_empty(), "Should skip CHAT files");
-    }
-
-    #[tokio::test]
-    async fn media_validate_missing_file() {
-        let file_list = media_pending(
-            DisplayPath::from("missing.wav"),
-            false,
-            true,
-            batchalign_types::paths::ClientPath::new("/nonexistent/path/missing.wav"),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert_eq!(failures.len(), 1);
-        assert!(failures[&0].contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn media_validate_empty_file() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        // File is empty (0 bytes)
-        let path = tmp.path().to_string_lossy().to_string();
-        // Rename to .wav for extension check
-        let wav_path = format!("{path}.wav");
-        std::fs::rename(&path, &wav_path).unwrap();
-        let file_list = media_pending(
-            DisplayPath::from("test.wav"),
-            false,
-            true,
-            batchalign_types::paths::ClientPath::new(&wav_path),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert_eq!(failures.len(), 1);
-        assert!(failures[&0].contains("empty"));
-        let _ = std::fs::remove_file(&wav_path);
-    }
-
-    #[tokio::test]
-    async fn media_validate_unknown_extension() {
-        let mut tmp = tempfile::NamedTempFile::with_suffix(".xyz").unwrap();
-        std::io::Write::write_all(&mut tmp, b"data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-        let file_list = media_pending(
-            DisplayPath::from("test.xyz"),
-            false,
-            true,
-            batchalign_types::paths::ClientPath::new(&path),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert_eq!(failures.len(), 1);
-        assert!(failures[&0].contains("Unknown media format"));
-    }
-
-    #[tokio::test]
-    async fn media_validate_valid_file() {
-        let mut tmp = tempfile::NamedTempFile::with_suffix(".wav").unwrap();
-        std::io::Write::write_all(&mut tmp, b"RIFF....").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-        let file_list = media_pending(
-            DisplayPath::from("test.wav"),
-            false,
-            true,
-            batchalign_types::paths::ClientPath::new(&path),
-        );
-        let failures = preflight_validate_media(&file_list).await;
-        assert!(failures.is_empty(), "Valid .wav file should pass");
-    }
-
-    #[tokio::test]
-    async fn media_validate_all_known_extensions() {
-        // Enumerated through the same verb production uses, so a format added
-        // to `MediaExtensions` is covered here without anyone remembering to
-        // widen a second list. That was the previous arrangement, and the two
-        // lists it created disagreed by two formats.
-        for name in crate::media::MediaExtensions::candidates("test") {
-            let extension = Path::new(&name)
-                .extension()
-                .expect("candidates always carry one")
-                .to_string_lossy()
-                .to_string();
-            let mut tmp = tempfile::NamedTempFile::with_suffix(format!(".{extension}")).unwrap();
-            std::io::Write::write_all(&mut tmp, b"data").unwrap();
-            let path = tmp.path().to_string_lossy().to_string();
-            let file_list = media_pending(
-                DisplayPath::from(name.clone()),
-                false,
-                true,
-                batchalign_types::paths::ClientPath::new(&path),
-            );
-            let failures = preflight_validate_media(&file_list).await;
-            assert!(failures.is_empty(), "{name} should be accepted");
-        }
     }
 
     /// Verifies media_roots fallback: audio not alongside cha or in source_dir,

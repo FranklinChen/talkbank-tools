@@ -308,7 +308,7 @@ impl CommonOpts {
                 // Compare has no `--lang`. Its internal morphotag of each main
                 // transcript resolves the language per file from `@Languages:`,
                 // exactly as `morphotag` does; the job-level code it used to
-                // carry reached `WorkerGateway::morphotag_for_compare` and was
+                // carry reached `CompareMorphology::morphotag_for_compare` and was
                 // discarded there, so it only labelled the job record.
                 lang: LanguageSpec::PerFile,
                 num_speakers: 1,

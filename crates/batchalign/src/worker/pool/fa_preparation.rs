@@ -95,6 +95,7 @@ impl BoundFaPreparation {
         ReadyRequest {
             request,
             memory: RequestMemory::ForcedAlignment(memory),
+            load: self.candidate.load,
         }
     }
 }
@@ -105,6 +106,7 @@ impl BoundFaPreparation {
 pub struct ReadyRequest {
     request: ExecuteRequestV2,
     memory: RequestMemory,
+    load: super::TaskLoad,
 }
 
 #[derive(Debug)]
@@ -115,6 +117,10 @@ enum RequestMemory {
 }
 
 impl ReadyRequest {
+    pub(super) fn load(&self) -> &super::TaskLoad {
+        &self.load
+    }
+
     pub(super) fn request(&self) -> &ExecuteRequestV2 {
         &self.request
     }
@@ -139,6 +145,13 @@ impl DispatchPreparation {
         }
     }
 
+    pub(super) fn load(&self) -> &super::TaskLoad {
+        match self {
+            Self::Ready(ready) => ready.load(),
+            Self::ForcedAlignment(exchange) => &exchange.candidate.load,
+        }
+    }
+
     /// Preserve malformed task/payload pairs for native validation. An FA
     /// preparation exchange may reshape phases only of an actual FA request.
     pub fn begin(request: &ExecuteRequestV2) -> Result<Self, WorkerError> {
@@ -150,6 +163,7 @@ impl DispatchPreparation {
                     FaRequestPhaseV2::Candidate => {
                         let candidate = FaCandidate {
                             request_id: request.request_id.clone(),
+                            load: super::TaskLoad::for_request(request),
                             payload: payload.clone(),
                             attachments: request.attachments.clone(),
                         };
@@ -167,6 +181,7 @@ impl DispatchPreparation {
                     FaRequestPhaseV2::Prepare { .. } => Ok(Self::Ready(ReadyRequest {
                         request: request.clone(),
                         memory: RequestMemory::MetadataOnly,
+                        load: super::TaskLoad::for_request(request),
                     })),
                     FaRequestPhaseV2::Execute { .. } => Err(WorkerError::Protocol(
                         "FA execution requires a bound candidate, not a raw execution packet"
@@ -187,6 +202,7 @@ impl DispatchPreparation {
             | TaskRequestV2::Avqi(_) => Ok(Self::Ready(ReadyRequest {
                 request: request.clone(),
                 memory: RequestMemory::Ordinary,
+                load: super::TaskLoad::for_request(request),
             })),
         }
     }
@@ -202,6 +218,7 @@ pub struct FaPreparationExchange {
 #[derive(Debug)]
 struct FaCandidate {
     request_id: WorkerRequestIdV2,
+    load: super::TaskLoad,
     payload: ForcedAlignmentRequestV2,
     attachments: Vec<ArtifactRefV2>,
 }
@@ -225,6 +242,7 @@ impl FaPreparationExchange {
         ReadyRequest {
             request: self.query.clone(),
             memory: RequestMemory::MetadataOnly,
+            load: self.candidate.load.clone(),
         }
     }
 
@@ -306,7 +324,7 @@ impl super::WorkerPool {
             ));
         };
         let query = exchange.query();
-        let reply = self.dispatch_routed_v2(route, query.request()).await?;
+        let reply = self.dispatch_ready_routed(route, query).await?;
         match exchange.bind(reply)? {
             FaPreparationCompletion::Refused(reply) => Ok(FaProbeCompletion::Refused(reply)),
             FaPreparationCompletion::Ready(preparation) => {

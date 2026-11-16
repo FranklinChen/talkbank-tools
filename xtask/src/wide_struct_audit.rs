@@ -215,16 +215,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
                  should replace the independently supplied recording facts",
     },
     WideStructAllowance {
-        path: "crates/batchalign/src/worker/pool/mod.rs",
-        struct_name: "WorkerGroup",
-        max_fields: 11,
-        max_bool_fields: 0,
-        disposition: WideStructDisposition::RealAggregate,
-        reason: "one worker-key group owns idle transport queues, admission counts (total and \
-                 away, the guard-moved count a saturated wait reads), bootstrap serialization and \
-                 return notifications; synchronized shared state is not a pipeline stage bag",
-    },
-    WideStructAllowance {
         path: "crates/batchalign/src/chat_ops/speaker_identity/evidence.rs",
         struct_name: "SpeakerIdentityProvenance",
         max_fields: 14,

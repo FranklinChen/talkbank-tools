@@ -141,6 +141,21 @@ async fn process_one_media_analysis_file_v2(
         .begin_first_attempt(WorkUnitKind::FileInfer, FileStage::ResolvingAudio)
         .await;
 
+    let outputs = match crate::recipe_runner::runtime::SourceOutputs::plan(
+        &job.filesystem,
+        file,
+        job.dispatch.command,
+        &job.dispatch.options,
+    ) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            return lifecycle
+                .fail(&error.to_string(), FailureCategory::System)
+                .await
+                .into();
+        }
+    };
+
     let original_audio_path = file
         .input_path(&job.filesystem.staging_dir)
         .as_path()
@@ -230,16 +245,7 @@ async fn process_one_media_analysis_file_v2(
         match attempt.run().await {
             Ok(output) => {
                 lifecycle.stage(FileStage::Writing).await;
-                let written = match write_primary_output_artifact(
-                    &job.filesystem,
-                    job.dispatch.command,
-                    &job.dispatch.options,
-                    file.location(),
-                    filename,
-                    output,
-                )
-                .await
-                {
+                let written = match write_primary_output_artifact(outputs, output).await {
                     Ok(written) => written,
                     Err(error) => {
                         return lifecycle
@@ -248,7 +254,7 @@ async fn process_one_media_analysis_file_v2(
                             .into();
                     }
                 };
-                return written.record(&lifecycle).await.into();
+                return written.record(sink.as_ref()).await.into();
             }
             Err(DispatchFailure::Runtime(error)) => {
                 let category = classify_server_error(&error);

@@ -151,6 +151,12 @@ fine.
 
 ## Output format
 
+The provenance records the server build, scoring policy and embedding revision
+in the server binary's packaged model manifest. Dimension and minimum frame
+count come from the worker response. Schema 2 carries source names.
+Input-content hashes and invocation-bound worker runtime identity require
+separate evidence.
+
 For `session.cha`, `session_speaker_identity.json`:
 
 ```json

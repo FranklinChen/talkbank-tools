@@ -1,148 +1,36 @@
-use std::sync::Arc;
+//! Per-file segmentation uses the runner's admitted worker capacity.
 
-use tracing::Instrument;
-use tracing::warn;
-
-use crate::planning;
-use crate::runner::DispatchHostContext;
+use super::text_io::{PreparedTextJob, SegmentationText};
+use super::worker_gateway::UtsegGateway;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
-use crate::store::RunnerJobSnapshot;
 use crate::utseg_route::ServableUtsegRoute;
+use std::sync::Arc;
 
-use super::text_io::{load_text_inputs, write_text_results};
-use super::worker_gateway::WorkerGateway;
-
-/// Default cap on concurrent per-file utseg tasks when the server config
-/// does not set `max_workers_per_job`. Matches the FA pipeline default.
-const DEFAULT_UTSEG_FILE_PARALLELISM: usize = 4;
-
-/// Per-file utseg dispatch with bounded parallelism.
-///
-/// Replaces the prior "pool everything, batch through worker, write at
-/// end" pattern that was structurally fragile to any interruption, a
-/// daemon redeploy mid-batch could vaporize the entire run's work.
-/// Each file gets its own `gateway.utseg_batch` call with a single-file
-/// vec and writes its result to disk before joining; an interruption at
-/// any point loses at most the files currently in flight rather than
-/// the whole batch.
-///
-/// Bounded by `plan.kernel_plan.file_parallelism_hint` (clamped to ≥1)
-///, same heuristic as `fa_pipeline.rs`. On macOS without MPS the
-/// underlying BERT inference is single-thread CPU-bound so the cap
-/// effectively limits how many files share that single thread, but
-/// when worker pools grow or GPU comes back the same code scales
-/// without architectural change. The gateway is passed in as
-/// `Arc<dyn WorkerGateway>` so spawned tasks can each hold a clone.
 pub(crate) async fn dispatch_utseg_job(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    gateway: Arc<dyn WorkerGateway>,
+    files: PreparedTextJob<SegmentationText>,
+    gateway: Arc<dyn UtsegGateway>,
     route: &ServableUtsegRoute,
 ) -> Result<(), crate::error::ServerError> {
-    let plan = planning::build_job_plan(job).map_err(|error| {
-        crate::error::ServerError::Validation(format!("Utseg planning failed: {error}"))
-    })?;
-    let plan = Arc::new(plan);
-    let sink = host.sink().clone();
-
-    let inputs = load_text_inputs(job, host, false).await;
-    if inputs.file_texts.is_empty() {
-        return Ok(());
-    }
-
-    for file in &job.pending_files {
-        FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
-            .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Segmenting)
-            .await;
-    }
-
-    // Admission owns the language and fallback together. Execution cannot
-    // substitute either part or dispatch without a runnable route.
-
-    // Bounded-parallelism per-file dispatch. Same shape as
-    // `fa_pipeline.rs`: Semaphore caps the number of concurrent file
-    // tasks; each task takes its permit, calls the gateway with a
-    // single-file vec, writes the result, and releases the permit on
-    // drop. JoinSet collects task completions; we await each to
-    // surface panics if any.
-    //
-    // Parallelism limit derives from the server config's
-    // `max_workers_per_job` (defaulting to a small cap when unset),
-    // matching the convention used by FA. Single-thread BERT
-    // inference on macOS still bottlenecks at the worker process,
-    // but with multiple workers in the pool the cap effectively
-    // becomes the file-fan-out and gives real wall-clock benefit.
-    let file_parallelism = host
-        .config()
-        .max_workers_per_job
-        .map(|n| n.max(1) as usize)
-        .unwrap_or(DEFAULT_UTSEG_FILE_PARALLELISM);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(file_parallelism));
-    let mut joinset: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-
-    for file_input in inputs.file_texts {
-        if job.cancel_token.is_cancelled() {
-            break;
-        }
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => {
-                // Semaphore closed during shutdown, abandon further
-                // submissions but await tasks already spawned.
-                break;
-            }
-        };
-        let gateway_for_task = Arc::clone(&gateway);
-        let route = route.clone();
-        let host_for_task = host.clone();
-        let job_for_task = job.clone();
-        let plan_for_task = Arc::clone(&plan);
-        // This file's events (pipeline decisions above all) carry its file
-        // and job, as every supervised file task's do.
-        let file_span = crate::runner::current_file_span(&file_input.filename, "utseg");
-        joinset.spawn(crate::worker::pool::job_tracker::inherit_job(
+    let route = route.clone();
+    files
+        .run_files(move |file, _mode| {
+            let gateway = Arc::clone(&gateway);
+            let route = route.clone();
             async move {
-                let _permit = permit; // released on drop after the task completes
-                let single = vec![file_input];
-                // A saturated checkout shows on this file's progress.
+                FileRunTracker::new(file.host().sink().as_ref(), file.input().filename.as_ref())
+                    .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Segmenting)
+                    .await;
                 let results = crate::runner::util::observing_file_waits(
-                    host_for_task.sink(),
-                    single.iter().map(|file| file.filename.to_string()),
-                    gateway_for_task.utseg_batch(
-                        &single,
-                        &route,
-                        crate::infer_retry::Cancellation::Token(&job_for_task.cancel_token),
-                    ),
+                    file.host().sink(),
+                    [file.input().filename.to_string()],
+                    gateway.utseg_file(file.input(), &route, file.cancellation()),
                 )
                 .await;
-                write_text_results(
-                    &job_for_task,
-                    &host_for_task,
-                    &plan_for_task,
-                    results,
-                    "Utseg",
-                )
-                .await;
+                file.complete(results).await;
             }
-            .instrument(file_span),
-        ));
-    }
-
-    while let Some(join_result) = joinset.join_next().await {
-        if let Err(error) = join_result {
-            // A spawned file task panicked. write_text_results would
-            // normally surface per-file failures via the sink; a
-            // JoinError here means the task itself terminated
-            // abnormally before reaching the sink. Log so it's not
-            // silent.
-            warn!(
-                job_id = %job.identity.job_id,
-                error = %error,
-                "Utseg per-file task panicked"
-            );
-        }
-    }
+        })
+        .await;
     Ok(())
 }
 
@@ -152,7 +40,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    use crate::chat_ops::morphosyntax_ops::MwtDict;
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
@@ -161,98 +48,70 @@ mod tests {
         CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
         ReleasedCommand,
     };
-    use crate::execution::worker_gateway::MorphotagRuntimeOptions;
     use crate::options::{CommandOptions, CommonOptions, UtsegOptions};
     use crate::runner::DispatchHostContext;
+    use crate::store::RunnerJobSnapshot;
     use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
-    use crate::types::worker_v2::UtsegSegmenterV2;
     use crate::utseg_route::UtsegRoute;
 
-    #[derive(Default)]
     struct FakeUtsegGateway {
-        state: Mutex<FakeUtsegState>,
+        events: Mutex<Vec<SegmentationEvent>>,
+        started: tokio::sync::mpsc::UnboundedSender<()>,
+        release: tokio::sync::Semaphore,
     }
 
-    #[derive(Default)]
-    struct FakeUtsegState {
-        batch_calls: usize,
-        batch_sizes: Vec<usize>,
-        routes: Vec<ServableUtsegRoute>,
+    enum SegmentationEvent {
+        Started(ObservedSegmentation),
+        Finished,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ObservedSegmentation {
+        source: DisplayPath,
+        route: ServableUtsegRoute,
     }
 
     #[async_trait]
-    impl WorkerGateway for FakeUtsegGateway {
-        async fn morphotag_for_compare(
+    impl UtsegGateway for FakeUtsegGateway {
+        async fn utseg_file(
             &self,
-            _chat_text: &str,
-            _mwt: &MwtDict,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
-        {
-            unreachable!()
-        }
-
-        async fn morphotag_single(
-            &self,
-            _chat_text: &str,
-            _before_text: Option<&str>,
-            _options: MorphotagRuntimeOptions,
-            _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, crate::error::ServerError>
-        {
-            unreachable!()
-        }
-
-        async fn utseg_batch(
-            &self,
-            files: &[TextBatchFileInput],
+            file: &TextBatchFileInput,
             route: &ServableUtsegRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
-            let mut state = self.state.lock().unwrap();
-            state.batch_calls += 1;
-            state.batch_sizes.push(files.len());
-            state.routes.push(route.clone());
-            files
-                .iter()
-                .map(|file| {
-                    TextBatchFileResult::ok(
-                        file.filename.clone(),
-                        crate::pipeline::post_validate::PostValidated::for_test(
-                            file.chat_text.clone(),
-                            crate::api::ReleasedCommand::Utseg,
-                        ),
-                    )
-                })
-                .collect()
-        }
-
-        async fn translate_file(
-            &self,
-            _file: &TextBatchFileInput,
-            _route: &crate::translate::TranslationRoute,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
-            unreachable!()
-        }
-
-        async fn coref_batch(
-            &self,
-            _files: &[TextBatchFileInput],
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
-            unreachable!()
+            self.events
+                .lock()
+                .unwrap()
+                .push(SegmentationEvent::Started(ObservedSegmentation {
+                    source: file.filename.clone(),
+                    route: route.clone(),
+                }));
+            self.started.send(()).unwrap();
+            self.release.acquire().await.unwrap().forget();
+            self.events
+                .lock()
+                .unwrap()
+                .push(SegmentationEvent::Finished);
+            vec![TextBatchFileResult::ok(
+                file.filename.clone(),
+                crate::pipeline::post_validate::PostValidated::for_test(
+                    file.chat_text.clone(),
+                    crate::api::ReleasedCommand::Utseg,
+                ),
+            )]
         }
     }
 
-    fn utseg_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
+    const SOURCES: [&str; 6] = ["a.cha", "b.cha", "c.cha", "d.cha", "e.cha", "f.cha"];
+
+    fn utseg_snapshot(staging_dir: &std::path::Path, language: LanguageCode3) -> RunnerJobSnapshot {
         let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n\
 @ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I .\n@End\n";
         let input_dir = staging_dir.join("input");
         std::fs::create_dir_all(&input_dir).unwrap();
-        std::fs::write(input_dir.join("a.cha"), text).unwrap();
-        std::fs::write(input_dir.join("b.cha"), text).unwrap();
+        for name in SOURCES {
+            std::fs::write(input_dir.join(name), text).unwrap();
+        }
         crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: crate::store::RunnerJobIdentity {
                 job_id: JobId::from("job-utseg"),
@@ -260,7 +119,7 @@ mod tests {
             },
             dispatch: crate::store::RunnerDispatchConfig {
                 command: ReleasedCommand::Utseg,
-                lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+                lang: LanguageSpec::Resolved(language),
                 num_speakers: NumSpeakers(1),
                 options: CommandOptions::Utseg(UtsegOptions {
                     common: CommonOptions::default(),
@@ -270,13 +129,14 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: crate::store::RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("a.cha"), DisplayPath::from("b.cha")],
-                    vec![true, true],
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                inputs: crate::store::JobInputs::Content(
+                    SOURCES
+                        .into_iter()
+                        .map(|name| crate::store::ContentInput {
+                            display: name.into(),
+                            kind: crate::store::InputKind::Chat,
+                        })
+                        .collect(),
                 ),
                 staging_dir: batchalign_types::paths::ServerPath::new(
                     staging_dir.display().to_string(),
@@ -293,16 +153,7 @@ mod tests {
     }
 
     fn host() -> DispatchHostContext {
-        let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        DispatchHostContext::from_store(
-            Arc::new(crate::store::JobStore::for_tests(
-                crate::config::ServerConfig::default(),
-                None,
-                tx,
-                std::sync::Arc::new(crate::clock::SystemClock),
-            )),
-            &JobId::from("job-utseg"),
-        )
+        DispatchHostContext::for_test_effects()
     }
 
     /// A registry serving English and Spanish with every processor the
@@ -315,90 +166,89 @@ mod tests {
         ])
     }
 
-    fn route() -> ServableUtsegRoute {
-        UtsegRoute::resolve(
-            &LanguageCode3::eng(),
-            crate::params::UtsegFallbackPolicy::Refuse,
-        )
-        .expect("English boundary model")
-        .admit(&Ok(registry().shared()))
-        .expect("a boundary-model route needs no Stanza")
+    enum FallbackCase {
+        English,
+        Spanish,
     }
 
-    /// Per-file dispatch: each file produces its own gateway call, never
-    /// pooled across files. Two files → two gateway calls of size 1 each.
-    /// This is the property that gives utseg incremental writeback and
-    /// failure isolation.
-    #[tokio::test]
-    async fn utseg_dispatches_one_gateway_call_per_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let host = host();
-        let gateway = Arc::new(FakeUtsegGateway::default());
-        let job = utseg_snapshot(temp.path());
-
-        dispatch_utseg_job(
-            &job,
-            &host,
-            Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
-            &route(),
-        )
-        .await
-        .expect("utseg dispatch");
-
-        let state = gateway.state.lock().unwrap();
-        assert_eq!(state.batch_calls, 2, "one gateway call per file");
-        assert_eq!(state.routes, vec![route(); 2]);
-        // Each call carries exactly one file. With parallelism, the
-        // per-call payload is single-file regardless of order; sort the
-        // observed sizes for a stable assertion.
-        let mut sizes = state.batch_sizes.clone();
-        sizes.sort();
-        assert_eq!(sizes, vec![1, 1], "each call carries one file");
+    impl FallbackCase {
+        fn language(&self) -> LanguageCode3 {
+            match self {
+                Self::English => LanguageCode3::eng(),
+                Self::Spanish => LanguageCode3::spa(),
+            }
+        }
     }
 
+    /// Guards: Each source reaches segmentation once with its admitted route, and concurrent work follows grants of one and six files.
+    /// Kind: contract
+    /// Not a type: Consuming file owners exclude repeated preparation and completion. Actual gateway entry, source propagation, adaptive scheduling and persisted CHAT bytes remain asynchronous effects.
+    /// State: Six temporary CHAT files exercise real preparation and publication. A recording gateway holds inference at explicit events. The host snapshot is the standard declared laptop, with no memory lease or model spawn in this dispatcher contract.
+    /// Concurrency: Each case owns its directory, event mutex, channel and release semaphore. The controller waits for the granted initial wave before releasing it. A timeout is a deadlock watchdog.
     #[tokio::test]
     async fn utseg_admitted_fallback_reaches_each_gateway_call() {
-        for code in ["eng", "spa"] {
+        for (case, grant) in [(FallbackCase::English, 1), (FallbackCase::Spanish, 6)] {
             let temp = tempfile::tempdir().unwrap();
             let host = host();
-            let gateway = Arc::new(FakeUtsegGateway::default());
-            let mut job = utseg_snapshot(temp.path());
-            let language = LanguageCode3::try_new(code).unwrap();
-            job.dispatch.lang = LanguageSpec::Resolved(language.clone());
+            let (started, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+            let gateway = Arc::new(FakeUtsegGateway {
+                events: Mutex::new(Vec::new()),
+                started,
+                release: tokio::sync::Semaphore::new(0),
+            });
+            let language = case.language();
+            let job = utseg_snapshot(temp.path(), language.clone());
             let route =
                 UtsegRoute::resolve(&language, crate::params::UtsegFallbackPolicy::AllowStanza)
                     .expect("model or authorized fallback")
                     .admit(&Ok(registry().shared()))
-                    .expect("the registry serves the Stanza route");
-            dispatch_utseg_job(
-                &job,
-                &host,
-                Arc::clone(&gateway) as Arc<dyn WorkerGateway>,
-                &route,
-            )
-            .await
-            .expect("admitted route dispatched");
-            // English keeps its boundary model even under the opt-in;
-            // Spanish takes the authorized Stanza route. Each call carries
-            // the admitted route itself, segmenter and all.
-            let routes = gateway.state.lock().unwrap().routes.clone();
-            assert_eq!(routes, vec![route.clone(); 2]);
-            let expected = match code {
-                "eng" => UtsegSegmenterV2::BoundaryModel,
-                _ => UtsegSegmenterV2::StanzaConstituency,
-            };
-            assert!(routes.iter().all(|sent| sent.segmenter() == expected));
+                    .expect("registry serves the route");
+            let task_gateway = Arc::clone(&gateway);
+            let task_route = route.clone();
+            let task = tokio::spawn(async move {
+                dispatch_utseg_job(
+                    PreparedTextJob::for_test(job, host, crate::api::NumWorkers(grant)),
+                    task_gateway,
+                    &task_route,
+                )
+                .await
+            });
+            for _ in 0..grant {
+                tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+                    .await
+                    .expect("granted initial wave reaches the gateway")
+                    .expect("arrival");
+            }
+            gateway.release.add_permits(SOURCES.len());
+            task.await
+                .expect("joined file dispatch")
+                .expect("admitted dispatch");
+            let events = gateway.events.lock().unwrap();
+            let mut active = 0;
+            let mut peak = 0;
+            let mut requests = Vec::new();
+            for event in &*events {
+                match event {
+                    SegmentationEvent::Started(request) => {
+                        active += 1;
+                        peak = peak.max(active);
+                        requests.push(request);
+                    }
+                    SegmentationEvent::Finished => active -= 1,
+                }
+            }
+            assert_eq!(active, 0);
+            assert_eq!(peak, grant);
+            requests.sort_by(|left, right| left.source.cmp(&right.source));
+            assert_eq!(requests.len(), SOURCES.len());
+            for (request, name) in requests.into_iter().zip(SOURCES) {
+                assert_eq!(request.source.as_ref(), name);
+                assert_eq!(request.route, route);
+                assert_eq!(
+                    std::fs::read_to_string(temp.path().join("output").join(name)).unwrap(),
+                    std::fs::read_to_string(temp.path().join("input").join(name)).unwrap()
+                );
+            }
         }
     }
-
-    // Note: the prior `utseg_writes_files_incrementally` probing-
-    // gateway test relied on sequential per-file dispatch (the second
-    // gateway call could observe the first's writeback). Under
-    // bounded parallelism (default 4) the calls race and the strict
-    // before/after check is no longer well-defined. The
-    // incremental-writeback property is now verified empirically on
-    // real corpus runs (see operational workspace's
-    // `utseg-most-fullrun-attempt` follow-up: 9 output files were on
-    // disk while the worker was still processing 876 more, a
-    // property impossible under the prior batched dispatch).
 }

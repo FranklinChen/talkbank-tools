@@ -28,25 +28,21 @@ fn snapshot(
             debug_traces: false,
         },
         filesystem: RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                names.iter().map(|name| (*name).into()).collect(),
-                vec![false; names.len()],
-                true,
+            inputs: crate::store::test_support::paths_inputs(
                 names
                     .iter()
-                    .map(|name| {
-                        batchalign_types::paths::ClientPath::new(root.join(name).to_str().unwrap())
-                    })
-                    .collect(),
-                names
-                    .iter()
-                    .map(|name| {
-                        batchalign_types::paths::ClientPath::new(
+                    .map(|name| crate::store::PathsInput {
+                        display: (*name).into(),
+                        kind: crate::store::InputKind::Media,
+                        source: crate::store::test_support::admitted(
+                            root.join(name).to_str().unwrap(),
+                        ),
+                        output: crate::store::test_support::admitted(
                             root.join("out").join(name).to_str().unwrap(),
-                        )
+                        ),
+                        before: None,
                     })
                     .collect(),
-                vec![],
             ),
             staging_dir: batchalign_types::paths::ServerPath::new(root.join("job")),
             media_mapping: Default::default(),
@@ -58,6 +54,11 @@ fn snapshot(
     })
 }
 
+/// Guards: Selected encoding binds requested and staged filenames without loading a worker profile.
+/// Kind: contract
+/// Not a type: Per-file input records cannot establish codec-specific output naming or whether native admission creates directories.
+/// State: An isolated root supplies admitted source/destination identities and absent destination entries for native admission to inspect. No source audio bytes, encoder, model or registry runs.
+/// Concurrency: The test owns its root and immutable declarations, then checks the admitted paths and directory absence before cleanup.
 #[test]
 fn selected_encoding_binds_both_destination_roles_and_needs_no_model_profile() {
     let root = tempfile::tempdir().unwrap();
@@ -82,6 +83,11 @@ fn selected_encoding_binds_both_destination_roles_and_needs_no_model_profile() {
     }
 }
 
+/// Guards: Colliding output stems and existing destinations refuse the entire export before any write.
+/// Kind: contract
+/// Not a type: Path-set admission cannot determine later codec-rewritten name collisions or current filesystem destination occupancy.
+/// State: The root supplies admitted identities, colliding rewritten stems and a retained destination containing known bytes. Real metadata checks refuse admission and the retained bytes are read back. No encoder, model or registry runs.
+/// Concurrency: The test owns every path and establishes destination occupancy before admission. All absence and byte checks finish before root cleanup.
 #[test]
 fn source_stem_collision_and_existing_output_refuse_the_whole_admission() {
     let root = tempfile::tempdir().unwrap();
@@ -108,6 +114,11 @@ fn source_stem_collision_and_existing_output_refuse_the_whole_admission() {
     assert_eq!(std::fs::read(retained).unwrap(), b"retain");
 }
 
+/// Guards: A persisted command and encoding-options mismatch refuses native export before side effects.
+/// Kind: contract
+/// Not a type: Complete input records cannot establish semantic consistency of separately persisted command and typed encoding options.
+/// State: The root supplies admitted input identities and an absent output directory. The independently supplied command/options mismatch is refused during planning. No publication, encoder, model or registry runs.
+/// Concurrency: The test owns its declarations and root. Planning refusal finishes before checking directory absence and cleanup.
 #[test]
 fn persisted_command_and_options_cannot_choose_different_execution_lanes() {
     let root = tempfile::tempdir().unwrap();
@@ -120,6 +131,11 @@ fn persisted_command_and_options_cannot_choose_different_execution_lanes() {
     assert!(!root.path().join("out").exists());
 }
 
+/// Guards: The wire requires an explicit native encoding and preserves each supported format on round-trip.
+/// Kind: wire
+/// Not a type: Typed format variants exist only after decoding, so missing external JSON fields and exact serialized format strings need boundary observations.
+/// State: None
+/// Concurrency: None
 #[test]
 fn encoding_is_required_on_the_wire_and_round_trips_without_guessing() {
     assert!(

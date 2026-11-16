@@ -126,23 +126,20 @@ mod tests {
 
     use super::*;
     use crate::api::JobStatus;
-    use crate::api::{
-        CancelReason, CancelSource, ContentType, FileStatusKind, JobId, ReleasedCommand,
-    };
+    use crate::api::{CancelReason, CancelSource, ContentType, FileStatusKind, JobId};
     use crate::db::JobDB;
     use crate::store::queries::tests::{make_job, test_config};
-    use crate::store::{FileResultEntry, JobStore, MachineTime};
+    use crate::store::{JobStore, MachineTime};
     use crate::ws::BROADCAST_CAPACITY;
 
-    /// A cancelled job must NOT be returned to the queue by the memory gate.
-    ///
-    /// `reserve_job_execution` can block at the memory gate for up to 120s,
-    /// which is exactly the window in which a user cancels a job that looks
-    /// stuck. On rejection the requeue path used to set `Queued`
-    /// unconditionally. `Queued` is an ACTIVE status, so a cancelled job came
-    /// back to life, `completed_at` was cleared, and the re-spawned runner then
-    /// saw its cancel token and returned without finalizing, leaving the job
-    /// permanently non-terminal and blocking resubmission of the same files.
+    /// Guards: cancellation refuses the memory requeue and returns no retry
+    /// authority or deferred-work event while the registry retains Cancelled status.
+    /// Kind: boundary
+    /// Not a type: cancellation can arrive after a real claim, so ownership
+    /// cannot freeze the actor's current lifecycle at the later requeue edge.
+    /// State: one in-memory store exercises that ordered claim, cancel and
+    /// requeue observation. No database or worker is part of this contract.
+    /// Concurrency: the registry and claim are private, with cancellation first.
     #[tokio::test]
     async fn cancelled_job_is_not_requeued_by_the_memory_gate() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -157,26 +154,26 @@ mod tests {
         store
             .submit(make_job(
                 "cancel-then-requeue",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
             .expect("submit");
-        store
-            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
-            .await;
+        let claim = crate::store::queries::tests::claim_registry_runner(&store, &job_id).await;
+        store.mark_job_running(claim.binding()).await;
         store
             .cancel(&job_id, CancellationRequest::default())
             .await
             .expect("cancel a running job");
 
         // The memory gate rejects moments later and tries to requeue.
-        store
-            .requeue_job_after_memory_gate(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
-                MachineTime::now(),
-            )
+        let outcome = store
+            .requeue_job_after_memory_gate(claim.binding(), MachineTime::now())
             .await;
+        assert!(matches!(
+            outcome,
+            crate::store::MemoryRequeueOutcome::NoLongerRunnable
+        ));
 
         assert_eq!(
             store.job_status(&job_id).await,
@@ -184,6 +181,9 @@ mod tests {
             "a cancelled job must not return to Queued; Queued is active, so it \
              would resurrect work the user stopped"
         );
+        let (_, _, _, deferred, _, _) = store.operational_counters().await;
+        assert_eq!(deferred, 0);
+        store.release_run(claim).await;
     }
 
     /// A job cancelled while queued must NOT be resurrected by the runner.
@@ -197,6 +197,11 @@ mod tests {
     ///
     /// Caught by `cancel_twice_records_two_audit_rows` on 2026-07-29, where
     /// the two cancels landed 5.9ms apart and both recorded `accepted: true`.
+    /// Guards: A queued cancellation survives a late mark-running request.
+    /// Kind: contract
+    /// Not a type: A run token cannot freeze cancellation accepted by another registry request after its generation was selected.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn cancelled_job_is_not_resurrected_by_mark_running() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -211,7 +216,7 @@ mod tests {
         store
             .submit(make_job(
                 "cancel-then-run",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
@@ -240,84 +245,11 @@ mod tests {
         );
     }
 
-    /// `interrupt_all_for_shutdown` must transition every active job to
-    /// `JobStatus::Interrupted` and return the count of transitioned jobs.
-    ///
-    /// This test proves that the public entry point delegates to
-    /// `registry.interrupt_all_active` with the correct semantics rather than
-    /// (incorrectly) landing jobs in `JobStatus::Cancelled`.
-    #[tokio::test]
-    async fn interrupt_all_for_shutdown_marks_active_jobs_interrupted() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-
-        // Submit two jobs and advance both to Running so they are "active".
-        let job_a = make_job(
-            "shutdown-a",
-            ReleasedCommand::Morphotag,
-            vec!["a.cha".into()],
-        );
-        let job_b = make_job(
-            "shutdown-b",
-            ReleasedCommand::Morphotag,
-            vec!["b.cha".into()],
-        );
-        store.submit(job_a).await.expect("submit job-a");
-        store.submit(job_b).await.expect("submit job-b");
-
-        store
-            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
-                "shutdown-a",
-            )))
-            .await;
-        store
-            .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
-                "shutdown-b",
-            )))
-            .await;
-
-        // Drive the shutdown path.
-        let interrupted = store.interrupt_all_for_shutdown().await;
-        assert_eq!(interrupted, 2, "both running jobs should be interrupted");
-
-        // Both jobs must land in Interrupted (resumable), not Cancelled (terminal).
-        let info_a = store
-            .get(&JobId::from("shutdown-a"))
-            .await
-            .expect("job-a after shutdown");
-        let info_b = store
-            .get(&JobId::from("shutdown-b"))
-            .await
-            .expect("job-b after shutdown");
-
-        assert_eq!(
-            info_a.status,
-            JobStatus::Interrupted,
-            "job-a must be Interrupted, not Cancelled"
-        );
-        assert_eq!(
-            info_b.status,
-            JobStatus::Interrupted,
-            "job-b must be Interrupted, not Cancelled"
-        );
-
-        // completed_at must be set (Task 1 established this invariant in
-        // interrupt_for_shutdown / interrupt_all_active).
-        assert!(
-            info_a.completed_at.is_some(),
-            "job-a should have completed_at set after interrupt"
-        );
-        assert!(
-            info_b.completed_at.is_some(),
-            "job-b should have completed_at set after interrupt"
-        );
-    }
-
+    /// Guards: Restart retains the successful output while requeuing the failed file and clearing its stale error.
+    /// Kind: contract
+    /// Not a type: Typed file outcomes cannot prove which result records a later mutable restart keeps or reopens.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect. The fixture reaches failure through an admitted run and real completion before restart.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn restart_preserves_successful_morphotag_results_and_requeues_failed_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -328,52 +260,42 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
 
-        let mut job = make_job(
+        let job = make_job(
             "morphotag-restart",
-            ReleasedCommand::Morphotag,
+            crate::store::queries::tests::FixtureCommand::Morphotag,
             vec!["eng.cha".into(), "missing_lang.cha".into()],
         );
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Failed);
-        job.execution.error = Some("worker dispatch failed".into());
-        let eng = job
-            .execution
-            .file_statuses
-            .get_mut("eng.cha")
-            .expect("english status");
-        eng.phase = crate::store::FilePhase::Done {
-            exclusions: Vec::new(),
-            started_at: None,
-            finished_at: Some(crate::unix_time(10.0)),
-        };
-
-        let missing = job
-            .execution
-            .file_statuses
-            .get_mut("missing_lang.cha")
-            .expect("missing lang status");
-        missing.phase = crate::store::FilePhase::Error {
-            started_at: None,
-            finished_at: Some(crate::unix_time(12.0)),
-            failure: crate::store::FileFailure::of_failed_row(
-                Some("worker dispatch failed".into()),
-                None,
-            ),
-        };
-
-        job.execution.results.push(FileResultEntry {
-            filename: "eng.cha".into(),
-            content_type: ContentType::Chat,
-            error: None,
-        });
-        job.execution.results.push(FileResultEntry {
-            filename: "missing_lang.cha".into(),
-            content_type: ContentType::Chat,
-            error: Some("worker dispatch failed".into()),
-        });
-
+        let id = job.identity.job_id.clone();
         store.submit(job).await.expect("submit test job");
+        let claim = crate::store::queries::tests::claim_registry_runner(&store, &id).await;
+        store
+            .mark_file_done(
+                claim.binding(),
+                "eng.cha",
+                crate::store::EventTime::fixed(crate::unix_time(10.0)),
+                crate::store::FileCompletion::Clean(crate::store::CompletedFileOutput {
+                    exclusions: Vec::new(),
+                    filename: "eng.cha".into(),
+                    content_type: ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                }),
+            )
+            .await;
+        store
+            .mark_file_error(
+                claim.binding(),
+                "missing_lang.cha",
+                &crate::store::FileFailureRecord {
+                    message: "worker dispatch failed".into(),
+                    category: crate::scheduling::FailureCategory::System,
+                    finished_at: crate::store::EventTime::fixed(crate::unix_time(12.0)),
+                },
+            )
+            .await;
+        store
+            .complete_run(claim, store.event_time())
+            .await
+            .expect("derive the failed job from its file outcomes");
 
         let restarted = store
             .restart(
@@ -437,6 +359,11 @@ mod tests {
     /// (`record_cancellation_audit` + `interrupt_all_for_shutdown`) that the
     /// local shutdown path uses, proving both invariants without needing a full
     /// server lifecycle harness.
+    /// Guards: Shutdown interrupts both active jobs and persists their signal audit records.
+    /// Kind: contract
+    /// Not a type: Typed cancellation provenance cannot establish actual SQLite audit rows or projected statuses after the actor transition.
+    /// State: An isolated SQLite database stores real audit rows and shutdown status. The registry supplies the two active jobs.
+    /// Concurrency: The test owns its directory, actor and channels. Audit writes precede the awaited shutdown transition.
     #[tokio::test]
     async fn interrupt_all_for_shutdown_writes_interrupted_status_with_signal_audit() {
         // Use a DB-backed store so `list_cancellations` can read the persisted rows.
@@ -457,12 +384,12 @@ mod tests {
         // Submit two jobs and advance both to Running so they are "active".
         let job_a = make_job(
             "shutdown-sig-a",
-            ReleasedCommand::Morphotag,
+            crate::store::queries::tests::FixtureCommand::Morphotag,
             vec!["a.cha".into()],
         );
         let job_b = make_job(
             "shutdown-sig-b",
-            ReleasedCommand::Morphotag,
+            crate::store::queries::tests::FixtureCommand::Morphotag,
             vec!["b.cha".into()],
         );
         store.submit(job_a).await.expect("submit job-a");
@@ -576,6 +503,11 @@ mod tests {
     /// `Interrupted | Running` rows (per `store/queries/recovery.rs:307`),
     /// so a `Cancelled` row was never revisited and the job stayed
     /// permanently dead. This test pins the corrected end-to-end shape.
+    /// Guards: Shutdown persists interruption and startup restores resumable work to queued state.
+    /// Kind: contract
+    /// Not a type: Owned claims cannot establish serialized shutdown state or how a new registry reconstructs rows from SQLite.
+    /// State: Two store lifecycles reopen an isolated SQLite database to exercise actual shutdown persistence and startup recovery.
+    /// Concurrency: Only this test owns the directory. The first registry lifecycle finishes before the second opens its recovery state.
     #[tokio::test]
     async fn shutdown_interrupted_job_recovers_to_queued_after_restart() {
         // Use a persistent tempdir so the DB survives across the simulated
@@ -600,20 +532,16 @@ mod tests {
 
             let job = make_job(
                 "shutdown-recover",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             );
             store.submit(job).await.expect("submit shutdown-recover");
-            let claim = crate::store::queries::tests::claim_runner(
+            let claim = crate::store::queries::tests::claim_registry_runner(
                 &store,
                 &JobId::from("shutdown-recover"),
             )
             .await;
-            store
-                .mark_job_running(&crate::store::RunBinding::first_run_of(JobId::from(
-                    "shutdown-recover",
-                )))
-                .await;
+            store.mark_job_running(claim.binding()).await;
 
             let interrupted = store.interrupt_all_for_shutdown().await;
             assert_eq!(

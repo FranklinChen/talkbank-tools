@@ -307,10 +307,9 @@ impl JobStore {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::api::{JobStatus, ReleasedCommand};
+    use crate::api::JobStatus;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -325,16 +324,7 @@ mod tests {
     use crate::store::{FileStatus, auto_max_concurrent_from};
     use crate::ws::BROADCAST_CAPACITY;
 
-    pub(super) async fn claim_runner(store: &JobStore, id: &JobId) -> crate::store::RunnerClaim {
-        match store.begin_runner(id).await.expect("job exists") {
-            crate::store::BeginRunnerOutcome::Started { claim, .. } => claim,
-            crate::store::BeginRunnerOutcome::RunnerStillLive => panic!("test job already claimed"),
-            crate::store::BeginRunnerOutcome::Stopped { .. } => panic!("test job already stopped"),
-            crate::store::BeginRunnerOutcome::NotRunnable { status } => {
-                panic!("test job is not runnable: {status}")
-            }
-        }
-    }
+    pub(super) use crate::store::test_support::claim_registry_runner;
 
     pub(super) fn test_config() -> crate::config::ServerConfig {
         crate::config::ServerConfig {
@@ -343,6 +333,11 @@ mod tests {
         }
     }
 
+    /// Guards: Recovered refused paths retain the recorded output folders independently of misleading source metadata.
+    /// Kind: contract
+    /// Not a type: Admitted paths cannot prove how serialized history is displayed after a new store refuses those paths under changed authority.
+    /// State: An isolated SQLite database exercises persistence and recovery. The owned directory also supplies real staging or admitted path identities required by the stated contract.
+    /// Concurrency: The test owns its database directory and stores. Mutations finish before reload, deletion or subsequent projection.
     #[tokio::test]
     async fn output_folders_survive_database_recovery_without_using_source_dir() {
         use batchalign_types::paths::ClientPath;
@@ -350,22 +345,24 @@ mod tests {
         let (store, db, directory) = test_store_with_db().await;
         let root = directory.path().canonicalize().unwrap();
         let path = |suffix: &str| ClientPath::new(root.join(suffix).to_str().unwrap());
-        let mut job = make_job(
-            "persisted-output",
-            crate::ReleasedCommand::Morphotag,
-            vec!["one.cha".into(), "nested/two.cha".into()],
+        let inputs = crate::store::test_support::paths_inputs(
+            ["one.cha", "nested/two.cha"]
+                .into_iter()
+                .map(|name| crate::store::PathsInput {
+                    display: name.into(),
+                    kind: crate::store::InputKind::Chat,
+                    source: crate::store::test_support::admitted(
+                        path(&format!("input/{name}")).as_str(),
+                    ),
+                    output: crate::store::test_support::admitted(
+                        path(&format!("results/{name}")).as_str(),
+                    ),
+                    before: None,
+                })
+                .collect(),
         );
+        let mut job = make_job_with_inputs("persisted-output", FixtureCommand::Morphotag, inputs);
         job.source.source_dir = path("misleading-input");
-        job.execution.lifecycle.replace_inputs_for_test(
-            crate::store::test_support::inputs_from_parts(
-                vec!["one.cha".into(), "nested/two.cha".into()],
-                Vec::new(),
-                true,
-                vec![path("input/one.cha"), path("input/nested/two.cha")],
-                vec![path("results/one.cha"), path("results/nested/two.cha")],
-                Vec::new(),
-            ),
-        );
         let id = JobId::from("persisted-output");
         store.submit(job).await.unwrap();
         let before =
@@ -420,6 +417,11 @@ mod tests {
     /// never reconciled and the job is permanently dead. Every other test in
     /// this area asserts only the in-memory side, which is how the hole
     /// survived.
+    /// Guards: Late completion preserves cancellation in registry, database and attempt records.
+    /// Kind: contract
+    /// Not a type: Run admission cannot freeze later cancellation or prove SQLite row content across the completion adapter.
+    /// State: An isolated SQLite database verifies cancellation and attempt persistence. A second job checks cleanup-only admission after cancellation.
+    /// Concurrency: The test owns its directory, registry actor and broadcast channel. Ordered awaits expose the cancellation-completion interleaving.
     #[tokio::test]
     async fn cancelled_run_completion_persists_cancellation() {
         let (store, db, _dir) = test_store_with_db().await;
@@ -428,18 +430,16 @@ mod tests {
         store
             .submit(make_job(
                 "cancel-then-finalize",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
             .expect("submit");
-        let claim = claim_runner(&store, &job_id).await;
-        store
-            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
-            .await;
+        let claim = claim_registry_runner(&store, &job_id).await;
+        store.mark_job_running(claim.binding()).await;
         store
             .start_file_attempt(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                claim.binding(),
                 "a.cha",
                 crate::scheduling::WorkUnitKind::FileProcess,
                 store.event_time(),
@@ -487,7 +487,7 @@ mod tests {
         store
             .submit(make_job(
                 waiting.as_ref(),
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["b.cha".into()],
             ))
             .await
@@ -526,6 +526,11 @@ mod tests {
     /// end through the store: reported diagnosed with its findings, not a
     /// failure (the job completes), persisted, and restored by a fresh store
     /// from the database as the same phase with the same findings.
+    /// Guards: Diagnosed output completes the job and restores the same findings and results after database reload.
+    /// Kind: contract
+    /// Not a type: Closed completion variants cannot prove diagnostic serialization, result projection or reconstruction from actual SQLite bytes.
+    /// State: An isolated SQLite database and fresh store exercise persistence of diagnosed and clean outputs. No CHAT IO or inference is needed.
+    /// Concurrency: Both stores and the database directory belong to this test. The restored store observes only completed awaited writes.
     #[tokio::test]
     async fn a_diagnosed_file_completes_its_job_and_round_trips_through_the_database() {
         use crate::store::{CompletedFileOutput, EventTime, FileCompletion};
@@ -535,14 +540,13 @@ mod tests {
         store
             .submit(make_job(
                 "diagnosed-job",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into(), "b.cha".into()],
             ))
             .await
             .expect("submit");
-        store
-            .mark_job_running(&crate::store::RunBinding::first_run_of(job_id.clone()))
-            .await;
+        let claim = claim_registry_runner(&store, &job_id).await;
+        store.mark_job_running(claim.binding()).await;
         let diagnostics = crate::api::FileOutputDiagnostics::of_findings(
             vec![crate::api::FileOutputDiagnostics::coded_finding(
                 "E220",
@@ -555,7 +559,7 @@ mod tests {
         for filename in ["a.cha", "b.cha"] {
             store
                 .mark_file_processing(
-                    &crate::store::RunBinding::first_run_of(job_id.clone()),
+                    claim.binding(),
                     filename,
                     EventTime::fixed(crate::unix_time(1.0)),
                 )
@@ -563,7 +567,7 @@ mod tests {
         }
         store
             .mark_file_done(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                claim.binding(),
                 "a.cha",
                 EventTime::fixed(crate::unix_time(2.0)),
                 FileCompletion::Diagnosed {
@@ -579,7 +583,7 @@ mod tests {
             .await;
         store
             .mark_file_done(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                claim.binding(),
                 "b.cha",
                 EventTime::fixed(crate::unix_time(3.0)),
                 FileCompletion::Clean(CompletedFileOutput {
@@ -592,10 +596,7 @@ mod tests {
             .await;
 
         store
-            .complete_run(
-                claim_runner(&store, &job_id).await,
-                EventTime::fixed(crate::unix_time(4.0)),
-            )
+            .complete_run(claim, EventTime::fixed(crate::unix_time(4.0)))
             .await
             .expect("complete diagnosed output");
 
@@ -664,40 +665,59 @@ mod tests {
         (store, db, dir)
     }
 
-    pub(super) fn make_job(
-        id: &str,
-        command: crate::api::ReleasedCommand,
-        filenames: Vec<String>,
-    ) -> Job {
-        use crate::options::{AlignOptions, CommandOptions, CommonOptions, MorphotagOptions};
+    /// Commands supported by the lifecycle fixtures, with their actual options.
+    pub(super) enum FixtureCommand {
+        Align,
+        Morphotag,
+    }
 
-        let mut file_statuses = HashMap::new();
-        let has_chat: Vec<bool> = filenames.iter().map(|_| true).collect();
-        for f in &filenames {
-            file_statuses.insert(
-                f.clone(),
-                FileStatus::new(crate::api::DisplayPath::from(f.as_str())),
-            );
+    impl FixtureCommand {
+        fn options(self) -> crate::options::CommandOptions {
+            use crate::options::{AlignOptions, CommandOptions, CommonOptions, MorphotagOptions};
+            match self {
+                Self::Align => CommandOptions::Align(AlignOptions {
+                    common: CommonOptions::default(),
+                    fa_engine: FaEngineName::Wave2Vec,
+                    utr: Default::default(),
+                    pauses: false,
+                    boundaries: Default::default(),
+                    wor: true.into(),
+                    media_dir: None,
+                    bullet_repair: false,
+                    review_level: Default::default(),
+                }),
+                Self::Morphotag => CommandOptions::Morphotag(MorphotagOptions {
+                    common: CommonOptions::default(),
+
+                    ..Default::default()
+                }),
+            }
         }
+    }
 
-        let options = match command {
-            crate::api::ReleasedCommand::Align => CommandOptions::Align(AlignOptions {
-                common: CommonOptions::default(),
-                fa_engine: FaEngineName::Wave2Vec,
-                utr: Default::default(),
-                pauses: false,
-                boundaries: Default::default(),
-                wor: true.into(),
-                media_dir: None,
-                bullet_repair: false,
-                review_level: Default::default(),
-            }),
-            _ => CommandOptions::Morphotag(MorphotagOptions {
-                common: CommonOptions::default(),
+    pub(super) fn make_job(id: &str, command: FixtureCommand, filenames: Vec<String>) -> Job {
+        let inputs = crate::store::JobInputs::Content(
+            filenames
+                .into_iter()
+                .map(|name| crate::store::ContentInput {
+                    display: name.into(),
+                    kind: crate::store::InputKind::Chat,
+                })
+                .collect(),
+        );
+        make_job_with_inputs(id, command, inputs)
+    }
 
-                ..Default::default()
-            }),
-        };
+    fn make_job_with_inputs(
+        id: &str,
+        command: FixtureCommand,
+        inputs: crate::store::JobInputs,
+    ) -> Job {
+        let options = command.options();
+        let file_statuses = inputs
+            .displays()
+            .map(|name| (name.to_string(), FileStatus::new(name.clone())))
+            .collect();
 
         Job {
             identity: JobIdentity {
@@ -705,7 +725,7 @@ mod tests {
                 correlation_id: format!("test-{id}").into(),
             },
             dispatch: JobDispatchConfig {
-                command,
+                command: options.command(),
                 lang: crate::api::LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
                 num_speakers: crate::api::NumSpeakers(1),
                 options,
@@ -725,17 +745,10 @@ mod tests {
                 media_subdir: Default::default(),
             },
             execution: JobExecutionState {
-                lifecycle: crate::store::JobLifecycle::for_test(
-                    JobStatus::Queued,
-                    crate::store::test_support::inputs_from_parts(
-                        filenames.into_iter().map(DisplayPath::from).collect(),
-                        has_chat,
-                        false,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                ),
+                lifecycle: crate::store::JobLifecycle::Active {
+                    status: crate::api::ActiveStatus::Queued,
+                    inputs,
+                },
                 file_statuses,
                 results: Vec::new(),
                 error: None,
@@ -753,24 +766,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn submit_and_get() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        store.submit(job).await.unwrap();
-
-        let info = store.get(&JobId::from("j1")).await;
-        assert!(info.is_some());
-        assert_eq!(info.unwrap().command, "morphotag");
-    }
-
+    /// Guards: A second valid command for an active source receives the precise conflict and original owner.
+    /// Kind: contract
+    /// Not a type: Closed fixture commands prevent option drift but cannot establish overlap against jobs already in the mutable registry.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn conflict_detection() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -781,61 +781,48 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
 
-        let job1 = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let job1 = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         store.submit(job1).await.unwrap();
 
-        let job2 = make_job("j2", ReleasedCommand::Align, vec!["a.cha".into()]);
-        let result = store.submit(job2).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn cancel_job() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
+        let job2 = make_job(
+            "j2",
+            crate::store::queries::tests::FixtureCommand::Align,
+            vec!["a.cha".into()],
         );
-
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        store.submit(job).await.unwrap();
-
-        store
-            .cancel(&JobId::from("j1"), CancellationRequest::default())
-            .await
-            .unwrap();
-        let info = store.get(&JobId::from("j1")).await.unwrap();
-        assert_eq!(info.status, JobStatus::Cancelled);
+        assert!(matches!(store.submit(job2).await,
+            Err(crate::error::ServerError::JobConflict { conflicts, .. })
+                if conflicts.len() == 1
+                    && conflicts[0].filename.as_ref() == "a.cha"
+                    && conflicts[0].job_id.as_ref() == "j1"
+                    && conflicts[0].command.as_ref() == "morphotag"
+                    && conflicts[0].status == JobStatus::Queued));
     }
 
-    #[tokio::test]
-    async fn delete_completed_job() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-
-        let mut job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Completed);
-        store.submit(job).await.unwrap();
-
-        store.delete(&JobId::from("j1")).await.unwrap();
-        assert!(store.get(&JobId::from("j1")).await.is_none());
-    }
-
+    /// Guards: Submission exposes the correct command and persists one queued job row.
+    /// Kind: contract
+    /// Not a type: Complete input records and closed commands cannot establish actor insertion, API projection or persisted SQLite columns.
+    /// State: An isolated SQLite database exercises persistence and recovery. The owned directory also supplies real staging or admitted path identities required by the stated contract.
+    /// Concurrency: The test owns its database directory and stores. Mutations finish before reload, deletion or subsequent projection.
     #[tokio::test]
     async fn submit_persists_job_without_relocking_store_state() {
         let (store, db, _dir) = test_store_with_db().await;
 
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let job = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         store.submit(job).await.unwrap();
+
+        let info = store
+            .get(&JobId::from("j1"))
+            .await
+            .expect("submitted projection");
+        assert_eq!(info.command, "morphotag");
 
         let jobs = db.load_all_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
@@ -843,16 +830,34 @@ mod tests {
         assert_eq!(jobs[0].status, "queued");
     }
 
+    /// Guards: Cancellation agrees in the registry projection and persisted status and completion timestamp.
+    /// Kind: contract
+    /// Not a type: An admitted fixture cannot prove how a later cancellation serializes its status and completion timestamp to SQLite.
+    /// State: An isolated SQLite database exercises persistence and recovery. The owned directory also supplies real staging or admitted path identities required by the stated contract.
+    /// Concurrency: The test owns its database directory and stores. Mutations finish before reload, deletion or subsequent projection.
     #[tokio::test]
     async fn cancel_persists_status_after_releasing_store_lock() {
         let (store, db, _dir) = test_store_with_db().await;
 
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let job = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         store.submit(job).await.unwrap();
         store
             .cancel(&JobId::from("j1"), CancellationRequest::default())
             .await
             .unwrap();
+
+        assert_eq!(
+            store
+                .get(&JobId::from("j1"))
+                .await
+                .expect("cancelled projection")
+                .status,
+            JobStatus::Cancelled
+        );
 
         let jobs = db.load_all_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
@@ -860,6 +865,11 @@ mod tests {
         assert!(jobs[0].completed_at.is_some());
     }
 
+    /// Guards: Deleting a genuinely completed run removes its projection, database row and staged artifacts.
+    /// Kind: contract
+    /// Not a type: Consuming completion proves the run ended but cannot establish actual row deletion or removal of staged filesystem content.
+    /// State: An isolated SQLite database exercises persistence and recovery. The owned directory also supplies real staging or admitted path identities required by the stated contract.
+    /// Concurrency: The test owns its database directory and stores. Mutations finish before reload, deletion or subsequent projection.
     #[tokio::test]
     async fn delete_removes_db_row_and_staging_dir_after_unlocking_store() {
         let (store, db, dir) = test_store_with_db().await;
@@ -867,51 +877,46 @@ mod tests {
         std::fs::create_dir_all(&staging_dir).unwrap();
         std::fs::write(staging_dir.join("artifact.txt"), "artifact").unwrap();
 
-        let mut job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Completed);
+        let mut job = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         job.filesystem.staging_dir = batchalign_types::paths::ServerPath::from(staging_dir.clone());
         store.submit(job).await.unwrap();
 
-        store.delete(&JobId::from("j1")).await.unwrap();
+        let id = JobId::from("j1");
+        let claim = claim_registry_runner(&store, &id).await;
+        store
+            .mark_file_done(
+                claim.binding(),
+                "a.cha",
+                store.event_time(),
+                crate::store::FileCompletion::Clean(crate::store::CompletedFileOutput {
+                    exclusions: Vec::new(),
+                    filename: "a.cha".into(),
+                    content_type: crate::api::ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                }),
+            )
+            .await;
+        store
+            .complete_run(claim, store.event_time())
+            .await
+            .expect("complete job before deletion");
+        store.delete(&id).await.unwrap();
+        assert!(store.get(&id).await.is_none());
 
         let jobs = db.load_all_jobs().await.unwrap();
         assert!(jobs.is_empty());
         assert!(!staging_dir.exists());
     }
 
-    #[tokio::test]
-    async fn list_all_ordered() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-
-        let mut j1 = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        j1.schedule.submitted_at = crate::unix_time(100.0);
-        j1.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Completed);
-        store.submit(j1).await.unwrap();
-
-        let mut j2 = make_job("j2", ReleasedCommand::Align, vec!["b.cha".into()]);
-        j2.schedule.submitted_at = crate::unix_time(200.0);
-        j2.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Completed);
-        store.submit(j2).await.unwrap();
-
-        let items = store.list_all().await;
-        assert_eq!(items.len(), 2);
-        // Newest first
-        assert_eq!(items[0].job_id, "j2");
-        assert_eq!(items[1].job_id, "j1");
-    }
-
+    /// Guards: Job listing is newest first while execution admission claims the same jobs oldest first.
+    /// Kind: contract
+    /// Not a type: Complete input records cannot determine the ordering of observations returned by the live registry queue and listing adapters.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn claim_ready_queued_jobs_orders_by_submission_time() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -922,13 +927,31 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
 
-        let mut early = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let mut early = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         early.schedule.submitted_at = crate::unix_time(100.0);
         store.submit(early).await.unwrap();
 
-        let mut late = make_job("j2", ReleasedCommand::Align, vec!["b.cha".into()]);
+        let mut late = make_job(
+            "j2",
+            crate::store::queries::tests::FixtureCommand::Align,
+            vec!["b.cha".into()],
+        );
         late.schedule.submitted_at = crate::unix_time(200.0);
         store.submit(late).await.unwrap();
+
+        assert_eq!(
+            store
+                .list_all()
+                .await
+                .into_iter()
+                .map(|job| job.job_id)
+                .collect::<Vec<_>>(),
+            [JobId::from("j2"), JobId::from("j1")]
+        );
 
         let poll = store.claim_ready_queued_jobs().await;
         assert_eq!(
@@ -960,22 +983,33 @@ mod tests {
         assert_eq!(lease.leased_by_node().as_ref(), store.node_id().as_ref());
     }
 
+    /// Guards: Queue admission claims ready work and retains the exact deferred eligibility deadline.
+    /// Kind: contract
+    /// Not a type: The owned clock binds instants to this store but cannot determine the queue policy applied to a deferred job.
+    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_deferred_and_reports_next_wake() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
+        let clocked = crate::store::test_support::ManualClockStore::at(
             test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
+            crate::unix_time(1000.0),
         );
+        let store = clocked.store();
 
-        let mut ready = make_job("ready", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let mut ready = make_job(
+            "ready",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         ready.schedule.submitted_at = crate::unix_time(100.0);
         store.submit(ready).await.unwrap();
 
-        let deferred_at = MachineTime::now().plus(std::time::Duration::from_secs(60));
-        let mut deferred = make_job("deferred", ReleasedCommand::Align, vec!["b.cha".into()]);
+        let deferred_at = clocked.now().plus(std::time::Duration::from_secs(60));
+        let mut deferred = make_job(
+            "deferred",
+            crate::store::queries::tests::FixtureCommand::Align,
+            vec!["b.cha".into()],
+        );
         deferred.schedule.submitted_at = crate::unix_time(50.0);
         deferred.schedule.next_eligible_at = Some(deferred_at);
         store.submit(deferred).await.unwrap();
@@ -1018,19 +1052,26 @@ mod tests {
         );
     }
 
+    /// Guards: Queue admission preserves a live foreign lease and reclaims only the expired lease.
+    /// Kind: contract
+    /// Not a type: Ordered lease values cannot establish the current-clock policy selecting an expired owner over a live owner.
+    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_unexpired_leases_and_reclaims_expired_ones() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
+        let clocked = crate::store::test_support::ManualClockStore::at(
             test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
+            crate::unix_time(1000.0),
         );
+        let store = clocked.store();
 
-        let now = MachineTime::now();
+        let now = clocked.now();
 
-        let mut leased = make_job("leased", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let mut leased = make_job(
+            "leased",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         leased.schedule.lease = Some(
             LeaseRecord::new(
                 "other-node".into(),
@@ -1041,7 +1082,11 @@ mod tests {
         );
         store.submit(leased).await.unwrap();
 
-        let mut expired = make_job("expired", ReleasedCommand::Align, vec!["b.cha".into()]);
+        let mut expired = make_job(
+            "expired",
+            crate::store::queries::tests::FixtureCommand::Align,
+            vec!["b.cha".into()],
+        );
         expired.schedule.lease = Some(
             LeaseRecord::new(
                 "dead-node".into(),
@@ -1078,6 +1123,11 @@ mod tests {
         assert_eq!(leased_lease.leased_by_node().as_ref(), "other-node");
     }
 
+    /// Guards: A live queue claim excludes a second claim and release makes the job eligible again.
+    /// Kind: contract
+    /// Not a type: A queue observation cannot freeze later claim release or prove that the store clears its retained lease.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn release_runner_claim_makes_job_eligible_again() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -1088,7 +1138,11 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
 
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let job = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         store.submit(job).await.unwrap();
 
         let first_poll = store.claim_ready_queued_jobs().await;
@@ -1111,17 +1165,24 @@ mod tests {
         assert!(lease.is_none());
     }
 
+    /// Guards: Renewal uses the exact advanced store clock and stops after the queue claim is released.
+    /// Kind: contract
+    /// Not a type: The private clock owner prevents mismatching stores but cannot prove the actual lease mutation or post-release refusal.
+    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn renew_job_lease_updates_heartbeat_and_expiry_for_local_claim() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
+        let clocked = crate::store::test_support::ManualClockStore::at(
             test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
+            crate::unix_time(1000.0),
         );
+        let store = clocked.store();
 
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
+        let job = make_job(
+            "j1",
+            crate::store::queries::tests::FixtureCommand::Morphotag,
+            vec!["a.cha".into()],
+        );
         store.submit(job).await.unwrap();
         let _ = store.claim_ready_queued_jobs().await;
 
@@ -1133,7 +1194,7 @@ mod tests {
             .expect("claimed")
             .heartbeat_at();
 
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        clocked.advance(std::time::Duration::from_secs(5));
         assert_eq!(
             store.renew_job_lease(&JobId::from("j1")).await,
             crate::store::LeaseRenewalOutcome::Renewed
@@ -1145,24 +1206,11 @@ mod tests {
             .await
             .unwrap()
             .expect("renewed");
-        assert!(lease.heartbeat_at() >= before);
-    }
-
-    #[tokio::test]
-    async fn renew_job_lease_stops_after_claim_is_released() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
+        assert_eq!(
+            lease.heartbeat_at(),
+            before.plus(std::time::Duration::from_secs(5))
         );
-
-        let job = make_job("j1", ReleasedCommand::Morphotag, vec!["a.cha".into()]);
-        store.submit(job).await.unwrap();
-        let _ = store.claim_ready_queued_jobs().await;
         store.release_runner_claim(&JobId::from("j1")).await;
-
         assert_eq!(
             store.renew_job_lease(&JobId::from("j1")).await,
             crate::store::LeaseRenewalOutcome::Stop

@@ -1,9 +1,7 @@
-//! Resource-aware kernel planning for the legacy dispatch path.
+//! Resource-aware kernel planning for managed dispatch.
 //!
-//! Moved here from `commands/kernel.rs` on 2026-07-29 because
-//! `dispatch/plan.rs` is its only consumer: it is legacy-path code, and placing
-//! it in the module that step 4 of the phase-2 sequence retires means that
-//! retirement is a directory deletion rather than a hunt.
+//! Plans combine the command catalog, retained host policy and request workload.
+//! The family plan carries the result through resource admission and execution.
 
 use crate::ReleasedCommand;
 use crate::api::MemoryMb;

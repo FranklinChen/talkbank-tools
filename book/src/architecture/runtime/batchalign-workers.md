@@ -35,6 +35,117 @@ identity named the installed wheel (found 2026-10-01). `-P` removes only that
 entry: an editable development install reaches its source through a `.pth`
 file and still works. Tested on a real interpreter in `worker/python.rs`.
 
+### Admitted startup and submitted work
+
+The startup reader decodes one private ready wire representation. Its admitted
+ReadySignal always retains an affirmative acknowledgement and validated runtime
+identity. Consuming transport admission yields StdioReady or TcpReady. Real
+spawners and shell fixtures use the same transition, so a fixture cannot skip
+the ready flag or transport check. Advancing startup progress keeps the existing
+loading-stall window alive.
+
+```mermaid
+flowchart TD
+    bytes["Startup JSON and progress bytes"] --> reader["Read under advancing-progress stall window"]
+    reader --> admission["Admit affirmative ready and runtime identity"]
+    admission --> stdio["Consume into StdioReady"]
+    admission --> tcp["Consume into TcpReady"]
+    stdio --> handle["Construct stdio handle with original identity"]
+    tcp --> daemon["Publish admitted TCP endpoint"]
+    reader --> refusal["Malformed bytes, silence or refused handshake"]
+    admission --> refusal
+```
+
+A ReadyRequest carries its already-derived TaskLoad through metadata preparation
+and final FA execution. Each transport loads that carried identity through its
+sealed effect adapter, then privately grants a RunPermit owning the request,
+loaded-model proof and request memory. Submission consumes the permit.
+Sequential transports bind the terminal reply to the original request ID and
+task before returning it.
+
+Shared submission moves that permit, its executor slot and its job cancellation
+registration into the pending route. The caller retains only reply interest.
+After a complete write, cancellation or timeout ends that interest while the
+pending owner remains until a terminal reply or stream retirement. A retry of
+the exact same still-pending packet can rejoin its detached reply before taking
+another memory lease or executor slot. An active duplicate ID or changed packet
+is refused. A dropped or failed partial write retires the uncertain stream.
+
+```mermaid
+flowchart TD
+    prepared["ReadyRequest carries task/model identity"] --> load["Same transport confirms carried load"]
+    load --> permit["RunPermit owns request and model/request leases"]
+    permit --> writer["Acquire executor slot and serialized writer"]
+    writer --> writing["Pending owner retains permit, slot and job registration"]
+    writing --> sent["Complete write consumes WritingInvocation"]
+    writing --> retired["Interrupted write retires stream"]
+    sent --> waiting["Caller owns reply interest"]
+    waiting --> detached["Timeout or cancellation drops interest"]
+    detached --> retry["Identical retry rejoins pending work"]
+    retry --> waiting
+    sent --> terminal["Terminal reply or stream retirement consumes owner"]
+    retired --> terminal
+    terminal --> bound["Admit original request ID and result task"]
+```
+
+Stream retirement remains the local connection's resource boundary. A detached
+external daemon may continue work after that connection ends. This ownership
+graph adds no remote cancellation or physical-completion acknowledgement.
+
+### Operation-bound control exchanges
+
+Each control operation carries its request and derives its own wait policy.
+The progress reader consumes that operation when admitting the terminal reply.
+Only ControlCompletion can authorize sequential reuse. A reported operation
+failure completes the exchange. A malformed or foreign terminal leaves the
+stdio handle in flight for retirement. Loading additionally retains its actual
+memory grant until a matching task reply can settle it.
+
+Observation-only ExpectedLoad, ExpectedInfer and ExpectedBatch describe wire
+contracts without granting request-sending authority. Test doubles run the
+same progress reader using controlled time and actual decoded JSON.
+
+```mermaid
+flowchart TD
+    operation["ControlOperation owns request and wait policy"] --> write["Write actual request and mark stdio in flight"]
+    write --> read["Observe progress under operation-derived wait"]
+    read --> read
+    read --> admit["Consume operation and admit terminal kind and load task"]
+    admit --> complete["ControlCompletion owns success or reported failure"]
+    complete --> idle["Authorize sequential reuse"]
+    complete --> settled["Matching loaded task settles original memory grant"]
+    read --> retired["Malformed bytes, EOF or timeout retain incomplete flight"]
+    admit --> retired
+    retired --> retire["Checked-out owner retires uncertain worker"]
+```
+
+### Worker preparation retains routing facts
+
+DispatchPreparation retains the actual request and its derived TaskLoad.
+WorkerPlan consumes that preparation with the admitted GPU route or derives
+its non-GPU worker key from the carried load. CommandWorkerPlan derives the
+capability probe's key and load from one command recipe. Consumers use these
+associated facts throughout checkout and loading.
+
+TaskLoad shares immutable load facts through Arc. Its retained engine selection
+serves worker selection without reparsing wire override strings. Cache identity
+continues to use task, wire overrides and residency. Cloning a load shares its
+map and derived selection.
+
+```mermaid
+flowchart TD
+    request["Actual execute request"] --> prepared["DispatchPreparation owns request and TaskLoad"]
+    prepared --> direct["Derive non-GPU key from retained load facts"]
+    prepared --> gpu["Admit actual request against job GPU route"]
+    direct --> plan["WorkerPlan owns key and preparation"]
+    gpu --> plan
+    recipe["Command recipe, language and GPU model plan"] --> probe["CommandWorkerPlan owns probe key and TaskLoad"]
+    plan --> checkout["Select worker with carried key"]
+    checkout --> load["Transport confirms carried TaskLoad"]
+    probe --> load
+    load --> permit["Consume into actual execution or admitted capability observation"]
+```
+
 ## Three Layers of Parallelism
 
 Batchalign has three independent parallelism controls:
@@ -307,128 +418,187 @@ Without safeguards the failure surfaces at two layers:
    morphosyntactic annotation. Nothing in the log names the file;
    downstream auditors see a per-file success.
 
-### Safeguard 1: idle-eviction, then a wait without a deadline, in `checkout`
+### Safeguard 1 — idle eviction and an observable wait
 
-`crates/batchalign/src/worker/pool/eviction.rs`,
-`/dispatch.rs`, `/checkout.rs`.
+Exclusive queues contain complete PoolWorker owners. Their contents alone
+establish availability. IdleView exposes read-only observations. Only the
+private capacity producer can publish, remove or drain workers. There is one
+global capacity semaphore whose permit remains with the actual worker through
+its entire lifetime.
 
-When `checkout(target, lang, overrides)` finds the pool saturated
-and this key has zero live workers, the loop does three things in
-order before returning any error:
+Checkout registers queue and pool-change notifications before inspecting the
+queue or attempting startup. It takes an actual DepartedWorker immediately
+when available. Otherwise it attempts admitted startup. A saturated empty group
+can retire an idle worker from another group, then retry admission. Other
+callers await queue publication, worker changes or the deferral's capacity event.
+Each actual publication wakes one registered waiter, including burst returns.
 
-1. **Try eviction**,
-   `WorkerPool::try_evict_idle_from_other_group` snapshots every
-   group's idle count, picks the non-skip group with the highest
-   idle count via the pure helper `select_eviction_target`,
-   non-blockingly acquires its `available` permit, pops one idle
-   handle, decrements that group's `total`, and drops the handle on
-   a detached task. One global-cap slot is now free; the main loop
-   `continue`s back to spawn.
-2. **Park on `worker_returned: Arc<Notify>`** (no worker for this
-   key) or on the group's `available` semaphore (this key's workers
-   are all busy). Every `CheckedOutWorker::drop` calls `notify_one()`,
-   so each return wakes one saturated checkout (the BUG-028 herd
-   fix), which retries eviction and spawn.
-3. **Keep waiting.** A saturated pool is congestion, not a failure
-   of the request, so the wait has **no deadline**. Each park is
-   raced against a **report interval** (`PoolConfig::checkout_wait_report_interval`,
-   300 s; the server does not expose it as a setting): when it passes,
-   the wait is logged (key, how long it has waited, the group's total
-   and idle counts) and the checkout re-probes from the top, so a
-   state that changed under it is re-read rather than trusted.
-4. **Reconcile the counts.** At each report interval the pool checks
-   that every worker a group's `total` counts is in an idle queue or
-   held by an `AwayFromQueue` guard (a checkout, a TCP checkout, a
-   spawn in flight, a health-check drain, a memory-pressure eviction's
-   shutdown). The guards are the only movers of `WorkerGroup::away`, so
-   that count cannot drift, and a guarded worker leaves the group only
-   through `AwayFromQueue::retire`, which takes it out of `total` before
-   the guard stops counting it (so neither a removal in progress nor a
-   taken worker's emptied guard distorts the count). A group that
-   counts workers nothing holds is a stale count, not congestion: no
-   worker will ever come back. Seen once (it may be a worker between a
-   queue and its guard) it is logged; the same group with the same
-   count at the next interval ends the wait with the typed, terminal
-   `WorkerError::PoolAccountingBroken` (`System`, not retried), naming
-   the group and its counts. Two unrelated mismatches never confirm
-   each other. A checkout parked on its own group's permits reconciles
-   only that group; one parked on the pool-wide return signal (its own
-   group empty, waiting for another group to free a slot) reconciles
-   every group.
+The wait has no deadline. The report interval logs current counts and re-probes
+admission. Shutdown produces PoolShuttingDown. Caller cancellation drops its
+wait. The queue owns each idle worker, and each departure owns its original
+capacity. Independent idle-permit counters and repeated mismatch reconciliation
+have been removed.
 
-   The wait otherwise ends only when a worker is available, when the
-   pool shuts down (`WorkerError::PoolShuttingDown`), or when its
-   caller drops it: a cancelled job's supervised file task is dropped,
-   and the wait with it. A worker that is genuinely checked out and
-   never comes back is held, so it is waited on: whether every
-   exchange is bounded is a property of each transport, not something
-   this wait can prove.
-
-Until 2026-10-06 step 3 was a 300 s deadline that returned
-`SpawnFailed("no worker available ... pool saturated with no idle
-workers to evict")`, classified as a system error and not retried.
-In a large batch (several jobs, each with several files in flight,
-all needing the same few Stanza workers) a file routinely queued
-longer than that behind other files' long requests and was lost,
-although nothing was wrong with it.
-
-**The wait is visible in the file's progress.** The audio-file shell
-(transcribe, align, speaker identification) and benchmark install a
-`PoolWaitObserver` around every attempt
-(`checkout_wait::observing_pool_waits`, carried by a task local
-exactly as `CURRENT_JOB_ID` is, so no dispatch signature changes);
-align's utterance-timing pre-pass, which runs before that shell,
-installs its own, and the text batch commands (morphotag, utseg,
-translate, coref) observe their inference through
-`runner::util::observing_file_waits`, coref's one batch on every
-file in it. Each wait's start and end is recorded on the file
-(`RunnerEventSink::set_file_worker_wait`) as a fact of its own,
-`FileStatus::worker_waits`, beside the stage the pipeline reported.
-The file shows `waiting_for_worker` ("Waiting for a worker") while
-any checkout wait is open, `waiting_for_host_memory` ("Waiting for host
-memory") while a worker startup or a model load of the file is queued for
-host memory (the same observer, told by
-`checkout_wait::MemoryWaitObserver`; it takes precedence), and the
-reported stage, with its counts, otherwise:
-the display is derived from both facts, so the pipeline's progress
-(a text batch's own reporter included) and the wait observer never
-overwrite each other. A checkout outside an observed task
-(a spawned sub-task, a health probe) waits the same way, unobserved,
-and is still logged at every report interval.
+PoolWaitObserver carries start/end observations to the file around audio,
+benchmark, align pre-pass and text inference. File worker waits coexist with
+pipeline progress. A host-memory wait takes presentation precedence, followed
+by a worker wait, followed by the reported stage. Dropping a wait closes its
+own observation. Unobserved health/background requests retain the same wait
+semantics and interval logging.
 
 ```mermaid
 flowchart TD
-    CO["checkout(target, lang)"] --> FP{"fast path\n(idle handle available?)"}
-    FP -- yes --> RET["return CheckedOutWorker"]
-    FP -- no --> SP["try_spawn_into_group"]
-    SP -- spawned --> RET
-    SP -- at cap --> HASW{"this key has\nlive workers?"}
-    HASW -- yes --> AWAIT1["park on available permit\n(report interval)"]
-    HASW -- no --> EV["try_evict_idle_from_other_group"]
-    EV -- Evicted --> SP
-    EV -- NoIdleElsewhere --> AWAIT2["park on worker_returned\n(report interval)"]
-    AWAIT1 -- permit --> RET
-    AWAIT1 -- interval passed: log, re-probe --> FP
-    AWAIT2 -- wakeup, or interval passed: log --> FP
-    AWAIT1 -- pool shutdown --> STOP["Err(PoolShuttingDown)"]
-    AWAIT2 -- pool shutdown --> STOP
+    register["Register queue and capacity notifications"] --> take{"Take actual idle owner"}
+    take -- present --> departure["DepartedWorker retains original home and slot"]
+    take -- absent --> spawn{"Admitted startup"}
+    spawn -- published --> register
+    spawn -- deferred --> evict{"Empty group can retire another idle worker"}
+    evict -- retired --> register
+    evict -- wait --> park["Await queue, worker change or relevant capacity event"]
+    park -- event or report interval --> register
+    park -- shutdown --> stop["PoolShuttingDown"]
+    departure --> run["Consume TrackedCheckout through actual exchange"]
+    run -- matching completion and reusable result --> home["Return to original queue"]
+    run -- failure or unfinished cancellation --> retire["Retire actual handle and original slot"]
+    home --> register
+    retire --> refund["Release original count and permit then notify"]
+    refund --> register
 ```
 
-Invariants:
+The eviction selector is a pure borrowed key/count policy. One consolidated
+matrix covers skip-key exclusion, empty populations and largest-idle preference
+without creating a pool, process or semaphore. Native contracts retain actual
+queue publication, cancellation, capacity rollback, pipe outcomes and teardown.
 
-- `group.total` never underflows. The decrement in eviction runs
-  only after a successful `try_acquire` + `pop_front`.
-- No worker is destroyed while it has pending work. Only idle
-  workers are evicted (non-blocking `try_acquire` on `available`).
-- No new lock-ordering hazard. Same order as
-  `global_worker_count` and `try_spawn_into_group`.
-- Graceful shutdown. The evicted handle is dropped on a detached
-  task so `checkout` never waits on `WorkerHandle::Drop`
-  (SIGTERM+SIGKILL).
+### Capacity retained through the worker lifetime
 
-`select_eviction_target` is a pure function of
-`HashMap<K, GroupSnapshot>`. Five unit tests in
-`worker/pool/eviction.rs` cover every selector branch.
+GlobalCapacity retains the actual RuntimeHost that admitted the pool. Each
+group derives StartupReservation once from that host, its profile and its engine
+selection. The estimate travels with the group through every admission retry.
+Live same-profile RSS observations can replace that fallback at the existing
+memory-policy edge.
+
+ReservedWorkerSlot owns the original global reservation and per-group count.
+The captured runtime owns it during startup. StartedWorker retains the completed
+native handle and reservation until consuming publication into PoolWorker.
+Failure or cancellation drops the original owner and releases capacity. Queue
+removal produces DepartedWorker with the actual home group. Its consuming
+return method always publishes to that same queue. Unfinished stdio and TCP
+checkouts retire. TrackedCheckout.run owns the actual exchange and privately
+binds its returned result to completion. Callers cannot independently supply a
+return decision. RequestFlight keeps incomplete sequential replies out of reuse.
+
+Health checking drains actual owners. Healthy handles return to their original
+queues. Failure and cancellation retire the held owners. Detached eviction
+carries RetiringWorker on the captured runtime. The handle drops before its
+original slot. Slot accounting holds no queue/group reference, avoiding an idle
+Arc cycle. Temporary departures retain their home while they can return.
+
+```mermaid
+flowchart TD
+    host["Actual RuntimeHost and global budget"] --> group["Group retains completed StartupReservation"]
+    group --> admission["Host policy and original capacity admission"]
+    admission --> reserved["ReservedWorkerSlot owns count and global permit"]
+    reserved --> starting["Captured runtime owns startup"]
+    starting --> complete["StartedWorker owns actual handle and reservation"]
+    complete --> publish["Consume publication into original idle queue"]
+    publish --> departure["DepartedWorker owns handle, slot and original home"]
+    departure --> exchange["Consuming exchange or health check"]
+    exchange -- completed and reusable --> publish
+    exchange -- failed or cancelled --> retire["Drop actual handle then original slot"]
+    starting -- cancelled or refused --> retire
+    reserved -- rollback --> retire
+    retire --> refund["Refund original count and permit then notify"]
+```
+
+### Sampled queue observations and native process targets
+
+IdlePopulation captures the original allocation marker with each member's key
+and PID. Consuming measurement joins one kernel RSS refresh to those members.
+Measured values move through pure pressure selection. Before retirement, the
+original observation consumes current queue admission by allocation identity.
+A worker checked out since sampling is skipped. A replacement sharing a PID
+cannot satisfy another allocation's marker. The marker stays alive with the
+observation, preventing allocation-address reuse while that observation exists.
+RSS remains a changing kernel observation and does not reserve queue membership.
+
+```mermaid
+flowchart TD
+    capture["IdlePopulation carries actual allocation observations"] --> measure["Consume one kernel RSS refresh"]
+    measure --> measured["Measured members retain source and RSS"]
+    measured --> select["Consume pure largest-RSS selection"]
+    select --> current{"Same allocation still in original queue"}
+    current -- present --> depart["Consume actual queue departure"]
+    current -- absent --> skip["Skip changed membership"]
+    depart --> retire["Shutdown and release original capacity"]
+```
+
+NativePid privately admits only positive IDs representable by the platform's
+pid_t. Registry marker bytes, daemon PID input and owned Child IDs enter through
+that boundary. Raw zero and overflow cannot reach process or group syscalls.
+Closed signal operations preserve process-only and process-group policies.
+NativePid establishes selector range. Process lifetime and kernel signal results
+remain external observations. The isolated native contract qualifies rejection
+of zero without risking another process group.
+
+```mermaid
+flowchart TD
+    raw["Marker bytes, PID input or owned Child"] --> admit{"Positive representable NativePid"}
+    admit -- rejected --> refusal["Refuse invalid target before kernel effect"]
+    admit -- admitted --> operation["Closed liveness, process or group operation"]
+    operation --> kernel["Observe actual kernel result"]
+```
+
+Registry discovery separately classifies owner/build policy before issuing
+CompatibleEntry tied to its original immutable entry. Consuming preparation
+parses that same source's profile/language once. Native connection follows the
+prepared proof. Foreign ownership and stale ownership retain their earlier
+priority over build checks.
+
+### Lifetime-owned registry adoption
+
+RegistryAdmissions issues one private, non-cloneable claim per daemon identity
+within a pool. Consuming the claim produces a PreparedRegistryConnection with
+the normalized key and metadata from its original source. Repeated or concurrent scans skip key
+normalization and connection for a claimed daemon. The original connection
+holds the claim through health probing, capability observation and pool
+admission. Discovery reports actual integrations.
+
+ProbedRegistryWorker consumes its health-checked connection into capability
+observation or the existing per-scan report deferral. A completed reported
+failure retains its diagnostic. An incomplete or foreign exchange retires that
+connection. ReportReadyRegistryWorker admits an observed report under the key
+derived from its original source before producing AdmittedRegistryWorker.
+
+Sequential publication retains the same connection and its claim through
+checkout and retirement. Shared promotion consumes that connection's buffered
+reader and writer. AdoptedTcpReader keeps the claim inside the reader task until
+the actual reader is dropped. Promotion performs no second connection. Shared
+dispatch receives its configured concurrency separately from sequential TCP
+metadata. Cancelled preparation drops its connection and claim. A failed
+connection or health probe closes its socket and carries its claim through locked stale-entry
+cleanup. Cleanup removes the observed row if it still matches.
+
+```mermaid
+flowchart TD
+    entry["Prepared original registry entry"] --> claim{"Acquire lifetime claim"}
+    claim -- already owned --> skip["Skip key normalization and connection"]
+    claim -- acquired --> keyed["Normalize source key and open connection"]
+    keyed -- connected --> connected["Original connection owns original claim"]
+    keyed -- refused by socket --> stale["Retain claim through locked stale-entry cleanup"]
+    connected --> health{"Health exchange completes"}
+    health -- failure --> stale
+    stale --> refund["Release claim after cleanup"]
+    health -- healthy --> report{"Consume capability observation or deferral"}
+    report -- incomplete exchange --> release["Drop connection and release its claim"]
+    report -- completed --> ready["Report-ready source and connection"]
+    ready --> admit{"Admit report under original key"}
+    admit -- refused --> release
+    admit -- sequential --> queue["Publish same connection with its capacity slot"]
+    admit -- shared --> reader["Move buffered reader and claim into reader task"]
+    queue -- retirement --> release
+    reader -- task retirement --> release
+```
 
 ### Safeguard 2: orchestrator-level failure propagation
 
@@ -456,9 +626,7 @@ job/file-status reporting path.
 2. When every worker is genuinely checked out, the checkout waits its
    turn, visibly (file progress `waiting_for_worker`, a log line per
    report interval), and is served when a worker comes back. Pool
-   shutdown, the job's cancellation, or a pool count that stays
-   unreconciled for two report intervals (`PoolAccountingBroken`) ends
-   the wait.
+   shutdown or the job's cancellation ends the wait.
 3. The morphosyntax orchestrator converts every pool-level failure
    into per-file errors that the CLI surfaces as non-zero exit
    codes. No code path writes a file with a stripped tier.
@@ -469,7 +637,7 @@ job/file-status reporting path.
 |---|---|---|
 | `max_workers_per_key` | per-profile, RAM-derived (`recommend_max_workers_per_key`); GPU `≈ ram_total_mb / 16 GB`, Stanza `≈ ram_total_mb / 12 GB`, IO `1` | Per-key cap; prevents one language from hogging |
 | `max_total_workers` | computed from RAM (clamped 2-32) | Global cap |
-| `checkout_wait_report_interval` (`PoolConfig` field, not a server setting: `serve` passes `None`) | 300 s | How often a saturated checkout logs, re-probes and reconciles the counts; not a deadline |
+| `checkout_wait_report_interval` (`PoolConfig` field, not a server setting: `serve` passes `None`) | 300 s | How often a saturated checkout logs current counts and re-probes; no deadline |
 
 Raising `max_total_workers` or `max_workers_per_key` reduces how
 often eviction fires but never changes correctness. The

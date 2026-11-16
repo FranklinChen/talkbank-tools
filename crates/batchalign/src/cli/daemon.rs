@@ -1604,8 +1604,9 @@ fn daemon_info(pid: u32, flags: DaemonDeviceFlags, runtime: RequestedRuntime) ->
 /// Whether a process exists, via `kill(pid, 0)`.
 pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
-    unsafe {
-        libc::kill(pid as i32, 0) == 0
+    {
+        crate::worker::process_id::NativePid::admit(pid)
+            .is_some_and(crate::worker::process_id::NativePid::is_alive)
     }
     #[cfg(not(unix))]
     {
@@ -1651,10 +1652,10 @@ const QUIET_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) fn stop_server_process(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        let pgid_ok = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) == 0 };
-        let pid_ok = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) == 0 };
-
-        if !pgid_ok && !pid_ok {
+        let Some(target) = crate::worker::process_id::NativePid::admit(pid) else {
+            return false;
+        };
+        if !target.terminate() {
             return false;
         }
 
@@ -1673,10 +1674,7 @@ pub(crate) fn stop_server_process(pid: u32) -> bool {
             "warning: server (PID {pid}) did not finish shutting down in {}s; killing it",
             GRACEFUL_STOP_DEADLINE.as_secs()
         );
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
+        target.kill();
         // Brief wait for SIGKILL to take effect.
         std::thread::sleep(KILL_SETTLE);
         true

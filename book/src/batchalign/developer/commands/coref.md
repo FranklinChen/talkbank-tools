@@ -129,7 +129,7 @@ to arrive as `LanguageSpec::PerFile`, and the command owns its own inference
 language, the constant `eng`.
 
 `dispatch_coref_job` therefore takes no language parameter, and neither does
-`WorkerGateway::coref_batch`. That is not a simplification, it is the fix for a
+`CorefGateway::coref_batch`. That is not a simplification, it is the fix for a
 defect that made the command unrunnable. Coref used to dispatch through a
 shared "simple batched text" path that began by demanding
 `job.dispatch.lang.as_resolved()`. On a per-file job that is always `None`, so

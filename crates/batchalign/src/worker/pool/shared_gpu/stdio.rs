@@ -63,13 +63,17 @@ impl SharedGpuWorker {
     /// Send one typed V2 execute request and await the response.
     #[instrument(
         skip_all,
-        fields(pid = %self.channel.pid(), request_id = %permit.request().request_id),
+        fields(pid = %self.channel.pid(), request_id = %prepared.request().request_id),
     )]
     pub(in crate::worker::pool) async fn execute_v2(
         &self,
-        permit: &crate::worker::pool::RunPermit<'_>,
+        prepared: crate::worker::pool::ReadyRequest,
+        preparation: &crate::worker::pool::LoadPreparation,
+        registration: crate::worker::pool::job_tracker::TrackerGuard,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.channel.execute_v2(permit).await
+        self.channel
+            .execute_v2(prepared, preparation, registration)
+            .await
     }
 
     /// Query this exact worker's live capability and engine identity.
@@ -132,10 +136,9 @@ impl SharedGpuWorker {
         if let Some(mut child) = child {
             #[cfg(unix)]
             {
-                let _ = child.id().map(|child_pid| {
-                    // SAFETY: the worker was spawned as its own process group.
-                    unsafe { libc::killpg(child_pid as libc::pid_t, libc::SIGTERM) };
-                });
+                if let Some(target) = crate::worker::process_id::NativePid::of_child(&child) {
+                    let _ = target.terminate_group();
+                }
             }
 
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
@@ -152,10 +155,10 @@ impl SharedGpuWorker {
                     );
                     #[cfg(unix)]
                     {
-                        let _ = child.id().map(|child_pid| {
-                            // SAFETY: the worker was spawned as its own process group.
-                            unsafe { libc::killpg(child_pid as libc::pid_t, libc::SIGKILL) };
-                        });
+                        if let Some(target) = crate::worker::process_id::NativePid::of_child(&child)
+                        {
+                            let _ = target.kill_group();
+                        }
                     }
                     let _ = child.kill().await;
                 }
@@ -178,18 +181,11 @@ impl Drop for SharedGpuWorker {
         {
             #[cfg(unix)]
             {
-                if let Some(pid) = child.id() {
-                    let pgid = pid as libc::pid_t;
-                    // SAFETY: the worker was spawned as its own process group.
-                    unsafe {
-                        libc::killpg(pgid, libc::SIGTERM);
-                    }
-                    // Brief pause then SIGKILL to prevent zombies holding GPU/RAM.
+                if let Some(target) = crate::worker::process_id::NativePid::of_child(child) {
+                    let _ = target.terminate_group();
                     std::thread::sleep(std::time::Duration::from_millis(200));
-                    if unsafe { libc::kill(pgid, 0) } == 0 {
-                        unsafe {
-                            libc::killpg(pgid, libc::SIGKILL);
-                        }
+                    if target.is_alive() {
+                        let _ = target.kill_group();
                     }
                 }
             }

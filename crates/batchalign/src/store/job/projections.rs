@@ -10,7 +10,7 @@ use crate::api::{FileStatusEntry, FileStatusKind, JobInfo, JobListItem, NonNegat
 use super::Submitter;
 
 use super::Job;
-use super::types::{
+use super::{
     JobInputs, PendingJobFile, RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity,
     RunnerJobSnapshot,
 };

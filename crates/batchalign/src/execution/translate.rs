@@ -1,123 +1,47 @@
-use crate::planning;
-use crate::runner::DispatchHostContext;
+//! Per-file translation retains source-language routing and immediate durability.
+
+use super::text_io::{PreparedTextJob, TranslationText};
+use super::worker_gateway::TranslateGateway;
 use crate::runner::util::{FileRunTracker, FileStage};
 use crate::scheduling::WorkUnitKind;
-use crate::store::RunnerJobSnapshot;
-use crate::text_batch::TextBatchFileResults;
 
-use super::text_io::{load_text_inputs, write_text_results};
-use super::worker_gateway::WorkerGateway;
-
-/// Dispatch a translate job: per-file source-language routing.
-///
-/// **BA2 parity (2026-05-03 fix).** BA2's translate reads each file's
-/// `doc.langs[0]` as the source language for inference
-/// (`~/batchalign2-master/batchalign/pipelines/translate/seamless.py:40`).
-/// Earlier BA3 used a shared batched-text dispatch which pulled one
-/// job-level lang and pooled all files into a single inference call
-/// the same shape that caused the 2026-05-03 morphotag incident
-/// (English Stanza silently applied to non-English files). That shared
-/// path has since been deleted outright: coref was its last caller, and
-/// the resolved job-level language it demanded is one a per-file command
-/// can never carry, so every coref job was refused before dispatch.
-///
-/// This dispatch parses each file's `@Languages:` header and resolves the
-/// per-file source language via `resolve_per_file_lang`. Files whose
-/// header is missing or malformed are recorded as failures and skipped
-/// no silent English fallback. Cross-file pooling is intentionally given
-/// up in exchange for per-file lang correctness, per-file failure
-/// isolation, and per-file durability, the same trade-off
-/// `execution::utseg::dispatch_utseg_job` made (see its module doc for
-/// the rationale).
 pub(crate) async fn dispatch_translate_job(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    gateway: &dyn WorkerGateway,
+    mut files: PreparedTextJob<TranslationText>,
+    gateway: &dyn TranslateGateway,
 ) -> Result<(), crate::error::ServerError> {
-    let plan = planning::build_job_plan(job).map_err(|error| {
-        crate::error::ServerError::Validation(format!("Translate planning failed: {error}"))
-    })?;
-    // The engine the job selected. A translate job whose persisted options are
-    // another command's is a programming error in submission or recovery, and
-    // is refused here rather than served by a defaulted engine.
-    let Some(options) = job.dispatch.options.as_translate() else {
-        return Err(crate::error::ServerError::Validation(format!(
-            "translate job carries {} options",
-            job.dispatch.options.command_name()
-        )));
-    };
-    let sink = host.sink().clone();
-
-    for file in &job.pending_files {
-        FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
+    let options = std::sync::Arc::clone(files.translation_options());
+    while let Some(file) = files.next_file().await {
+        FileRunTracker::new(file.host().sink().as_ref(), file.input().filename.as_ref())
             .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Translating)
             .await;
-    }
-
-    let inputs = load_text_inputs(job, host, false).await;
-    if inputs.file_texts.is_empty() {
-        return Ok(());
-    }
-
-    let mut all_results: TextBatchFileResults = Vec::with_capacity(inputs.file_texts.len());
-    let parser = crate::chat_parser();
-    for file_input in inputs.file_texts {
-        if job.cancel_token.is_cancelled() {
-            break;
-        }
-
-        // Resolve source language from the file's own @Languages header.
-        // No silent English fallback, a file with no parseable language
-        // becomes a typed Err in this file's batch results, surfaced to
-        // the operator via the job's file_statuses.
-        let (chat_file, _parse_errors) =
-            batchalign_transform::parse::parse_lenient(&parser, file_input.chat_text.as_ref());
-        match crate::pipeline::morphosyntax::resolve_per_file_lang(&chat_file) {
-            Ok(src_lang) => {
-                let route = crate::translate::TranslationRoute::for_file(src_lang, options);
-                // Single-file batch at the gateway boundary. This loses
-                // cross-file pooling on purpose: per-file lang correctness
-                // > batching speedup.
-                // A saturated checkout shows on this file's progress.
-                let mut results = crate::runner::util::observing_file_waits(
-                    host.sink(),
-                    [file_input.filename.to_string()],
-                    gateway.translate_file(
-                        &file_input,
-                        &route,
-                        crate::infer_retry::Cancellation::Token(&job.cancel_token),
-                    ),
+        let parser = crate::chat_parser();
+        let (chat, _) =
+            batchalign_transform::parse::parse_lenient(&parser, &file.input().chat_text);
+        let results = match crate::pipeline::morphosyntax::resolve_per_file_lang(&chat) {
+            Ok(language) => {
+                let route = crate::translate::TranslationRoute::for_file(language, &options);
+                crate::runner::util::observing_file_waits(
+                    file.host().sink(),
+                    [file.input().filename.to_string()],
+                    gateway.translate_file(file.input(), &route, file.cancellation()),
                 )
-                .await;
-                all_results.append(&mut results);
+                .await
             }
-            Err(err) => {
-                tracing::warn!(
-                    file = %file_input.filename,
-                    error = %err,
-                    "Translate skipping file: per-file language resolution failed",
-                );
-                // A file whose language cannot be resolved is refused on
-                // validity grounds, not by a provider: a bare string here made
-                // it `Batch`, hence `ProviderTerminal`.
-                all_results.push(crate::text_batch::TextBatchFileResult::err(
-                    file_input.filename.clone(),
-                    crate::text_batch::TextWorkflowFileError::validation(err.to_string()),
-                ));
-            }
-        }
+            Err(error) => vec![crate::text_batch::TextBatchFileResult::err(
+                file.input().filename.clone(),
+                crate::text_batch::TextWorkflowFileError::validation(error.to_string()),
+            )],
+        };
+        file.complete(results).await;
     }
-
-    write_text_results(job, host, &plan, all_results, "Translate").await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
-    use crate::chat_ops::morphosyntax_ops::MwtDict;
     use async_trait::async_trait;
     use tokio_util::sync::CancellationToken;
 
@@ -126,63 +50,33 @@ mod tests {
         CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
         ReleasedCommand,
     };
-    use crate::execution::worker_gateway::MorphotagRuntimeOptions;
-    use crate::options::{CommandOptions, CommonOptions, TranslateOptions};
+    use crate::options::{CommandOptions, TranslateOptions};
+    use crate::runner::DispatchHostContext;
+    use crate::store::RunnerJobSnapshot;
     use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
 
     #[derive(Default)]
     struct FakeTranslateGateway {
-        state: Mutex<FakeTranslateState>,
+        requests: Mutex<Vec<ObservedTranslation>>,
     }
 
-    #[derive(Default)]
-    struct FakeTranslateState {
-        calls: usize,
-        routes: Vec<crate::translate::TranslationRoute>,
+    struct ObservedTranslation {
+        source: DisplayPath,
+        route: crate::translate::TranslationRoute,
     }
 
     #[async_trait]
-    impl WorkerGateway for FakeTranslateGateway {
-        async fn morphotag_for_compare(
-            &self,
-            _chat_text: &str,
-            _mwt: &MwtDict,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
-        {
-            unreachable!()
-        }
-
-        async fn morphotag_single(
-            &self,
-            _chat_text: &str,
-            _before_text: Option<&str>,
-            _options: MorphotagRuntimeOptions,
-            _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, crate::error::ServerError>
-        {
-            unreachable!()
-        }
-
-        async fn utseg_batch(
-            &self,
-            _files: &[TextBatchFileInput],
-            _route: &crate::utseg_route::ServableUtsegRoute,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
-            unreachable!()
-        }
-
+    impl TranslateGateway for FakeTranslateGateway {
         async fn translate_file(
             &self,
             file: &TextBatchFileInput,
             route: &crate::translate::TranslationRoute,
             _cancellation: crate::infer_retry::Cancellation<'_>,
         ) -> TextBatchFileResults {
-            let mut state = self.state.lock().unwrap();
-            state.calls += 1;
-            state.routes.push(route.clone());
+            self.requests.lock().unwrap().push(ObservedTranslation {
+                source: file.filename.clone(),
+                route: route.clone(),
+            });
             let translated = file.chat_text.replace("@End", "%xtra:\ttranslated\n@End");
             vec![TextBatchFileResult::ok(
                 file.filename.clone(),
@@ -192,17 +86,12 @@ mod tests {
                 ),
             )]
         }
-
-        async fn coref_batch(
-            &self,
-            _files: &[TextBatchFileInput],
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
-            unreachable!()
-        }
     }
 
-    fn translate_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
+    fn translate_snapshot(
+        staging_dir: &std::path::Path,
+        options: TranslateOptions,
+    ) -> RunnerJobSnapshot {
         // Translate dispatch resolves the source language *per file* from
         // each file's `@Languages:` header (BA2 parity, see module doc).
         // A missing header is a typed failure, not a silent fallback
@@ -226,21 +115,19 @@ mod tests {
                 // `LanguageSpec` for this command.
                 lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
-                options: CommandOptions::Translate(TranslateOptions {
-                    common: CommonOptions::default(),
-                    ..TranslateOptions::default()
-                }),
+                options: CommandOptions::Translate(options),
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,
             },
             filesystem: crate::store::RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("a.cha"), DisplayPath::from("b.cha")],
-                    vec![true, true],
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
+                inputs: crate::store::JobInputs::Content(
+                    ["a.cha", "b.cha"]
+                        .into_iter()
+                        .map(|name| crate::store::ContentInput {
+                            display: name.into(),
+                            kind: crate::store::InputKind::Chat,
+                        })
+                        .collect(),
                 ),
                 staging_dir: batchalign_types::paths::ServerPath::new(
                     staging_dir.display().to_string(),
@@ -257,18 +144,14 @@ mod tests {
     }
 
     fn host() -> DispatchHostContext {
-        let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        DispatchHostContext::from_store(
-            Arc::new(crate::store::JobStore::for_tests(
-                crate::config::ServerConfig::default(),
-                None,
-                tx,
-                std::sync::Arc::new(crate::clock::SystemClock),
-            )),
-            &JobId::from("job-translate"),
-        )
+        DispatchHostContext::for_test_effects()
     }
 
+    /// Guards: Each CHAT source dispatches separately and its translated text reaches the written xtra tier.
+    /// Kind: contract
+    /// Not a type: TranslateGateway accepts one source, while actual scheduling of each source and serialized xtra bytes require observing requests and written output.
+    /// State: Temporary CHAT sources and output exercise actual text IO. The recording gateway associates source names with routes and the shared sink records lifecycle effects.
+    /// Concurrency: Each run owns its directory and gateway mutex. No external worker or shared store is started.
     #[tokio::test]
     async fn translate_dispatches_one_gateway_call_per_file() {
         // BA2 parity (2026-05-03): translate dispatches one gateway call per
@@ -280,67 +163,68 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let host = host();
         let gateway = FakeTranslateGateway::default();
-        let job = translate_snapshot(temp.path());
+        let job = translate_snapshot(temp.path(), TranslateOptions::default());
 
-        dispatch_translate_job(&job, &host, &gateway)
-            .await
-            .expect("translate dispatch");
+        dispatch_translate_job(
+            PreparedTextJob::for_test(job, host, crate::api::NumWorkers(1)),
+            &gateway,
+        )
+        .await
+        .expect("translate dispatch");
 
-        let state = gateway.state.lock().unwrap();
+        let requests = gateway.requests.lock().unwrap();
         assert_eq!(
-            state.calls, 2,
-            "one gateway call per file (BA2 parity); the gateway takes one file by signature"
+            requests
+                .iter()
+                .map(|request| request.source.as_ref())
+                .collect::<Vec<_>>(),
+            ["a.cha", "b.cha"],
         );
+        let output = std::fs::read_to_string(temp.path().join("output/a.cha")).unwrap();
+        assert!(output.contains("%xtra:\ttranslated"));
     }
 
+    /// Guards: Per-file headers retain distinct source languages with the requested target and translation engine.
+    /// Kind: contract
+    /// Not a type: The sealed route retains its admitted language, target and engine. Reading distinct external CHAT headers and associating their routes with the scheduled sources remains a dispatcher effect.
+    /// State: Two temporary CHAT files declare different languages. The recording gateway captures each source name with its actual route after the reader runs.
+    /// Concurrency: The directory, gateway mutex and shared sink instance belong to this test. No external process is used.
     #[tokio::test]
     async fn translate_routes_each_source_to_the_selected_target_and_engine() {
         let temp = tempfile::tempdir().unwrap();
         let host = host();
         let gateway = FakeTranslateGateway::default();
-        let mut job = translate_snapshot(temp.path());
+        let mut options = TranslateOptions {
+            target: LanguageCode3::fra(),
+            ..TranslateOptions::default()
+        };
+        options.common.engine_overrides.translate =
+            Some(crate::types::engines::TranslateEngineName::Nllb);
+        let job = translate_snapshot(temp.path(), options);
         let path = temp.path().join("input/b.cha");
         let spanish = std::fs::read_to_string(&path)
             .unwrap()
             .replace("eng", "spa");
         std::fs::write(path, spanish).unwrap();
-        let CommandOptions::Translate(options) = &mut job.dispatch.options else {
-            panic!("translate fixture")
-        };
-        options.target = LanguageCode3::fra();
-        options.common.engine_overrides.translate =
-            Some(crate::types::engines::TranslateEngineName::Nllb);
-        dispatch_translate_job(&job, &host, &gateway).await.unwrap();
-        let state = gateway.state.lock().unwrap();
+        dispatch_translate_job(
+            PreparedTextJob::for_test(job, host, crate::api::NumWorkers(1)),
+            &gateway,
+        )
+        .await
+        .unwrap();
+        let requests = gateway.requests.lock().unwrap();
         assert_eq!(
-            state
-                .routes
+            requests
                 .iter()
-                .map(|route| route.source().as_ref())
+                .map(|request| (request.source.as_ref(), request.route.source().as_ref()))
                 .collect::<Vec<_>>(),
-            ["eng", "spa"]
+            [("a.cha", "eng"), ("b.cha", "spa")]
         );
         assert!(
-            state
-                .routes
+            requests
                 .iter()
-                .all(|route| route.target() == &LanguageCode3::fra()
-                    && route.engine() == &crate::types::engines::TranslateEngineName::Nllb)
+                .all(|request| request.route.target() == &LanguageCode3::fra()
+                    && request.route.engine() == &crate::types::engines::TranslateEngineName::Nllb)
         );
-    }
-
-    #[tokio::test]
-    async fn translate_write_path_persists_xtra_output() {
-        let temp = tempfile::tempdir().unwrap();
-        let host = host();
-        let gateway = FakeTranslateGateway::default();
-        let job = translate_snapshot(temp.path());
-
-        dispatch_translate_job(&job, &host, &gateway)
-            .await
-            .expect("translate dispatch");
-
-        let output = std::fs::read_to_string(temp.path().join("output").join("a.cha")).unwrap();
-        assert!(output.contains("%xtra:\ttranslated"));
     }
 }

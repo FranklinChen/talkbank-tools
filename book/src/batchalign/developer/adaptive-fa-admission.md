@@ -506,13 +506,16 @@ flowchart TD
     capacity -->|"possible"| queue["Queue for shared host-memory lease"]
     queue --> permit["RunPermit owns request and lease"]
     permit --> execute["Execute: verify binding, then read PCM and run model"]
-    execute --> terminal["Success, failure or cancellation releases lease"]
+    execute --> terminal["Terminal reply or transport retirement releases lease"]
+    execute --> detached["Shared caller leaves while pending owner retains lease"]
+    detached --> terminal
 ```
 
 The wire phase is required: `Candidate`, `Prepare`, or `Execute`. The pool accepts
 a candidate, performs preparation on the loaded worker, and consumes the bound
 reply to make `ReadyRequest`. An arbitrary execute packet cannot construct that
-proof. `Loaded::run` requires it and returns the lease-owning `RunPermit`.
+proof. The actual transport consumes it through `LoadPreparation::prepare_on`,
+which uses its carried TaskLoad and privately grants the lease-owning RunPermit.
 Stdio, shared-GPU, TCP and replay use the same transition. A preparation refusal
 retains the worker's typed response and measured duration; it never becomes a
 successful request containing invented timing.

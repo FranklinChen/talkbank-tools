@@ -9,7 +9,7 @@
 //! - `context`: shared type definitions: execution contexts, host bundles,
 //!   orchestration traits, and internal request/error enums.
 //! - `execution`: job lifecycle entry points (`job_task`, `run_direct_job`,
-//!   `run_server_job_attempt`) and the core `run_hosted_job` loop.
+//!   `run_server_job_attempt`) and consuming claim, preparation, dispatch and completion phases.
 //! - `routing`: command dispatch routing: capability resolution, dispatch-
 //!   family selection, and per-command dispatch wrappers.
 //! - `dispatch/`: concrete dispatch family implementations (batched text,
@@ -33,6 +33,7 @@ mod execution;
 mod job_scope;
 pub(crate) use job_scope::current_file_span;
 mod policy;
+mod preflight;
 mod routing;
 mod test_echo;
 pub(crate) mod util;
@@ -46,6 +47,10 @@ pub(crate) use context::{
     ServerExecutionHost,
 };
 
+#[cfg(test)]
+pub(crate) use preflight::DispatchInputs;
+pub(crate) use preflight::{ChatDispatchInputs, DispatchInputParts};
+
 // The one constructor of a job-level refusal, for dispatchers outside the router.
 pub(crate) use routing::refuse;
 
@@ -53,8 +58,6 @@ pub(crate) use routing::refuse;
 pub(crate) use execution::{job_task, run_direct_job};
 
 // Re-exports used only by tests
-#[cfg(test)]
-use execution::record_preflight_media_failures;
 #[cfg(test)]
 use policy::command_requires_chat_infer;
 

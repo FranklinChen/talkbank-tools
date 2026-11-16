@@ -12,7 +12,7 @@ use crate::api::{ContentType, DisplayPath, FileProgressStage, MachineTime};
 use crate::store::{CompletedFileOutput, FileFailure, FilePhase, FileProgress, FileResultEntry};
 
 use super::Job;
-use super::types::{FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord};
+use super::{FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord};
 use crate::store::FileStatus;
 
 /// Why a [`Job`] did not apply a write to one of its files.

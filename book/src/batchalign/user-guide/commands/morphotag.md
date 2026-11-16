@@ -160,6 +160,11 @@ clap parse error, the CLI surface deliberately rejects it. See the
 | `--ca-policy honor\|analyze` | `honor` | Honor `@Options: CA` pass-through, or explicitly run morphotag while preserving that header. Use `analyze` only when the corpus reconstruction record calls for an analyzed CA edition |
 | `--before PATH` |: | Previous version of the file for incremental processing (skip unchanged utterances) |
 
+A declared `--before` input must be readable UTF-8. If that read fails, the
+file reports `Failed to read declared prior input` with the IO reason and stops
+before inference. Correct the prior path or contents and retry. Each readable
+current/prior pair is retained through its file's inference and publication.
+
 ## `@Options: CA` files pass through by default
 
 Under the default `--ca-policy honor`, a valid transcript declaring

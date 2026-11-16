@@ -35,8 +35,8 @@ use super::context::{
     DispatchEnd, DispatchHostContext, JobDispatchRequest, JobRefusal, RunnerExecutionContext,
 };
 use super::dispatch::{
-    BatchedInferDispatchPlan, BenchmarkDispatchPlan, BenchmarkDispatchRuntime, FaDispatchPlan,
-    FaDispatchRuntime, MediaAnalysisDispatchPlan, MediaAnalysisDispatchRuntime,
+    BenchmarkDispatchPlan, BenchmarkDispatchRuntime, FaDispatchPlan, FaDispatchRuntime,
+    MediaAnalysisDispatchPlan, MediaAnalysisDispatchRuntime, MediaAnalysisRequest, PlanRequest,
     TranscribeDispatchPlan, TranscribeDispatchRuntime, dispatch_benchmark_infer, dispatch_fa_infer,
     dispatch_media_analysis_v2, dispatch_transcribe_infer, pre_scale_workers, probe_command_worker,
 };
@@ -49,28 +49,28 @@ use super::test_echo::dispatch_test_echo_files;
 /// and delegates.
 pub(super) async fn dispatch_job_with_execution_context(
     request: JobDispatchRequest,
-    host: &DispatchHostContext,
     execution: &RunnerExecutionContext,
 ) -> Result<DispatchEnd, crate::error::ServerError> {
     let JobDispatchRequest {
-        job,
-        file_list,
+        preflight,
         num_workers,
     } = request;
+    let inputs = preflight.into_inputs();
+    let job = inputs.job();
+    let host = inputs.host();
+    let file_list = inputs.files();
     let command = job.dispatch.command;
     let pool = &execution.pool;
     let cache = &execution.cache;
-    let all_chat = file_list
-        .iter()
-        .all(|file| matches!(file.kind(), crate::store::InputKind::Chat));
+    let all_chat = inputs.all_chat();
 
     // Native work shares the managed runner's admission and supervision, but
     // cannot pass through test echo or probing an invented worker task.
     if command_runner_dispatch_kind(command) == RunnerDispatchKind::NativeAudioExport {
         return Ok(crate::execution::native_media::dispatch_audio_export(
-            &job,
+            job,
             host,
-            &file_list,
+            file_list,
             num_workers,
         )
         .await);
@@ -78,15 +78,14 @@ pub(super) async fn dispatch_job_with_execution_context(
 
     if command_requires_chat_infer(command) && !all_chat {
         return Ok(DispatchEnd::Refused(refuse(
-            &job,
+            job,
             format!("'{command}' needs CHAT input for every file, and at least one file has none"),
         )));
     }
 
     // Test-echo workers answer every task and are never probed per command.
     if execution.test_echo_mode {
-        dispatch_test_echo_files(&job, host.sink().as_ref(), &file_list, pool.test_delay_ms())
-            .await;
+        dispatch_test_echo_files(job, host.sink().as_ref(), file_list, pool.test_delay_ms()).await;
         return Ok(DispatchEnd::Dispatched);
     }
 
@@ -97,7 +96,7 @@ pub(super) async fn dispatch_job_with_execution_context(
     // refused plan also fails the job before a model is loaded for it.
     let runner_dispatch_kind = command_runner_dispatch_kind(command);
     let family = match FamilyPlan::build(
-        &job,
+        job,
         host,
         runner_dispatch_kind,
         all_chat,
@@ -126,7 +125,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         // job itself carries no language to probe on.
         FamilyPlan::PerFileAudio(plan) => {
             dispatch_fa_infer(
-                &job,
+                job,
                 host,
                 FaDispatchRuntime {
                     pool: pool.clone(),
@@ -178,7 +177,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         }
         Err(refusal) => {
             return Ok(DispatchEnd::Refused(refuse(
-                &job,
+                job,
                 format!("cannot run '{command}': {refusal}"),
             )));
         }
@@ -203,7 +202,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         // Audio-first commands: they take audio input, not CHAT.
         JobLevelFamily::Transcribe(plan) => {
             dispatch_transcribe_infer(
-                &job,
+                job,
                 host,
                 TranscribeDispatchRuntime {
                     pool: pool.clone(),
@@ -216,7 +215,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         }
         JobLevelFamily::Benchmark(plan) => {
             dispatch_benchmark_infer(
-                &job,
+                job,
                 host,
                 BenchmarkDispatchRuntime {
                     pool: pool.clone(),
@@ -229,7 +228,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         }
         JobLevelFamily::MediaAnalysis(plan) => {
             dispatch_media_analysis_v2(
-                &job,
+                job,
                 host,
                 MediaAnalysisDispatchRuntime {
                     pool: pool.clone(),
@@ -243,7 +242,7 @@ pub(super) async fn dispatch_job_with_execution_context(
         JobLevelFamily::SpeakerIdentity => {
             return Ok(
                 crate::runner::dispatch::speaker_identity_pipeline::dispatch_speaker_identity(
-                    &job,
+                    job,
                     host,
                     pool.clone(),
                 )
@@ -251,7 +250,7 @@ pub(super) async fn dispatch_job_with_execution_context(
             );
         }
         JobLevelFamily::BatchedText => {
-            return dispatch_batched_text_command(&job, host, execution, num_workers).await;
+            return dispatch_batched_text_command(inputs, execution, num_workers).await;
         }
     }
 
@@ -288,13 +287,13 @@ pub(crate) fn refuse(job: &RunnerJobSnapshot, message: String) -> JobRefusal {
 /// `every_batched_text_command_has_a_named_arm` below fails if a command whose
 /// catalog entry declares `BatchedTextInfer` has no arm here.
 async fn dispatch_batched_text_command(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
+    inputs: super::preflight::DispatchInputs,
     execution: &RunnerExecutionContext,
     num_workers: NumWorkers,
 ) -> Result<DispatchEnd, crate::error::ServerError> {
+    let job = inputs.job();
+    let host = inputs.host();
     let command = job.dispatch.command;
-    let plan = BatchedInferDispatchPlan::from_job(job);
     let gateway = PooledWorkerGateway::new(execution.pool.clone(), execution.cache.clone());
 
     // Where this command's language comes from, resolved ONCE from the command
@@ -318,26 +317,18 @@ async fn dispatch_batched_text_command(
     let dispatched = match (dispatch_language, command) {
         (DispatchLanguage::PerFile, ReleasedCommand::Morphotag) => {
             dispatch_morphotag_job(
-                job,
-                host,
+                crate::execution::text_io::PreparedTextJob::<MorphotagRuntimeOptions>::prepare(
+                    inputs.into_chat()?,
+                    num_workers,
+                )?,
                 Arc::new(gateway),
-                MorphotagRuntimeOptions {
-                    tokenization_mode: plan.tokenization_mode,
-                    multilingual_policy: plan.multilingual_policy,
-                    mwt: Arc::new(plan.mwt),
-                    l2_policy: plan.l2_policy,
-                    pos_hint_policy: plan.pos_hint_policy,
-                    ca_policy: plan.ca_policy,
-                    review_level: plan.review_level,
-                },
-                num_workers,
             )
             .await
         }
         // Compare takes no language either: its internal morphotag of each
         // main transcript reads that file's `@Languages:` header.
         (DispatchLanguage::PerFile, ReleasedCommand::Compare) => {
-            dispatch_compare_job(job, host, &gateway, &plan.mwt).await
+            dispatch_compare_job(job, host, &gateway, &job.dispatch.options.common().mwt).await
         }
         (DispatchLanguage::Job(job_language), ReleasedCommand::Utseg) => {
             // Refuse a language with no segmenter before dispatching, for the
@@ -365,19 +356,41 @@ async fn dispatch_batched_text_command(
                     return Ok(DispatchEnd::Refused(refuse(job, unservable.to_string())));
                 }
             };
-            dispatch_utseg_job(job, host, Arc::new(gateway), &route).await
+            dispatch_utseg_job(
+                crate::execution::text_io::PreparedTextJob::prepare(
+                    inputs.into_chat()?,
+                    num_workers,
+                )?,
+                Arc::new(gateway),
+                &route,
+            )
+            .await
         }
         // Translation and coreference name their engines on every result
         // they apply, so nothing about the worker's report travels with them.
         // Neither takes a language: translate resolves one per file from that
         // file's `@Languages:` header, and coref is English-only.
         (DispatchLanguage::PerFile, ReleasedCommand::Translate) => {
-            dispatch_translate_job(job, host, &gateway).await
+            dispatch_translate_job(
+                crate::execution::text_io::PreparedTextJob::prepare(
+                    inputs.into_chat()?,
+                    num_workers,
+                )?,
+                &gateway,
+            )
+            .await
         }
         // Its English requests reach the English worker the probe prepared
         // (`dispatch_language::probe_language`).
         (DispatchLanguage::Fixed(_), ReleasedCommand::Coref) => {
-            dispatch_coref_job(job, host, &gateway).await
+            dispatch_coref_job(
+                crate::execution::text_io::PreparedTextJob::prepare(
+                    inputs.into_chat()?,
+                    num_workers,
+                )?,
+                &gateway,
+            )
+            .await
         }
         // A programming error, not a user error, in one of two ways: a command
         // whose catalog entry declares `BatchedTextInfer` has no arm above, or
@@ -551,18 +564,29 @@ impl FamilyPlan {
             }
             RunnerDispatchKind::TranscribeAudioInfer => Self::JobLevel(JobLevelFamily::Transcribe(
                 plan_or_fail_files(job, host, |job, policy| {
-                    TranscribeDispatchPlan::from_job(job, policy, tencent)
+                    let request =
+                        PlanRequest::from_dispatch(&job.dispatch, job.pending_files.len())?;
+                    TranscribeDispatchPlan::from_request(request, policy, tencent)
                 })
                 .await?,
             )),
             RunnerDispatchKind::BenchmarkAudioInfer => Self::JobLevel(JobLevelFamily::Benchmark(
                 plan_or_fail_files(job, host, |job, policy| {
-                    BenchmarkDispatchPlan::from_job(job, policy, tencent)
+                    let request =
+                        PlanRequest::from_dispatch(&job.dispatch, job.pending_files.len())?;
+                    BenchmarkDispatchPlan::from_request(request, policy, tencent)
                 })
                 .await?,
             )),
             RunnerDispatchKind::MediaAnalysisV2 => Self::JobLevel(JobLevelFamily::MediaAnalysis(
-                plan_or_fail_files(job, host, MediaAnalysisDispatchPlan::from_job).await?,
+                plan_or_fail_files(job, host, |job, policy| {
+                    let request = MediaAnalysisRequest::from_dispatch(
+                        &job.dispatch,
+                        job.pending_files.len(),
+                    )?;
+                    MediaAnalysisDispatchPlan::from_request(request, policy)
+                })
+                .await?,
             )),
             RunnerDispatchKind::SpeakerIdentity if all_chat => {
                 Self::JobLevel(JobLevelFamily::SpeakerIdentity)
@@ -577,9 +601,14 @@ impl FamilyPlan {
                     ),
                 )));
             }
-            RunnerDispatchKind::ForcedAlignment => {
-                Self::PerFileAudio(plan_or_fail_files(job, host, FaDispatchPlan::from_job).await?)
-            }
+            RunnerDispatchKind::ForcedAlignment => Self::PerFileAudio(
+                plan_or_fail_files(job, host, |job, policy| {
+                    let request =
+                        PlanRequest::from_dispatch(&job.dispatch, job.pending_files.len())?;
+                    FaDispatchPlan::from_request(request, policy)
+                })
+                .await?,
+            ),
             RunnerDispatchKind::BatchedTextInfer => Self::JobLevel(JobLevelFamily::BatchedText),
         })
     }

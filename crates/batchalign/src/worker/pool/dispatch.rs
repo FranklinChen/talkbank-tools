@@ -1,13 +1,12 @@
 //! Worker checkout and dispatch routing.
 //!
-//! Contains the core `checkout()` loop (semaphore acquire → pop idle worker →
-//! RAII guard), `dispatch_batch_infer`, `dispatch_execute_v2`, and TCP worker
+//! Contains the core `checkout()` loop (observe queue → own departure →
+//! consuming exchange), `dispatch_batch_infer`, `dispatch_execute_v2`, and TCP worker
 //! checkout/return helpers. Routes keys whose workers serve concurrently
 //! (`WorkerServing::SharedConcurrent`) to one shared worker; every other key
 //! uses the exclusive-checkout model.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use crate::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use crate::types::worker_v2::{ExecuteRequestV2, ExecuteResponseV2};
@@ -16,27 +15,26 @@ use crate::worker::tcp_handle::TcpWorkerHandle;
 use crate::worker::{BatchInferRequest, BatchInferResponse, WorkerTarget};
 use tracing::{instrument, warn};
 
-use super::checkout::CheckedOutWorker;
 use super::checkout_wait::{GroupCounts, Parked, SaturatedWait};
 use super::eviction::EvictionOutcome;
-use super::execute_v2::{self, execute_v2_worker_key};
+use super::execute_v2;
 use super::job_tracker::TrackerGuard;
-use super::{AwayFromQueue, TaskLoad, WorkerGroup, WorkerKey, WorkerPool, lock_recovered};
+use super::worker_plan::{CommandWorkerPlan, WorkerPlan};
 use super::{DispatchPreparation, ReadyRequest};
+use super::{WorkerKey, WorkerPool, lock_recovered};
 
 // The exchange order is identical on every transport. Both sends require the
 // same lease-owning RunPermit; the FA preparation reply advances the owned
 // candidate rather than reopening an arbitrary execution packet.
 macro_rules! dispatch_prepared {
-    ($loaded:expr, $admission:expr, $prepared:expr, $permit:ident => $send:expr) => {
+    ($prepared:expr, $ready:ident => $send:expr) => {
         'prepared_dispatch: {
             use $crate::worker::pool::{DispatchPreparation, FaPreparationCompletion};
             let ready = match $prepared {
                 DispatchPreparation::Ready(ready) => ready,
                 DispatchPreparation::ForcedAlignment(exchange) => {
-                    let $permit = $loaded.run(exchange.query(), $admission).await?;
+                    let $ready = exchange.query();
                     let reply = $send.await?;
-                    drop($permit);
                     match exchange.bind(reply)? {
                         FaPreparationCompletion::Ready(ready) => ready.into_ready(),
                         FaPreparationCompletion::Refused(reply) => {
@@ -45,265 +43,99 @@ macro_rules! dispatch_prepared {
                     }
                 }
             };
-            let $permit = $loaded.run(ready, $admission).await?;
+            let $ready = ready;
             $send.await
         }
     };
 }
 pub(crate) use dispatch_prepared;
 
-/// A TCP worker handle checked out of its group for one exchange.
-///
-/// Owns the handle and its group slot together, so no exit path can lose
-/// either. [`Self::finish`] reads what the exchange left: the handle goes back
-/// to its group unless the error means the worker must be retired
-/// ([`WorkerError::worker_after_failure`]), in which case the handle is
-/// dropped and the slot released. Dropped without `finish` (the exchange
-/// future was cancelled mid-request), the handle is dropped and the slot
-/// released too: a request may be half-sent or a response half-read, and a
-/// later exchange on that stream could read a stale reply as its own.
+/// A completed TCP exchange retains its original queue departure and job use.
 pub(super) struct TcpCheckout {
-    handle: TcpWorkerHandle,
-    lease: TcpSlotLease,
-    /// Accounts for this worker while it is out of the TCP queue.
-    _away: AwayFromQueue,
+    handle: super::capacity::DepartedWorker<TcpWorkerHandle>,
+    _registration: TrackerGuard,
 }
-
 impl TcpCheckout {
-    /// The checked-out handle, for the exchange.
-    pub(super) fn handle(&mut self) -> &mut TcpWorkerHandle {
-        &mut self.handle
-    }
-
-    /// End the exchange: return the handle to its group, or retire it.
-    pub(super) fn finish<T>(self, outcome: &Result<T, WorkerError>) {
-        // The away guard is held to the end, after the handle is back.
-        let Self {
-            handle,
-            lease,
-            _away,
-        } = self;
+    pub(super) async fn run<T>(
+        mut self,
+        work: impl AsyncFnOnce(&mut TcpWorkerHandle) -> Result<T, WorkerError>,
+    ) -> Result<T, WorkerError> {
+        let outcome = work(&mut self.handle).await;
         match outcome
             .as_ref()
-            .map(|_| ())
-            .map_err(WorkerError::worker_after_failure)
+            .map(|_| WorkerAfterFailure::Reusable)
+            .unwrap_or_else(|error| error.worker_after_failure())
         {
-            Ok(()) | Err(WorkerAfterFailure::Reusable) => lease.return_handle(handle),
-            Err(WorkerAfterFailure::Retire) => {
-                warn!(
-                    pid = %handle.pid(),
-                    "Retiring TCP worker handle after a failed exchange; the daemon is \
-                     left running and is adopted again by the next registry sweep"
-                );
-                // Dropping the handle closes the connection; dropping the lease
-                // releases the slot.
-                drop(handle);
-                drop(lease);
-            }
+            WorkerAfterFailure::Reusable => self.handle.return_idle(),
+            WorkerAfterFailure::Retire => drop(self),
         }
-    }
-}
-
-/// The group slot a checked-out TCP handle occupies.
-///
-/// Which groups a saturated checkout's reconciliation looks at: the groups
-/// whose accounting can keep what it is parked on from coming back.
-#[derive(Debug, Clone, Copy)]
-enum ReconcileScope<'a> {
-    /// Parked on its own group's permits.
-    OwnGroup(&'a WorkerKey),
-    /// Parked on the pool-wide worker-returned signal.
-    Pool,
-}
-
-/// Releases the slot (the group's live count and its global worker permit)
-/// when dropped, unless [`Self::return_handle`] gave the handle back first.
-struct TcpSlotLease {
-    /// `Some` until the slot is either given back with its handle or released.
-    group: Option<Arc<WorkerGroup>>,
-}
-
-impl TcpSlotLease {
-    /// Give the handle back to its group; the slot stays occupied by it.
-    fn return_handle(mut self, handle: TcpWorkerHandle) {
-        if let Some(group) = self.group.take() {
-            lock_recovered(&group.tcp_workers).push_back(handle);
-            group.tcp_available.add_permits(1);
-        }
-    }
-}
-
-impl Drop for TcpSlotLease {
-    fn drop(&mut self) {
-        if let Some(group) = self.group.take() {
-            group.total.fetch_sub(1, Ordering::Relaxed);
-            group.spawn_permits.add_permits(1);
-        }
+        outcome
     }
 }
 
 impl WorkerPool {
     /// Check out an idle worker or spawn a new one.
     ///
-    /// 1. Try to acquire a semaphore permit immediately.
+    /// 1. Register queue notifications and try to take an actual idle owner.
     /// 2. If none available, try to spawn a new worker (if under capacity).
     /// 3. If at capacity, wait for a worker to come back (async suspend).
-    /// 4. Pop from the idle queue and wrap in `CheckedOutWorker` (RAII guard).
+    /// 4. Consume the tracked checkout through its exchange and completion.
     ///
     /// A saturated pool is congestion, not a failure of the request: the
     /// wait has no deadline, only a report interval after which it is logged
     /// and re-probed. It ends when a worker is available, when the pool
     /// shuts down, or when the caller drops it. See [`super::checkout_wait`].
-    pub(super) async fn checkout(&self, key: &WorkerKey) -> Result<CheckedOutWorker, WorkerError> {
+    pub(super) async fn checkout(
+        &self,
+        key: &WorkerKey,
+    ) -> Result<super::checkout::TrackedCheckout, WorkerError> {
         let group = self.get_or_create_group(key);
         let report_interval = self.config.checkout_wait_report_interval();
-        // Begun at the first park, so a checkout that never waits reports
-        // nothing; dropped on return, which ends its observation.
         let mut saturated: Option<SaturatedWait> = None;
-        let group_counts = || GroupCounts {
-            total: group.total.load(Ordering::Relaxed),
-            idle: lock_recovered(&group.idle).len(),
+        let counts = || GroupCounts {
+            total: group.total.count(),
+            idle: group.idle.view().len(),
         };
-
         loop {
-            // Invariant (normal operation): `group.available.permits() ==
-            // group.idle.len()`. When the invariant holds, a successful
-            // `try_acquire` is matched by a non-empty idle queue and we
-            // return immediately.
-            //
-            // Degenerate case: `permits > idle.len()`, a permit without a
-            // matching worker. The health-check task drains idle before
-            // re-adding permits for survivors, so this window is real.
-            // Returning the permit and falling through is correct; the
-            // `yield_now().await` is LOAD-BEARING. Without it, a tight
-            // `try_acquire → pop-None → add_permits → continue` cycle
-            // starves the tokio runtime, other tasks that might refill
-            // idle never run, and one worker thread burns a core.
-            if let Ok(permit) = group.available.try_acquire() {
-                permit.forget();
-                if let Some(handle) = lock_recovered(&group.idle).pop_front() {
-                    return Ok(CheckedOutWorker::from_idle(&group, handle));
-                }
-                group.available.add_permits(1);
-                tokio::task::yield_now().await;
+            // Register before either observation or spawn. A burst wakes the
+            // already-registered queue waiters once per actual publication.
+            let queued = group.idle.changed();
+            let changed = self.worker_returned.notified();
+            tokio::pin!(queued, changed);
+            queued.as_mut().enable();
+            changed.as_mut().enable();
+            if let Some(worker) = group.take_stdio() {
+                return Ok(super::checkout::TrackedCheckout::from_departed(
+                    worker,
+                    &self.job_tracker,
+                ));
             }
-
-            // Slow path: try to spawn a new worker (if under cap).
-            match self.try_spawn_into_group(&group, key).await {
-                Ok(true) => {
-                    // Spawned: loop back: the new permit is backed by
-                    // a real enqueued worker, so the fast path will hit.
-                    continue;
-                }
-                Ok(false) => {
-                    // At capacity. If this group already has live
-                    // workers they will eventually return permits
-                    // fall through to the async wait below. Otherwise
-                    // try to free a slot by evicting an idle worker
-                    // from another group; if that fails, park on the
-                    // pool-wide `worker_returned` Notify.
-                    if group.is_empty() {
-                        // Register on `worker_returned` BEFORE the
-                        // eviction probe. `Notified::enable()` puts
-                        // this task on the wait list without polling
-                        // the future, so any `notify_one()` that
-                        // fires during the probe is delivered here
-                        // instead of being absorbed by the Notify's
-                        // single-slot buffer (a burst of N>1 returns
-                        // would otherwise lose N−1 wakeups, forcing
-                        // late-comers to wait a whole report interval).
-                        // checkout.rs uses `notify_one()` (not
-                        // `notify_waiters()`) so each return wakes
-                        // exactly one waiter: the BUG-028 herd fix.
-                        let notified = self.worker_returned.notified();
-                        tokio::pin!(notified);
-                        notified.as_mut().enable();
-
-                        if let EvictionOutcome::Evicted = self.try_evict_idle_from_other_group(key)
-                        {
-                            continue;
-                        }
-
-                        // A wakeup and an elapsed report interval both
-                        // re-probe from the top; a shutdown, or accounting
-                        // that stays broken, ends it.
-                        let wait = saturated.get_or_insert_with(|| {
-                            SaturatedWait::begin(&key.target, &key.language, report_interval)
-                        });
-                        match wait.park(notified, &self.cancel, group_counts).await? {
-                            Parked::Ready(()) => {}
-                            Parked::StillSaturated => {
-                                // Parked on the pool-wide return signal: any
-                                // group's broken count can be what blocks it.
-                                wait.reconcile(self.unaccounted_groups(ReconcileScope::Pool))?;
-                            }
-                        }
-                        continue;
-                    }
-                    // fall through to this-key async wait below
-                }
-                Err(e) => return Err(e),
+            let deferral = match self.try_spawn_into_group(&group, key).await? {
+                super::lifecycle::SpawnOutcome::Published => continue,
+                super::lifecycle::SpawnOutcome::Deferred(deferral) => deferral,
+            };
+            if group.is_empty()
+                && matches!(
+                    self.try_evict_idle_from_other_group(key),
+                    EvictionOutcome::Evicted
+                )
+            {
+                continue;
             }
-
-            // All workers busy and at capacity. Wait for a permit. An elapsed
-            // report interval re-probes from the top, so a stale `total > 0`
-            // count or a group that emptied meanwhile is re-read rather than
-            // waited on forever without a word.
             let wait = saturated.get_or_insert_with(|| {
                 SaturatedWait::begin(&key.target, &key.language, report_interval)
             });
-            let permit = match wait
-                .park(group.available.acquire(), &self.cancel, group_counts)
-                .await?
-            {
-                Parked::Ready(acquired) => acquired
-                    .map_err(|_| WorkerError::SpawnFailed("worker pool semaphore closed".into()))?,
-                Parked::StillSaturated => {
-                    // Parked on this group's own permits: only its own
-                    // accounting can keep them from coming back.
-                    wait.reconcile(self.unaccounted_groups(ReconcileScope::OwnGroup(key)))?;
-                    continue;
+            let wake = async {
+                tokio::select! {
+                    _ = queued => {},
+                    _ = changed => {},
+                    _ = deferral.global_change(&self.spawn_permits) => {},
                 }
             };
-            permit.forget();
-
-            if let Some(handle) = lock_recovered(&group.idle).pop_front() {
-                return Ok(CheckedOutWorker::from_idle(&group, handle));
+            match wait.park(wake, &self.cancel, counts).await? {
+                Parked::Ready(()) | Parked::StillSaturated => {}
             }
-            // Rare: async-acquire returned a permit but idle is empty.
-            // Same load-bearing yield as above, returning the permit
-            // without yielding would reintroduce the runtime starvation.
-            group.available.add_permits(1);
-            tokio::task::yield_now().await;
         }
-    }
-
-    /// Every group in `scope` whose live count exceeds what holds its
-    /// workers. Lock order is groups, then each group's queues, as
-    /// elsewhere.
-    fn unaccounted_groups(
-        &self,
-        scope: ReconcileScope<'_>,
-    ) -> Vec<super::checkout_wait::UnaccountedGroup> {
-        let groups = lock_recovered(&self.groups);
-        groups
-            .iter()
-            .filter(|(key, _)| match scope {
-                ReconcileScope::OwnGroup(own) => *key == own,
-                ReconcileScope::Pool => true,
-            })
-            .filter_map(|(key, group)| {
-                let unaccounted = group.unaccounted();
-                (unaccounted > 0).then(|| super::checkout_wait::UnaccountedGroup {
-                    key: key.clone(),
-                    unaccounted,
-                    total: group.total.load(Ordering::Relaxed),
-                    idle: lock_recovered(&group.idle).len()
-                        + lock_recovered(&group.tcp_workers).len(),
-                    away: group.away.load(Ordering::Relaxed),
-                })
-            })
-            .collect()
     }
 
     /// Dispatch a batch inference request to a single worker.
@@ -321,49 +153,25 @@ impl WorkerPool {
         let worker_lang = WorkerLanguage::from(lang);
         let key = WorkerKey::without_engine_selection(target, worker_lang);
 
-        // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut checkout) = self.try_checkout_tcp(&key)
+            && let Some(checkout) = self.try_checkout_tcp(&key)
         {
-            let result = checkout.handle().batch_infer(request).await;
-            checkout.finish(&result);
-            return result;
+            return checkout
+                .run(async |worker| worker.batch_infer(request).await)
+                .await;
         }
-
-        // Fall back to stdio worker. TrackerGuard registers this
-        // worker against the current job for cancel-driven shutdown;
-        // auto-unregisters on drop.
-        let mut worker = self.checkout(&key).await?;
-        let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
-        let result = worker.batch_infer(request).await;
-
-        // If the worker crashed (I/O error or process exit), it is dead and
-        // must not be returned to the idle queue.  Discard it via `take()` so
-        // the pool decrements `total` (freeing a slot), then retry once with a
-        // freshly spawned replacement.
-        //
-        // Without this, `Drop` would silently return the corpse to the idle
-        // queue, causing the *next* dispatch to also fail with BrokenPipe.
-        //
-        // Protocol errors also warrant discarding the worker (the stdio stream
-        // may be desynchronized), but we do NOT retry them, the framing break
-        // may be input-specific and a retry could hang.
+        let result = self
+            .checkout(&key)
+            .await?
+            .run(async |worker| worker.batch_infer(request).await)
+            .await;
         match result {
-            Err(ref e @ (WorkerError::Io(_) | WorkerError::ProcessExited { .. })) => {
-                warn!(
-                    error = %e,
-                    "worker crashed during batch_infer: discarding and retrying with a fresh worker"
-                );
-                worker.take(); // decrement total, do NOT return to idle queue
-                drop(worker); // Drop now sees None handle, does nothing
-                let mut fresh = self.checkout(&key).await?;
-                fresh.batch_infer(request).await
-            }
-            Err(ref e @ WorkerError::Protocol(_)) => {
-                // Desynchronized stream: discard without retry.
-                warn!(error = %e, "worker protocol error, discarding worker");
-                worker.take();
-                result
+            Err(ref error @ (WorkerError::Io(_) | WorkerError::ProcessExited { .. })) => {
+                warn!(%error, "worker crashed during batch_infer; retrying with a fresh worker");
+                self.checkout(&key)
+                    .await?
+                    .run(async |worker| worker.batch_infer(request).await)
+                    .await
             }
             other => other,
         }
@@ -373,18 +181,10 @@ impl WorkerPool {
     /// [`TcpCheckout`] that gives it back or retires it.
     pub(super) fn try_checkout_tcp(&self, key: &WorkerKey) -> Option<TcpCheckout> {
         let group = lock_recovered(&self.groups).get(key)?.clone();
-        let permit = group.tcp_available.try_acquire().ok()?;
-        let Some(handle) = lock_recovered(&group.tcp_workers).pop_front() else {
-            // A permit with no handle behind it: give the permit back rather
-            // than lose it.
-            drop(permit);
-            return None;
-        };
-        permit.forget();
+        let handle = group.take_tcp()?;
         Some(TcpCheckout {
+            _registration: TrackerGuard::new(&self.job_tracker, handle.pid()),
             handle,
-            _away: AwayFromQueue::new(&group, 1),
-            lease: TcpSlotLease { group: Some(group) },
         })
     }
 
@@ -400,6 +200,33 @@ impl WorkerPool {
     ) -> Result<ExecuteResponseV2, WorkerError> {
         self.dispatch_execute_v2_with_progress(lang, request, None)
             .await
+    }
+
+    /// The registry GPU daemon connected for `key`, if its stream is still
+    /// open. A connection whose stream has closed is removed here, so dispatch
+    /// falls back to a spawned worker and the next discovery sweep can connect
+    /// to the daemon afresh, instead of every request waiting out its timeout
+    /// on a dead connection.
+    pub(super) async fn live_gpu_tcp_worker(
+        &self,
+        key: &WorkerKey,
+    ) -> Option<Arc<super::shared_gpu::SharedGpuTcpWorker>> {
+        let mut workers = self.gpu_tcp_workers.lock().await;
+        let worker = workers.get(key)?;
+        match worker.check_available() {
+            Ok(()) => Some(worker.clone()),
+            Err(error) => {
+                warn!(
+                    target = %key.target.label(),
+                    lang = %key.language,
+                    pid = %worker.pid(),
+                    %error,
+                    "GPU TCP worker connection is closed; removing it"
+                );
+                workers.remove(key);
+                None
+            }
+        }
     }
 
     /// Dispatch a V2 execute request, forwarding intermediate progress events
@@ -419,9 +246,12 @@ impl WorkerPool {
         request: &ExecuteRequestV2,
         progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        let key = execute_v2_worker_key(lang.into(), request, self.config.runtime.bootstrap_mode)?;
-        self.dispatch_v2_on_key(&key, DispatchPreparation::begin(request)?, progress_tx)
-            .await
+        let plan = WorkerPlan::direct(
+            lang.into(),
+            DispatchPreparation::begin(request)?,
+            self.config.runtime.bootstrap_mode,
+        )?;
+        self.dispatch_v2_on_plan(plan, progress_tx).await
     }
 
     /// The route for one GPU task of a job's model plan, in `language`.
@@ -457,9 +287,8 @@ impl WorkerPool {
         route: &super::GpuRoute,
         request: &ExecuteRequestV2,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        route.admit(request)?;
-        self.dispatch_v2_on_key(&route.key, DispatchPreparation::begin(request)?, None)
-            .await
+        let plan = WorkerPlan::routed(route, DispatchPreparation::begin(request)?)?;
+        self.dispatch_v2_on_plan(plan, None).await
     }
 
     /// Consume retained preparation on the ordinary route. The loaded worker
@@ -470,9 +299,8 @@ impl WorkerPool {
         route: &super::GpuRoute,
         ready: ReadyRequest,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        route.admit(ready.request())?;
-        self.dispatch_v2_on_key(&route.key, DispatchPreparation::Ready(ready), None)
-            .await
+        let plan = WorkerPlan::routed(route, DispatchPreparation::Ready(ready))?;
+        self.dispatch_v2_on_plan(plan, None).await
     }
 
     /// Dispatch a GPU-profile request in integration tests, on the route
@@ -494,16 +322,16 @@ impl WorkerPool {
     }
 
     /// Dispatch one request to the worker `key` names.
-    async fn dispatch_v2_on_key(
+    async fn dispatch_v2_on_plan(
         &self,
-        key: &WorkerKey,
-        prepared: DispatchPreparation,
+        plan: WorkerPlan,
         progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        if self.serving(key.target).is_shared() {
-            // Shared workers don't support progress forwarding yet.
-            return self.dispatch_gpu_execute_v2(key, prepared).await;
+        if self.serving(plan.key().target).is_shared() {
+            return self.dispatch_gpu_execute_v2(plan).await;
         }
+        let (key, prepared) = plan.into_parts();
+        let key = &key;
 
         // The prepare step: every model loads here, before the request's
         // first dispatch to a worker, in every bootstrap mode (no worker
@@ -513,56 +341,18 @@ impl WorkerPool {
         // under the loading stall window, never inside the request. The load
         // is read from the request once, before any worker is taken, so a
         // malformed request never retires a worker.
-        let load = TaskLoad::for_request(prepared.request());
         let preparation = self.load_preparation();
 
-        // Try TCP worker first.
         if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut checkout) = self.try_checkout_tcp(key)
+            && let Some(checkout) = self.try_checkout_tcp(key)
         {
-            let result = async {
-                let loaded = checkout.handle().ensure_task(&load, &preparation).await?;
-                dispatch_prepared!(loaded, &preparation.admission, prepared, permit => checkout
-                    .handle()
-                    .execute_v2_with_progress(&permit, progress_tx))
-            }
-            .await;
-            checkout.finish(&result);
-            return result;
+            return checkout.run(async |worker| {
+                dispatch_prepared!(prepared, ready => worker.execute_v2_with_progress(ready, &preparation, progress_tx))
+            }).await;
         }
-
-        // Fall back to stdio worker.
-        let mut worker = self.checkout(key).await?;
-        let _job_guard = TrackerGuard::new(&self.job_tracker, worker.pid());
-        let loaded = worker.ensure_task(&load, &preparation).await?;
-        dispatch_prepared!(loaded, &preparation.admission, prepared, permit => worker.execute_v2_with_progress(&permit, progress_tx))
-    }
-
-    /// The registry GPU daemon connected for `key`, if its stream is still
-    /// open. A connection whose stream has closed is removed here, so dispatch
-    /// falls back to a spawned worker and the next discovery sweep can connect
-    /// to the daemon afresh, instead of every request waiting out its timeout
-    /// on a dead connection.
-    pub(super) async fn live_gpu_tcp_worker(
-        &self,
-        key: &WorkerKey,
-    ) -> Option<Arc<super::shared_gpu::SharedGpuTcpWorker>> {
-        let mut workers = self.gpu_tcp_workers.lock().await;
-        let worker = workers.get(key)?;
-        match worker.check_available() {
-            Ok(()) => Some(worker.clone()),
-            Err(error) => {
-                warn!(
-                    target = %key.target.label(),
-                    lang = %key.language,
-                    pid = %worker.pid(),
-                    %error,
-                    "GPU TCP worker connection is closed; removing it"
-                );
-                workers.remove(key);
-                None
-            }
-        }
+        self.checkout(key).await?.run(async |worker| {
+            dispatch_prepared!(prepared, ready => worker.execute_v2_with_progress(ready, &preparation, progress_tx))
+        }).await
     }
 
     /// Dispatch a V2 execute request to a GPU worker.
@@ -574,34 +364,28 @@ impl WorkerPool {
     #[instrument(
         skip_all,
         fields(
-            target = %key.target.label(),
-            lang = %key.language,
-            request_id = %prepared.request().request_id,
+            target = %plan.key().target.label(),
+            lang = %plan.key().language,
         ),
     )]
     async fn dispatch_gpu_execute_v2(
         &self,
-        key: &WorkerKey,
-        prepared: DispatchPreparation,
+        plan: WorkerPlan,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        // The prepare step, as in `dispatch_v2_on_key`.
-        let load = TaskLoad::for_request(prepared.request());
+        let (key, prepared) = plan.into_parts();
+        let key = &key;
         let preparation = self.load_preparation();
 
         // Try TCP worker first (discovered from registry).
         if matches!(key.target, WorkerTarget::Profile(_))
             && let Some(tcp_worker) = self.live_gpu_tcp_worker(key).await
         {
-            let _job_guard = TrackerGuard::new(&self.job_tracker, tcp_worker.pid());
-            let loaded = tcp_worker.ensure_task(&load, &preparation).await?;
-            return dispatch_prepared!(loaded, &preparation.admission, prepared, permit => tcp_worker.execute_v2(&permit));
+            return dispatch_prepared!(prepared, ready => tcp_worker.execute_v2(ready, &preparation, TrackerGuard::new(&self.job_tracker, tcp_worker.pid())));
         }
 
         // Fall back to stdio worker.
         let gpu_worker = self.get_or_create_gpu_worker(key).await?;
-        let _job_guard = TrackerGuard::new(&self.job_tracker, gpu_worker.pid());
-        let loaded = gpu_worker.ensure_task(&load, &preparation).await?;
-        let result = dispatch_prepared!(loaded, &preparation.admission, prepared, permit => gpu_worker.execute_v2(&permit));
+        let result = dispatch_prepared!(prepared, ready => gpu_worker.execute_v2(ready, &preparation, TrackerGuard::new(&self.job_tracker, gpu_worker.pid())));
         if let Err(WorkerError::Timeout { .. }) = &result {
             // The worker thread serving the request may still be running it,
             // holding one of the worker's `gpu_thread_pool_size` slots for
@@ -653,42 +437,33 @@ impl WorkerPool {
             .capabilities
             .require_inference()
             .map_err(|_| WorkerError::NativeCommand { command })?;
-        // A GPU command is probed on its plan's worker, so the worker the
-        // probe spawns is the one the job's requests reach. Keyed from the
-        // command's main task alone, an align job's probe used to spawn an
-        // FA-only worker beside the one its UTR requests then needed.
-        let key = WorkerKey::for_command(
+        let plan = CommandWorkerPlan::new(
             requirement,
             lang.into(),
             options,
             gpu,
             self.config.runtime.bootstrap_mode,
         );
-        // The load the job's own requests will need, so the probe prepares
-        // exactly the model they run on: a GPU command's from its plan (which
-        // names the speaker model, never part of the key), any other from
-        // the key's engines.
-        let task = requirement.task();
-        let load = match super::GpuTask::of(task) {
-            Some(gpu_task) => TaskLoad::new(task, gpu.load_overrides(gpu_task)),
-            None => TaskLoad::new(task, key.engine_selection.overrides().clone()),
-        };
+        let key = plan.key();
+        let load = plan.load();
+        let task = load.task();
         let preparation = self.load_preparation();
 
         let reports = if self.serving(key.target).is_shared() {
             let registry_worker = if matches!(key.target, WorkerTarget::Profile(_)) {
-                self.live_gpu_tcp_worker(&key).await
+                self.live_gpu_tcp_worker(key).await
             } else {
                 None
             };
             match registry_worker {
                 Some(worker) => {
-                    worker.ensure_task(&load, &preparation).await?;
+                    let _registration = TrackerGuard::new(&self.job_tracker, worker.pid());
+                    worker.ensure_task(load, &preparation).await?;
                     let caps = worker.capabilities().await?;
-                    match self.record_capabilities(&key, caps) {
+                    match self.record_capabilities(key, caps) {
                         Ok(reports) => reports,
                         Err(refusal) => {
-                            self.gpu_tcp_workers.lock().await.remove(&key);
+                            self.gpu_tcp_workers.lock().await.remove(key);
                             worker
                                 .shutdown(super::shared_gpu::Retirement::WorkerRetired)
                                 .await;
@@ -697,13 +472,14 @@ impl WorkerPool {
                     }
                 }
                 None => {
-                    let worker = self.get_or_create_gpu_worker(&key).await?;
-                    worker.ensure_task(&load, &preparation).await?;
+                    let worker = self.get_or_create_gpu_worker(key).await?;
+                    let _registration = TrackerGuard::new(&self.job_tracker, worker.pid());
+                    worker.ensure_task(load, &preparation).await?;
                     let caps = worker.capabilities().await?;
-                    match self.record_capabilities(&key, caps) {
+                    match self.record_capabilities(key, caps) {
                         Ok(reports) => reports,
                         Err(refusal) => {
-                            self.gpu_workers.lock().await.remove(&key);
+                            self.gpu_workers.lock().await.remove(key);
                             worker
                                 .shutdown(super::shared_gpu::Retirement::WorkerRetired)
                                 .await;
@@ -713,32 +489,26 @@ impl WorkerPool {
                 }
             }
         } else if matches!(key.target, WorkerTarget::Profile(_))
-            && let Some(mut checkout) = self.try_checkout_tcp(&key)
+            && let Some(checkout) = self.try_checkout_tcp(key)
         {
-            // Load, probe and admit as one exchange, so a refused report
-            // retires the handle exactly as a broken connection would.
-            let admitted = async {
-                checkout.handle().ensure_task(&load, &preparation).await?;
-                let caps = checkout.handle().capabilities().await?;
-                self.record_capabilities(&key, caps)
-                    .map_err(WorkerError::from)
-            }
-            .await;
-            checkout.finish(&admitted);
-            admitted?
+            checkout
+                .run(async |worker| {
+                    worker.ensure_task(load, &preparation).await?;
+                    let caps = worker.capabilities().await?;
+                    self.record_capabilities(key, caps)
+                        .map_err(WorkerError::from)
+                })
+                .await?
         } else {
-            let mut worker = self.checkout(&key).await?;
-            worker.ensure_task(&load, &preparation).await?;
-            let caps = worker.capabilities().await?;
-            match self.record_capabilities(&key, caps) {
-                Ok(reports) => reports,
-                Err(refusal) => {
-                    // `take` releases the slot; the handle drops here, which
-                    // terminates the worker process.
-                    drop(worker.take());
-                    return Err(refusal.into());
-                }
-            }
+            self.checkout(key)
+                .await?
+                .run(async |worker| {
+                    worker.ensure_task(load, &preparation).await?;
+                    let caps = worker.capabilities().await?;
+                    self.record_capabilities(key, caps)
+                        .map_err(WorkerError::from)
+                })
+                .await?
         };
         Ok(super::LoadedCapabilities { task, reports })
     }
@@ -787,15 +557,18 @@ mod tcp_checkout_tests {
             crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<5>());
         let pool = WorkerPool::new(config);
         let options = CommandOptions::Morphotag(MorphotagOptions::default());
-        let key = WorkerKey::from_command_options(
+        let key = CommandWorkerPlan::new(
             crate::command_model::command_spec(ReleasedCommand::Morphotag)
                 .capabilities
                 .require_inference()
                 .expect("morphotag requires inference"),
             WorkerLanguage::from(LanguageCode3::eng()),
             &options,
+            &super::super::GpuModelPlan::without_engines(),
             pool.bootstrap_mode(),
-        );
+        )
+        .key()
+        .clone();
         assert!(
             matches!(key.target, WorkerTarget::Profile(_)) && !pool.serving(key.target).is_shared(),
             "precondition: morphotag dispatches through the sequential TCP path"
@@ -808,143 +581,108 @@ mod tcp_checkout_tests {
             engine_overrides: String::new(),
             pid: WorkerPid(1),
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
-            gpu_thread_pool_size: 1,
         })
         .await
         .expect("connect to fake daemon");
         let group = pool.get_or_create_group(&key);
-        group
-            .spawn_permits
-            .try_acquire()
-            .expect("a global worker permit")
-            .forget();
-        lock_recovered(&group.tcp_workers).push_back(handle);
-        group.tcp_available.add_permits(1);
-        group.total.fetch_add(1, Ordering::Relaxed);
+        super::super::capacity::ReservedWorkerSlot::try_claim(&group, 1)
+            .expect("admit the TCP fixture's actual slot")
+            .publish_tcp(handle);
         (pool, key, options)
     }
 
-    /// `ensure_task` failing with a complete error response the worker goes
-    /// on serving after (`runtime`) leaves the connection in step: the handle
-    /// goes back to its group. Before the owned checkout, the `?` returned
-    /// early and the handle was lost for good.
-    #[tokio::test]
-    async fn a_worker_error_response_returns_the_handle_to_its_group() {
-        let port = fake_daemon(Some(
-            "{\"op\":\"error\",\"error\":\"model load failed\",\"kind\":\"runtime\"}\n",
-        ))
-        .await;
-        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
-        let permits_before = pool.spawn_permits.available_permits();
-
-        let error = pool
-            .ensure_command_capabilities(
-                ReleasedCommand::Morphotag,
-                WorkerLanguage::from(LanguageCode3::eng()),
-                &options,
-                &super::super::GpuModelPlan::without_engines(),
-            )
-            .await
-            .expect_err("the fake daemon refuses to load the task");
-        assert!(matches!(error, WorkerError::Bootstrap { .. }), "{error:?}");
-
-        let group = pool.get_or_create_group(&key);
-        assert_eq!(lock_recovered(&group.tcp_workers).len(), 1);
-        assert_eq!(group.tcp_available.available_permits(), 1);
-        assert_eq!(group.total.load(Ordering::Relaxed), 1);
-        assert_eq!(pool.spawn_permits.available_permits(), permits_before);
+    enum TaskReply {
+        RuntimeRefusal,
+        DownloadExit,
+        WrongTask,
+        ClosedConnection,
     }
 
-    /// RED FIRST: a `download` (or `bootstrap`) report ends the worker's
-    /// service on that connection (the daemon closes it), so the handle is
-    /// retired, not returned. It was returned as reusable, and the retry the
-    /// download's category grants landed on the closed connection as a
-    /// worker crash, spending the retry budget on a dead handle.
-    #[tokio::test]
-    async fn a_report_after_which_the_worker_stops_serving_retires_the_handle() {
-        let port = fake_daemon(Some(
-            "{\"op\":\"error\",\"error\":\"connection reset\",\"kind\":\"download\"}\n",
-        ))
-        .await;
-        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
+    impl TaskReply {
+        fn wire(&self) -> Option<&'static str> {
+            match self {
+                Self::RuntimeRefusal => Some(
+                    "{\"op\":\"error\",\"error\":\"model load failed\",\"kind\":\"runtime\"}\n",
+                ),
+                Self::DownloadExit => Some(
+                    "{\"op\":\"error\",\"error\":\"connection reset\",\"kind\":\"download\"}\n",
+                ),
+                Self::WrongTask => Some(
+                    "{\"op\":\"ensure_task\",\"response\":{\"status\":\"loaded\",\"task\":\"fa\",\"elapsed_s\":0.1}}\n",
+                ),
+                Self::ClosedConnection => None,
+            }
+        }
 
-        let error = pool
-            .ensure_command_capabilities(
-                ReleasedCommand::Morphotag,
-                WorkerLanguage::from(LanguageCode3::eng()),
-                &options,
-                &super::super::GpuModelPlan::without_engines(),
-            )
-            .await
-            .expect_err("the fake daemon's download failed");
-        assert!(
-            matches!(
-                error,
-                WorkerError::ModelDownload {
-                    worker: crate::worker::error::WorkerAfterError::Exits,
-                    ..
+        fn assert_error(&self, error: &WorkerError) {
+            match self {
+                Self::RuntimeRefusal => {
+                    assert!(matches!(error, WorkerError::Bootstrap { .. }), "{error:?}")
                 }
-            ),
-            "{error:?}"
-        );
+                Self::DownloadExit => assert!(
+                    matches!(
+                        error,
+                        WorkerError::ModelDownload {
+                            worker: crate::worker::error::WorkerAfterError::Exits,
+                            ..
+                        }
+                    ),
+                    "{error:?}"
+                ),
+                Self::WrongTask => assert!(
+                    matches!(error, WorkerError::Protocol(message) if message.contains("answered about fa")),
+                    "{error:?}"
+                ),
+                Self::ClosedConnection => assert!(
+                    matches!(error, WorkerError::ProcessExited { .. }),
+                    "{error:?}"
+                ),
+            }
+        }
 
-        let group = pool.get_or_create_group(&key);
-        assert_eq!(lock_recovered(&group.tcp_workers).len(), 0);
-        assert_eq!(group.total.load(Ordering::Relaxed), 0);
+        fn retained_workers(&self) -> usize {
+            match self {
+                Self::RuntimeRefusal => 1,
+                Self::DownloadExit | Self::WrongTask | Self::ClosedConnection => 0,
+            }
+        }
     }
 
-    /// An `ensure_task` reply about another task does not load the asked
-    /// task: on a single-flight connection it is a protocol violation.
+    /// Guards: Exact task-preparation reply bytes and EOF classify errors truthfully and retain or retire the actual TCP worker with its original capacity slot.
+    /// Kind: wire
+    /// Not a type: Private slot publication prevents a bare TCP handle entering the pool and owns release. Runtime-refusal JSON, exit-promising download JSON, a loaded reply about fa instead of morphosyntax, and connection EOF still arrive as external bytes requiring transport and semantic admission.
+    /// State: Each closed reply case owns a loopback daemon and isolated pool on the declared test host. The real TCP adapter must decode those bytes and close or retain its connection. A pure reply double cannot establish stream EOF or real connection lifecycle.
+    /// Concurrency: Each daemon binds a unique ephemeral loopback port. Each case drops its pool/connection before the next case. No fixed port, models, shared runtime service or sleep establishes readiness.
     #[tokio::test]
-    async fn an_ensure_task_reply_about_another_task_is_a_protocol_error() {
-        let port = fake_daemon(Some(
-            "{\"op\":\"ensure_task\",\"response\":{\"status\":\"loaded\",\"task\":\"fa\",\"elapsed_s\":0.1}}\n",
-        ))
-        .await;
-        let (pool, _key, options) = pool_with_one_tcp_handle(port).await;
-        let error = pool
-            .ensure_command_capabilities(
-                ReleasedCommand::Morphotag,
-                WorkerLanguage::from(LanguageCode3::eng()),
-                &options,
-                &super::super::GpuModelPlan::without_engines(),
-            )
-            .await
-            .expect_err("a reply about fa does not answer ensure_task(morphosyntax)");
-        assert!(
-            matches!(&error, WorkerError::Protocol(message) if message.contains("answered about fa")),
-            "{error:?}"
-        );
-    }
-
-    /// A closed connection is the request losing its worker, as on the
-    /// shared GPU paths (`ProcessExited`, retryable): the handle is retired
-    /// and its slot released, not returned to serve another request.
-    #[tokio::test]
-    async fn a_closed_connection_retires_the_handle_and_releases_its_slot() {
-        let port = fake_daemon(None).await;
-        let (pool, key, options) = pool_with_one_tcp_handle(port).await;
-        let permits_before = pool.spawn_permits.available_permits();
-
-        let error = pool
-            .ensure_command_capabilities(
-                ReleasedCommand::Morphotag,
-                WorkerLanguage::from(LanguageCode3::eng()),
-                &options,
-                &super::super::GpuModelPlan::without_engines(),
-            )
-            .await
-            .expect_err("the fake daemon closed the connection");
-        assert!(
-            matches!(error, WorkerError::ProcessExited { .. }),
-            "{error:?}"
-        );
-
-        let group = pool.get_or_create_group(&key);
-        assert!(lock_recovered(&group.tcp_workers).is_empty());
-        assert_eq!(group.tcp_available.available_permits(), 0);
-        assert_eq!(group.total.load(Ordering::Relaxed), 0);
-        assert_eq!(pool.spawn_permits.available_permits(), permits_before + 1);
+    async fn task_preparation_replies_preserve_owned_tcp_capacity() {
+        for reply in [
+            TaskReply::RuntimeRefusal,
+            TaskReply::DownloadExit,
+            TaskReply::WrongTask,
+            TaskReply::ClosedConnection,
+        ] {
+            let port = fake_daemon(reply.wire()).await;
+            let (pool, key, options) = pool_with_one_tcp_handle(port).await;
+            let permits_before = pool.spawn_permits.available_permits();
+            let error = pool
+                .ensure_command_capabilities(
+                    ReleasedCommand::Morphotag,
+                    WorkerLanguage::from(LanguageCode3::eng()),
+                    &options,
+                    &super::super::GpuModelPlan::without_engines(),
+                )
+                .await
+                .expect_err("the declared wire reply refuses preparation");
+            reply.assert_error(&error);
+            let group = pool.get_or_create_group(&key);
+            let retained = reply.retained_workers();
+            assert_eq!(group.tcp_workers.view().len(), retained);
+            assert_eq!(group.total.count(), retained);
+            assert_eq!(
+                pool.spawn_permits.available_permits(),
+                permits_before + 1 - retained
+            );
+        }
     }
 }
 
@@ -959,7 +697,6 @@ mod tcp_checkout_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use crate::api::LanguageCode3;
@@ -968,7 +705,11 @@ mod tests {
     use super::*;
 
     /// A pool whose one counted worker is checked out and held.
-    fn saturated_pool() -> (std::sync::Arc<WorkerPool>, WorkerKey) {
+    fn saturated_pool() -> (
+        std::sync::Arc<WorkerPool>,
+        WorkerKey,
+        super::super::capacity::ReservedWorkerSlot,
+    ) {
         let pool = std::sync::Arc::new(WorkerPool::new(super::super::PoolConfig {
             max_workers_per_key: crate::host_facts::PerProfile::uniform(1),
             max_total_workers: 1,
@@ -978,25 +719,20 @@ mod tests {
         let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
         let lang = WorkerLanguage::from(LanguageCode3::eng());
         let key = WorkerKey::without_engine_selection(target, lang);
-        pool.get_or_create_group(&key)
-            .total
-            .store(1, Ordering::Relaxed);
-        (pool, key)
+        let reservation = pool
+            .try_claim_spawn_slot(&pool.get_or_create_group(&key))
+            .expect("hold the actual admitted startup slot");
+        (pool, key, reservation)
     }
 
-    /// RED FIRST (2026-10-06): a saturated checkout waits; it does not fail.
-    ///
-    /// The group's one counted worker is held (by a checkout that never
-    /// returns it), so nothing can be checked out. This used to return
-    /// `SpawnFailed("no worker available ... pool saturated")` once a fixed
-    /// deadline passed, which failed the file that was waiting. Now ten
-    /// report intervals pass and the checkout is still waiting (reported and
-    /// reconciled each interval: the held worker is accounted for), and only
-    /// the pool's shutdown ends it, with its own typed error.
+    /// Guards: A legitimately held startup slot keeps a saturated checkout waiting across report intervals, and pool shutdown returns PoolShuttingDown.
+    /// Kind: policy
+    /// Not a type: The slot prevents fabricated saturation counts. Waiting indefinitely through congestion and selecting shutdown over further retry remain async scheduling policies observed through the actual checkout future.
+    /// State: An isolated pool on the declared test host retains a real reservation. Its shared semaphore and cancellation token drive checkout; no worker process, socket, model or memory ledger is needed.
+    /// Concurrency: One current-thread runtime uses paused Tokio time for ten report intervals. The task is joined after explicit cancellation and the original reservation is dropped.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_saturated_checkout_keeps_waiting_until_the_pool_shuts_down() {
-        let (pool, key) = saturated_pool();
-        let held = AwayFromQueue::new(&pool.get_or_create_group(&key), 1);
+        let (pool, key, held) = saturated_pool();
 
         let waiting = tokio::spawn({
             let pool = pool.clone();
@@ -1017,80 +753,11 @@ mod tests {
         drop(held);
     }
 
-    /// A counted worker that nothing holds (a stale `total`) is not
-    /// congestion: no worker will ever come back. Seen at two consecutive
-    /// report intervals, the wait ends with the typed, terminal accounting
-    /// failure instead of waiting forever.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn a_count_nothing_holds_ends_the_wait_as_broken_accounting() {
-        let (pool, key) = saturated_pool();
-        let waiting = tokio::spawn({
-            let pool = pool.clone();
-            async move { pool.checkout(&key).await.map(drop) }
-        });
-        tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert!(!waiting.is_finished(), "one mismatch is only reported");
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let outcome = waiting.await.expect("the checkout task does not panic");
-        let Err(error @ WorkerError::PoolAccountingBroken { .. }) = outcome else {
-            panic!("a persistent mismatch is broken accounting, got {outcome:?}");
-        };
-        assert!(
-            matches!(
-                error,
-                WorkerError::PoolAccountingBroken {
-                    unaccounted: 1,
-                    total: 1,
-                    idle: 0,
-                    away: 0,
-                    ..
-                }
-            ),
-            "{error}"
-        );
-        assert_eq!(
-            crate::runner::util::classify_worker_error(&error),
-            crate::scheduling::FailureCategory::System
-        );
-    }
-
-    /// A checkout parked on its own group's permits waits on that group
-    /// alone: another group's broken count is not what keeps its worker from
-    /// coming back, and does not fail it.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn another_groups_broken_count_does_not_fail_an_own_group_wait() {
-        let (pool, key) = saturated_pool();
-        let held = AwayFromQueue::new(&pool.get_or_create_group(&key), 1);
-        let other = WorkerKey::without_engine_selection(
-            WorkerTarget::infer_task(InferTask::Utseg),
-            WorkerLanguage::from(LanguageCode3::eng()),
-        );
-        pool.get_or_create_group(&other)
-            .total
-            .store(1, Ordering::Relaxed);
-
-        let waiting = tokio::spawn({
-            let pool = pool.clone();
-            async move { pool.checkout(&key).await.map(drop) }
-        });
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        assert!(
-            !waiting.is_finished(),
-            "the own group's worker is held: this is congestion, whatever another group shows"
-        );
-        pool.cancel.cancel();
-        let outcome = waiting.await.expect("the checkout task does not panic");
-        assert!(
-            matches!(outcome, Err(WorkerError::PoolShuttingDown)),
-            "{outcome:?}"
-        );
-        drop(held);
-    }
-
-    /// Admission control reads the per-profile cap from
-    /// `PoolConfig::max_workers_per_key` based on the requesting
-    /// group's `WorkerProfile`. Different profiles can have different
-    /// caps; one profile saturating must not affect another.
+    /// Guards: Actual profile limits, global capacity, per-profile metrics and refunds agree for the original admitted slot owners.
+    /// Kind: policy
+    /// Not a type: Unique slot ownership excludes forged counts, detached refunds and duplicate publication. The chosen 4/2/1 profile limits, global limit 8 and observable rejection/metrics projection still require semantic qualification against live reservations. Refunding speculative global admission must also wake its actual waiter.
+    /// State: One isolated in-memory pool uses the declared test host. Reservations exercise the real semaphore and atomic projections without processes, models, sockets or a memory ledger lease.
+    /// Concurrency: Reservations stay owned in a local vector. Drop and rejection ordering are explicit, with no spawned tasks or timing assumptions.
     #[tokio::test(flavor = "current_thread")]
     async fn try_claim_spawn_slot_uses_per_profile_cap() {
         let pool = WorkerPool::new(super::super::PoolConfig {
@@ -1099,57 +766,66 @@ mod tests {
                 stanza: 4,
                 io: 1,
             },
-            max_total_workers: 64, // not the binding constraint here
+            max_total_workers: 8,
             ..super::super::PoolConfig::for_tests()
         });
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-
-        // Stanza profile: cap 4. Filling group.total to 3 still admits;
-        // 4 rejects.
-        let stanza_target = WorkerTarget::infer_task(InferTask::Morphosyntax);
+        let mut reservations = Vec::new();
+        for (task, count) in [
+            (InferTask::Morphosyntax, 4),
+            (InferTask::Asr, 2),
+            (InferTask::Translate, 1),
+        ] {
+            let key = WorkerKey::without_engine_selection(
+                WorkerTarget::infer_task(task),
+                WorkerLanguage::from(LanguageCode3::eng()),
+            );
+            let group = pool.get_or_create_group(&key);
+            for _ in 0..count {
+                reservations.push(
+                    pool.try_claim_spawn_slot(&group)
+                        .expect("admit up to the actual profile cap"),
+                );
+            }
+            let changed = pool.spawn_permits.refund_event();
+            tokio::pin!(changed);
+            assert!(futures::poll!(&mut changed).is_pending());
+            assert!(matches!(
+                pool.try_claim_spawn_slot(&group),
+                Err(super::super::lifecycle::AdmissionRejection::PerKeyCap)
+            ));
+            assert!(
+                futures::poll!(&mut changed).is_ready(),
+                "a speculative global refund wakes its waiter"
+            );
+            assert_eq!(group.total.count(), count);
+        }
+        let extra = pool.get_or_create_group(&WorkerKey::without_engine_selection(
+            WorkerTarget::infer_task(InferTask::Coref),
+            WorkerLanguage::from(LanguageCode3::eng()),
+        ));
+        reservations.push(
+            pool.try_claim_spawn_slot(&extra)
+                .expect("the eighth global slot fits"),
+        );
+        assert!(matches!(
+            pool.try_claim_spawn_slot(&extra),
+            Err(super::super::lifecycle::AdmissionRejection::GlobalCap)
+        ));
+        let metrics = pool.metrics_snapshot();
+        assert_eq!(metrics.active_workers_total, 8);
         assert_eq!(
-            stanza_target.profile_kind(),
-            crate::worker::WorkerProfile::Stanza
+            (
+                metrics.active_workers_by_profile.stanza,
+                metrics.active_workers_by_profile.gpu,
+                metrics.active_workers_by_profile.io
+            ),
+            (5, 2, 1)
         );
-        let stanza_key = WorkerKey::without_engine_selection(stanza_target, lang.clone());
-        let stanza_group = pool.get_or_create_group(&stanza_key);
-        stanza_group.total.store(3, Ordering::Relaxed);
-        assert!(
-            pool.try_claim_spawn_slot(&stanza_group).is_ok(),
-            "stanza cap=4 must admit when current=3"
-        );
-        // The successful claim incremented total to 4; the next probe
-        // must reject.
-        assert!(
-            pool.try_claim_spawn_slot(&stanza_group).is_err(),
-            "stanza cap=4 must reject when current=4"
-        );
-
-        // GPU profile: cap 2 (lower). Independent group; not affected
-        // by stanza saturation.
-        let gpu_target = WorkerTarget::infer_task(InferTask::Asr);
-        assert_eq!(gpu_target.profile_kind(), crate::worker::WorkerProfile::Gpu);
-        let gpu_key = WorkerKey::without_engine_selection(gpu_target, lang.clone());
-        let gpu_group = pool.get_or_create_group(&gpu_key);
-        gpu_group.total.store(1, Ordering::Relaxed);
-        assert!(
-            pool.try_claim_spawn_slot(&gpu_group).is_ok(),
-            "gpu cap=2 must admit when current=1 (independent of stanza saturation)"
-        );
-        assert!(
-            pool.try_claim_spawn_slot(&gpu_group).is_err(),
-            "gpu cap=2 must reject when current=2"
-        );
-
-        // IO profile: cap 1 (smallest). At cap, rejects.
-        let io_target = WorkerTarget::infer_task(InferTask::Translate);
-        assert_eq!(io_target.profile_kind(), crate::worker::WorkerProfile::Io);
-        let io_key = WorkerKey::without_engine_selection(io_target, lang);
-        let io_group = pool.get_or_create_group(&io_key);
-        io_group.total.store(1, Ordering::Relaxed);
-        assert!(
-            pool.try_claim_spawn_slot(&io_group).is_err(),
-            "io cap=1 must reject when current=1"
-        );
+        assert_eq!(metrics.permits_available, 0);
+        assert_eq!(metrics.spawn_rejections_total, 3);
+        assert_eq!(metrics.permit_rejections_total, 1);
+        drop(reservations);
+        assert_eq!(pool.metrics_snapshot().active_workers_total, 0);
+        assert_eq!(pool.spawn_permits.available_permits(), 8);
     }
 }

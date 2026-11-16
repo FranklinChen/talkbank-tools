@@ -16,6 +16,12 @@ use super::work_unit::{
 /// Planning-time error while deriving typed work units.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PlanningError {
+    /// A pending file or artifact layout belongs to another declared source.
+    #[error("output source does not match the declared input: {0}")]
+    OutputSourceMismatch(DisplayPath),
+    /// A command requires the named CHAT and metrics layout.
+    #[error("output layout has no CHAT and metrics pair: {0}")]
+    OutputLayoutMismatch(DisplayPath),
     /// Output selection cannot combine one command with another's options.
     #[error("output plan for {expected} received options for {observed}")]
     OutputOptionsMismatch {
@@ -24,9 +30,6 @@ pub enum PlanningError {
         /// The command selected by the supplied options.
         observed: crate::ReleasedCommand,
     },
-    /// A catalog policy failed to declare its primary artifact.
-    #[error("output policy for {0} has no primary artifact")]
-    MissingPrimary(crate::ReleasedCommand),
     /// The source path did not expose a file stem for companion derivation.
     #[error("cannot derive companion path for source input {0}")]
     MissingFileStem(DisplayPath),

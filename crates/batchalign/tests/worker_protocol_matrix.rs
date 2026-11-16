@@ -1068,6 +1068,13 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
     assert!(error.contains("word_utterance_indices"));
 }
 
+/// Guards: Python's real execute boundary returns the original request ID and a
+/// typed InvalidPayload response for mismatched task and payload bytes.
+/// Kind: contract
+/// Not a type: Rust deliberately forwards malformed protocol inputs for native
+/// validation, and the independently implemented Python decoder can reject differently.
+/// State: an echo worker subprocess exercises real loading and Rust/Python JSON lines.
+/// Concurrency: the shared worker pool grants this test an exclusive configured lease.
 #[tokio::test]
 async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_matrix() {
     let python = crate::prerequisite::worker_test_python();
@@ -1105,25 +1112,14 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
             ),
             stall: batchalign::worker::LoadingStall::DEFAULT_ENSURE_TASK,
         };
-        let loaded = lease
-            .ensure_task(
-                &batchalign::worker::pool::TaskLoad::for_request(&request),
-                &preparation,
-            )
-            .await
-            .expect("an echo worker is prepared for any task");
         let batchalign::worker::pool::DispatchPreparation::Ready(ready) =
             batchalign::worker::pool::DispatchPreparation::begin(&request)
                 .expect("malformed task pairs reach native validation unchanged")
         else {
             panic!("a mismatched task must not become a valid FA preparation")
         };
-        let permit = loaded
-            .run(ready, &preparation.admission)
-            .await
-            .expect("the request is its load's own");
         let response = lease
-            .execute_v2(&permit)
+            .execute_v2(ready, &preparation)
             .await
             .expect("worker should return a typed invalid-payload response");
 

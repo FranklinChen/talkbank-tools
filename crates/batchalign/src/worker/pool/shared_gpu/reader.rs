@@ -41,22 +41,38 @@ use super::envelopes::{
     CapabilitiesResponseEnvelope, EnsureTaskResponseEnvelope, ExecuteResponseV2Envelope,
 };
 use super::routes::{
-    ControlLine, ControlOpName, ControlReply, ControlSlot, PendingDispatches, ReplyFailure,
-    StreamClosed,
+    ControlLine, ControlOpName, ControlReply, ControlSlot, DispatchOwner, PendingDispatches,
+    ReplyFailure, StreamClosed,
 };
 
 /// The two places a worker's lines are routed to.
-#[derive(Clone, Default)]
-pub(crate) struct Routes {
+pub(crate) struct Routes<O: DispatchOwner = super::channel::ScheduledInvocation> {
     /// V2 dispatches, by request id.
-    pub(crate) pending: PendingDispatches,
+    pub(crate) pending: PendingDispatches<O>,
     /// The one sequential op.
     pub(crate) control: ControlSlot,
 }
 
-impl Routes {
+impl<O: DispatchOwner> Clone for Routes<O> {
+    fn clone(&self) -> Self {
+        Self {
+            pending: self.pending.clone(),
+            control: self.control.clone(),
+        }
+    }
+}
+impl<O: DispatchOwner> Default for Routes<O> {
+    fn default() -> Self {
+        Self {
+            pending: PendingDispatches::default(),
+            control: ControlSlot::default(),
+        }
+    }
+}
+
+impl<O: DispatchOwner> Routes<O> {
     /// Close both ends with `reason`.
-    fn close(&self, reason: StreamClosed) {
+    pub(super) fn close(&self, reason: StreamClosed) {
         self.pending.close(reason.clone());
         self.control.close(reason);
     }
@@ -65,9 +81,9 @@ impl Routes {
 /// Closes the routes when the reader task ends, however it ends: with the
 /// reader's own reason when it returns one, with
 /// [`StreamClosed::ReaderStopped`] when the task is aborted or panics.
-struct CloseOnExit(Option<Routes>);
+struct CloseOnExit<O: DispatchOwner>(Option<Routes<O>>);
 
-impl CloseOnExit {
+impl<O: DispatchOwner> CloseOnExit<O> {
     fn finish(mut self, reason: StreamClosed) {
         if let Some(routes) = self.0.take() {
             routes.close(reason);
@@ -75,7 +91,7 @@ impl CloseOnExit {
     }
 }
 
-impl Drop for CloseOnExit {
+impl<O: DispatchOwner> Drop for CloseOnExit<O> {
     fn drop(&mut self) {
         if let Some(routes) = self.0.take() {
             routes.close(StreamClosed::ReaderStopped);
@@ -84,9 +100,9 @@ impl Drop for CloseOnExit {
 }
 
 /// Spawn the reader task for one worker's output.
-pub(crate) fn spawn_reader<R>(
+pub(crate) fn spawn_reader<R, O: DispatchOwner>(
     mut reader: R,
-    routes: Routes,
+    routes: Routes<O>,
     pid: WorkerPid,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -108,9 +124,9 @@ where
 }
 
 /// Read and route lines until the stream closes; return why it closed.
-async fn read_until_closed<R: AsyncBufRead + Unpin>(
+async fn read_until_closed<R: AsyncBufRead + Unpin, O: DispatchOwner>(
     reader: &mut R,
-    routes: &Routes,
+    routes: &Routes<O>,
     pid: WorkerPid,
 ) -> StreamClosed {
     let mut line = String::new();
@@ -154,7 +170,7 @@ fn named_request(parsed: &Value, pointer: &str) -> Option<WorkerRequestIdV2> {
 }
 
 /// Route one parsed line to its owner.
-fn route_line(parsed: &Value, routes: &Routes, pid: WorkerPid) {
+fn route_line<O: DispatchOwner>(parsed: &Value, routes: &Routes<O>, pid: WorkerPid) {
     let op = parsed.get("op").and_then(Value::as_str);
     match op {
         Some("execute_v2") => match ExecuteResponseV2Envelope::deserialize(parsed) {
@@ -307,7 +323,12 @@ fn decode_control<E: serde::de::DeserializeOwned>(
 
 /// Fail the owner a tagged failure names: the waiting control op when its
 /// request carried that id, else the dispatch of that id.
-fn fail_owner(routes: &Routes, pid: WorkerPid, request_id: &str, failure: ReplyFailure) {
+fn fail_owner<O: DispatchOwner>(
+    routes: &Routes<O>,
+    pid: WorkerPid,
+    request_id: &str,
+    failure: ReplyFailure,
+) {
     match routes.control.deliver_tagged_failure(request_id, failure) {
         Ok(()) => debug!(
             pid = %pid,
@@ -320,7 +341,12 @@ fn fail_owner(routes: &Routes, pid: WorkerPid, request_id: &str, failure: ReplyF
 
 /// Fail the one dispatch a line names. Nobody waiting means that caller
 /// already gave up or was answered; the failure goes nowhere else.
-fn fail_dispatch(routes: &Routes, pid: WorkerPid, request_id: &str, failure: ReplyFailure) {
+fn fail_dispatch<O: DispatchOwner>(
+    routes: &Routes<O>,
+    pid: WorkerPid,
+    request_id: &str,
+    failure: ReplyFailure,
+) {
     let message = failure.message();
     let error = failure.into_worker_error(ReportedFailure::into_worker_error);
     match routes.pending.answer(request_id, Err(error)) {
@@ -342,7 +368,7 @@ fn fail_dispatch(routes: &Routes, pid: WorkerPid, request_id: &str, failure: Rep
 /// Offer a line to the waiting sequential op. A line no waiting op claims
 /// (nobody waits, or it answers an op that already timed out) is logged and
 /// fails nobody.
-fn offer_control(routes: &Routes, pid: WorkerPid, line: ControlLine) {
+fn offer_control<O: DispatchOwner>(routes: &Routes<O>, pid: WorkerPid, line: ControlLine) {
     if let Err(unclaimed) = routes.control.deliver(line) {
         match unclaimed {
             ControlLine::Reply(reply) => warn!(
@@ -368,7 +394,9 @@ fn offer_control(routes: &Routes, pid: WorkerPid, line: ControlLine) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::routes::observations::ObservedDispatch;
     use super::*;
+    type Routes = super::Routes<ObservedDispatch>;
     use crate::runner::util::classify_worker_error;
     use crate::types::worker_v2::WorkerErrorKind;
     use crate::worker::InferTask;
@@ -383,7 +411,7 @@ mod tests {
     fn wait_for(routes: &Routes, request_id: &str) -> super::super::routes::DispatchReceipt {
         routes
             .pending
-            .register(WorkerRequestIdV2::from(request_id))
+            .register(ObservedDispatch::named(request_id))
             .expect("an open stream registers")
     }
 
@@ -411,9 +439,11 @@ mod tests {
     }
     type DispatchReplyForTest = super::super::routes::DispatchReply;
 
-    /// An `execute_v2` line the strict response parse refuses still resolves
-    /// its dispatch at once, with `WorkerError::Protocol`, as the sequential
-    /// path's undecodable reply does.
+    /// Guards: An `execute_v2` line the strict response parse refuses still resolves its dispatch at once, with `WorkerError::Protocol`, as the sequential path's undecodable reply does.
+    /// Kind: wire
+    /// Not a type: a success envelope can arrive without result bytes, and the reader must route that decode failure to the raw request ID.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn refused_execute_v2_response_fails_its_dispatch_with_protocol_error() {
         let routes = Routes::default();
@@ -431,8 +461,11 @@ mod tests {
         }
     }
 
-    /// A refused `execute_v2` line that names no request fails no dispatch:
-    /// its siblings are left to their own replies.
+    /// Guards: A refused `execute_v2` line that names no request fails no dispatch: its siblings are left to their own replies.
+    /// Kind: wire
+    /// Not a type: a malformed execute envelope can omit request_id entirely, leaving no evidence that permits failing either registered sibling.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn an_uncorrelated_refused_execute_v2_line_fails_no_sibling() {
         let routes = Routes::default();
@@ -452,8 +485,11 @@ mod tests {
         );
     }
 
-    /// A tagged `invalid_request` refusal fails its dispatch with the terminal
-    /// `WorkerError::RequestRefused`.
+    /// Guards: A tagged `invalid_request` refusal fails its dispatch with the terminal `WorkerError::RequestRefused`.
+    /// Kind: wire
+    /// Not a type: the external invalid_request tag chooses a terminal refusal for its named request, including the original diagnostic text.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn tagged_request_refusal_fails_its_dispatch_terminally() {
         let routes = Routes::default();
@@ -477,8 +513,11 @@ mod tests {
         assert_eq!(routes.pending.waiting(), 0);
     }
 
-    /// An `op=error` line without `kind` is refused: its dispatch gets a
-    /// protocol error, never a retryable runtime failure by default.
+    /// Guards: An `op=error` line without `kind` is refused: its dispatch gets a protocol error, never a retryable runtime failure by default.
+    /// Kind: wire
+    /// Not a type: the worker can omit the required kind field, which must become a protocol refusal instead of an invented runtime classification.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn an_error_line_without_kind_is_a_protocol_refusal() {
         let routes = Routes::default();
@@ -496,8 +535,11 @@ mod tests {
         }
     }
 
-    /// A tagged `bootstrap` failure is terminal on this path as on the
-    /// sequential one.
+    /// Guards: A tagged `bootstrap` failure is terminal on this path as on the sequential one.
+    /// Kind: wire
+    /// Not a type: a bootstrap failure tag from the worker selects terminal model preparation policy after decoding, independently of valid ID ownership.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn tagged_bootstrap_error_is_terminal() {
         let routes = Routes::default();
@@ -517,9 +559,11 @@ mod tests {
         );
     }
 
-    /// An untagged `op=error` that no sequential op is waiting for fails no
-    /// dispatch: its owner is unknown, and the dispatches in flight are left
-    /// to their own replies.
+    /// Guards: An untagged `op=error` that no sequential op is waiting for fails no dispatch: its owner is unknown, and the dispatches in flight are left to their own replies.
+    /// Kind: wire
+    /// Not a type: an untagged runtime error contains no dispatch correlation fact, so its bytes cannot authorize failure of the registered embedding request.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn an_untagged_error_with_no_sequential_op_fails_no_dispatch() {
         let routes = Routes::default();
@@ -537,9 +581,11 @@ mod tests {
         );
     }
 
-    /// A TAGGED error for a request nobody is waiting for reaches nobody: not
-    /// another dispatch, and not the sequential op waiting in the control
-    /// slot (a health check would otherwise fail on a late dispatch error).
+    /// Guards: A TAGGED error for a request nobody is waiting for reaches nobody: not another dispatch, and not the sequential op waiting in the control slot (a health check would otherwise fail on a late dispatch error).
+    /// Kind: wire
+    /// Not a type: the external request ID can name an expired dispatch while capabilities waits, so the named failure must reach neither live owner.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_tagged_error_for_an_unknown_request_never_reaches_the_control_slot() {
         let routes = Routes::default();
@@ -565,9 +611,11 @@ mod tests {
         );
     }
 
-    /// A late `ensure_task` reply for a task other than the one the waiting op
-    /// asked for does not answer it: the op that sent it timed out, and the
-    /// waiting op's own reply is still to come, and answers it.
+    /// Guards: A late `ensure_task` reply for a task other than the one the waiting op asked for does not answer it: the op that sent it timed out, and the waiting op's own reply is still to come, and answers it.
+    /// Kind: wire
+    /// Not a type: valid ensure_task bytes can name fa while morphosyntax waits, requiring task correspondence before the admitted load proof is created.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_late_ensure_task_reply_for_another_task_does_not_answer_the_waiting_op() {
         let routes = Routes::default();
@@ -594,11 +642,11 @@ mod tests {
         }
     }
 
-    /// A model load's own download progress reaches the load (which uses it
-    /// to keep its stall window open) and does not answer or fail it. It used
-    /// to fall through to the unknown-op arm and fail whichever op waited, so
-    /// a shared GPU worker's `ensure_task` was failed by its first progress
-    /// report. A load's real reply still answers it afterwards.
+    /// Guards: A model load's own download progress reaches the load (which uses it to keep its stall window open) and does not answer or fail it. It used to fall through to the unknown-op arm and fail whichever op waited, so a shared GPU worker's `ensure_task` was failed by its first progress report. A load's real reply still answers it afterwards.
+    /// Kind: wire
+    /// Not a type: load-scoped download_growth bytes must deliver 2048 KiB to the load observer while preserving the later ASR terminal reply.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_load_s_progress_reaches_it_and_does_not_fail_it() {
         let routes = Routes::default();
@@ -631,9 +679,11 @@ mod tests {
         }
     }
 
-    /// A dispatch's progress names its request and is not the load's: it
-    /// must not reach a waiting load, where it would keep a hung load's
-    /// stall window open while a sibling request makes progress.
+    /// Guards: A dispatch's progress names its request and is not the load's: it must not reach a waiting load, where it would keep a hung load's stall window open while a sibling request makes progress.
+    /// Kind: wire
+    /// Not a type: request-scoped transcribing progress can arrive during ASR loading and must never extend that unrelated loading stall window.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_dispatch_s_progress_does_not_reach_a_waiting_load() {
         let routes = Routes::default();
@@ -652,8 +702,11 @@ mod tests {
         );
     }
 
-    /// Progress with no load waiting (a dispatch's own, which this channel
-    /// does not forward) is dropped, and fails no waiting dispatch.
+    /// Guards: Progress with no load waiting (a dispatch's own, which this channel does not forward) is dropped, and fails no waiting dispatch.
+    /// Kind: wire
+    /// Not a type: request-scoped progress is an observation rather than terminal reply bytes, so its arrival must preserve the pending dispatch.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn progress_with_no_load_waiting_fails_nothing() {
         let routes = Routes::default();
@@ -672,9 +725,11 @@ mod tests {
         );
     }
 
-    /// A late failure of an op that timed out does not answer the next op:
-    /// the failure carries the id of the request that failed, and the
-    /// waiting op's request carried another.
+    /// Guards: A late failure of an op that timed out does not answer the next op: the failure carries the id of the request that failed, and the waiting op's request carried another.
+    /// Kind: wire
+    /// Not a type: late bootstrap error bytes can carry the expired control ID, and the new control owner must await its own tagged failure.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_late_failure_of_a_timed_out_op_does_not_answer_the_next_op() {
         let routes = Routes::default();
@@ -712,8 +767,11 @@ mod tests {
         ));
     }
 
-    /// A capabilities reply does not answer an `ensure_task`, and the
-    /// reverse: each waiter takes only its own op's reply.
+    /// Guards: A capabilities reply does not answer an `ensure_task`, and the reverse: each waiter takes only its own op's reply.
+    /// Kind: wire
+    /// Not a type: a valid capabilities envelope can arrive while ensure_task waits, which requires external operation correspondence before delivery.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_reply_of_another_op_does_not_answer_the_waiting_op() {
         let routes = Routes::default();
@@ -729,7 +787,11 @@ mod tests {
         assert!(control.try_recv().is_err());
     }
 
-    /// An untagged `op=error` goes to the waiting sequential op, with its kind.
+    /// Guards: An untagged `op=error` goes to the waiting sequential op, with its kind.
+    /// Kind: wire
+    /// Not a type: the untagged bootstrap bytes choose the current sequential operation under the protocol and must retain their original failure message.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn an_untagged_error_answers_the_sequential_op_with_its_kind() {
         let routes = Routes::default();
@@ -751,9 +813,11 @@ mod tests {
         }
     }
 
-    /// At EOF every waiter is answered through its own reply with
-    /// `ProcessExited`, the sequential op included, and the worker reports
-    /// itself unavailable.
+    /// Guards: At EOF every waiter is answered through its own reply with `ProcessExited`, the sequential op included, and the worker reports itself unavailable.
+    /// Kind: wire
+    /// Not a type: EOF is an external stream event that must deliver its actual reason to two dispatch owners and the current control owner.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn eof_answers_every_waiter_and_marks_the_worker_dead() {
         let routes = Routes::default();
@@ -783,8 +847,11 @@ mod tests {
         ));
     }
 
-    /// The reader stops trusting a stream after the sequential path's noise
-    /// limit of consecutive non-JSON lines.
+    /// Guards: The reader stops trusting a stream after the sequential path's noise limit of consecutive non-JSON lines.
+    /// Kind: wire
+    /// Not a type: a concrete run of noise bytes reaches the stream trust limit and must produce retryable OutputNoise for its pending owner.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn too_many_non_json_lines_close_the_stream() {
         let routes = Routes::default();
@@ -804,8 +871,11 @@ mod tests {
         );
     }
 
-    /// A JSON scalar or array is not a protocol message: it is noise, by the
-    /// rule the sequential readers apply too.
+    /// Guards: A JSON scalar or array is not a protocol message: it is noise, by the rule the sequential readers apply too.
+    /// Kind: wire
+    /// Not a type: valid scalar JSON such as 42 has no protocol-object shape, so repeated scalar bytes must count toward the same noise boundary.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn a_json_scalar_line_is_noise() {
         let routes = Routes::default();
@@ -816,7 +886,11 @@ mod tests {
         ));
     }
 
-    /// Fewer noise lines than the limit, separated by protocol lines, do not.
+    /// Guards: Fewer noise lines than the limit, separated by protocol lines, do not.
+    /// Kind: wire
+    /// Not a type: a valid shutdown object separates two sub-limit noise runs, and that byte ordering must reset the consecutive-noise observation.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn noise_below_the_limit_is_tolerated() {
         let routes = Routes::default();
@@ -828,9 +902,11 @@ mod tests {
         assert_eq!(read_to_end(&routes, &lines).await, StreamClosed::Eof);
     }
 
-    /// An op the protocol does not name, and a sequential reply that does not
-    /// decode, answer the waiting sequential op with a refusal instead of
-    /// leaving it on its timeout.
+    /// Guards: An op the protocol does not name, and a sequential reply that does not decode, answer the waiting sequential op with a refusal instead of leaving it on its timeout.
+    /// Kind: wire
+    /// Not a type: surprise-op bytes and malformed capabilities fields require two distinct refusal diagnostics to the actual current control waiter.
+    /// State: local route owners, byte values and reply channels isolate the routing policy.
+    /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
     async fn unknown_ops_and_undecodable_replies_answer_the_sequential_op() {
         let routes = Routes::default();
@@ -849,8 +925,11 @@ mod tests {
         ));
     }
 
-    /// Aborting the reader task closes the routes rather than leaving waiters
-    /// on their timeouts.
+    /// Guards: Aborting the reader task closes the routes rather than leaving waiters on their timeouts.
+    /// Kind: contract
+    /// Not a type: task abortion can occur before the reader first polls, so actual Drop cleanup must close its previously registered waiters.
+    /// State: a test-owned duplex pipe and actual reader task expose abort cleanup.
+    /// Concurrency: the reader task and both pipe halves belong to this runtime.
     #[tokio::test]
     async fn an_aborted_reader_closes_the_routes() {
         let routes = Routes::default();

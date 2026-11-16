@@ -4,13 +4,9 @@
 //! requests) to the pool's typed worker-key abstraction. Extracted from
 //! `mod.rs` for browsability.
 
-use crate::api::WorkerLanguage;
 use crate::types::engines::{AsrEngineName, EngineOverrides, FaEngineName, TranslateEngineName};
 use crate::types::worker_v2::{AsrBackendV2, ExecuteRequestV2, InferenceTaskV2, TaskRequestV2};
-use crate::worker::error::WorkerError;
-use crate::worker::{InferTask, WorkerBootstrapMode, WorkerTarget};
-
-use super::{EngineSelection, WorkerKey};
+use crate::worker::InferTask;
 
 /// Map a V2 inference task enum to the pool's infer-task vocabulary: the
 /// task a worker serving it is bootstrapped for. Total: every V2 task has a
@@ -35,40 +31,6 @@ pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> InferTask {
         InferenceTaskV2::Avqi => InferTask::Avqi,
         InferenceTaskV2::WordSegmentation => InferTask::WordSegmentation,
     }
-}
-
-/// Derive the worker-pool key for one text or IO V2 execute request.
-///
-/// A GPU-profile request is refused ([`WorkerError::UnroutedGpuRequest`]): a
-/// GPU worker hosts every task of its job's model plan, so its key comes from
-/// the plan (`WorkerPool::gpu_route`), never from one request.
-pub(super) fn execute_v2_worker_key(
-    lang: WorkerLanguage,
-    request: &ExecuteRequestV2,
-    bootstrap_mode: WorkerBootstrapMode,
-) -> Result<WorkerKey, WorkerError> {
-    let infer_task = infer_task_for_execute_v2(request.task);
-    if super::GpuTask::of(infer_task).is_some() {
-        return Err(WorkerError::UnroutedGpuRequest { task: infer_task });
-    }
-    let target = WorkerTarget::from_infer_task(infer_task, bootstrap_mode);
-
-    // The selected engine is part of the worker identity in every bootstrap
-    // mode. A lazy worker loads the recipe on demand, but it is not allowed to
-    // change recipes afterward: sharing one task-only key between Wave2Vec and
-    // Whisper made the Rust and Python "already loaded" caches return the
-    // first engine for later requests. It also allowed a concurrent request to
-    // switch process-global model state underneath in-flight inference.
-    //
-    // The same derivation the command route uses, from what this request
-    // names; the two keys agree by construction.
-    let engine_selection = EngineSelection::derive(infer_task, execute_request_overrides(request));
-
-    Ok(WorkerKey {
-        target,
-        language: lang,
-        engine_selection,
-    })
 }
 
 /// The engines a V2 request itself names, before any target-driven filling.
@@ -123,20 +85,27 @@ pub(super) fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
 
 #[cfg(test)]
 mod tests {
+    use super::super::WorkerKey;
     use super::*;
-    use crate::api::LanguageCode3;
+    use crate::api::{LanguageCode3, WorkerLanguage};
     use crate::types::worker_v2::{MorphosyntaxRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2};
     use crate::worker::{WorkerBootstrapMode, WorkerTarget};
 
-    fn request_with_payload(task: InferenceTaskV2, payload: TaskRequestV2) -> ExecuteRequestV2 {
+    fn request_with_payload(payload: TaskRequestV2) -> ExecuteRequestV2 {
         ExecuteRequestV2 {
             request_id: WorkerRequestIdV2::from("req-1"),
-            task,
+            task: payload.task(),
             payload,
             attachments: Vec::new(),
         }
     }
 
+    /// Guards: the wire forced_alignment task selects the infrastructure FA host.
+    /// Kind: policy
+    /// Not a type: the wire and pool task vocabularies have different variants,
+    /// and the many-to-one host mapping remains an explicit semantic choice.
+    /// State: none
+    /// Concurrency: none
     #[test]
     fn maps_forced_alignment_execute_v2_to_fa_worker_profile() {
         assert_eq!(
@@ -166,31 +135,6 @@ mod tests {
         )
     }
 
-    /// The user's engine extras reach the worker's spawn configuration through
-    /// the plan-derived key: every key the job passed via
-    /// `--engine-overrides` is in the JSON the worker is spawned with.
-    /// (Regression, 2026-05-27: a Qwen job's `qwen_model` was dropped and the
-    /// worker silently loaded the default model.)
-    #[test]
-    fn asr_extras_reach_the_worker_spawn_configuration() {
-        let mut extras = std::collections::BTreeMap::new();
-        extras.insert("qwen_model".to_owned(), "Qwen/Qwen3-ASR-0.6B".to_owned());
-        extras.insert("qwen_device".to_owned(), "cpu".to_owned());
-        let json = asr_worker_key(
-            crate::transcribe::AsrWorkerMode::HkQwenV2,
-            "yue",
-            extras.clone(),
-        )
-        .engine_selection
-        .worker_config_json();
-        let parsed: std::collections::BTreeMap<String, String> =
-            serde_json::from_str(&json).expect("engine_overrides JSON must round-trip");
-        assert_eq!(parsed.get("asr").map(String::as_str), Some("qwen"));
-        for (k, v) in &extras {
-            assert_eq!(parsed.get(k), Some(v), "extras key {k:?} was dropped");
-        }
-    }
-
     /// The spawn override `name` a worker for `key` receives, parsed.
     fn spawn_override<T: serde::de::DeserializeOwned>(key: &WorkerKey, name: &str) -> T {
         let json = super::super::lifecycle::spawn_engine_overrides(
@@ -203,55 +147,19 @@ mod tests {
         serde_json::from_str(map.get(name).expect("policy key")).expect("policy parses")
     }
 
-    #[test]
-    fn a_qwen_worker_spawns_with_its_language_recognition_policy() {
-        use crate::transcribe::segmentation::qwen_recognition;
-        use crate::types::worker_v2::{QWEN_RECOGNITION_KEY, QwenRecognitionV2};
-        // The wiring under test: each worker receives exactly what the table
-        // decides for its language (the values are pinned by the table's own
-        // tests in `transcribe::segmentation`).
-        for code in ["nan", "yue"] {
-            let language = LanguageCode3::try_new(code).expect("language code");
-            let key = asr_worker_key(
-                crate::transcribe::AsrWorkerMode::HkQwenV2,
-                code,
-                Default::default(),
-            );
-            assert_eq!(
-                spawn_override::<QwenRecognitionV2>(&key, QWEN_RECOGNITION_KEY),
-                qwen_recognition(Some(&language)),
-                "{code}"
-            );
-        }
-    }
-
-    /// A stock Whisper worker is told its language by Whisper's own token,
-    /// decided by the control plane (the decisions themselves are pinned by
-    /// `WhisperDecodeLanguageV2`'s tests).
-    #[test]
-    fn a_stock_whisper_worker_spawns_with_its_decode_language() {
-        use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
-        for code in ["ell", "jav", "yue"] {
-            let language = LanguageCode3::try_new(code).expect("language code");
-            let key = asr_worker_key(
-                crate::transcribe::AsrWorkerMode::LocalWhisperV2,
-                code,
-                Default::default(),
-            );
-            assert_eq!(
-                spawn_override::<WhisperDecodeLanguageV2>(&key, WHISPER_DECODE_LANGUAGE_KEY),
-                WhisperDecodeLanguageV2::for_language(&language).expect("Whisper has a token"),
-                "{code}"
-            );
-        }
-    }
-
     /// A worker rediscovered from the registry must land under the key the
     /// request that spawned it computes. The registry records the worker's
     /// full spawn overrides, including the keys the control plane injected
     /// (pinned models, language policies); those are derived from the key, so
     /// reading them back as user extras would file the worker under a key no
     /// request ever asks for, and it would never be reused.
+    /// Guards: serialized spawn keys normalize back to the original recipe key,
+    /// including every injected model and recognition-policy field.
+    /// Kind: wire
+    /// Not a type: registry JSON is independently stored external bytes and must
+    /// strip injected fields without losing the actual configured engine identity.
+    /// State: local registry JSON exercises the real writer and reader adapters.
+    /// Concurrency: none
     #[test]
     fn a_rediscovered_worker_keys_like_the_request_that_spawned_it() {
         let mut qwen_extras = std::collections::BTreeMap::new();
@@ -290,31 +198,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn execute_v2_worker_key_uses_task_target_when_requested() {
-        let request = request_with_payload(
-            InferenceTaskV2::Morphosyntax,
-            TaskRequestV2::Morphosyntax(MorphosyntaxRequestV2 {
-                lang: LanguageCode3::eng(),
-                payload_ref_id: WorkerArtifactIdV2::from("payload-1"),
-                item_count: 1,
-                retokenize: false,
-            }),
-        );
-
-        let key = execute_v2_worker_key(
-            WorkerLanguage::from(LanguageCode3::eng()),
-            &request,
-            WorkerBootstrapMode::Task,
-        )
-        .unwrap();
-
-        assert_eq!(
-            key.target,
-            WorkerTarget::infer_task(InferTask::Morphosyntax)
-        );
-    }
-
     /// Shared overrides that name every key a request could carry plus an
     /// extra: whatever a job's command is, the keys its request does not
     /// carry must not enter its spawn-time identity either.
@@ -331,17 +214,47 @@ mod tests {
         }
     }
 
-    /// The capability probe's key (from the job's options) and the dispatch
-    /// key (from the request) for one command, which must agree in every
-    /// bootstrap mode or the probed worker idles while dispatch spawns a
-    /// second one. Before 2026-09-22 they agreed only when the shared
-    /// overrides were empty: the probe started from the whole map.
-    fn assert_probe_and_dispatch_keys_agree(
-        command: crate::api::ReleasedCommand,
+    enum TextCommand {
+        Translate,
+        Morphotag,
+        Utseg,
+        Coref,
+    }
+
+    fn assert_planned_worker_identity(
+        kind: TextCommand,
         options: crate::options::CommandOptions,
         request: ExecuteRequestV2,
     ) {
-        let language = WorkerLanguage::from(LanguageCode3::eng());
+        use super::super::worker_plan::{CommandWorkerPlan, WorkerPlan};
+        use crate::api::ReleasedCommand as Command;
+        use crate::worker::WorkerProfile;
+        let (command, task, profile, expected_engines) = match kind {
+            TextCommand::Translate => (
+                Command::Translate,
+                InferTask::Translate,
+                WorkerProfile::Io,
+                serde_json::json!({"translate":"nllb"}),
+            ),
+            TextCommand::Morphotag => (
+                Command::Morphotag,
+                InferTask::Morphosyntax,
+                WorkerProfile::Stanza,
+                serde_json::json!({}),
+            ),
+            TextCommand::Utseg => (
+                Command::Utseg,
+                InferTask::Utseg,
+                WorkerProfile::Stanza,
+                serde_json::json!({}),
+            ),
+            TextCommand::Coref => (
+                Command::Coref,
+                InferTask::Coref,
+                WorkerProfile::Stanza,
+                serde_json::json!({}),
+            ),
+        };
         for mode in [
             WorkerBootstrapMode::LazyProfile,
             WorkerBootstrapMode::Profile,
@@ -350,12 +263,37 @@ mod tests {
             let requirement = crate::command_model::command_spec(command)
                 .capabilities
                 .require_inference()
-                .expect("test command requires inference");
-            let probe =
-                WorkerKey::from_command_options(requirement, language.clone(), &options, mode);
-            let dispatch = execute_v2_worker_key(language.clone(), &request, mode)
-                .expect("a typed request derives a worker key");
-            assert_eq!(probe, dispatch, "{command} in {mode:?}");
+                .unwrap();
+            let command_plan = CommandWorkerPlan::new(
+                requirement,
+                LanguageCode3::eng().into(),
+                &options,
+                &super::super::GpuModelPlan::without_engines(),
+                mode,
+            );
+            let prepared = super::super::DispatchPreparation::begin(&request).unwrap();
+            let request_plan =
+                WorkerPlan::direct(LanguageCode3::eng().into(), prepared, mode).unwrap();
+            let expected_target = match mode {
+                WorkerBootstrapMode::Task => WorkerTarget::InferTask(task),
+                WorkerBootstrapMode::Profile | WorkerBootstrapMode::LazyProfile => {
+                    WorkerTarget::Profile(profile)
+                }
+            };
+            assert_eq!(request_plan.key().target, expected_target);
+            assert_eq!(request_plan.key(), command_plan.key());
+            assert_eq!(command_plan.load().task(), task);
+            assert_eq!(
+                serde_json::to_value(
+                    request_plan
+                        .key()
+                        .engine_selection
+                        .overrides()
+                        .dispatch_overrides()
+                )
+                .unwrap(),
+                expected_engines
+            );
         }
     }
 
@@ -363,84 +301,145 @@ mod tests {
         WorkerArtifactIdV2::from("payload-1")
     }
 
+    /// Guards: command probes and direct requests retain each task's actual key,
+    /// ignoring foreign overrides and selecting explicit profile/task targets.
+    /// Kind: policy
+    /// Not a type: which recipe keys belong to translation, morphology, segmentation
+    /// and coreference is a semantic mapping across external command and wire inputs.
+    /// State: none
+    /// Concurrency: none
     #[test]
-    fn translate_probe_and_dispatch_keys_agree_under_crowded_overrides() {
-        assert_probe_and_dispatch_keys_agree(
-            crate::api::ReleasedCommand::Translate,
-            crate::options::CommandOptions::Translate(crate::options::TranslateOptions {
-                common: crowded_common_options(),
-                ..crate::options::TranslateOptions::default()
-            }),
-            request_with_payload(
-                InferenceTaskV2::Translate,
-                TaskRequestV2::Translate(crate::types::worker_v2::TranslateRequestV2 {
-                    source_lang: LanguageCode3::eng(),
-                    target_lang: LanguageCode3::eng(),
-                    // The shared map's `translate` beats the flag, so the
-                    // request names what the job resolved.
-                    engine: crate::types::worker_v2::TranslateBackendV2::Nllb,
-                    payload_ref_id: text_payload_id(),
-                    item_count: 1,
+    fn bound_worker_plans_preserve_task_recipe_and_bootstrap_policy() {
+        {
+            assert_planned_worker_identity(
+                TextCommand::Translate,
+                crate::options::CommandOptions::Translate(crate::options::TranslateOptions {
+                    common: crowded_common_options(),
+                    ..crate::options::TranslateOptions::default()
                 }),
-            ),
-        );
-    }
-
-    #[test]
-    fn morphotag_probe_and_dispatch_keys_agree_under_crowded_overrides() {
-        assert_probe_and_dispatch_keys_agree(
-            crate::api::ReleasedCommand::Morphotag,
-            crate::options::CommandOptions::Morphotag(crate::options::MorphotagOptions {
-                common: crowded_common_options(),
-                ..crate::options::MorphotagOptions::default()
-            }),
-            request_with_payload(
-                InferenceTaskV2::Morphosyntax,
-                TaskRequestV2::Morphosyntax(MorphosyntaxRequestV2 {
+                request_with_payload(TaskRequestV2::Translate(
+                    crate::types::worker_v2::TranslateRequestV2 {
+                        source_lang: LanguageCode3::eng(),
+                        target_lang: LanguageCode3::eng(),
+                        // The shared map's `translate` beats the flag, so the
+                        // request names what the job resolved.
+                        engine: crate::types::worker_v2::TranslateBackendV2::Nllb,
+                        payload_ref_id: text_payload_id(),
+                        item_count: 1,
+                    },
+                )),
+            );
+        }
+        {
+            assert_planned_worker_identity(
+                TextCommand::Morphotag,
+                crate::options::CommandOptions::Morphotag(crate::options::MorphotagOptions {
+                    common: crowded_common_options(),
+                    ..crate::options::MorphotagOptions::default()
+                }),
+                request_with_payload(TaskRequestV2::Morphosyntax(MorphosyntaxRequestV2 {
                     lang: LanguageCode3::eng(),
                     payload_ref_id: text_payload_id(),
                     item_count: 1,
                     retokenize: false,
+                })),
+            );
+        }
+        {
+            assert_planned_worker_identity(
+                TextCommand::Utseg,
+                crate::options::CommandOptions::Utseg(crate::options::UtsegOptions {
+                    common: crowded_common_options(),
+                    utseg_fallback: false.into(),
                 }),
-            ),
-        );
+                request_with_payload(TaskRequestV2::Utseg(
+                    crate::types::worker_v2::UtsegRequestV2 {
+                        lang: LanguageCode3::eng(),
+                        payload_ref_id: text_payload_id(),
+                        item_count: 1,
+                        segmenter: crate::types::worker_v2::UtsegSegmenterV2::BoundaryModel,
+                    },
+                )),
+            );
+        }
+        {
+            assert_planned_worker_identity(
+                TextCommand::Coref,
+                crate::options::CommandOptions::Coref(crate::options::CorefOptions {
+                    common: crowded_common_options(),
+                }),
+                request_with_payload(TaskRequestV2::Coref(
+                    crate::types::worker_v2::CorefRequestV2 {
+                        lang: LanguageCode3::eng(),
+                        payload_ref_id: text_payload_id(),
+                        item_count: 1,
+                    },
+                )),
+            );
+        }
     }
-
+    /// Guards: actual spawn JSON retains ASR extras and the language-specific
+    /// Qwen and Whisper recognition policies supplied by their typed job plan.
+    /// Kind: wire
+    /// Not a type: Python receives serialized key names and policy values whose
+    /// wire spelling and selection must survive the native spawn producer.
+    /// State: local plan values and JSON serialization require no worker process.
+    /// Concurrency: none
     #[test]
-    fn utseg_probe_and_dispatch_keys_agree_under_crowded_overrides() {
-        assert_probe_and_dispatch_keys_agree(
-            crate::api::ReleasedCommand::Utseg,
-            crate::options::CommandOptions::Utseg(crate::options::UtsegOptions {
-                common: crowded_common_options(),
-                utseg_fallback: false.into(),
-            }),
-            request_with_payload(
-                InferenceTaskV2::Utseg,
-                TaskRequestV2::Utseg(crate::types::worker_v2::UtsegRequestV2 {
-                    lang: LanguageCode3::eng(),
-                    payload_ref_id: text_payload_id(),
-                    item_count: 1,
-                    segmenter: crate::types::worker_v2::UtsegSegmenterV2::BoundaryModel,
-                }),
-            ),
-        );
-    }
-
-    #[test]
-    fn coref_probe_and_dispatch_keys_agree_under_crowded_overrides() {
-        assert_probe_and_dispatch_keys_agree(
-            crate::api::ReleasedCommand::Coref,
-            crate::options::CommandOptions::Coref(crate::options::CorefOptions {
-                common: crowded_common_options(),
-            }),
-            request_with_payload(
-                InferenceTaskV2::Coref,
-                TaskRequestV2::Coref(crate::types::worker_v2::CorefRequestV2 {
-                    lang: LanguageCode3::eng(),
-                    payload_ref_id: text_payload_id(),
-                    item_count: 1,
-                }),
-            ),
-        );
+    fn planned_asr_spawn_bytes_retain_extras_and_language_policies() {
+        {
+            let mut extras = std::collections::BTreeMap::new();
+            extras.insert("qwen_model".to_owned(), "Qwen/Qwen3-ASR-0.6B".to_owned());
+            extras.insert("qwen_device".to_owned(), "cpu".to_owned());
+            let json = asr_worker_key(
+                crate::transcribe::AsrWorkerMode::HkQwenV2,
+                "yue",
+                extras.clone(),
+            )
+            .engine_selection
+            .worker_config_json();
+            let parsed: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&json).expect("engine_overrides JSON must round-trip");
+            assert_eq!(parsed.get("asr").map(String::as_str), Some("qwen"));
+            for (k, v) in &extras {
+                assert_eq!(parsed.get(k), Some(v), "extras key {k:?} was dropped");
+            }
+        }
+        {
+            use crate::transcribe::segmentation::qwen_recognition;
+            use crate::types::worker_v2::{QWEN_RECOGNITION_KEY, QwenRecognitionV2};
+            // The wiring under test: each worker receives exactly what the table
+            // decides for its language (the values are pinned by the table's own
+            // tests in `transcribe::segmentation`).
+            for code in ["nan", "yue"] {
+                let language = LanguageCode3::try_new(code).expect("language code");
+                let key = asr_worker_key(
+                    crate::transcribe::AsrWorkerMode::HkQwenV2,
+                    code,
+                    Default::default(),
+                );
+                assert_eq!(
+                    spawn_override::<QwenRecognitionV2>(&key, QWEN_RECOGNITION_KEY),
+                    qwen_recognition(Some(&language)),
+                    "{code}"
+                );
+            }
+        }
+        {
+            use crate::types::worker_v2::{WHISPER_DECODE_LANGUAGE_KEY, WhisperDecodeLanguageV2};
+            for code in ["ell", "jav", "yue"] {
+                let language = LanguageCode3::try_new(code).expect("language code");
+                let key = asr_worker_key(
+                    crate::transcribe::AsrWorkerMode::LocalWhisperV2,
+                    code,
+                    Default::default(),
+                );
+                assert_eq!(
+                    spawn_override::<WhisperDecodeLanguageV2>(&key, WHISPER_DECODE_LANGUAGE_KEY),
+                    WhisperDecodeLanguageV2::for_language(&language).expect("Whisper has a token"),
+                    "{code}"
+                );
+            }
+        }
     }
 }

@@ -1,137 +1,100 @@
 use std::collections::HashMap;
 
 use crate::chat_ops::morphosyntax_ops::MwtDict;
-use async_trait::async_trait;
 
 use crate::api::{DisplayPath, ReleasedCommand};
-use crate::compare::{
-    CompareMaterializedOutputs, is_gold_file, process_compare_morphotagged_main,
-    template_gold_path_for,
-};
+use crate::compare::is_gold_file;
 use crate::planning::{self, JobPlan};
-use crate::recipe_runner::recipe::RecipeStageId;
 use crate::recipe_runner::runtime::publish_text;
-use crate::recipe_runner::work_unit::{CompareWorkUnit, PlannedWorkUnit};
+use crate::recipe_runner::work_unit::PlannedWorkUnit;
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{FileRunTracker, FileStage, classify_server_error};
 
+mod comparison;
 mod outputs;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
-use outputs::{ConsolidatedCompareMetricsRow, format_consolidated_csv, write_outputs};
+use comparison::PreparedComparison;
+use outputs::{ConsolidatedCompareMetricsRow, format_consolidated_csv};
 
-use super::worker_gateway::WorkerGateway;
+use super::worker_gateway::CompareMorphology;
 
 /// Immutable execution inputs shared across stages for one job.
 struct ExecutionContext<'a> {
     pub(crate) job: &'a RunnerJobSnapshot,
     pub(crate) host: &'a DispatchHostContext,
-    pub(crate) gateway: &'a dyn WorkerGateway,
+    pub(crate) gateway: &'a dyn CompareMorphology,
     pub(crate) mwt: &'a MwtDict,
 }
 
-/// Stage executor interface used by the new execution kernel.
-#[async_trait]
-trait StageExecutor {
-    /// Run one stage for the current work unit.
-    async fn run_stage(
-        &self,
-        stage: RecipeStageId,
-        state: &mut CompareExecutionState,
-        plan: &JobPlan,
-        ctx: &ExecutionContext<'_>,
-    ) -> Result<(), crate::error::ServerError>;
-}
-
-/// Minimal execution kernel for recipe-owned commands.
-struct ExecutionKernel {
-    stage_executor: Box<dyn StageExecutor + Send + Sync>,
-}
-
-impl ExecutionKernel {
-    /// Build a kernel with one stage executor implementation.
-    pub(crate) fn new(stage_executor: Box<dyn StageExecutor + Send + Sync>) -> Self {
-        Self { stage_executor }
+/// Execute compare's concrete consuming graph over its planned work units.
+async fn run_compare(
+    plan: &JobPlan,
+    ctx: &ExecutionContext<'_>,
+) -> Result<(), crate::error::ServerError> {
+    if plan.spec.command != ReleasedCommand::Compare {
+        return Err(crate::error::ServerError::Validation(format!(
+            "compare execution received command '{}'",
+            plan.spec.command
+        )));
     }
+    let file_by_display: HashMap<&DisplayPath, &crate::store::PendingJobFile> = ctx
+        .job
+        .pending_files
+        .iter()
+        .map(|file| (file.filename(), file))
+        .collect();
+    let sink = ctx.host.sink().clone();
+    let mut consolidated_rows = Vec::new();
 
-    /// Run one immutable job plan through the stage executor.
-    pub(crate) async fn run(
-        &self,
-        plan: &JobPlan,
-        ctx: &ExecutionContext<'_>,
-    ) -> Result<(), crate::error::ServerError> {
-        match plan.spec.command {
-            ReleasedCommand::Compare => self.run_compare(plan, ctx).await,
-            command => Err(crate::error::ServerError::Validation(format!(
-                "execution kernel does not yet support command '{command}'"
-            ))),
-        }
-    }
-
-    async fn run_compare(
-        &self,
-        plan: &JobPlan,
-        ctx: &ExecutionContext<'_>,
-    ) -> Result<(), crate::error::ServerError> {
-        let location_by_display: HashMap<DisplayPath, &crate::store::InputLocation> = ctx
-            .job
-            .pending_files
-            .iter()
-            .map(|file| (file.filename().clone(), file.location()))
-            .collect();
-        let sink = ctx.host.sink().clone();
-        let mut consolidated_rows = Vec::new();
-
-        for file in &ctx.job.pending_files {
-            let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());
-            lifecycle
-                .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Comparing)
-                .await;
-            if is_gold_file(file.filename().as_ref()) {
-                lifecycle.complete_without_result().await;
-            }
-        }
-
-        for work_unit in &plan.work_units {
-            let PlannedWorkUnit::Compare(unit) = work_unit else {
-                continue;
-            };
-            let Some(location) = location_by_display.get(&unit.main.display_path).copied() else {
-                continue;
-            };
-            let mut state = CompareExecutionState::new(unit.clone(), location.clone());
-            let stage_result = async {
-                for stage in plan.spec.recipe.stages {
-                    self.stage_executor
-                        .run_stage(stage.id, &mut state, plan, ctx)
-                        .await?;
-                }
-                Ok::<(), crate::error::ServerError>(())
-            }
+    for file in &ctx.job.pending_files {
+        let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());
+        lifecycle
+            .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Comparing)
             .await;
-            if let Err(error) = stage_result {
-                state
-                    .lifecycle(ctx)
+        if is_gold_file(file.filename().as_ref()) {
+            lifecycle.complete_without_result().await;
+        }
+    }
+
+    for work_unit in &plan.work_units {
+        let PlannedWorkUnit::Compare(unit) = work_unit else {
+            continue;
+        };
+        let Some(file) = file_by_display.get(&unit.main.display_path).copied() else {
+            continue;
+        };
+        let comparison = match PreparedComparison::admit(unit, file, plan, ctx) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
                     .fail(&error.to_string(), classify_server_error(&error))
                     .await;
-            } else if let Some(row) = state.consolidated_metrics.take() {
-                consolidated_rows.push(row);
+                continue;
+            }
+        };
+        match comparison.run().await {
+            Ok(row) => consolidated_rows.push(row),
+            Err(error) => {
+                FileRunTracker::new(sink.as_ref(), file.filename().as_ref())
+                    .fail(&error.to_string(), classify_server_error(&error))
+                    .await;
             }
         }
-
-        if !consolidated_rows.is_empty() {
-            write_consolidated_compare_csv(&ctx.job.filesystem, &consolidated_rows).await?;
-        }
-
-        Ok(())
     }
+
+    if !consolidated_rows.is_empty() {
+        write_consolidated_compare_csv(&ctx.job.filesystem, &consolidated_rows).await?;
+    }
+
+    Ok(())
 }
 
 /// Runner-owned dispatch entrypoint for the first migrated command family.
 pub(crate) async fn dispatch_compare_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
-    gateway: &dyn WorkerGateway,
+    gateway: &dyn CompareMorphology,
     mwt: &MwtDict,
 ) -> Result<(), crate::error::ServerError> {
     let plan = match planning::build_job_plan(job) {
@@ -161,200 +124,7 @@ pub(crate) async fn dispatch_compare_job(
         gateway,
         mwt,
     };
-    ExecutionKernel::new(Box::new(CompareStageExecutor))
-        .run(&plan, &ctx)
-        .await
-}
-
-struct CompareExecutionState {
-    unit: CompareWorkUnit,
-    /// Where the main transcript is read and its outputs are written.
-    location: crate::store::InputLocation,
-    main_text: Option<String>,
-    reference: Option<crate::compare::AdmittedComparisonReference>,
-    /// Morphotag's PROOF of the main transcript, carried between the two
-    /// stages rather than its bytes, so the comparison stage continues in the
-    /// document the gate judged and has no text to re-parse.
-    morphotagged_main: Option<crate::pipeline::post_validate::PostValidated>,
-    outputs: Option<CompareMaterializedOutputs>,
-    consolidated_metrics: Option<ConsolidatedCompareMetricsRow>,
-}
-
-impl CompareExecutionState {
-    fn new(unit: CompareWorkUnit, location: crate::store::InputLocation) -> Self {
-        Self {
-            unit,
-            location,
-            main_text: None,
-            reference: None,
-            morphotagged_main: None,
-            outputs: None,
-            consolidated_metrics: None,
-        }
-    }
-
-    fn lifecycle<'a>(&'a self, ctx: &'a ExecutionContext<'_>) -> FileRunTracker<'a> {
-        FileRunTracker::new(
-            ctx.host.sink().as_ref(),
-            self.unit.main.display_path.as_ref(),
-        )
-    }
-}
-
-struct CompareStageExecutor;
-
-#[async_trait]
-impl StageExecutor for CompareStageExecutor {
-    async fn run_stage(
-        &self,
-        stage: RecipeStageId,
-        state: &mut CompareExecutionState,
-        plan: &JobPlan,
-        ctx: &ExecutionContext<'_>,
-    ) -> Result<(), crate::error::ServerError> {
-        match stage {
-            RecipeStageId::PlanWorkUnits => Ok(()),
-            RecipeStageId::ReadChatInputs => {
-                state.lifecycle(ctx).stage(FileStage::Reading).await;
-                state.main_text = Some(
-                    tokio::fs::read_to_string(&state.unit.main.source_path)
-                        .await
-                        .map_err(|error| {
-                            crate::error::ServerError::Validation(format!(
-                                "failed to read compare input {}: {error}",
-                                state.unit.main.display_path
-                            ))
-                        })?,
-                );
-                Ok(())
-            }
-            RecipeStageId::ReadReferenceInputs => {
-                state.lifecycle(ctx).stage(FileStage::Reading).await;
-                let template_gold_source = state
-                    .unit
-                    .main
-                    .source_path
-                    .with_file_name("template.gold.cha");
-                let gold_text = match tokio::fs::read_to_string(&state.unit.gold.source_path).await {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => tokio::fs::read_to_string(&template_gold_source)
-                        .await
-                        .map_err(|_| {
-                            crate::error::ServerError::Validation(format!(
-                                "No gold .cha file found for comparison. main: {}, expected: {} or {}",
-                                state.unit.main.display_path,
-                                state.unit.gold.display_path,
-                                template_gold_path_for(state.unit.main.display_path.as_ref()),
-                            ))
-                        })?,
-                    Err(error) => return Err(crate::error::ServerError::Validation(format!(
-                        "failed to read compare reference {}: {error}", state.unit.gold.display_path
-                    ))),
-                };
-                state.reference = Some(crate::compare::AdmittedComparisonReference::admit(
-                    &gold_text,
-                )?);
-                Ok(())
-            }
-            RecipeStageId::Morphosyntax => {
-                // A dynamic recipe cannot dispatch comparison inference until
-                // its reference stage has produced complete admission.
-                if state.reference.is_none() {
-                    return Err(crate::error::ServerError::OutputAdmission {
-                        command: ReleasedCommand::Compare,
-                        details: crate::error::OutputAdmissionRefusal::unestablished(
-                            "compare morphosyntax stage ran before reference admission",
-                        ),
-                    });
-                }
-                state
-                    .lifecycle(ctx)
-                    .stage(FileStage::AnalyzingMorphosyntax)
-                    .await;
-                let main_text = state.main_text.as_deref().ok_or_else(|| {
-                    crate::error::ServerError::Validation(
-                        "compare morphosyntax stage ran before input read".into(),
-                    )
-                })?;
-                // No job language: the main transcript's language is read
-                // from its own `@Languages:` header inside the morphosyntax
-                // pipeline (`collect_payloads`), exactly as `morphotag` reads
-                // it. A job-level code used to be handed here and discarded by
-                // the gateway, so the one it named was never the one used.
-                state.morphotagged_main = Some(
-                    ctx.gateway
-                        .morphotag_for_compare(
-                            main_text,
-                            ctx.mwt,
-                            crate::infer_retry::Cancellation::Token(&ctx.job.cancel_token),
-                        )
-                        .await?,
-                );
-                Ok(())
-            }
-            RecipeStageId::CompareAlign => {
-                state.lifecycle(ctx).stage(FileStage::Comparing).await;
-                // TAKEN, not borrowed: the proof is consumed by the comparison
-                // it feeds, so a second CompareAlign on the same state reports
-                // the stage-order error rather than comparing a document that
-                // has already been compared.
-                let morphotagged_main = state.morphotagged_main.take().ok_or_else(|| {
-                    crate::error::ServerError::Validation(
-                        "compare alignment stage ran before morphosyntax".into(),
-                    )
-                })?;
-                let reference = state.reference.take().ok_or_else(|| {
-                    crate::error::ServerError::Validation(
-                        "compare alignment stage ran before reference read".into(),
-                    )
-                })?;
-                state.outputs = Some(process_compare_morphotagged_main(
-                    morphotagged_main,
-                    reference,
-                )?);
-                Ok(())
-            }
-            RecipeStageId::CompareMetrics => Ok(()),
-            RecipeStageId::SerializeChat => {
-                state.lifecycle(ctx).stage(FileStage::Finalizing).await;
-                Ok(())
-            }
-            RecipeStageId::MaterializeOutputs => {
-                state.lifecycle(ctx).stage(FileStage::Writing).await;
-                let CompareMaterializedOutputs {
-                    chat_output,
-                    metrics,
-                } = state.outputs.take().ok_or_else(|| {
-                    crate::error::ServerError::Validation(
-                        "compare output materialization ran before compare outputs existed".into(),
-                    )
-                })?;
-                let Some(artifacts) =
-                    planning::artifact_set_for_source(plan, &state.unit.main.display_path)
-                else {
-                    return Err(crate::error::ServerError::Validation(format!(
-                        "compare job plan was missing artifacts for {}",
-                        state.unit.main.display_path
-                    )));
-                };
-                let written = write_outputs(
-                    &ctx.job.filesystem,
-                    &state.location,
-                    artifacts,
-                    CompareMaterializedOutputs {
-                        chat_output,
-                        metrics,
-                    },
-                )
-                .await?;
-                state.consolidated_metrics = Some(written.complete(state.lifecycle(ctx)).await);
-                Ok(())
-            }
-            other => Err(crate::error::ServerError::Validation(format!(
-                "compare kernel does not yet support stage '{other}'"
-            ))),
-        }
-    }
+    run_compare(&plan, &ctx).await
 }
 
 async fn write_consolidated_compare_csv(
@@ -397,7 +167,6 @@ mod tests {
     use super::*;
     use crate::api::{CorrelationId, JobId, LanguageSpec, NumSpeakers};
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
-    use crate::planning::build_job_plan;
     use crate::store::{RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity};
 
     #[derive(Default)]
@@ -406,7 +175,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl WorkerGateway for FakeGateway {
+    impl CompareMorphology for FakeGateway {
         async fn morphotag_for_compare(
             &self,
             chat_text: &str,
@@ -425,47 +194,12 @@ mod tests {
                 crate::api::ReleasedCommand::Morphotag,
             ))
         }
-
-        async fn morphotag_single(
-            &self,
-            _chat_text: &str,
-            _before_text: Option<&str>,
-            _options: crate::execution::MorphotagRuntimeOptions,
-            _progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, crate::error::ServerError>
-        {
-            unreachable!("compare tests do not call morphotag_single")
-        }
-
-        async fn utseg_batch(
-            &self,
-            _files: &[crate::text_batch::TextBatchFileInput],
-            _route: &crate::utseg_route::ServableUtsegRoute,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> crate::text_batch::TextBatchFileResults {
-            unreachable!("compare tests do not call utseg_batch")
-        }
-
-        async fn translate_file(
-            &self,
-            _file: &crate::text_batch::TextBatchFileInput,
-            _route: &crate::translate::TranslationRoute,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> crate::text_batch::TextBatchFileResults {
-            unreachable!("compare tests do not call translate_file")
-        }
-
-        async fn coref_batch(
-            &self,
-            _files: &[crate::text_batch::TextBatchFileInput],
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> crate::text_batch::TextBatchFileResults {
-            unreachable!("compare tests do not call coref_batch")
-        }
     }
 
-    fn compare_snapshot(staging_dir: &std::path::Path) -> RunnerJobSnapshot {
+    fn compare_snapshot(
+        staging_dir: &std::path::Path,
+        inputs: crate::store::JobInputs,
+    ) -> RunnerJobSnapshot {
         crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-compare-kernel"),
@@ -484,14 +218,7 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("sample.cha")],
-                    vec![true],
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
+                inputs,
                 staging_dir: batchalign_types::paths::ServerPath::new(staging_dir),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
@@ -568,56 +295,42 @@ mod tests {
                     .unwrap();
             }
         }
-        let mut snapshot = compare_snapshot(tempdir.path());
-        match output {
-            OutputFixture::Staged => {}
-            OutputFixture::BlockedChat | OutputFixture::BlockedSidecar => {
-                let name = match output {
-                    OutputFixture::BlockedChat => "sample.cha",
-                    _ => "sample.compare.csv",
-                };
-                tokio::fs::create_dir_all(tempdir.path().join("output").join(name))
-                    .await
-                    .unwrap();
-            }
+        let inputs = match &output {
             OutputFixture::Paths => {
                 let destination = tempdir.path().join("requested").join("sample.cha");
-                snapshot.filesystem.inputs = crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("sample.cha")],
-                    vec![true],
-                    true,
-                    vec![batchalign_types::paths::ClientPath::new(
+                crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                    display: "sample.cha".into(),
+                    kind: crate::store::InputKind::Chat,
+                    source: crate::store::test_support::admitted(
                         input_dir.join("sample.cha").to_str().unwrap(),
-                    )],
-                    vec![batchalign_types::paths::ClientPath::new(
-                        destination.to_str().unwrap(),
-                    )],
-                    vec![],
-                );
-                snapshot = crate::store::test_support::with_pending(snapshot);
+                    ),
+                    output: crate::store::test_support::admitted(destination.to_str().unwrap()),
+                    before: None,
+                }])
             }
-        }
-        let plan = build_job_plan(&snapshot).expect("plan");
-        let (_tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
-        let store = std::sync::Arc::new(crate::store::JobStore::for_tests(
-            crate::config::ServerConfig::default(),
-            None,
-            _tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        ));
-        let host = DispatchHostContext::from_store(store, &snapshot.identity.job_id);
-        let gateway = FakeGateway::default();
-        let ctx = ExecutionContext {
-            job: &snapshot,
-            host: &host,
-            gateway: &gateway,
-            mwt: &MwtDict::default(),
+            OutputFixture::Staged | OutputFixture::BlockedChat | OutputFixture::BlockedSidecar => {
+                crate::store::JobInputs::Content(vec![crate::store::ContentInput {
+                    display: "sample.cha".into(),
+                    kind: crate::store::InputKind::Chat,
+                }])
+            }
         };
-
-        ExecutionKernel::new(Box::new(CompareStageExecutor))
-            .run(&plan, &ctx)
+        let blocked_name = match output {
+            OutputFixture::BlockedChat => Some("sample.cha"),
+            OutputFixture::BlockedSidecar => Some("sample.compare.csv"),
+            OutputFixture::Staged | OutputFixture::Paths => None,
+        };
+        if let Some(name) = blocked_name {
+            tokio::fs::create_dir_all(tempdir.path().join("output").join(name))
+                .await
+                .unwrap();
+        }
+        let snapshot = compare_snapshot(tempdir.path(), inputs);
+        let host = DispatchHostContext::for_test_effects();
+        let gateway = FakeGateway::default();
+        dispatch_compare_job(&snapshot, &host, &gateway, &MwtDict::default())
             .await
-            .expect("run compare kernel");
+            .expect("dispatch compare");
 
         (
             tempdir,
@@ -633,6 +346,11 @@ mod tests {
         .await
     }
 
+    /// Guards: A valid reference produces the primary CHAT file and both required CSV artifacts.
+    /// Kind: contract
+    /// Not a type: Admitted plans cannot prove actual artifact creation through the compare reader and writer adapters.
+    /// State: Temporary CHAT input, reference and outputs exercise real filesystem IO with a recording gateway. The shared sink removes registry effects.
+    /// Concurrency: The test owns its directory, gateway counter and recording sink. No external worker or shared store runs.
     #[tokio::test]
     async fn compare_kernel_writes_primary_and_sidecar_outputs() {
         let (tempdir, calls) = run_compare_reference(VALID_CHAT).await;
@@ -646,6 +364,11 @@ mod tests {
         assert!(consolidated.exists());
     }
 
+    /// Guards: Malformed reference bytes produce neither inference requests nor output artifacts.
+    /// Kind: contract
+    /// Not a type: Typed plans cannot establish whether newly read external CHAT bytes pass reference validation.
+    /// State: Each malformed reference is written under an isolated directory and read by production validation. A recording gateway checks absence of inference.
+    /// Concurrency: Each case owns its directory, gateway counter and recording sink. There is no shared registry or worker.
     #[tokio::test]
     async fn compare_invalid_reference_cannot_dispatch_inference_or_write_outputs() {
         for invalid in [
@@ -661,6 +384,11 @@ mod tests {
         }
     }
 
+    /// Guards: Companion presence controls template fallback and unreadable companions refuse inference.
+    /// Kind: contract
+    /// Not a type: Closed fixture variants cannot establish actual filesystem presence, read errors or the chosen reference text.
+    /// State: Distinct temporary layouts exercise companion selection, template fallback and a directory at the companion path as a real read failure.
+    /// Concurrency: Each layout owns its directory, recording gateway and sink. No filesystem state is shared across cases.
     #[tokio::test]
     async fn compare_reference_selection_uses_template_only_when_companion_is_absent() {
         let different = VALID_CHAT.replace("hello there .", "goodbye there .");
@@ -705,6 +433,11 @@ mod tests {
         assert!(!blocked.path().join("output/compare.csv").exists());
     }
 
+    /// Guards: A failed required artifact write contributes no successful consolidated metric row.
+    /// Kind: contract
+    /// Not a type: An admitted output path cannot guarantee later filesystem writes succeed or prevent obstructing directory entries.
+    /// State: Temporary directories placed at required output filenames induce real write failures. Actual consolidation must omit the row.
+    /// Concurrency: Every obstruction case owns its directory, gateway counter and sink. No external process or store is used.
     #[tokio::test]
     async fn compare_failed_required_write_cannot_supply_a_successful_metric_row() {
         for output in [OutputFixture::BlockedChat, OutputFixture::BlockedSidecar] {
@@ -715,6 +448,11 @@ mod tests {
         }
     }
 
+    /// Guards: Paths mode retains matching required artifacts in staging and requested destinations.
+    /// Kind: contract
+    /// Not a type: Admitted path pairs prove authority but cannot prove the bytes copied to both filesystem destinations.
+    /// State: An isolated admitted paths fixture exercises real staging and requested-directory writes against a recording gateway and sink.
+    /// Concurrency: The test owns both destinations under one temporary root and its gateway counter. No shared registry runs.
     #[tokio::test]
     async fn compare_paths_mode_keeps_both_required_artifacts_in_staging() {
         let (directory, calls) = run_compare_fixture(

@@ -1,24 +1,15 @@
 //! Tests for file status tracking, supervision, and progress forwarding.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::api::MachineTime;
-use crate::api::{
-    ContentType, DisplayPath, FileProgressStage, FileStatusKind, JobId, JobStatus, LanguageCode3,
-    LanguageSpec, NumSpeakers, ReleasedCommand,
-};
+use crate::api::{ContentType, DisplayPath, FileProgressStage, FileStatusKind, JobId};
 use crate::db::JobDB;
-use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use crate::scheduling::{AttemptOutcome, FailureCategory, RetryDisposition, WorkUnitKind};
-use crate::store::{
-    FileStatus, Job, JobDispatchConfig, JobExecutionState, JobFilesystemConfig, JobIdentity,
-    JobRuntimeControl, JobScheduleState, JobSourceContext,
-};
+use crate::store::Job;
 use crate::ws::BROADCAST_CAPACITY;
 
 use super::*;
@@ -119,68 +110,14 @@ fn test_config() -> crate::config::ServerConfig {
 }
 
 fn make_job(id: &str) -> Job {
-    let mut file_statuses = HashMap::new();
-    file_statuses.insert(
-        "a.cha".to_string(),
-        FileStatus::new(DisplayPath::from("a.cha")),
-    );
-
-    Job {
-        identity: JobIdentity {
-            job_id: id.into(),
-            correlation_id: format!("test-{id}").into(),
-        },
-        dispatch: JobDispatchConfig {
-            command: ReleasedCommand::Morphotag,
-            lang: LanguageSpec::Resolved(LanguageCode3::eng()),
-            num_speakers: NumSpeakers(1),
-            options: CommandOptions::Morphotag(MorphotagOptions {
-                common: CommonOptions::default(),
-
-                ..Default::default()
-            }),
-            runtime_state: std::collections::BTreeMap::new(),
-            debug_traces: false,
-        },
-        source: JobSourceContext {
-            submitter: Some(crate::store::Submitter::client(
-                std::net::Ipv4Addr::LOCALHOST.into(),
-                String::new(),
-            )),
-            source_dir: Default::default(),
-        },
-        filesystem: JobFilesystemConfig {
-            staging_dir: Default::default(),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-        },
-        execution: JobExecutionState {
-            lifecycle: crate::store::JobLifecycle::for_test(
-                JobStatus::Queued,
-                crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("a.cha")],
-                    vec![true],
-                    false,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            ),
-            file_statuses,
-            results: Vec::new(),
-            error: None,
-        },
-        schedule: JobScheduleState {
-            submitted_at: MachineTime::now(),
-            completed_at: None,
-            next_eligible_at: None,
-            num_workers: None,
-            lease: None,
-            last_cancel: None,
-        },
-        runtime: JobRuntimeControl::unclaimed(),
-        execution_plan: None,
-    }
+    let mut job =
+        crate::store::test_support::queued_morphotag_job_fixture(crate::store::ContentInput {
+            display: DisplayPath::from("a.cha"),
+            kind: crate::store::InputKind::Chat,
+        });
+    job.identity.job_id = id.into();
+    job.identity.correlation_id = format!("test-{id}").into();
+    job
 }
 
 #[tokio::test]
@@ -242,6 +179,11 @@ async fn forwarder_drains_queued_wait_changes_before_finishing() {
     );
 }
 
+/// Guards: A real panicking child records an error for its claimed file.
+/// Kind: contract
+/// Not a type: An admitted run binds the sink but cannot prevent a spawned future from panicking during polling.
+/// State: A real Tokio child and in-memory registry exercise join-error translation and file projection. Disk contributes no effect.
+/// Concurrency: The test owns its registry actor, broadcast channel and child handle. Draining joins the child before consuming the claim.
 #[tokio::test]
 async fn supervised_task_marks_panic_as_error() {
     let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -252,8 +194,9 @@ async fn supervised_task_marks_panic_as_error() {
         std::sync::Arc::new(crate::clock::SystemClock),
     ));
     let job_id = JobId::from("job-2");
-    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-2")).await.unwrap();
+    let claim = crate::store::test_support::claim_runner(&store, &job_id).await;
+    let sink = StoreRunnerEventSink::for_run(&claim);
 
     sink.mark_file_processing("a.cha", sink.now()).await;
 
@@ -281,12 +224,18 @@ async fn supervised_task_marks_panic_as_error() {
             .as_deref()
             .is_some_and(|msg| msg.contains("panicked before recording a terminal file state"))
     );
+    claim.complete().await.expect("complete admitted run");
 }
 
 /// The tracker stamps every event from the store's clock: the attempt starts
 /// when the clock says, a retry deadline is that instant plus the backoff,
 /// and the file's duration is the clock's elapsed time, never a time the
 /// pipeline chose.
+/// Guards: Retry deadlines and persisted attempts use the bound store clock through successful writeback.
+/// Kind: contract
+/// Not a type: Owned claims bind the store but cannot prove persisted timestamps, retry disposition or SQLite attempt rows.
+/// State: An isolated SQLite database verifies actual attempt persistence. A manual store clock advances through failure, backoff and success without sleeps.
+/// Concurrency: The directory, registry actor, broadcast channel and manual clock belong to this run. All writes finish before claim completion.
 #[tokio::test]
 async fn file_run_tracker_retries_then_completes_cleanly() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -301,8 +250,9 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
         clock.clone(),
     ));
     let job_id = JobId::from("job-tracker");
-    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-tracker")).await.unwrap();
+    let claim = crate::store::test_support::claim_runner(&store, &job_id).await;
+    let sink = StoreRunnerEventSink::for_run(&claim);
 
     let lifecycle = FileRunTracker::new(sink.as_ref(), "a.cha");
     lifecycle
@@ -369,8 +319,14 @@ async fn file_run_tracker_retries_then_completes_cleanly() {
         attempts[1].finished_at,
         Some(crate::unix_time(1_700_000_017.0))
     );
+    claim.complete().await.expect("complete admitted run");
 }
 
+/// Guards: Setup rejection writes a validation error and one failed setup attempt.
+/// Kind: contract
+/// Not a type: An admitted sink binds the run but cannot establish the SQLite row or projected setup error text.
+/// State: An isolated SQLite database and registry exercise the real sink attempt adapter. No media or worker is required for setup rejection.
+/// Concurrency: The database directory, registry actor and broadcast channel are per test. The claim completes after observed effects.
 #[tokio::test]
 async fn file_run_tracker_records_setup_failure() {
     let tempdir = tempfile::tempdir().expect("tempdir");
@@ -383,8 +339,9 @@ async fn file_run_tracker_records_setup_failure() {
         std::sync::Arc::new(crate::clock::SystemClock),
     ));
     let job_id = JobId::from("job-setup-failure");
-    let sink = StoreRunnerEventSink::wrap(store.clone(), &job_id);
     store.submit(make_job("job-setup-failure")).await.unwrap();
+    let claim = crate::store::test_support::claim_runner(&store, &job_id).await;
+    let sink = StoreRunnerEventSink::for_run(&claim);
 
     let lifecycle = FileRunTracker::new(sink.as_ref(), "a.cha");
     lifecycle
@@ -411,6 +368,7 @@ async fn file_run_tracker_records_setup_failure() {
         attempts[0].failure_category,
         Some(FailureCategory::Validation)
     );
+    claim.complete().await.expect("complete admitted run");
 }
 
 /// The runner-local stage vocabulary must map onto the stable API enum and its

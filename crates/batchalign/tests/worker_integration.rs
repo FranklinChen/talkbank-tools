@@ -577,6 +577,11 @@ async fn pool_pre_scale_uses_infer_targets() {
     pool.shutdown().await;
 }
 
+/// Guards: Concurrent discovery publishes one worker. Later discovery preserves its original registry entry, and the adopted connection continues serving requests.
+/// Kind: journey
+/// Not a type: A daemon's real TCP stream, registry file and process lifetime can change independently. Unique claims exclude duplicate preparation, while this native adapter must preserve actual source bytes and communication through repeated discovery.
+/// State: One real Python echo daemon, a private registry directory and an admitted pool exercise actual health, capability and batch-infer bytes without models or providers.
+/// Concurrency: The fixture owns its loopback daemon, ephemeral port, directory and pool. Cleanup precedes the final failure assertions. Repeated scans and actual request completion establish readiness without inferred sleeps or shared registry changes.
 #[cfg(unix)]
 #[tokio::test]
 async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
@@ -605,18 +610,54 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
         ..PoolConfig::for_tests()
     });
 
-    let discovered = pool.discover_from_registry().await;
-    assert_eq!(discovered, 1, "expected one external registry worker");
-    assert!(
-        pool.detected_capabilities().is_some(),
-        "registry discovery should seed a live capability snapshot"
-    );
+    let (first, concurrent) =
+        tokio::join!(pool.discover_from_registry(), pool.discover_from_registry());
+    let capabilities_observed = pool.detected_capabilities().is_some();
 
+    let entries_after_first = read_registry(&registry_path);
+    let second_adoption = pool.discover_from_registry().await;
+    let entries_after_second = read_registry(&registry_path);
+    let retained_workers = pool.worker_count().await;
+    let retained_request = pool
+        .dispatch_batch_infer(
+            &LanguageCode3::eng(),
+            &batch_request(InferTask::Morphosyntax, vec![json!({"retained": true})]),
+        )
+        .await;
+    let daemon_alive = process_alive(external_pid);
     pool.shutdown().await;
     if process_alive(external_pid) {
         terminate_pid(external_pid);
         wait_for_process_exit(external_pid).await;
     }
+    assert_eq!(first + concurrent, 1, "one discovered external worker");
+    assert!(
+        capabilities_observed,
+        "the worker seeds a live capability snapshot"
+    );
+    assert!(
+        retained_request.is_ok(),
+        "the retained connection still serves its actual request"
+    );
+    assert!(daemon_alive, "the registered daemon is still alive");
+    assert_eq!(
+        second_adoption, 0,
+        "the already-adopted daemon requires no second adoption"
+    );
+    assert_eq!(
+        retained_workers, 1,
+        "one actual daemon must own one pool slot"
+    );
+    assert_eq!(
+        entries_after_first.len(),
+        1,
+        "first adoption keeps its live registry source"
+    );
+    assert_eq!(
+        entries_after_second.len(),
+        1,
+        "a repeated scan preserves the live adopted registry entry"
+    );
 }
 
 #[cfg(unix)]

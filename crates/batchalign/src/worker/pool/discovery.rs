@@ -1,39 +1,19 @@
-//! Registry-based worker discovery.
-//!
-//! Reads `workers.json` to find pre-started TCP daemon workers and integrates
-//! them into the pool. GPU workers become `SharedGpuTcpWorker` entries;
-//! non-GPU workers join the sequential pool as `TcpWorkerHandle` entries.
-
-use std::sync::atomic::Ordering;
-
+//! Integrate source-bound, lifetime-owned registry connections.
+use super::WorkerPool;
+use crate::worker::registry;
+use crate::worker::serving::WorkerServing;
+use std::sync::Arc;
 use tracing::{info, warn};
-
-use crate::worker::tcp_handle::{TcpWorkerHandle, TcpWorkerInfo};
-use crate::worker::{WorkerPid, WorkerTarget, registry};
-
-use super::{WorkerKey, WorkerPool, lock_recovered, shared_gpu};
-
 impl WorkerPool {
-    /// Discover pre-started TCP workers from the registry file.
-    ///
-    /// Reads `workers.json`, health-checks each entry, and integrates healthy
-    /// workers into the pool. GPU workers become `SharedGpuWorker` entries;
-    /// non-GPU workers are not integrated into the sequential pool (they use
-    /// TCP handles directly via the dispatch path).
-    ///
-    /// Returns the number of workers discovered and integrated.
+    /// Observe unowned candidates and return the actual newly integrated count.
     pub async fn discover_from_registry(&self) -> usize {
-        let registry_path = self.registry_path();
-
         let discovery = registry::discover_workers(
-            &registry_path,
+            &self.registry_path(),
             self.config.task_timeouts,
             self.current_server_instance_id(),
+            &self.registry_admissions,
         )
         .await;
-        // Every daemon this sweep refused is recorded, replacing the previous
-        // sweep's list, so `/health` shows daemons that are alive but not
-        // adopted, and why.
         self.record_refused_registry_workers(
             discovery
                 .refused
@@ -41,153 +21,46 @@ impl WorkerPool {
                 .map(registry::ForeignBuildDaemon::to_refused_registry_worker)
                 .collect(),
         );
-        let discovered = discovery.workers;
-
-        if discovered.is_empty() {
-            return 0;
-        }
-
-        let count = discovered.len();
-        info!(count, "Discovered worker(s) from registry");
-
-        // Integrate GPU workers into the shared GPU worker map.
-        // Non-GPU TCP workers are tracked in a separate TCP worker map.
-        for mut worker in discovered {
-            let target = WorkerTarget::profile(worker.profile);
-            let key = match WorkerKey::from_registry_json(
-                target,
-                worker.lang.clone(),
-                &worker.entry.engine_overrides,
-            ) {
-                Ok(key) => key,
+        let mut integrated = 0;
+        for candidate in discovery.workers {
+            let worker = match candidate.admit(self) {
+                Ok(worker) => worker,
                 Err(error) => {
-                    warn!(
-                        profile = %worker.entry.profile,
-                        lang = %worker.entry.lang,
-                        engine_overrides = %worker.entry.engine_overrides,
-                        %error,
-                        "Skipping registry worker with invalid engine override JSON"
-                    );
+                    warn!(%error,"Registry worker report refused");
                     continue;
                 }
             };
-            // The one worker discovery probed carries its report; it is
-            // admitted here, under the key it will be dispatched by. A refused
-            // report means the worker is not used, so it is not integrated;
-            // the refusal is that key's recorded admission, which `/health`
-            // lists.
-            if let Some(caps) = worker.capabilities.take()
-                && let Err(error) = self.record_capabilities(&key, caps)
-            {
-                warn!(
-                    profile = %worker.entry.profile,
-                    lang = %worker.entry.lang,
-                    %error,
-                    "Registry worker's capability report was refused; not integrating it"
-                );
-                continue;
-            }
-            if self.serving(target).is_shared() {
-                let info = TcpWorkerInfo {
-                    host: worker.entry.host.clone(),
-                    port: worker.entry.port,
-                    profile: worker.profile,
-                    lang: worker.lang.clone(),
-                    engine_overrides: worker.entry.engine_overrides.clone(),
-                    pid: WorkerPid(worker.entry.pid),
-                    task_timeouts: self.config.task_timeouts,
-                    gpu_thread_pool_size: self.config.runtime.gpu_thread_pool_size,
-                };
-
-                match shared_gpu::SharedGpuTcpWorker::connect(info).await {
-                    Ok(shared) => {
-                        // A live connection for this key is kept (the new one
-                        // drops); a connection whose stream has closed is
-                        // replaced, so a restarted daemon is picked up again.
-                        let mut workers = self.gpu_tcp_workers.lock().await;
-                        match workers.get(&key).map(|existing| existing.check_available()) {
-                            Some(Ok(())) => {}
-                            Some(Err(_)) | None => {
-                                workers.insert(key, std::sync::Arc::new(shared));
-                            }
-                        }
-                        drop(workers);
-                        info!(
-                            profile = %worker.entry.profile,
-                            lang = %worker.entry.lang,
-                            host = %worker.entry.host,
-                            port = worker.entry.port,
-                            "Integrated GPU TCP worker"
-                        );
+            info!(pid=worker.source().pid,host=%worker.source().host,port=worker.source().port,"Admitted original registry connection");
+            match self.serving(worker.key().target) {
+                WorkerServing::SharedConcurrent { in_flight } => {
+                    let mut workers = self.gpu_tcp_workers.lock().await;
+                    if workers
+                        .get(worker.key())
+                        .is_some_and(|existing| existing.check_available().is_ok())
+                    {
+                        continue;
                     }
-                    Err(e) => {
-                        warn!(
-                            host = %worker.entry.host,
-                            port = worker.entry.port,
-                            error = %e,
-                            "Failed to integrate GPU TCP worker"
-                        );
-                    }
+                    let (key, shared) =
+                        super::shared_gpu::SharedGpuTcpWorker::from_registry(worker, in_flight);
+                    workers.insert(key, Arc::new(shared));
+                    integrated += 1;
                 }
-            } else {
-                // For non-GPU TCP workers, add them to the sequential pool.
-                let info = TcpWorkerInfo {
-                    host: worker.entry.host.clone(),
-                    port: worker.entry.port,
-                    profile: worker.profile,
-                    lang: worker.lang.clone(),
-                    engine_overrides: worker.entry.engine_overrides.clone(),
-                    pid: WorkerPid(worker.entry.pid),
-                    task_timeouts: self.config.task_timeouts,
-                    gpu_thread_pool_size: self.config.runtime.gpu_thread_pool_size,
-                };
-
-                match TcpWorkerHandle::connect(info).await {
-                    Ok(handle) => {
-                        let group = self.get_or_create_group(&key);
-                        // Acquire a global-cap permit for the
-                        // discovered worker. If the pool is full,
-                        // skip rather than exceed the cap; a future
-                        // discovery sweep can pick the daemon up.
-                        let Some(permit_guard) =
-                            super::permit::SpawnPermitGuard::try_acquire_or_skip(
-                                &group.spawn_permits,
-                                || {
-                                    warn!(
-                                        profile = %worker.entry.profile,
-                                        lang = %worker.entry.lang,
-                                        "Skipping TCP worker integration: global cap reached"
-                                    );
-                                },
-                            )
-                        else {
+                WorkerServing::OneRequestPerProcess => {
+                    let group = self.get_or_create_group(worker.key());
+                    let reservation = match super::capacity::ReservedWorkerSlot::try_adopt(&group) {
+                        Ok(reservation) => reservation,
+                        Err(_) => {
+                            warn!(profile=%worker.info().profile.label(),"Registry adoption deferred at global capacity");
                             continue;
-                        };
-                        lock_recovered(&group.tcp_workers).push_back(handle);
-                        group.tcp_available.add_permits(1);
-                        group.total.fetch_add(1, Ordering::Relaxed);
-                        permit_guard.forget();
-                        info!(
-                            profile = %worker.entry.profile,
-                            lang = %worker.entry.lang,
-                            host = %worker.entry.host,
-                            port = worker.entry.port,
-                            "Integrated non-GPU TCP worker into pool (key={:?})",
-                            key
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            host = %worker.entry.host,
-                            port = worker.entry.port,
-                            error = %e,
-                            "Failed to integrate non-GPU TCP worker"
-                        );
-                    }
+                        }
+                    };
+                    let (_key, handle) = worker.into_sequential();
+                    reservation.publish_tcp(handle);
+                    integrated += 1;
                 }
             }
         }
-
-        count
+        info!(integrated, "Integrated registry worker connections");
+        integrated
     }
 }

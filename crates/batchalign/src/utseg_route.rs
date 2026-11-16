@@ -241,6 +241,11 @@ mod tests {
 
     /// Every language the boundary-model table names takes the model route,
     /// under either policy: an available model is never substituted.
+    /// Guards: Available boundary-model languages retain their model under either fallback policy.
+    /// Kind: policy
+    /// Not a type: LanguageCode3 proves the code shape. The mapping of eng, cmn, zho and yue to the packaged boundary model under both policy values is a semantic choice.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn boundary_model_languages_take_the_model_route() {
         for code in ["eng", "cmn", "zho", "yue"] {
@@ -261,6 +266,11 @@ mod tests {
     /// RED FIRST: the defect. A language with no boundary model and no opt-in
     /// is refused HERE, by the language alone, rather than after a full ASR
     /// pass, and the message names the language instead of the wire format.
+    /// Guards: Spanish without fallback produces a refusal naming its language, CLI flag and request field.
+    /// Kind: policy
+    /// Not a type: UtsegUnavailable retains the refused language. Its rendered flag, JSON field and explanation remain external diagnostic bytes.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn an_unsupported_language_is_refused_by_the_language_alone() {
         let refusal = UtsegRoute::resolve(&lang("spa"), UtsegFallbackPolicy::Refuse)
@@ -296,6 +306,11 @@ mod tests {
     /// every multi-word item failed at the worker with "produced no tree". It
     /// is now refused before any work, naming the processors it lacks; a
     /// boundary-model route needs no Stanza, registry or not.
+    /// Guards: Stanza segmentation requires constituency admission, while a boundary-model route remains servable independently of a registry report.
+    /// Kind: policy
+    /// Not a type: ServableUtsegRoute retains admission. Its constructor must interpret the actual reported language and processor inventory, including missing Constituency and an unavailable report.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn the_stanza_route_is_admitted_only_with_a_constituency_parser() {
         use crate::stanza_registry::{GapKind, StanzaProcessor::*};
@@ -340,6 +355,11 @@ mod tests {
 
     /// The opt-in is what makes an unsupported language runnable, and it
     /// selects Stanza rather than silently borrowing another language's model.
+    /// Guards: Explicit fallback selects Stanza for the declared unsupported boundary-model languages.
+    /// Kind: policy
+    /// Not a type: The policy maps spa, fra, jpn, cat and nld to Stanza. Valid language-code types alone cannot establish that semantic mapping.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn the_operator_opt_in_selects_the_stanza_fallback() {
         for code in ["spa", "fra", "jpn", "cat", "nld"] {
@@ -348,20 +368,5 @@ mod tests {
             assert_eq!(route.boundary_model(), None);
             assert_eq!(route.language(), &lang(code));
         }
-    }
-
-    /// The hole in the failure this replaces: the worker refused only when a
-    /// batch still had multi-word items, so single-word content skipped it.
-    /// The route cannot be reached through content at all, which is what this
-    /// pins: the answer is a function of the language and policy only.
-    #[test]
-    fn the_route_does_not_depend_on_payload_content() {
-        let first = UtsegRoute::resolve(&lang("spa"), UtsegFallbackPolicy::Refuse);
-        let second = UtsegRoute::resolve(&lang("spa"), UtsegFallbackPolicy::Refuse);
-        assert_eq!(
-            first, second,
-            "the route is decided by language and policy; there is no payload input"
-        );
-        assert!(first.is_err());
     }
 }

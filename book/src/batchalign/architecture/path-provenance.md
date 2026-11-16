@@ -1,7 +1,7 @@
 # Typed Path Provenance
 
 **Status:** Current
-**Last updated:** 2026-11-12 09:03 EST
+**Last updated:** {{git-dates:page}}
 
 Paths in batchalign3 cross machine boundaries: a client submits paths from
 their filesystem, the server resolves media on its own filesystem (potentially
@@ -308,13 +308,16 @@ name, kind and paths now cannot disagree, a paths-mode path exists only as an
 admitted one, and a content-mode job has no paths to misread.
 
 ```mermaid
-flowchart LR
-    wire["JobSubmission\n(ClientPath fields)"] -->|"validate()"| validated["ValidatedSubmission"]
+flowchart TD
+    wire["JobSubmission<br/>ClientPath fields"] -->|"validate()"| validated["ValidatedSubmission"]
     validated -->|"materialize: AllowedRoots::admit"| inputs["JobInputs"]
-    inputs -->|"to_columns()"| db[("SQLite\nparallel columns")]
+    inputs -->|"to_columns()"| db[("SQLite<br/>parallel columns")]
     db -->|"from_columns(roots): re-admit"| inputs
-    inputs -->|"entries()"| pending["PendingJobFile\n(file_index, filename, kind, location)"]
-    pending --> runner["runner: input_path(), before_path(),\noutput_write_path(location)"]
+    inputs -->|"entries()"| pending["PendingJobFile<br/>file_index, filename, kind, location"]
+    pending --> runner["Read input_path() and before_path()"]
+    inputs -->|"match declaration"| outputs
+    pending --> outputs["SourceOutputs admits declaration and matching layout"]
+    outputs --> targets["Consume prepared OutputTarget destinations"]
 ```
 
 - **Storage boundary.** The database still stores parallel columns.
@@ -455,6 +458,62 @@ provenance types (`ChatRawText`, `AsrNormalizedText`) is that path types also
 encode **machine boundaries** -- which side of the client/server divide a value
 lives on -- and enforce this through the presence or absence of `AsRef<Path>`.
 
+## Preflight observations travel with the job
+
+Store admission binds the actual store and registry claim in `AdmittedRun`.
+`ClaimedDispatch::for_run` derives the immutable snapshot and host context from
+that capability alone. Resource admission carries the pair into
+`ObservedPreflight`. Each pending input is consumed into an exhaustive
+`PreflightInput` route. An in-place recording produces `InPlaceMedia`, which
+owns that input's admitted source and output paths. Staged inputs and CHAT
+files pass directly to the accepted partition. The filesystem observer's
+signature requires `InPlaceMedia`.
+
+```mermaid
+flowchart TD
+    admitted["AdmittedRun binds actual store and claim"] --> claimed["ClaimedDispatch derives snapshot and host"]
+    claimed --> snapshot["Resource-admitted snapshot and run-bound host"]
+    snapshot --> classify["Consume PendingJobFile into PreflightInput"]
+    classify -->|"staged input or CHAT"| accepted["Accepted files in input order"]
+    classify -->|"recording read in place"| media["InPlaceMedia owns its paths"]
+    media --> observe["Observe metadata once"]
+    observe -->|"nonempty"| nonempty["NonemptyMedia"]
+    observe -->|"unavailable or empty"| rejected["RejectedMedia owns file and reason"]
+    nonempty --> format["Admit suffix from MediaExtensions"]
+    format -->|"recognized"| accepted
+    format -->|"unknown or absent"| rejected
+    accepted --> batch["ObservedPreflight retains snapshot and host"]
+    rejected --> batch
+    batch --> record["Consume and record rejections in input order"]
+    record --> ready["PreflightedJob carries snapshot, host and accepted files"]
+    ready --> dispatch["Consuming dispatch request"]
+```
+
+Only completed rejection recording constructs `PreflightedJob`. The dispatch
+request takes that owner, keeping files, snapshot and run-bound context paired
+through the kernel entry. Rejection recording takes its sink from the carried
+context. A failure retains its own file and reason through
+recording. The earlier index-to-error map, rejection-index set and filename
+lookup are removed. Pending projection takes the complete admitted input set
+and mints its ordinals internally. Consumers cannot supply a different index
+when constructing one pending file.
+
+Metadata establishes the current size and availability observation. Format
+admission reads the filename suffix from the same owned path. Container
+decoding and engine compatibility have their own later media-admission stages.
+A source may change after preflight, and cancellation or supersession can
+change the current run. File effects continue through the run-bound sink.
+
+### Fixture input ownership
+
+Fixture construction follows the same per-file association. `ContentInput`
+selects staged content. A `PathsInput` holds all admitted paths for one file,
+and the shared fixture factory consumes a vector of those records through
+`PathsFiles::admit`. Pending projection then derives from the completed set.
+Separate source/output lists and mode flags are absent from this fixture API.
+See [complete per-file fixtures](../developer/testing.md#complete-per-file-input-fixtures)
+for the construction and clock-owner diagrams.
+
 ## Key Source Files
 
 | File | Role |
@@ -464,5 +523,7 @@ lives on -- and enforce this through the presence or absence of `AsRef<Path>`.
 | `crates/batchalign/src/types/config/mod.rs` | `ServerConfig.media_mappings: BTreeMap<MediaMappingKey, ServerPath>` |
 | `crates/batchalign/src/runner/dispatch/media_search.rs` | Media resolution cascade |
 | `crates/batchalign/src/submission.rs` | Admits every paths-mode path in `materialize_submission_job()`, before staging |
-| `crates/batchalign/src/store/job/types.rs` | `JobInputs`, `PendingJobFile`, `InputLocation`, the `InputColumns` storage boundary |
+| `crates/batchalign/src/store/job/inputs.rs` | `JobInputs`, recorded inputs and the `InputColumns` storage boundary |
+| `crates/batchalign/src/store/job/pending.rs` | Source-bound pending files and the `InPlaceMedia` capability |
+| `crates/batchalign/src/runner/preflight/mod.rs` | Consuming observation, rejection recording and dispatch admission |
 | `crates/batchalign/src/store/queries/recovery.rs` | Recovery: finished jobs as recorded history, unfinished ones admitted or shown failed |

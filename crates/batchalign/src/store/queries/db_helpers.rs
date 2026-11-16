@@ -125,7 +125,7 @@ impl JobStore {
     }
 
     /// Persist and attach a new active attempt record for one file.
-    pub(crate) async fn db_start_attempt(
+    pub(in crate::store) async fn db_start_attempt(
         &self,
         run: &super::super::RunBinding,
         attempt: AttemptStartRecord<'_>,
@@ -189,7 +189,7 @@ impl JobStore {
     }
 
     /// Finalize the currently active attempt for one file.
-    pub(crate) async fn db_finish_attempt_for_file(
+    pub(in crate::store) async fn db_finish_attempt_for_file(
         &self,
         run: &super::super::RunBinding,
         attempt: AttemptFinishRecord<'_>,

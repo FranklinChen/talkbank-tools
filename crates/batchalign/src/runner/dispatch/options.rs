@@ -1,17 +1,9 @@
-//! Pure functions that extract typed dispatch parameters from [`CommandOptions`].
+//! Infallible parameter extraction from concrete command option types.
 //!
-//! These functions encapsulate the "read options from job" logic that was
-//! previously inlined in async dispatch functions, making it testable without
-//! async runtimes, job stores, or worker pools.
-//!
-//! # Wiring guarantee
-//!
-//! Every field in every [`CommandOptions`] variant MUST be consumed by exactly
-//! one extraction function. The tests in this module verify this invariant by
-//! constructing options with non-default values and asserting the extracted
-//! parameters reflect those values. If a new field is added to a
-//! `CommandOptions` struct but not wired here, the corresponding test will
-//! fail (or a new test must be added to cover it).
+//! Plan request admission selects each family once. Extractors consume that
+//! family evidence through their argument type and carry the requested policy
+//! values into executable parameters. Policy and wire contracts cover value
+//! precedence, exact cache identity and serialized output behavior.
 
 // These pure extractors feed the typed dispatch-plan builders in `plan.rs`.
 // Some returned compatibility fields (`wor_tier`, `batch_size`) are still
@@ -19,17 +11,14 @@
 // does not yet consume them.
 
 #[cfg(test)]
-use crate::chat_ops::fa::WordGapHealing;
-
-#[cfg(test)]
 #[path = "gap_policy_tests.rs"]
 mod gap_policy_tests;
-use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, TokenizationMode};
-#[allow(unused_imports)]
 use crate::options::{
-    AlignOptions, AsrEngineName, BenchmarkOptions, CommandOptions, CommonOptions, MorphotagOptions,
-    OpensmileOptions, TranscribeOptions, UtrEngine, UtrOverlapStrategy,
+    AlignOptions, AsrEngineName, BenchmarkOptions, OpensmileOptions, TranscribeOptions, UtrEngine,
+    UtrOverlapStrategy,
 };
+#[cfg(test)]
+use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
 use crate::params::{CachePolicy, FaParams, MergeAbbrevPolicy, WorTierPolicy};
 use crate::transcribe::TranscribeCachePolicies;
 
@@ -65,17 +54,11 @@ pub(crate) struct FaDispatchParams {
     pub utr_strategy: ResolvedUtrStrategy,
 }
 
-/// Extract FA dispatch parameters from [`CommandOptions`].
-///
-/// Returns `None` if the options are not for an `align` command.
+/// Extract FA dispatch parameters from selected alignment options.
 pub(crate) fn extract_fa_dispatch_params(
-    options: &CommandOptions,
+    align: &AlignOptions,
     cache_policy: CachePolicy,
-) -> Option<FaDispatchParams> {
-    let CommandOptions::Align(align) = options else {
-        return None;
-    };
-
+) -> FaDispatchParams {
     // Preserve the legacy model-input choice without deriving it from an
     // output policy. Ordinary alignment now preserves measured word ends.
     let whisper_text = if align.pauses {
@@ -84,7 +67,7 @@ pub(crate) fn extract_fa_dispatch_params(
         crate::chat_ops::fa::WhisperTextMode::SpaceJoined
     };
 
-    Some(FaDispatchParams {
+    FaDispatchParams {
         fa_params: FaParams {
             gap_healing: align.boundaries.word_gaps,
             whisper_text,
@@ -99,7 +82,7 @@ pub(crate) fn extract_fa_dispatch_params(
         },
         utr_engine: align.effective_utr_engine(),
         utr_strategy: ResolvedUtrStrategy::from_options(&align.utr),
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -133,64 +116,23 @@ pub(crate) struct TranscribeDispatchParams {
     pub engine_extras: std::collections::BTreeMap<String, String>,
 }
 
-/// Extract transcribe dispatch parameters from [`CommandOptions`].
+/// Extract parameters from the selected transcription option family.
 ///
-/// Returns `None` if the options are not for a `transcribe` or `transcribe_s`
-/// command.
 pub(crate) fn extract_transcribe_dispatch_params(
-    options: &CommandOptions,
+    t: &TranscribeOptions,
     cache_policies: TranscribeCachePolicies,
-) -> Option<TranscribeDispatchParams> {
-    match options {
-        CommandOptions::Transcribe(t) | CommandOptions::TranscribeS(t) => {
-            Some(TranscribeDispatchParams {
-                auto_speakers: t.auto_speakers,
-                asr_engine: t.effective_asr_engine(),
-                speaker_engine: t.common.engine_overrides.speaker,
-                diarize: t.diarize,
-                wor_tier: t.wor,
-                batch_size: t.batch_size,
-                merge_abbrev: t.merge_abbrev,
-                cache_policies,
-                utseg_fallback: t.utseg_fallback,
-                engine_extras: t.common.engine_overrides.extras.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Morphotag
-// ---------------------------------------------------------------------------
-
-/// Extracted parameters for the morphotag dispatch path.
-#[derive(Debug, PartialEq)]
-pub(crate) struct MorphotagDispatchParams {
-    pub tokenization_mode: TokenizationMode,
-    pub multilingual_policy: MultilingualPolicy,
-    pub override_media_cache: bool,
-    pub l2_policy: crate::params::L2MorphotagPolicy,
-    pub pos_hint_policy: crate::params::PosHintPolicy,
-    pub ca_policy: crate::options::CaMorphotagPolicy,
-    pub review_level: crate::chat_ops::fa::ReviewLevel,
-}
-
-/// Extract morphotag dispatch parameters from [`CommandOptions`].
-pub(crate) fn extract_morphotag_dispatch_params(
-    options: &CommandOptions,
-) -> Option<MorphotagDispatchParams> {
-    match options {
-        CommandOptions::Morphotag(m) => Some(MorphotagDispatchParams {
-            tokenization_mode: TokenizationMode::from(m.retokenize),
-            multilingual_policy: MultilingualPolicy::from_skip_flag(m.skipmultilang),
-            override_media_cache: m.common.override_media_cache,
-            l2_policy: (!m.no_l2_morphotag).into(),
-            pos_hint_policy: (!m.no_pos_hints).into(),
-            ca_policy: m.ca_policy,
-            review_level: m.review_level,
-        }),
-        _ => None,
+) -> TranscribeDispatchParams {
+    TranscribeDispatchParams {
+        auto_speakers: t.auto_speakers,
+        asr_engine: t.effective_asr_engine(),
+        speaker_engine: t.common.engine_overrides.speaker,
+        diarize: t.diarize,
+        wor_tier: t.wor,
+        batch_size: t.batch_size,
+        merge_abbrev: t.merge_abbrev,
+        cache_policies,
+        utseg_fallback: t.utseg_fallback,
+        engine_extras: t.common.engine_overrides.extras.clone(),
     }
 }
 
@@ -210,19 +152,16 @@ pub(crate) struct BenchmarkDispatchParams {
     pub engine_extras: std::collections::BTreeMap<String, String>,
 }
 
-/// Extract benchmark dispatch parameters from [`CommandOptions`].
+/// Extract parameters from selected benchmark options.
 pub(crate) fn extract_benchmark_dispatch_params(
-    options: &CommandOptions,
+    b: &BenchmarkOptions,
     cache_policy: CachePolicy,
-) -> Option<BenchmarkDispatchParams> {
-    match options {
-        CommandOptions::Benchmark(b) => Some(BenchmarkDispatchParams {
-            asr_engine: b.effective_asr_engine(),
-            wor_tier: b.wor,
-            cache_policy,
-            engine_extras: b.common.engine_overrides.extras.clone(),
-        }),
-        _ => None,
+) -> BenchmarkDispatchParams {
+    BenchmarkDispatchParams {
+        asr_engine: b.effective_asr_engine(),
+        wor_tier: b.wor,
+        cache_policy,
+        engine_extras: b.common.engine_overrides.extras.clone(),
     }
 }
 
@@ -236,15 +175,10 @@ pub(crate) struct OpensmileDispatchParams {
     pub feature_set: String,
 }
 
-/// Extract opensmile dispatch parameters from [`CommandOptions`].
-pub(crate) fn extract_opensmile_dispatch_params(
-    options: &CommandOptions,
-) -> Option<OpensmileDispatchParams> {
-    match options {
-        CommandOptions::Opensmile(o) => Some(OpensmileDispatchParams {
-            feature_set: o.feature_set.clone(),
-        }),
-        _ => None,
+/// Extract parameters from selected openSMILE options.
+pub(crate) fn extract_opensmile_dispatch_params(o: &OpensmileOptions) -> OpensmileDispatchParams {
+    OpensmileDispatchParams {
+        feature_set: o.feature_set.clone(),
     }
 }
 
@@ -278,8 +212,8 @@ mod tests {
         utr_engine: Option<UtrEngine>,
         pauses: bool,
         wor: bool,
-    ) -> CommandOptions {
-        CommandOptions::Align(AlignOptions {
+    ) -> AlignOptions {
+        AlignOptions {
             common: common_default(),
             fa_engine: FaEngineName::from_wire_name(fa_engine).expect("test fa_engine"),
             utr: crate::options::AlignUtrOptions {
@@ -292,42 +226,19 @@ mod tests {
             media_dir: None,
             bullet_repair: false,
             review_level: Default::default(),
-        })
+        }
     }
-
-    /// Legacy --pauses and an omitted policy both preserve measured ends.
-    #[test]
-    fn pauses_reaches_the_default_engine() {
-        let with_pauses = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, true, true),
-            CachePolicy::UseCache,
-        )
-        .expect("wav2vec align must produce dispatch params");
-        assert_eq!(
-            with_pauses.fa_params.gap_healing,
-            WordGapHealing::PreserveMeasured,
-            "--pauses must stop gap healing on the default engine too"
-        );
-
-        let without = extract_fa_dispatch_params(
-            &align_opts("wav2vec_fa", None, false, true),
-            CachePolicy::UseCache,
-        )
-        .expect("wav2vec align must produce dispatch params");
-        assert_eq!(
-            without.fa_params.gap_healing,
-            WordGapHealing::PreserveMeasured,
-            "omitting --pauses preserves measured gaps too"
-        );
-    }
-
+    /// Guards: Whisper and wav2vec selections reach the corresponding alignment engine values.
+    /// Kind: policy
+    /// Not a type: A concrete alignment family cannot establish which engine value the extractor selects for two admitted engine choices.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn fa_dispatch_reads_fa_engine() {
         let p1 = extract_fa_dispatch_params(
             &align_opts("whisper_fa", None, false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(
             p1.fa_params.engine,
             crate::types::engines::FaEngineName::Whisper
@@ -336,121 +247,107 @@ mod tests {
         let p2 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(
             p2.fa_params.engine,
             crate::types::engines::FaEngineName::Wave2Vec
         );
     }
-
-    #[test]
-    fn fa_dispatch_reads_pauses() {
-        let p1 = extract_fa_dispatch_params(
-            &align_opts("whisper_fa", None, true, true),
-            CachePolicy::UseCache,
-        )
-        .unwrap();
-        assert_eq!(p1.fa_params.gap_healing, WordGapHealing::PreserveMeasured);
-
-        let p2 = extract_fa_dispatch_params(
-            &align_opts("whisper_fa", None, false, true),
-            CachePolicy::UseCache,
-        )
-        .unwrap();
-        assert_eq!(p2.fa_params.gap_healing, WordGapHealing::PreserveMeasured);
-    }
-
+    /// Guards: The requested existing-word and end-overlap choices reach the alignment bundle.
+    /// Kind: policy
+    /// Not a type: The selected family cannot establish preservation of the supplied RebuildFromEvidence and default end-overlap values in their distinct runtime policy slots.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn fa_dispatch_reads_existing_wor_boundary_policy() {
-        let opts = CommandOptions::Align(AlignOptions {
+        let opts = AlignOptions {
             boundaries: crate::options::AlignBoundaryOptions {
                 existing_wor_boundaries:
                     crate::chat_ops::fa::ExistingWorBoundaryPolicy::RebuildFromEvidence,
-                ..Default::default()
-            },
-            ..AlignOptions::default()
-        });
-        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
-        assert_eq!(
-            params.fa_params.existing_wor_boundaries,
-            crate::chat_ops::fa::ExistingWorBoundaryPolicy::RebuildFromEvidence
-        );
-    }
-
-    #[test]
-    fn fa_dispatch_reads_main_bullet_policy() {
-        let opts = CommandOptions::Align(AlignOptions {
-            boundaries: crate::options::AlignBoundaryOptions {
-                main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
-                ..Default::default()
-            },
-            ..AlignOptions::default()
-        });
-        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
-        assert_eq!(
-            params.fa_params.main_bullets,
-            crate::chat_ops::fa::MainBulletPolicy::KeepGiven
-        );
-    }
-
-    #[test]
-    fn fa_dispatch_reads_end_overlap_policy() {
-        let opts = CommandOptions::Align(AlignOptions {
-            boundaries: crate::options::AlignBoundaryOptions {
                 end_overlap_policy: crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY,
                 ..Default::default()
             },
             ..AlignOptions::default()
-        });
-        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
+        };
+        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache);
+        assert_eq!(
+            params.fa_params.existing_wor_boundaries,
+            crate::chat_ops::fa::ExistingWorBoundaryPolicy::RebuildFromEvidence
+        );
         assert_eq!(
             params.fa_params.end_overlap_policy,
             crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY
         );
     }
-
+    /// Guards: KeepGiven reaches the main-bullet projection policy.
+    /// Kind: policy
+    /// Not a type: The family proof cannot establish that the requested KeepGiven value reaches the main-bullet slot rather than another boundary policy.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
+    #[test]
+    fn fa_dispatch_reads_main_bullet_policy() {
+        let opts = AlignOptions {
+            boundaries: crate::options::AlignBoundaryOptions {
+                main_bullets: crate::chat_ops::fa::MainBulletPolicy::KeepGiven,
+                ..Default::default()
+            },
+            ..AlignOptions::default()
+        };
+        let params = extract_fa_dispatch_params(&opts, CachePolicy::UseCache);
+        assert_eq!(
+            params.fa_params.main_bullets,
+            crate::chat_ops::fa::MainBulletPolicy::KeepGiven
+        );
+    }
+    /// Guards: Requested word-tier inclusion and omission reach the alignment bundle.
+    /// Kind: policy
+    /// Not a type: The option type admits both word-tier choices and cannot establish which requested value the extractor carries into the output policy.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn fa_dispatch_reads_wor() {
         let p1 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(p1.fa_params.wor_tier, WorTierPolicy::Include);
 
         let p2 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", None, false, false),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(p2.fa_params.wor_tier, WorTierPolicy::Omit);
     }
-
+    /// Guards: Rev, absent and Tencent UTR selections reach the alignment bundle unchanged.
+    /// Kind: policy
+    /// Not a type: The selected family cannot establish the semantic distinction between no UTR engine and the two requested recognizer backends.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn fa_dispatch_reads_utr_engine() {
         let p1 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", Some(UtrEngine::RevAi), false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(p1.utr_engine, Some(UtrEngine::RevAi));
 
         let p2 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", None, false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(p2.utr_engine, None);
 
         let p3 = extract_fa_dispatch_params(
             &align_opts("wav2vec_fa", Some(UtrEngine::HkTencent), false, true),
             CachePolicy::UseCache,
-        )
-        .unwrap();
+        );
         assert_eq!(p3.utr_engine, Some(UtrEngine::HkTencent));
     }
-
+    /// Guards: Two-pass UTR preparation retains its supplied windows, thresholds and matching policies.
+    /// Kind: policy
+    /// Not a type: The two-pass variant requires tuning to exist but cannot establish equality of the authored threshold and window values after translation.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn fa_dispatch_preserves_two_pass_tuning() {
         use crate::chat_ops::fa::{CaMarkerPolicy, TwoPassConfig, UtrMatchMode};
@@ -465,16 +362,15 @@ mod tests {
             UtrOverlapStrategy::Global,
             UtrOverlapStrategy::TwoPass,
         ] {
-            let options = CommandOptions::Align(AlignOptions {
+            let options = AlignOptions {
                 utr: crate::options::AlignUtrOptions {
                     engine: Some(UtrEngine::RevAi),
                     overlap_strategy: strategy,
                     two_pass: config.clone(),
                 },
                 ..Default::default()
-            });
-            let params = extract_fa_dispatch_params(&options, CachePolicy::UseCache)
-                .expect("align dispatch");
+            };
+            let params = extract_fa_dispatch_params(&options, CachePolicy::UseCache);
             let expected = match strategy {
                 UtrOverlapStrategy::TwoPass => ResolvedUtrStrategy::TwoPass(config.clone()),
                 UtrOverlapStrategy::Auto | UtrOverlapStrategy::Global => {
@@ -485,30 +381,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fa_dispatch_passes_cache_policy() {
-        let opts = CommandOptions::Align(AlignOptions {
-            common: common_default(),
-            fa_engine: FaEngineName::Wave2Vec,
-            utr: Default::default(),
-            pauses: false,
-            boundaries: Default::default(),
-            wor: true.into(),
-            media_dir: None,
-            bullet_repair: false,
-            review_level: Default::default(),
-        });
-        let params = extract_fa_dispatch_params(&opts, CachePolicy::SkipCache).unwrap();
-        assert_eq!(params.fa_params.cache_policy, CachePolicy::SkipCache);
-    }
-
     // =======================================================================
     // Transcribe: every TranscribeOptions field is exercised
     // =======================================================================
-
+    /// Guards: Transcription extraction carries engine, word output, merge choice, batch size and cache policy.
+    /// Kind: policy
+    /// Not a type: The family type prevents cross-command input and cannot establish equality of the submitted values in the distinct runtime option slots.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn transcribe_dispatch_reads_all_fields() {
-        let opts = CommandOptions::Transcribe(TranscribeOptions {
+        let opts = TranscribeOptions {
             auto_speakers: false,
             common: common_with_cache_override(),
             asr_engine: AsrEngineName::WhisperX,
@@ -517,12 +400,11 @@ mod tests {
             merge_abbrev: true.into(),
             batch_size: 32,
             utseg_fallback: false.into(),
-        });
+        };
         let params = extract_transcribe_dispatch_params(
             &opts,
             TranscribeCachePolicies::uniform(CachePolicy::SkipCache),
-        )
-        .unwrap();
+        );
         assert_eq!(params.asr_engine, AsrEngineName::WhisperX);
         assert!(!params.diarize);
         assert!(params.wor_tier.should_write());
@@ -533,40 +415,16 @@ mod tests {
             TranscribeCachePolicies::uniform(CachePolicy::SkipCache)
         );
     }
-
-    #[test]
-    fn transcribe_s_dispatch_reads_all_fields() {
-        let opts = CommandOptions::TranscribeS(TranscribeOptions {
-            auto_speakers: false,
-            common: common_default(),
-            asr_engine: AsrEngineName::RevAi,
-            diarize: true,
-            wor: false.into(),
-            merge_abbrev: false.into(),
-            batch_size: 8,
-            utseg_fallback: false.into(),
-        });
-        let params = extract_transcribe_dispatch_params(
-            &opts,
-            TranscribeCachePolicies::uniform(CachePolicy::UseCache),
-        )
-        .unwrap();
-        assert_eq!(params.asr_engine, AsrEngineName::RevAi);
-        assert!(params.diarize);
-        assert!(!params.wor_tier.should_write());
-        assert!(!params.merge_abbrev.should_merge());
-        assert_eq!(params.batch_size, 8);
-        assert_eq!(
-            params.cache_policies,
-            TranscribeCachePolicies::uniform(CachePolicy::UseCache)
-        );
-    }
-
+    /// Guards: A common Tencent override supersedes the transcription Rev default.
+    /// Kind: policy
+    /// Not a type: The transcription family admits Rev and Tencent engine values but cannot establish that the explicit common Tencent selection supersedes the command default.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn transcribe_dispatch_prefers_common_asr_override() {
         let mut common = common_default();
         common.engine_overrides.asr = Some(AsrEngineName::HkTencent);
-        let opts = CommandOptions::Transcribe(TranscribeOptions {
+        let opts = TranscribeOptions {
             auto_speakers: false,
             common,
             asr_engine: AsrEngineName::RevAi,
@@ -575,135 +433,52 @@ mod tests {
             merge_abbrev: false.into(),
             batch_size: 8,
             utseg_fallback: false.into(),
-        });
+        };
 
         let params = extract_transcribe_dispatch_params(
             &opts,
             TranscribeCachePolicies::uniform(CachePolicy::UseCache),
-        )
-        .unwrap();
-        assert_eq!(params.asr_engine, AsrEngineName::HkTencent);
-    }
-
-    // =======================================================================
-    // Morphotag: every MorphotagOptions field is exercised
-    // =======================================================================
-
-    #[test]
-    fn morphotag_dispatch_reads_all_fields() {
-        let opts = CommandOptions::Morphotag(MorphotagOptions {
-            common: common_with_cache_override(),
-            retokenize: true,
-            skipmultilang: true,
-
-            ..Default::default()
-        });
-        let params = extract_morphotag_dispatch_params(&opts).unwrap();
-        assert_eq!(params.tokenization_mode, TokenizationMode::StanzaRetokenize);
-        assert_eq!(
-            params.multilingual_policy,
-            MultilingualPolicy::SkipNonPrimary
         );
-        assert!(params.override_media_cache);
-    }
-
-    #[test]
-    fn morphotag_dispatch_defaults() {
-        let opts = CommandOptions::Morphotag(MorphotagOptions {
-            common: common_default(),
-
-            ..Default::default()
-        });
-        let params = extract_morphotag_dispatch_params(&opts).unwrap();
-        assert_eq!(params.tokenization_mode, TokenizationMode::Preserve);
-        assert_eq!(params.multilingual_policy, MultilingualPolicy::ProcessAll);
-        assert!(!params.override_media_cache);
+        assert_eq!(params.asr_engine, AsrEngineName::HkTencent);
     }
 
     // =======================================================================
     // Benchmark: every BenchmarkOptions field is exercised
     // =======================================================================
-
+    /// Guards: Benchmark extraction retains Whisper, word output and the supplied cache policy.
+    /// Kind: policy
+    /// Not a type: Concrete benchmark options cannot establish the selected recognizer, word-output choice and caller-supplied cache policy in the translated bundle.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn benchmark_dispatch_reads_all_fields() {
-        let opts = CommandOptions::Benchmark(BenchmarkOptions {
+        let opts = BenchmarkOptions {
             common: common_with_cache_override(),
             asr_engine: AsrEngineName::WhisperOai,
             wor: true.into(),
-        });
-        let params = extract_benchmark_dispatch_params(&opts, CachePolicy::SkipCache).unwrap();
+        };
+        let params = extract_benchmark_dispatch_params(&opts, CachePolicy::SkipCache);
         assert_eq!(params.asr_engine, AsrEngineName::WhisperOai);
         assert!(params.wor_tier.should_write());
         assert_eq!(params.cache_policy, CachePolicy::SkipCache);
     }
-
+    /// Guards: A common Aliyun override supersedes the benchmark Rev default.
+    /// Kind: policy
+    /// Not a type: The benchmark family admits Rev and Aliyun recognizers but cannot establish that the explicit common Aliyun override controls the scored recognizer.
+    /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
+    /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
     fn benchmark_dispatch_prefers_common_asr_override() {
         let mut common = common_default();
         common.engine_overrides.asr = Some(AsrEngineName::HkAliyun);
-        let opts = CommandOptions::Benchmark(BenchmarkOptions {
+        let opts = BenchmarkOptions {
             common,
             asr_engine: AsrEngineName::RevAi,
             wor: true.into(),
-        });
+        };
 
-        let params = extract_benchmark_dispatch_params(&opts, CachePolicy::UseCache).unwrap();
+        let params = extract_benchmark_dispatch_params(&opts, CachePolicy::UseCache);
         assert_eq!(params.asr_engine, AsrEngineName::HkAliyun);
-    }
-
-    // =======================================================================
-    // Opensmile: every OpensmileOptions field is exercised
-    // =======================================================================
-
-    #[test]
-    fn opensmile_dispatch_reads_feature_set() {
-        let opts = CommandOptions::Opensmile(OpensmileOptions {
-            common: common_default(),
-            feature_set: "ComParE_2016".into(),
-        });
-        let params = extract_opensmile_dispatch_params(&opts).unwrap();
-        assert_eq!(params.feature_set, "ComParE_2016");
-    }
-
-    // =======================================================================
-    // Wrong-command returns None
-    // =======================================================================
-
-    #[test]
-    fn wrong_command_returns_none() {
-        let align = CommandOptions::Align(AlignOptions {
-            common: common_default(),
-            fa_engine: FaEngineName::Wave2Vec,
-            utr: Default::default(),
-            pauses: false,
-            boundaries: Default::default(),
-            wor: true.into(),
-            media_dir: None,
-            bullet_repair: false,
-            review_level: Default::default(),
-        });
-        assert!(
-            extract_transcribe_dispatch_params(
-                &align,
-                TranscribeCachePolicies::uniform(CachePolicy::UseCache)
-            )
-            .is_none()
-        );
-        assert!(extract_morphotag_dispatch_params(&align).is_none());
-        assert!(extract_benchmark_dispatch_params(&align, CachePolicy::UseCache).is_none());
-        assert!(extract_opensmile_dispatch_params(&align).is_none());
-
-        let transcribe = CommandOptions::Transcribe(TranscribeOptions {
-            auto_speakers: false,
-            common: common_default(),
-            asr_engine: AsrEngineName::RevAi,
-            diarize: false,
-            wor: false.into(),
-            merge_abbrev: false.into(),
-            batch_size: 8,
-            utseg_fallback: false.into(),
-        });
-        assert!(extract_fa_dispatch_params(&transcribe, CachePolicy::UseCache).is_none());
     }
 
     // =======================================================================

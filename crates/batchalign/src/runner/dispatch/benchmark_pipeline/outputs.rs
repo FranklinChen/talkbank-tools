@@ -3,9 +3,9 @@
 use crate::api::ReleasedCommand;
 use crate::benchmark::BenchmarkOutputs;
 use crate::error::ServerError;
-use crate::recipe_runner::materialize::{MaterializedArtifactRole, PlannedMaterializedFile};
+use crate::recipe_runner::materialize::PlannedMaterializedFile;
 use crate::recipe_runner::runtime::{
-    ChatOutputTarget, planned_output_artifacts, write_text_output_artifact,
+    ChatMetricsOutputs, SourceOutputs, write_text_output_artifact,
 };
 use crate::recipe_runner::work_unit::BenchmarkWorkUnit;
 use crate::runner::util::{
@@ -15,11 +15,9 @@ use crate::store::{PendingJobFile, RunnerFilesystemConfig};
 
 /// Catalog-derived destinations, bound to the file whose completion they own.
 pub(super) struct BenchmarkOutputPlan<'a> {
-    filesystem: &'a RunnerFilesystemConfig,
     file: &'a PendingJobFile,
     sink: &'a dyn RunnerEventSink,
-    primary: PlannedMaterializedFile,
-    sidecar: PlannedMaterializedFile,
+    outputs: ChatMetricsOutputs<'a>,
 }
 
 impl<'a> BenchmarkOutputPlan<'a> {
@@ -35,32 +33,12 @@ impl<'a> BenchmarkOutputPlan<'a> {
                 "benchmark output plan belongs to a different source".into(),
             ));
         }
-        let mut artifacts = planned_output_artifacts(
-            ReleasedCommand::Benchmark,
-            options,
-            &unit.audio().display_path,
-        )?
-        .into_iter();
-        let (Some(primary), Some(sidecar), None) =
-            (artifacts.next(), artifacts.next(), artifacts.next())
-        else {
-            return Err(ServerError::Validation(
-                "benchmark requires one CHAT output and one metrics sidecar".into(),
-            ));
-        };
-        if primary.role != MaterializedArtifactRole::Primary
-            || sidecar.role != MaterializedArtifactRole::Sidecar
-        {
-            return Err(ServerError::Validation(
-                "benchmark output roles do not match its recipe".into(),
-            ));
-        }
+        let outputs = SourceOutputs::plan(filesystem, file, ReleasedCommand::Benchmark, options)?
+            .into_chat_metrics()?;
         Ok(Self {
-            filesystem,
             file,
             sink,
-            primary,
-            sidecar,
+            outputs,
         })
     }
 
@@ -80,36 +58,28 @@ impl<'a> BenchmarkOutputPlan<'a> {
         let metrics_csv = outputs.metrics.to_csv_string().map_err(|error| {
             ServerError::Persistence(format!("benchmark CSV serialization failed: {error}"))
         })?;
-        let chat_target = ChatOutputTarget::new(
-            self.filesystem,
-            self.file.location(),
-            &self.primary.display_path,
-        );
-        write_text_output_artifact(&chat_target, outputs.annotated_main_chat.as_str())
+        let artifacts = self.outputs.artifacts();
+        let targets = self.outputs.targets()?;
+        write_text_output_artifact(targets.primary, outputs.annotated_main_chat.as_str())
             .await
             .map_err(|error| {
                 ServerError::Persistence(format!(
                     "failed to write benchmark CHAT output {}: {error}",
-                    self.primary.display_path
+                    artifacts.primary().display_path()
                 ))
             })?;
-        let csv_target = ChatOutputTarget::new(
-            self.filesystem,
-            self.file.location(),
-            &self.sidecar.display_path,
-        );
-        write_text_output_artifact(&csv_target, &metrics_csv)
+        write_text_output_artifact(targets.metrics, &metrics_csv)
             .await
             .map_err(|error| {
                 ServerError::Persistence(format!(
                     "failed to write benchmark CSV output {}: {error}",
-                    self.sidecar.display_path
+                    artifacts.metrics().display_path()
                 ))
             })?;
         Ok(WrittenBenchmark {
             file: self.file,
             sink: self.sink,
-            primary: self.primary,
+            primary: self.outputs.into_primary(),
         })
     }
 }
@@ -173,30 +143,48 @@ mod tests {
 
     /// The one-recording benchmark job: paths mode (read in place, written
     /// to `requested/`) or staged, with `display` as its name.
+    enum FixtureMode {
+        Paths,
+        Staged,
+    }
+
     fn filesystem_named(
         root: &std::path::Path,
-        paths_mode: bool,
+        mode: &FixtureMode,
         display: &str,
     ) -> RunnerFilesystemConfig {
-        let client = |relative: &str| ClientPath::new(root.join(relative).to_str().expect("UTF-8"));
+        let inputs = match mode {
+            FixtureMode::Paths => {
+                crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                    display: display.into(),
+                    kind: crate::store::InputKind::Media,
+                    source: crate::store::test_support::admitted(
+                        root.join("input/clip.wav").to_str().unwrap(),
+                    ),
+                    output: crate::store::test_support::admitted(
+                        root.join("requested/clip.cha").to_str().unwrap(),
+                    ),
+                    before: None,
+                }])
+            }
+            FixtureMode::Staged => {
+                crate::store::JobInputs::Content(vec![crate::store::ContentInput {
+                    display: display.into(),
+                    kind: crate::store::InputKind::Media,
+                }])
+            }
+        };
         RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                vec![display.into()],
-                vec![false],
-                paths_mode,
-                vec![client("input/clip.wav")],
-                vec![client("requested/clip.cha")],
-                vec![],
-            ),
-            staging_dir: ServerPath::new(root.join("staging").to_str().expect("UTF-8")),
+            inputs,
+            staging_dir: ServerPath::new(root.join("staging")),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
-            source_dir: client("input"),
+            source_dir: ClientPath::new(root.join("input").to_string_lossy()),
         }
     }
 
     fn filesystem(root: &std::path::Path) -> RunnerFilesystemConfig {
-        filesystem_named(root, true, "nested/clip.wav")
+        filesystem_named(root, &FixtureMode::Paths, "nested/clip.wav")
     }
 
     /// The job's one pending file, as its own inputs give it.
@@ -204,6 +192,11 @@ mod tests {
         crate::store::test_support::pending_files(&filesystem.inputs).remove(0)
     }
 
+    /// Guards: Wrong command options report the precise benchmark planning mismatch before publication.
+    /// Kind: contract
+    /// Not a type: A well-formed options enum cannot prove semantic agreement with a separately received command at this admission boundary.
+    /// State: The isolated root supplies admitted source/destination identities and output-directory absence checks. The recording sink observes the absence of completion and attempts after refusal. No publication, worker or registry runs.
+    /// Concurrency: The test owns its paths and recording sink. Constructor refusal finishes before directory-presence assertions and root cleanup.
     #[test]
     fn benchmark_option_mismatch_is_planning_failure_before_any_write() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -229,6 +222,11 @@ mod tests {
         assert!(!temp.path().join("staging").exists());
     }
 
+    /// Guards: Every required primary and staged CHAT and CSV write must succeed before completion is recorded.
+    /// Kind: contract
+    /// Not a type: Admitted output plans cannot prevent later filesystem obstructions at any required artifact destination.
+    /// State: Each isolated root supplies a directory obstructing one required artifact destination. Actual publication attempts exercise filesystem failure. The recording sink observes terminal error and the absence of completion or inference retry. No worker or registry runs.
+    /// Concurrency: Each obstruction case owns its root and recording sink. Persistence returns before error observations and root cleanup.
     #[tokio::test]
     async fn benchmark_completion_requires_every_requested_and_staged_write() {
         for blocked in [
@@ -275,11 +273,16 @@ mod tests {
         }
     }
 
+    /// Guards: Both input modes publish exact CHAT and CSV pairs and paths mode keeps requested copies.
+    /// Kind: contract
+    /// Not a type: Closed fixture modes prevent ignored path payloads but cannot establish actual serialization and publication at each destination.
+    /// State: An isolated root supplies actual requested/staged CHAT and CSV writes. The source-bound plan and native synthetic output proof supply metadata and bytes. The recording sink observes completion without a worker or registry.
+    /// Concurrency: Each input-mode case owns every destination and its recording sink, and awaits publication before reading bytes or dropping its root.
     #[tokio::test]
     async fn benchmark_writes_complete_pairs_in_paths_and_staged_modes() {
-        for paths_mode in [true, false] {
+        for mode in [FixtureMode::Paths, FixtureMode::Staged] {
             let temp = tempfile::tempdir().expect("temporary directory");
-            let filesystem = filesystem_named(temp.path(), paths_mode, "nested/clip.wav");
+            let filesystem = filesystem_named(temp.path(), &mode, "nested/clip.wav");
             let unit = unit(&temp.path().join("input/clip.wav"));
             let file = file_of(&filesystem);
             let sink = RecordingSink::default();
@@ -306,7 +309,7 @@ mod tests {
                     .expect("staged CSV"),
                 expected_csv
             );
-            if paths_mode {
+            if matches!(mode, FixtureMode::Paths) {
                 assert_eq!(
                     std::fs::read_to_string(temp.path().join("requested/clip.cha"))
                         .expect("requested CHAT"),
@@ -321,10 +324,15 @@ mod tests {
         }
     }
 
+    /// Guards: An output plan refuses a well-formed pending file belonging to a different source name.
+    /// Kind: contract
+    /// Not a type: Per-file input admission cannot establish semantic agreement with an independently received benchmark work unit.
+    /// State: The isolated root supplies admitted file identities for a different pending source. The recording sink observes no completion after the constructor refuses the independently planned work unit. No publication, worker or registry runs.
+    /// Concurrency: The test owns all declaration values, paths and its recording sink. Refusal completes before the no-output assertions and root cleanup.
     #[test]
     fn benchmark_output_plan_rejects_a_different_source_file() {
         let temp = tempfile::tempdir().expect("temporary directory");
-        let filesystem = filesystem_named(temp.path(), true, "other.wav");
+        let filesystem = filesystem_named(temp.path(), &FixtureMode::Paths, "other.wav");
         let unit = unit(&temp.path().join("input/clip.wav"));
         let file = file_of(&filesystem);
         let sink = RecordingSink::default();

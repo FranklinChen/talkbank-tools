@@ -310,7 +310,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::api::{DisplayPath, FileStatusKind, JobId, JobStatus, NumSpeakers, ReleasedCommand};
+    use crate::api::{DisplayPath, FileStatusKind, JobId, NumSpeakers, ReleasedCommand};
     use crate::api::{LanguageCode3, LanguageSpec};
     use crate::cache::UtteranceCache;
     use crate::db::JobDB;
@@ -371,21 +371,22 @@ mod tests {
                 media_subdir: Default::default(),
             },
             execution: JobExecutionState {
-                lifecycle: crate::store::JobLifecycle::for_test(
-                    JobStatus::Queued,
-                    crate::store::test_support::inputs_from_parts(
-                        vec![DisplayPath::from(filename)],
-                        vec![false],
-                        true,
-                        vec![batchalign_types::paths::ClientPath::new(
-                            source_path.to_string_lossy().to_string(),
-                        )],
-                        vec![batchalign_types::paths::ClientPath::new(
-                            output_path.to_string_lossy().to_string(),
-                        )],
-                        Vec::new(),
-                    ),
-                ),
+                lifecycle: crate::store::JobLifecycle::Active {
+                    status: crate::api::ActiveStatus::Queued,
+                    inputs: crate::store::test_support::paths_inputs(vec![
+                        crate::store::PathsInput {
+                            display: filename.into(),
+                            kind: crate::store::InputKind::Media,
+                            source: crate::store::test_support::admitted(
+                                source_path.to_str().unwrap(),
+                            ),
+                            output: crate::store::test_support::admitted(
+                                output_path.to_str().unwrap(),
+                            ),
+                            before: None,
+                        },
+                    ]),
+                },
                 file_statuses,
                 results: Vec::new(),
                 error: None,
@@ -405,6 +406,11 @@ mod tests {
 
     /// Media-conversion failure should still record a failed attempt because
     /// the first attempt now begins before audio normalization.
+    /// Guards: Missing recording bytes record one failed inference attempt and an error file.
+    /// Kind: contract
+    /// Not a type: An admitted run and transcription plan cannot prove filesystem presence or persistence after failed media normalization.
+    /// State: An isolated database and cache exercise actual missing-file IO and attempt writes. The worker pool stays unloaded because normalization fails first.
+    /// Concurrency: The directory, cache, registry and worker pool are local. Awaited processing finishes before consuming the claim.
     #[tokio::test]
     async fn missing_media_records_failed_attempt() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -428,10 +434,9 @@ mod tests {
             .await
             .expect("submit job");
 
-        let snapshot = store
-            .runner_snapshot(&JobId::from("job-transcribe"))
-            .await
-            .expect("runner snapshot");
+        let claim =
+            crate::store::test_support::claim_runner(&store, &JobId::from("job-transcribe")).await;
+        let snapshot = claim.snapshot();
         let file = snapshot
             .pending_files
             .first()
@@ -442,7 +447,7 @@ mod tests {
             .await
             .expect("open cache");
         let services = PipelineServices::new(&pool, &cache);
-        let sink = StoreRunnerEventSink::wrap(store.clone(), &snapshot.identity.job_id);
+        let sink = StoreRunnerEventSink::for_run(&claim);
         let mut opts = crate::transcribe::TranscribeOptions {
             plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                 crate::transcribe::TranscribeAsrPlan::from_request(
@@ -466,7 +471,7 @@ mod tests {
             engine_extras: std::collections::BTreeMap::new(),
         };
 
-        process_one_transcribe_file(&snapshot, sink, services, &file, &mut opts).await;
+        process_one_transcribe_file(snapshot, sink, services, &file, &mut opts).await;
 
         let attempts = db
             .load_attempts_for_job("job-transcribe")
@@ -489,6 +494,7 @@ mod tests {
             .expect("job detail");
         assert_eq!(detail.file_statuses.len(), 1);
         assert_eq!(detail.file_statuses[0].status, FileStatusKind::Error);
+        claim.complete().await.expect("complete admitted run");
     }
 
     #[tokio::test]

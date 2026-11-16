@@ -123,18 +123,9 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
     )
     .await
     .map_err(|e| CliError::InvalidArgument(format!("Cannot start the worker: {e}")))?;
-    // Prepared as the pool prepares every worker before a task's first
-    // request, in every bootstrap mode.
-    let loaded = worker
-        .ensure_task(
-            &crate::worker::pool::TaskLoad::for_request(&request),
-            &preparation,
-        )
-        .await
-        .map_err(|e| CliError::InvalidArgument(format!("Cannot load the task: {e}")))?;
     eprintln!("Sending original request...");
     let outcome = async {
-        crate::worker::pool::dispatch_prepared!(loaded, &preparation.admission, crate::worker::pool::DispatchPreparation::begin(&request)?, permit => worker.execute_v2(&permit))
+        crate::worker::pool::dispatch_prepared!(crate::worker::pool::DispatchPreparation::begin(&request)?, ready => worker.execute_v2(ready, &preparation))
     }.await;
     if let Err(error) = worker.shutdown().await {
         eprintln!("(worker shutdown: {error})");

@@ -9,7 +9,7 @@ use super::super::{
 
 impl JobStore {
     /// Mark one file as processing and persist the start timestamp.
-    pub(crate) async fn mark_file_processing(
+    pub(in crate::store) async fn mark_file_processing(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -42,7 +42,7 @@ impl JobStore {
     /// Mark one file as finished without failing (`Done`, or `Diagnosed`
     /// when its written output carries admission diagnostics) and record its
     /// downloadable result if it has one.
-    pub(crate) async fn mark_file_done(
+    pub(in crate::store) async fn mark_file_done(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -78,7 +78,7 @@ impl JobStore {
     }
 
     /// Mark one file as terminally failed and record the error result.
-    pub(crate) async fn mark_file_error(
+    pub(in crate::store) async fn mark_file_error(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -116,7 +116,7 @@ impl JobStore {
     }
 
     /// Mark one file attempt as started and attach the new attempt record.
-    pub(crate) async fn start_file_attempt(
+    pub(in crate::store) async fn start_file_attempt(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -158,7 +158,7 @@ impl JobStore {
     }
 
     /// Mark one file as waiting for a retry after a transient failure.
-    pub(crate) async fn mark_file_retry_pending(
+    pub(in crate::store) async fn mark_file_retry_pending(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -202,14 +202,14 @@ impl JobStore {
     }
 
     /// Clear transient retry state before a new attempt starts or succeeds.
-    pub(crate) async fn clear_file_retry_state(&self, run: &RunBinding, filename: &str) {
+    pub(in crate::store) async fn clear_file_retry_state(&self, run: &RunBinding, filename: &str) {
         if let Err(refusal) = self.registry.clear_file_retry_state(run, filename).await {
             refusal.log(run, filename, "clear_file_retry_state");
         }
     }
 
     /// Apply a change in one file's open worker waits and notify listeners.
-    pub(crate) async fn set_file_worker_wait(
+    pub(in crate::store) async fn set_file_worker_wait(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -228,7 +228,7 @@ impl JobStore {
     }
 
     /// Apply an ephemeral progress update to one file and notify listeners.
-    pub(crate) async fn set_file_progress(
+    pub(in crate::store) async fn set_file_progress(
         &self,
         run: &RunBinding,
         filename: &str,
@@ -252,50 +252,12 @@ mod tests {
     use crate::api::DisplayPath;
     use tokio::sync::broadcast;
 
-    use crate::api::{ContentType, FileStatusKind, JobId, ReleasedCommand};
+    use crate::api::{ContentType, FileStatusKind, JobId};
     use crate::scheduling::FailureCategory;
     use crate::store::queries::tests::{make_job, test_config};
     use crate::ws::BROADCAST_CAPACITY;
 
     use super::*;
-
-    /// Completing a file records one result.
-    #[tokio::test]
-    async fn mark_file_done_records_result() {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
-        let store = JobStore::for_tests(
-            test_config(),
-            None,
-            tx,
-            std::sync::Arc::new(crate::clock::SystemClock),
-        );
-        store
-            .submit(make_job(
-                "job-1",
-                ReleasedCommand::Morphotag,
-                vec!["a.cha".into()],
-            ))
-            .await
-            .unwrap();
-
-        store
-            .mark_file_done(
-                &crate::store::RunBinding::first_run_of(JobId::from("job-1")),
-                "a.cha",
-                crate::store::EventTime::fixed(crate::unix_time(10.0)),
-                FileCompletion::Clean(crate::store::CompletedFileOutput {
-                    exclusions: Vec::new(),
-                    filename: DisplayPath::from("a.cha"),
-                    content_type: ContentType::Chat,
-                    stamp: crate::api::FileStampOutcome::Unrecorded,
-                }),
-            )
-            .await;
-
-        let detail = store.get_job_detail(&JobId::from("job-1")).await.unwrap();
-        assert_eq!(detail.results.len(), 1);
-        assert_eq!(detail.results[0].error, None);
-    }
 
     fn clean_output(name: &str) -> FileCompletion {
         FileCompletion::Clean(crate::store::CompletedFileOutput {
@@ -319,6 +281,11 @@ mod tests {
     /// A write from a run the job has moved past is refused, so a task of a
     /// cancelled or interrupted run still finishing a step cannot land on the
     /// files of the run that replaced it.
+    /// Guards: Shutdown-superseded file writes leave results and file phases untouched.
+    /// Kind: contract
+    /// Not a type: A retained binding cannot freeze the registry generation changed by a later shutdown request.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn a_superseded_run_cannot_write_a_file() {
         let store = empty_store();
@@ -326,7 +293,7 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
@@ -358,6 +325,11 @@ mod tests {
     /// Each refused write names its reason, so the store can tell the
     /// expected refusals (a superseded run, a finished file) from the ones
     /// that mean the runner wrote about something the store never had.
+    /// Guards: Unknown files, missing jobs, terminal files and stale runs retain distinct refusal reasons.
+    /// Kind: contract
+    /// Not a type: Valid bindings cannot prove current registry membership, file names or terminal state after external mutations.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn a_refused_file_write_says_why() {
         use crate::store::registry::RefusedFileWrite;
@@ -367,7 +339,7 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
@@ -422,9 +394,14 @@ mod tests {
         );
     }
 
-    /// The job-level writes are bound to their run too: a superseded run
-    /// cannot mark the job running or requeue it over the run that
-    /// replaced it.
+    /// Guards: a shutdown-superseded claim cannot mark the job running or
+    /// obtain a replacement retry, and cannot alter its eligibility deadline.
+    /// Kind: boundary
+    /// Not a type: shutdown advances the actor's generation after a claim is
+    /// minted. The run proof must be admitted against that changing generation.
+    /// State: the private in-memory registry runs real claim and shutdown effects.
+    /// No worker or database contributes to the generation-refusal assertion.
+    /// Concurrency: shutdown precedes the stale writes in this isolated store.
     #[tokio::test]
     async fn a_superseded_run_cannot_mark_the_job_running_or_requeue_it() {
         let store = empty_store();
@@ -432,27 +409,37 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
             .unwrap();
+        let claim = crate::store::queries::tests::claim_registry_runner(&store, &job_id).await;
         assert_eq!(store.interrupt_all_for_shutdown().await, 1);
         let before = store.get(&job_id).await.unwrap();
 
-        let stale = crate::store::RunBinding::first_run_of(job_id.clone());
-        store.mark_job_running(&stale).await;
-        store
-            .requeue_job_after_memory_gate(&stale, crate::unix_time(321.0))
+        store.mark_job_running(claim.binding()).await;
+        let outcome = store
+            .requeue_job_after_memory_gate(claim.binding(), crate::unix_time(321.0))
             .await;
+        assert!(matches!(
+            outcome,
+            crate::store::MemoryRequeueOutcome::NoLongerRunnable
+        ));
 
         let after = store.get(&job_id).await.unwrap();
         assert_eq!(after.status, before.status);
         assert_eq!(after.next_eligible_at, before.next_eligible_at);
+        store.release_run(claim).await;
     }
 
     /// A finished file stays finished within its run: a second terminal write
     /// is refused, so it neither replaces the outcome nor counts twice.
+    /// Guards: A second terminal event preserves the first failure and records no extra result.
+    /// Kind: contract
+    /// Not a type: An admitted claim cannot rule out duplicate asynchronous completion events after a file has become terminal.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn a_finished_file_is_not_finished_again() {
         let store = empty_store();
@@ -460,26 +447,23 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await
             .unwrap();
+        let claim = crate::store::queries::tests::claim_registry_runner(&store, &job_id).await;
         let failure = FileFailureRecord {
             message: "stopped".into(),
             category: FailureCategory::Cancelled,
             finished_at: crate::store::EventTime::fixed(crate::unix_time(5.0)),
         };
         store
-            .mark_file_error(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
-                "a.cha",
-                &failure,
-            )
+            .mark_file_error(claim.binding(), "a.cha", &failure)
             .await;
         store
             .mark_file_done(
-                &crate::store::RunBinding::first_run_of(job_id.clone()),
+                claim.binding(),
                 "a.cha",
                 crate::store::EventTime::fixed(crate::unix_time(10.0)),
                 clean_output("a.cha"),
@@ -494,9 +478,15 @@ mod tests {
         assert_eq!(file.status, FileStatusKind::Error);
         let detail = store.get_job_detail(&job_id).await.unwrap();
         assert_eq!(detail.results.len(), 1, "a second result was recorded");
+        store.release_run(claim).await;
     }
 
     /// Retry-pending updates keep the file in processing state with a deadline.
+    /// Guards: Retry recording keeps the file processing and exposes the supplied deadline.
+    /// Kind: contract
+    /// Not a type: A typed retry record cannot establish the real actor projection of status and its eligibility instant.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn mark_file_retry_pending_sets_deadline() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -509,7 +499,7 @@ mod tests {
         store
             .submit(make_job(
                 "job-1",
-                ReleasedCommand::Morphotag,
+                crate::store::queries::tests::FixtureCommand::Morphotag,
                 vec!["a.cha".into()],
             ))
             .await

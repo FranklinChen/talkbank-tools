@@ -86,7 +86,6 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
         WorkerError::PoolShuttingDown => FailureCategory::System,
         // A count the pool cannot reconcile is our defect; a retry would
         // wait on the same count.
-        WorkerError::PoolAccountingBroken { .. } => FailureCategory::System,
         WorkerError::SpawnFailed(_)
         | WorkerError::HostUnreadable(_)
         | WorkerError::ReadyParseFailed(_)

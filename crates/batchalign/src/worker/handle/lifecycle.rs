@@ -116,12 +116,12 @@ impl WorkerHandle {
         let mut preamble = ReadyPreamble::default();
         loop {
             line.clear();
-            let bytes = match wait.within(reader.read_line(&mut line)).await {
-                Some(read) => read.map_err(|e| {
+            let bytes = wait
+                .within(reader.read_line(&mut line))
+                .await?
+                .map_err(|e| {
                     WorkerError::ReadyParseFailed(format!("failed to read stdout: {e}"))
-                })?,
-                None => return Err(wait.expired()),
-            };
+                })?;
 
             if bytes == 0 {
                 return Err(WorkerError::ReadyParseFailed(preamble.describe(
@@ -199,10 +199,8 @@ impl WorkerHandle {
     async fn terminate_startup_child(child: &mut Child) {
         #[cfg(unix)]
         {
-            if let Some(pid) = child.id() {
-                unsafe {
-                    libc::killpg(pid as libc::pid_t, libc::SIGTERM);
-                }
+            if let Some(target) = crate::worker::process_id::NativePid::of_child(child) {
+                let _ = target.terminate_group();
             }
         }
 
@@ -315,11 +313,9 @@ impl WorkerHandle {
 
         #[cfg(unix)]
         {
-            let _ = self.child.id().map(|pid| {
-                // SAFETY: sending SIGTERM to the worker's process group.
-                // The worker was spawned with setpgid(0,0), so its PGID == PID.
-                unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
-            });
+            if let Some(target) = crate::worker::process_id::NativePid::of_child(&self.child) {
+                let _ = target.terminate_group();
+            }
         }
 
         // On Windows, there is no direct equivalent of killpg(SIGTERM).
@@ -344,9 +340,11 @@ impl WorkerHandle {
                 );
                 #[cfg(unix)]
                 {
-                    let _ = self.child.id().map(|pid| {
-                        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
-                    });
+                    if let Some(target) =
+                        crate::worker::process_id::NativePid::of_child(&self.child)
+                    {
+                        let _ = target.kill_group();
+                    }
                 }
                 // On all platforms (including Windows), child.kill() sends
                 // TerminateProcess / SIGKILL to the direct child. On Windows
@@ -479,119 +477,120 @@ mod ready_signal_tests {
         )
     }
 
-    /// Happy path: ready signal is the first line.
+    /// Guards: startup admits affirmative transport-specific bytes and retains runtime digests
+    /// through empty, stacked and long advancing progress preambles.
+    /// Kind: wire
+    /// Not a type: external JSON, its ordering and digest bytes still require decoding
+    /// before private ready proofs can carry the admitted identity.
+    /// State: local byte readers exercise the actual startup reader without a process.
+    /// Concurrency: none
     #[tokio::test]
-    async fn read_ready_line_accepts_ready_first() {
-        let stdout = ready(4242);
-        let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
-            .await
-            .unwrap();
-        assert!(signal.ready);
-        assert_eq!(signal.pid, 4242);
-        assert_eq!(signal.runtime.python_version(), "3.13.12");
-    }
-
-    #[tokio::test]
-    async fn read_ready_line_retains_content_addressed_runtime_without_paths() {
-        let stdout = concat!(
-            "{\"ready\":true,\"pid\":4242,\"transport\":\"stdio\",\"runtime\":{",
-            "\"schema_version\":1,\"python_version\":\"3.13.12\",",
-            "\"python_executable_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
-            "\"batchalign_package_tree_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",",
-            "\"batchalign_core_extension_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",",
-            "\"distribution_inventory_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}}\n",
-        );
-        let mut r = buf(stdout);
-
-        let runtime = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
-            .await
-            .unwrap()
-            .runtime;
-
-        assert_eq!(runtime.python_version(), "3.13.12");
-        assert_eq!(runtime.python_executable_sha256().as_str(), "a".repeat(64));
-    }
-
-    /// 2026-05-06 morphotag protocol-ordering bug: a `progress_v2` event
-    /// emitted by the worker during model load (e.g. a
-    /// `download_liveness` growth report) lands on stdout
-    /// BEFORE the ready signal. The parent must tolerate it, not
-    /// reject the worker, and consume the actual ready signal from a
-    /// later line.
-    #[tokio::test]
-    async fn read_ready_line_skips_pre_ready_progress_event() {
-        let stdout = format!(
-            "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_lang_zh\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n{}",
-            ready(9001)
-        );
-        let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
-            .await
-            .unwrap();
-        assert!(
-            signal.ready,
-            "ready signal must be parsed after a pre-ready progress event"
-        );
-        assert_eq!(signal.pid, 9001);
-    }
-
-    /// Multiple progress events may stack up before the ready signal
-    /// (e.g. catalog download + language pack download + model load).
-    #[tokio::test]
-    async fn read_ready_line_skips_multiple_pre_ready_progress_events() {
-        let stdout = format!(
-            concat!(
-                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_catalog\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n",
-                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_catalog\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"complete\"}}}}}}\n",
-                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_stanza_lang_zh\", \"measure\": {{\"kind\": \"phase\", \"edge\": \"begin\"}}}}}}\n",
-                "{}"
-            ),
-            ready(7)
-        );
-        let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
-            .await
-            .unwrap();
-        assert!(signal.ready);
-        assert_eq!(signal.pid, 7);
-    }
-
-    /// A progress line missing its fields is a malformed protocol line, and
-    /// says so, instead of being misreported as an invalid ready signal.
-    #[tokio::test]
-    async fn read_ready_line_names_an_undecodable_progress_line() {
-        let stdout = "{\"op\": \"progress_v2\", \"event\": {\"stage\": \"x\"}}\n";
-        let mut r = buf(stdout);
-        match WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await {
-            Err(WorkerError::ReadyParseFailed(detail)) => {
-                assert!(detail.starts_with("undecodable pre-ready line"), "{detail}");
+    async fn startup_bytes_carry_identity_through_transport_admission() {
+        for progress_count in [0, 1, 3, 4 * MAX_READY_STDOUT_PREAMBLE_LINES] {
+            let mut prefix = String::new();
+            for kib in 1..=progress_count {
+                prefix.push_str(&format!(
+                    "{{\"op\":\"progress_v2\",\"event\":{{\"scope\":\"load\",\"stage\":\"download\",\"measure\":{{\"kind\":\"download_growth\",\"grown_kib\":{kib}}}}}}}\n"
+                ));
             }
-            other => panic!("expected a named protocol failure, got {other:?}"),
+            let stdio = format!("{prefix}{}", ready(4242));
+            let mut reader = buf(&stdio);
+            let signal = WorkerHandle::read_ready_line(&mut reader, GENEROUS_STALL)
+                .await
+                .unwrap();
+            let (pid, runtime) = signal.into_stdio().unwrap().into_parts();
+            assert_eq!(pid, WorkerPid(4242));
+            assert_eq!(runtime.python_version(), "3.13.12");
+            assert_eq!(runtime.python_executable_sha256().as_str(), "a".repeat(64));
+            let expected: serde_json::Value = serde_json::from_str(&ready(4242)).unwrap();
+            assert_eq!(serde_json::to_value(&runtime).unwrap(), expected["runtime"]);
+
+            let tcp = stdio.replace(
+                "\"transport\":\"stdio\"",
+                "\"transport\":\"tcp\",\"host\":\"127.0.0.1\",\"port\":42001",
+            );
+            let mut reader = buf(&tcp);
+            let (pid, runtime, host, port) =
+                WorkerHandle::read_ready_line(&mut reader, GENEROUS_STALL)
+                    .await
+                    .unwrap()
+                    .into_tcp()
+                    .unwrap()
+                    .into_parts();
+            assert_eq!(pid, WorkerPid(4242));
+            assert_eq!(runtime.python_executable_sha256().as_str(), "a".repeat(64));
+            assert_eq!((host.as_str(), port), ("127.0.0.1", 42001));
         }
     }
 
-    /// A long download reports far more progress than the non-JSON cap
-    /// allows lines; progress is the worker being alive, so it never trips
-    /// the cap, and only the latest few are kept for diagnostics.
+    /// Guards: refused startup bytes cannot produce readiness or the wrong transport proof.
+    /// Kind: wire
+    /// Not a type: hostile JSON can omit runtime facts, deny readiness or name a transport
+    /// different from the real spawning adapter, so admission must inspect those bytes.
+    /// State: local byte readers preserve each actual malformed or mismatched handshake.
+    /// Concurrency: none
     #[tokio::test]
-    async fn read_ready_line_accepts_a_long_download_s_progress() {
-        let mut stdout = String::new();
-        for kib in 1..=(4 * MAX_READY_STDOUT_PREAMBLE_LINES) {
-            stdout.push_str(&format!(
-                "{{\"op\": \"progress_v2\", \"event\": {{\"scope\": \"load\", \"stage\": \"downloading_x\", \"measure\": {{\"kind\": \"download_growth\", \"grown_kib\": {kib}}}}}}}\n"
-            ));
+    async fn startup_admission_refuses_false_missing_and_mismatched_wire_facts() {
+        for (stdout, expected) in [
+            (
+                ready(1).replace("\"ready\":true", "\"ready\":false"),
+                "ready=false",
+            ),
+            (
+                "{\"ready\":true,\"pid\":1,\"transport\":\"stdio\"}\n".into(),
+                "runtime",
+            ),
+            (
+                format!("{{\"hello\":\"world\"}}\n{}", ready(1)),
+                "invalid ready JSON",
+            ),
+            (
+                "{\"op\":\"progress_v2\",\"event\":{\"stage\":\"x\"}}\n".into(),
+                "undecodable pre-ready line",
+            ),
+            (
+                ready(1).replace(&"a".repeat(64), "invalid-digest"),
+                "invalid ready JSON",
+            ),
+        ] {
+            let mut reader = buf(&stdout);
+            match WorkerHandle::read_ready_line(&mut reader, GENEROUS_STALL).await {
+                Err(WorkerError::ReadyParseFailed(detail)) => {
+                    assert!(detail.contains(expected), "{detail}")
+                }
+                other => panic!("expected startup refusal containing {expected}, got {other:?}"),
+            }
         }
-        stdout.push_str(&ready(11));
-        let mut r = buf(&stdout);
-        let signal = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL)
-            .await
-            .unwrap();
-        assert_eq!(signal.pid, 11);
+
+        let stdio = ready(1);
+        let mut reader = buf(&stdio);
+        assert!(
+            WorkerHandle::read_ready_line(&mut reader, GENEROUS_STALL)
+                .await
+                .unwrap()
+                .into_tcp()
+                .is_err()
+        );
+        let tcp = stdio.replace(
+            "\"transport\":\"stdio\"",
+            "\"transport\":\"tcp\",\"host\":\"127.0.0.1\",\"port\":42001",
+        );
+        let mut reader = buf(&tcp);
+        assert!(
+            WorkerHandle::read_ready_line(&mut reader, GENEROUS_STALL)
+                .await
+                .unwrap()
+                .into_stdio()
+                .is_err()
+        );
     }
 
-    /// A worker that stops reporting while it loads is stalled after one
-    /// window of silence, named as a stall at the ready signal.
+    /// Guards: an open startup stream with no advancing progress becomes a typed ready stall.
+    /// Kind: contract
+    /// Not a type: future silence depends on external IO and elapsed time after admission,
+    /// which a retained handshake proof cannot predict.
+    /// State: a duplex pipe stays open and silent under Tokio's controlled clock.
+    /// Concurrency: both pipe halves and the paused clock belong to this test runtime.
     #[tokio::test(start_paused = true)]
     async fn a_silent_starting_worker_is_stalled() {
         let (reader, _writer) = tokio::io::duplex(64);
@@ -602,29 +601,5 @@ mod ready_signal_tests {
             }
             other => panic!("expected a startup stall, got {other:?}"),
         }
-    }
-
-    /// Non-progress JSON that is not a valid ReadySignal is still a hard
-    /// error: we don't let arbitrary garbage through.
-    #[tokio::test]
-    async fn read_ready_line_rejects_unknown_json_shape() {
-        let stdout = format!("{{\"hello\": \"world\"}}\n{}", ready(1));
-        let mut r = buf(&stdout);
-        let result = WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await;
-        assert!(
-            matches!(result, Err(WorkerError::ReadyParseFailed(_))),
-            "unknown JSON shape ahead of ready must error"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_ready_line_refuses_a_current_worker_without_runtime_identity() {
-        let stdout = "{\"ready\":true,\"pid\":4242,\"transport\":\"stdio\"}\n";
-        let mut r = buf(stdout);
-
-        assert!(matches!(
-            WorkerHandle::read_ready_line(&mut r, GENEROUS_STALL).await,
-            Err(WorkerError::ReadyParseFailed(_))
-        ));
     }
 }

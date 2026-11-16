@@ -10,6 +10,131 @@ an `Option` before asserting success. A failed fixture should show the producer'
 refusal, especially for source-bound retokenization and alignment. Formatting
 or lint success is not model-quality evidence or a replacement for these tests.
 
+## Worker policy and native-effect fixtures
+
+Queue mutation and return require private actual capacity owners. Retained
+allocation observations are consuming and source-bound. Pure selector matrices
+use borrowed key/count snapshots or Measured logical values, with zero native
+worker setup. CPU matrices carry a single declared host observation. Startup
+reservation matrices use typed engines and declared host tiers. Model routing
+uses closed ASR compositions and admitted command requirements. Footprint hides
+its measured components and GpuRoute keeps its key private.
+
+Native adapter contracts retain real pipe bytes, executable failure, kernel RSS,
+registry file locking and cancellation teardown. The invalid-PID contract runs
+in an isolated child process group. It tests zero rejection through the actual
+signal wrapper. Unsigned overflow is qualified through pure admission and the
+compiler boundary, avoiding unsafe raw signal probes. Dynamic queue membership
+is exercised by sampling an actual idle allocation, checking it out, then
+consuming the old observation and refusing removal.
+
+## Registry adoption fixtures
+
+The registry producer consumes admitted metadata into a unique daemon claim.
+Private connected, probed, report-ready and admitted owners carry the original
+source and socket. Compiler qualification must reject fabrication, detached publication
+and repeated consumption. Socket, process and registry-file effects retain
+native contracts because types cannot establish the peer's actual bytes or
+ongoing liveness.
+
+The discovery journey runs concurrent scans for one external sequential echo
+daemon. It then rescans, sends a request through the retained connection and
+observes that the original registry entry and live process remain present. Pool and process
+cleanup precede assertions. Its earlier control exposed a scan deleting that
+live entry. Shared TCP EOF retains its focused reader-task retirement contract.
+A loopback probe contract cancels pending health I/O, observes EOF and starts
+a fresh probe. A foreign capability reply retires the fresh socket and preserves
+the registry row.
+
+## Response-budget fixtures
+
+Fixed and loading waits have separate private deadline owners. Transport callers
+receive actual expiration through the timed effect's Result. Compiler exclusions
+qualify arbitrary deadline replacement, raw owner reconstruction and premature
+expiration. A pure LoadAdvances matrix covers concrete per-stage growth, zero,
+repeat, regression and phase-edge choices without creating a clock. One paused
+Tokio contract qualifies actual deadline renewal, fixed-budget expiry and request
+progress through the same owning API used by startup and control readers.
+Eight old clock fixtures consolidate into these two residual contracts.
+
+## Connected hundred-test reviews
+
+Review test declarations in connected windows of one hundred. Select shared
+producers, consumers, fixtures and effect adapters, then seal the identities,
+body hashes and source hashes before inspection. The final remainder retains
+its actual count. Graph scope follows the real dependency path across adjacent
+modules and review windows.
+
+Read every selected body and shared setup before deciding which tests survive.
+Design the whole ownership graph first, including branches, joins, reuse,
+retry, cancellation and release. Carry completed computations and provenance.
+Each retained test names the exact external bytes, real effect or semantic
+choice beyond that graph. Shared typed observations and doubles own decision
+matrices. Remove unreachable-state checks and obsolete fixture paths with the
+consuming implementation that replaces them.
+
+Track source inspection, pending graph decisions and completed adjudication
+separately. Bind renamed or consolidated tests to their original identities.
+Report tests removed, cases consolidated, resource setup retired and duplicated
+work eliminated separately from rubric annotation. Qualification follows the
+affected transition and real adapter boundaries.
+
+```mermaid
+flowchart TD
+    source["Current test inventory and source identities"] --> batch["Seal connected hundred-test window"]
+    batch --> inspect["Inspect every selected body and shared setup"]
+    inspect --> ownership["Design full producer, consumer and effect graph"]
+    ownership --> implement["Implement consuming ownership through real callers"]
+    implement --> residual["Retain concrete external or semantic obligations"]
+    implement --> prune["Remove unreachable setup, checks and duplicated work"]
+    residual --> qualify["Qualify exact sources and boundaries"]
+    prune --> qualify
+    qualify --> reconcile["Reconcile every selected identity and count actual reductions"]
+    reconcile --> next["Select the next connected window"]
+    ownership --> adjacent["Trace adjacent owners and link their review window"]
+    adjacent --> ownership
+```
+
+Worker-capacity fixtures enter through ReservedWorkerSlot and normal
+publication. Keep the original reservation alive when exercising admission or
+congestion. Actual process and TCP adapters publish their real handle with
+that owner. Independent total setters, bulk-refund simulations and emptied
+checkout reuse retire with their consuming production APIs. Compiler exclusions
+qualify those unavailable operations. Native contracts retain actual future
+cancellation, queue wakeup, executable refusal, pipe/EOF and process teardown.
+
+Startup fixtures consume the same affirmative, transport-specific ready proof
+as real spawners. Wire contracts retain malformed, false, mismatched and missing
+runtime bytes, progress ordering and actual silence. Field-access and repeated
+consumption probes belong to compiler qualification.
+
+Execution fixtures use the sealed declared load-effect producer when no model
+is needed. Route decisions instantiate the same pending-owner graph with an
+observation-only owner. Real invocation contracts retain actual memory-ledger,
+pipe, cancellation, deadline, partial-write and request/reply correspondence
+claims. Keep those resource effects separate from pure routing matrices.
+
+Control fixtures describe an observation with ExpectedLoad, ExpectedInfer or
+ExpectedBatch. They cannot send an unleased request. The same consuming reader
+admits operation-specific terminals, retaining progress order, timeout policy,
+actual decoded failures and model-load observations. A controlled ResponseSource
+runs the decision matrix without spawning pipe writers. Keep one native pipe
+contract for foreign-terminal retirement and reported-failure reuse.
+
+Worker-plan contracts check engine filtering, task/profile bootstrap, command
+recipe selection and registry normalization. They enter through the production
+plan producers. A plan's private key/preparation and key/load association is
+qualified with compiler exclusions. Launch contracts inspect actual argv and
+explicit environment entries from local Commands. Explicit synthetic account
+sources pass the production admission readers without consulting real keys.
+
+Text contracts inspect source bytes, real output judgment, provenance stamping,
+localized segmentation and externally observed result counts. Pure batch
+observations need no pool or cache. Single-file normal-entry contracts retain
+the local service handles required by that API and replace inference with an
+owned response double. Raw application proofs and matched-file constructors
+remain inaccessible to fixtures.
+
 The test suite is split into tiers by design. The following diagram shows
 the tiers, their resource requirements, and how to invoke each.
 
@@ -132,15 +257,15 @@ flowchart TD
     ml["Tier 2: ML Golden Tests\n(make batchalign-test-ml-golden)\nReal Whisper + Stanza + pyannote\nSkips are FAILURES, not passes\nSerialized (profile test-threads=1)\n~5min, 8-12 GB peak RAM"]
     pygolden["Tier 3: Python Golden\n(make batchalign-test-python-golden)\nreal Stanza models\n~2min on ming, 1-2 GB"]
 
-    fast -->|"routine dev loop\n(every edit)"| safe(["Safe on any machine"])
+    fast -->|"focused correctness checks"| safe(["Safe on any machine"])
     ml -->|"opt-in only\n(pre-release, inference changes)"| danger(["Serialized, never\nrun with bare cargo test"])
     pygolden -->|"opt-in only\n(PyO3 changes)"| safe
 ```
 
 1. **Fast tests**: unit tests, protocol tests, test-echo integration tests.
-   No ML models, no GPU, no multi-GB processes. These run in seconds, fully
-   parallel, on every edit. This is the inner development loop. It must stay
-   fast and safe, a `cargo test` should never crash your machine.
+   These target model-free boundary and effect contracts. Choose focused checks
+   for the changed graph, retaining the declared host and resource gates. The
+   final candidate receives the required release qualification.
 
 2. **ML tests**: golden snapshots, audio transcription, parity checks,
    profile verification. These spawn real Python workers that load Whisper,
@@ -1262,3 +1387,319 @@ commands perform locked installation through that owner, including on populated
 developer checkouts. Cold qualification exercises the shell entry point and
 external npm, generator and browser behavior. Retain those observations
 separately from compiler rejection of illegal phase operations.
+
+
+### Runner ownership and preparation contracts
+
+The [runner transition graph](../architecture/server-architecture.md#runner-boundary)
+connects the registry claim, input snapshot, host, resource leases, supervised
+execution outcome and finalization. `PreparedExecution` has a private
+constructor and a consuming dispatch method. Reusing preparation, dispatching
+before resource admission giving inline execution a queued retry payload and fabricating a store retry
+are compiler errors.
+
+The retained missing-job case checks the actor's current registry observation.
+The refusal case checks the routing reason written to the job and unfinished
+file and the released claim. Both use an in-memory store, a dormant worker pool
+and a no-op cache. Their assertions require neither SQLite nor worker processes.
+The preflight-attempt contract retains one isolated SQLite database to check
+the persisted attempt fields and file status for an injected rejection.
+
+### Typed dispatch-policy fixtures
+
+Option-policy controls construct a dispatch configuration from typed
+`CommandOptions`. Command identity derives from those options. A fixture carries
+language, speaker and runtime inputs and a representative file count. It creates
+no fabricated identity, empty input population, staging filesystem, cancellation
+token or pending-file list. The same request admission used by routing selects
+its concrete option family.
+
+`from_request` consumes family evidence into the executable plan. A
+transcription request cannot enter alignment planning. A consumed request cannot
+be planned again. Rust also prevents mutation of the borrowed configuration
+while a request still depends on it. Root, engine, speaker, segmentation and cache
+policy admission remain real fallible boundaries. One shared raw-JSON contract
+keeps rejection of inconsistent command/options tags at the actual request
+admission edge, before family evidence exists. Retained controls name their
+exact raw values and policy choices after the family proof has been established.
+
+The real CLI/JSON-to-worker-to-CHAT policy cohort owns measured-end defaults,
+Whisper text shaping and historical cache bytes. Redundant low-level pause
+checks are retired. End-overlap wiring shares the existing word-boundary
+contract and its single prepared bundle. Transcribe and transcribe_s share the same
+concrete transcription options. Their command-level policy contracts remain
+separate while the duplicate extractor-only declaration is removed. Compiler
+probes qualify wrong-family calls, repeated consumption, borrowed mutation and
+private construction. Keep raw input and native-effect observations separate
+from those static guarantees.
+
+### Consuming model-fixture preparation
+
+Fresh lifecycle fixtures begin queued and unclaimed. `ChatFileFixture` consumes
+one input declaration into a pending file or a processing declaration. Only a
+processing declaration can become written, diagnosed or failed. The same input
+owns the resulting output identity. `JobFixture::content` requires a first file,
+checks name uniqueness once and derives the queued lifecycle and file map from
+that input set.
+
+`start` consumes the queued fixture through the local model lease helper and
+actual dispatch/file operations. It consumes each file declaration once. `defer`
+and `fail` exercise the current job operations. Restart produces an
+`AwaitingRelease` fixture, which exposes no start operation. Releasing the old
+claim produces a queued fixture with completed outcomes retained and no file
+preparation to replay. Read-only inspection preserves the phase proof.
+`into_subject` consumes that proof to expose the raw job for the operation under
+test. The raw subject has no conversion back into a claimed fixture.
+
+```mermaid
+flowchart TD
+    declared["Nonempty unique file declarations"] -->|"consume content"| queued["JobFixture Queued owns work"]
+    queued -->|"consume start and work"| running["Running owns claim and file outcomes"]
+    running -->|"consume defer"| deferred["Deferred retains claim"]
+    running -->|"consume fail"| failed["Failed"]
+    deferred -->|"consume fail"| failed
+    failed -->|"consume restart"| awaiting["AwaitingRelease retains old claim"]
+    awaiting -->|"consume release"| ready["Queued retains results and no preparation"]
+    ready -->|"consume start"| running
+    running -->|"consume into_subject"| raw["Raw operation subject without phase proof"]
+```
+
+The fixture graph replaces arbitrary status setters and post-construction input
+replacement. Partial-failure and restart selection share one clean/diagnosed
+cohort. Startup decoding and durable rewrites remain in the focused SQLite
+contracts. A fixture called legacy provides no compatibility requirement by
+itself. Stored-data accommodations need an actual producer or a stated
+malformed-input admission contract. Current command completion and output are
+the primary acceptance targets.
+
+The memory-requeue contracts obtain real claims through the shared
+`store::test_support::claim_registry_runner` admission helper inside the store layer. They observe accepted,
+cancelled and superseded runs through the actor. Accepted and cancelled requeue contracts check that only accepted work changes
+the deferred-work counter. The store owns the counter effect and retry admission
+together, and the runner sink has no separate counter operation. The private
+`DeferredRun` constructor prevents the host from fabricating a retry after a
+refusal.
+
+
+### Store-bound run and text adapter contracts
+
+`AdmittedRun` binds the actual store to its registry claim. Completion, failure
+and release consume that capability. Context, sink and concurrency admission
+derive their owner from it. `StoppedAdmission` exposes only completion.
+Compiler qualification checks cross-store arguments, repeated consumption,
+completion-only dispatch, private fields and the removed claimless sink API.
+Checks of field privacy run separately so earlier type errors cannot hide them.
+
+`store::test_support::claim_runner` returns the same admitted capability used
+by production. Real sink contracts submit a queued job, obtain its claim,
+perform the observed effect and consume completion. They use SQLite only for
+attempt persistence and restart claims. The panic-supervision contract uses
+only the registry actor and a real Tokio child. Text-report writeback retains
+its actual CHAT output and registry projection.
+
+Coreference, translation, segmentation and compare policy fixtures use
+`DispatchHostContext::for_test_effects`, a declared host snapshot and the shared
+recording sink. They create no empty registry or fake job to receive ignored
+writes. The context retains the trace handle directly. Concrete translation
+options and closed segmentation/report cases replace variant extraction and
+interchangeable fixture flags.
+
+Coreference batching and xcoref bytes share one completed dispatch. Translation
+per-file dispatch and xtra bytes likewise share one execution. These combined
+contracts retire three repeated test functions. The retained filesystem and
+gateway observations establish payload shape, actual source-language bytes,
+reference selection and required artifact persistence after type admission.
+
+
+### Complete per-file input fixtures
+
+Input fixtures use `JobInputs::Content` with explicit `ContentInput` records or
+`paths_inputs` with complete `PathsInput` records. Each paths record carries its
+own display name, kind, admitted source, destination and optional prior. The
+factory consumes those records through production `PathsFiles::admit`. It
+retains the collision checks over actual path identities. The parallel-vector
+`inputs_from_parts` API is removed. Shorter output lists cannot silently discard
+sources, and missing names or kinds cannot be supplied by fixture fallbacks.
+
+Audio-shell fixtures select transcription or alignment before preparation.
+`prepare` consumes that choice into `PreparedFileTaskFixture`, retaining the
+selected options, admitted file set and staging owner. `into_snapshot` consumes
+that preparation and projects pending files once. UTR controls no longer build
+and discard a complete transcription fixture before replacing its inputs.
+
+```mermaid
+flowchart LR
+    selected["FileTaskFixture selects family"] -->|"consume prepare"| prepared["PreparedFileTaskFixture owns options, inputs and staging"]
+    prepared -->|"consume into_snapshot"| snapshot["Derive command and pending files once"]
+```
+
+Lifecycle fixtures derive the file-status map from the same retained input set.
+Their closed `FixtureCommand` produces the actual typed options, and command
+identity is derived from those options. Recipe snapshots likewise take typed
+options and complete input records. Fixtures for malformed persisted requests
+continue to enter their actual refusal boundary explicitly.
+
+```mermaid
+flowchart TD
+    content["Complete ContentInput records"] --> inputs["JobInputs"]
+    paths["PathsInput owns display, kind, source, output and prior"] --> admit["Consume through PathsFiles::admit"]
+    admit --> inputs
+    inputs --> construct["Derive command from options and retain the same inputs"]
+    options["Typed CommandOptions or closed FixtureCommand"] --> construct
+    construct --> status["Derive file-status map and queued lifecycle"]
+    status --> run["Actual store mints AdmittedRun"]
+    run --> effects["Focused reader and writer contracts"]
+    construct --> pending["with_pending projects the same inputs"]
+    pending --> snapshot["Consistent runner snapshot"]
+    snapshot --> plan["Build work units and output artifacts once"]
+    plan --> effects
+```
+
+`JobPlan` retains its computed work and artifacts. Its unused copied `IoMode`
+field is removed. The actual `JobInputs` variant and per-file locations continue
+to carry I/O behavior. Compare pairing and sidecar naming share the planning
+contract. Nested staged paths are covered by actual dual-publication contracts.
+Submission, cancellation and deletion projections share their corresponding
+SQLite contracts. Listing order shares the actual queue-order fixture while
+asserting each adapter's promised ordering.
+
+The fixture owners live in `store/job/test_support/`. `mod.rs` owns lifecycle
+construction, `inputs.rs` owns per-file admission and projection, and `clock.rs`
+owns `ManualClockStore`. Its private fields retain the actual store and the
+manual clock installed in that store. Deadline and lease cases advance this
+owner explicitly. Renewal checks the exact advanced heartbeat, then releases
+the queue claim before checking that renewal stops. No wall-clock sleep
+is needed for that observation.
+
+```mermaid
+flowchart TD
+    owner["ManualClockStore::at"] --> clock["Private manual clock"]
+    owner --> store["Actual store configured with that clock"]
+    advance["Explicit advance"] --> clock
+    clock --> observation["Store time observation"]
+    store --> observation
+    observation --> claim["Queue claim and lease"]
+    claim --> renew["Renew at exact advanced instant"]
+    renew --> release["Release claim"]
+    release --> stop["Renewal returns Stop"]
+```
+
+Writer morphology fixtures admit complete authored CHAT once, consume that
+source's valid model into real output gating, and retain the resulting
+`PostValidated` and its cached serialization. Their expected written bytes come
+from that same output owner. The provenance-only contract also compares the
+original on-disk bytes and modification time. These contracts no longer use
+fake gateway output proofs or incomplete CHAT fragments.
+
+The backend submission journey stages an actual source under its owned job
+root, waits for terminal echo completion, checks exact output bytes and shuts
+down its owned runtime. The model-free echo adapter exercises scheduling and
+publication. Real-model qualification remains a separate operation.
+
+
+### Preflight contracts and producer ownership
+
+The [preflight transition graph](../architecture/path-provenance.md#preflight-observations-travel-with-the-job)
+starts with source-bound pending inputs and completes with the snapshot and
+accepted files and run-bound host held together in `PreflightedJob`. The metadata observer accepts
+only `InPlaceMedia`. `NonemptyMedia` alone reaches suffix admission, and
+rejection recording consumes the observed partition before dispatch becomes
+available. Compiler probes qualify single-use recording, metadata-input
+capability, private dispatch admission and the typed dispatch request. Separate
+privacy probes reject forged pending ordinals and an independently assembled
+snapshot/sink pair. Field privacy is checked in its own compiler run, after
+other type mismatches have been excluded.
+
+The filesystem contracts cover missing and empty inputs, unknown and absent
+suffixes, and every advertised suffix in source order. Each uses the real
+metadata adapter under its own temporary root. The single-format success
+case is covered by the advertised-format contract. The staged-input and CHAT
+skip cases are excluded from the media observer by its input capability.
+
+The persistence contract supplies a typed PermissionDenied observation through
+`MediaObserver` and runs real SQLite recording effects. It admits source and
+output paths against the existing temporary root and obtains the real run
+claim. The source file and a decoder contribute no effect to that assertion.
+Its retained claims are exact attempt fields, file status and the underlying
+filesystem diagnostic. The shared paths fixture uses the production
+`AllowedRoots` and `PathsFiles` admission boundaries. `PathsFixture` owns its
+temporary directory and the authority admitted for that root. The advertised-
+format batch reuses this completed root observation for every input.
+
+Rubric discovery uses the canonical position-preserving scanner for raw and
+code views. Literal fixture functions contribute no test declarations. Report
+scanner corrections, rubric migrations, duplicate-case retirement and type-
+excluded cases separately when measuring an audit batch.
+
+### Output-layout admission and publication
+
+Output fixtures consume the same catalog producer as production. The sealed
+layout excludes an absent primary, arbitrary artifact counts and swapped
+primary/metrics roles. The compare plan contract retains source pairing,
+reference-projection selection, exact nested filenames, content types and
+primary-first transport projection. It absorbs the former duplicate comparison
+catalog and filename cases. The actual analysis catalog contract covers the
+stem-rewrite examples previously repeated in a lower-level test.
+
+Compiler qualification checks a generic layout passed to the pair writer,
+cross-role arguments, repeated consumption, mutation through read-only
+projections and private reconstruction from the actual consumer module.
+Source-rebinding qualification first demonstrates acceptance with a relaxed
+field, then rejection with the producer's private field restored. Privacy
+checks run separately from type mismatches so earlier errors cannot hide them.
+Disposable probes remain outside the permanent test population.
+
+Retained filesystem contracts cover exact primary and CSV bytes, both staged
+and requested destinations, obstructed required writes and successful metric
+consolidation. Their shared recording gateway and event sink isolate inference
+and registry effects. Text writeback retains its genuine registry projection.
+CSV contracts cover escaping external filenames and sparse metric-cell bytes.
+Native export retains encoding, collision and current-destination admission.
+These observations qualify the effects and semantics left after the
+[output-layout graph](../architecture/server-architecture.md#source-bound-output-layouts)
+has established source and role ownership.
+
+Target fixtures retain complete pending-file proofs through `only_file` and
+production `SourceOutputs` admission. A fixture supplies its declared nested
+source name once. The detached location helper and independently selected
+target display strings are removed. The naming wrapper's four assertions are
+covered by the catalog, actual compare plan and native audio writer contracts.
+
+One admission contract compares independently supplied declaration facts for
+name, kind, source, destination, prior, ordinal and input mode. It also refuses
+a differently sourced layout and a primary-only plan selected as a pair. A
+disposable control relaxes input membership and demonstrates that the contract
+fails, then restores the admission check for the passing population.
+
+Compiler controls reject unchecked target construction, private reconstruction,
+repeated write/completion consumption, swapped artifact roles, mutation through
+read-only metadata and changes to borrowed input configuration. Writer receipts
+also reject consumer reconstruction and a caller-selected completion tracker.
+The clean transcript contract retains its distinct exclusion behavior and now
+checks source-name completion through the shared recording sink.
+
+
+### Text preparation ownership and scheduler qualification
+
+Text fixtures consume the same preparation edge as production. Accepted files
+come from their own snapshot. The source owner retains the output layout and
+run sink through reads and publication. Batch reading belongs to coreference,
+and concurrent dispatch belongs to morphology and segmentation. Compiler probes cover duplicate queue consumption, duplicate
+completion, mutation of loaded bytes, private reconstruction, sink replacement
+and attempts to substitute command states or batch an incremental queue. These probes remain disposable.
+
+One event-controlled segmentation contract retains exact source/route capture
+and observes grants of one and six files with persisted outputs. The gateway
+holds its initial wave until the controller releases it. Its timeout detects a
+deadlock without using sleeps to coordinate tasks. Host allocation policies use
+one declared `HostSnapshot` and exact file, CPU, operator, GPU and tier cases.
+Overlapping worker-planning functions consolidate into that policy matrix.
+Morphology policy contracts move beside the actual prepared-options producer.
+They absorb the authored expansion case from the retired generic text plan.
+
+External-byte contracts retain real reads for absent, readable, missing and
+invalid-UTF-8 prior inputs. Result-correspondence cases retain reordered
+coreference batches and refuse missing, repeated or foreign responses in
+singular and batch paths. Private publication ownership prevents repeated
+completion, while the actual gateway responses require admission. Whole-batch
+admission precedes all filesystem publication effects.

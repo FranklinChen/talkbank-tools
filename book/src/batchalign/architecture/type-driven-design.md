@@ -5,6 +5,19 @@
 
 Batchalign uses Rust's type system to encode domain invariants at compile time. This document catalogs the patterns in use, explains when to reach for each one, and records the serde techniques that keep the wire format stable while the internal types evolve.
 
+## Worker queue and observation ownership
+
+IdleQueue exposes read-only views. Private capacity publication and departure
+are its only mutation paths. DepartedWorker retains its actual original home
+and slot, and consuming exchange completion returns it exactly once. Cancellation
+retires the unfinished owner. There are no independent idle-availability permits.
+StartupReservation carries completed engine/host policy across retries.
+ObservedIdleWorker retains allocation identity through measurement and pressure
+selection before consuming current queue admission. NativePid admits selector
+range before every native signal adapter. CompatibleEntry and PreparedEntry
+retain the exact registry source across owner/build and metadata admission.
+See the [worker graphs](../../architecture/runtime/batchalign-workers.md#capacity-retained-through-the-worker-lifetime).
+
 ## Patterns
 
 ### Source-bound timed-CHAT diarization
@@ -82,12 +95,12 @@ and the two cannot disagree.
 | `EventTime` | `MachineTime` (private) | `crates/batchalign/src/store/event_time.rs` | The instant an event is recorded at, produced only by the store's clock (`JobStore::event_time`). Required by every `RunnerEventSink` event method, the store's event methods and records, and `SubmissionContext`, so a pipeline cannot hand in `MachineTime::now()` or any time it chose. `deadline_after` derives a retry or requeue deadline. A compile-fail doctest shows it cannot be built outside the store |
 | `FilePhase` | enum | `crates/batchalign/src/store/mod.rs` | Where a file is: `Queued`, `Processing { started_at }`, `RetryPending { started_at, failed_at, retry_at, failure }`, `Done { started_at, finished_at }`, `Error { started_at, finished_at, failure }`, `Interrupted { started_at, last_failure }`. A finish time exists only on `Done` and `Error`, a retry deadline only on `RetryPending`, a failure only where one happened, and always on `RetryPending` and `Error`. `FileFailure` has a private shape: this build makes only `recorded(message, category)`; the database boundary reads a stored row's message alone, category alone, or (for a failed row that named neither) an unrecorded failure (`of_failed_row`), and `from_columns` gives `None` for an interrupted row's columns that held neither. `kind()` gives the API status; `interrupted()` is the startup transition of an in-flight phase. `FilePhase::columns` (its `FilePhaseColumns` row image, NULLs included) is the one writer, used by the insert, every transition, startup interruption and the recovery requeue, and `FilePhase::from_row(FilePhaseColumns)` the one reader; a roundtrip test holds them inverse |
 | `JobStatusColumns` | struct | `crates/batchalign/src/store/job/projections.rs` | A job's status columns (`status`, `error`, `completed_at`, `num_workers`, `next_eligible_at`) as one image, built only by its owners: `Job::status_columns`, the stop transition `JobStatusColumns::stopped`, and `JobStatusColumns::read_stored` at the database boundary (fields visible to the job module only, read elsewhere through accessors; a live stop adopts the image whole). `JobDB::write_job_status` writes it whole, NULLs included, and every status write reads it from the job after the transition (`JobStore::db_persist_job_status`), so a row describes the status the job reached, never the one a caller asked for |
-| `Submitter` | struct (private) | `crates/batchalign/src/store/job/types.rs` | Who submitted a job: the client's address and, when it resolved to one, a name, neither ever empty. Held as `Option<Submitter>` on `JobSourceContext`, so absence is `None` from submission to the database; built by `client`, `direct_cli` or, at the database boundary, `from_columns`, the one place `''` means absent. |
+| `Submitter` | struct (private) | `crates/batchalign/src/store/job/submitter.rs` | Who submitted a job: the client's address and, when it resolved to one, a name, neither ever empty. Held as `Option<Submitter>` on `JobSourceContext`, so absence is `None` from submission to the database; built by `client`, `direct_cli` or, at the database boundary, `from_columns`, the one place `''` means absent. |
 | `NumSpeakers` | `u32` | `crates/batchalign-types/src/domain.rs` | Speaker count for diarization |
 | `PositiveSeconds` | `NonZeroU64` (private) | `crates/batchalign-types/src/domain.rs` | A timeout or interval an operator sets, in whole seconds, never zero. "Not set" is `Option<PositiveSeconds>::None`. Routes in: `TryFrom<u64>` and `FromStr` (the `--timeout` flag, which refuses `0` with an instruction), `literal::<N>()` (checked non-zero at compile time) and serde, which refuses `0`. The value travels typed from `server.yaml` to its timer: `PoolConfig.health_check_interval_s`, `worker_startup_stall_s` and `ensure_task_stall_s` (each becomes a `LoadingStall` at the configuration boundary, `ServerConfig::worker_startup_stall` and `ServerConfig::ensure_task_stall`), `ServerConfig.memory_gate_timeout_s`, each request's transport ceiling (`TaskRequestV2::transport_timeout`, with `batched_items_timeout` for batched requests, built on `PositiveSeconds::at_least`) and the limit a `WorkerError::Timeout` names, and each becomes a `Duration` only at the timer through `duration()`, so no consumer re-checks for zero. `server.yaml` files that still write `0` are read by `zero_as_no_override` or `zero_as_default`, the only readers of the legacy spelling |
 | `LoadingStall` | `PositiveSeconds` (private) | `crates/batchalign/src/worker/mod.rs` | How long a model-loading wait (worker startup, stdio or TCP; `ensure_task`) may go without progress that advanced: a stall window, not a total limit, because a first model download takes as long as the network makes it. The only wait a starting or loading worker is given: the host-memory wait before it queues with no limit. Made from `worker_startup_stall_s` and `ensure_task_stall_s` at the configuration boundary, or `LoadingStall::DEFAULT_STARTUP` / `DEFAULT_ENSURE_TASK`. A distinct type from a request's budget, so the two cannot be swapped. A wait is a `ResponseWait` (`Budget` or `Loading`), run as an opaque `RunningWait` whose deadline moves only through `observe` (a new stage, or a larger count in the same stage; a repeated report extends nothing) and which ends as `WorkerError::Timeout` or `WorkerError::Stalled` accordingly. The Python half is `batchalign/worker/_download_liveness.py`, which reports a download's measured growth |
 | `Residency` (`Footprint`, `Basis`, `WORKER_BASELINE`) | enum / struct | `crates/batchalign/src/worker/residency.rs` | What a worker holds, per load: `Residency::of(task, engines)` is the one table from a load to what it keeps resident (`Nothing`, `WorkerLife(Footprint)`, `PerBatch(Footprint)` for coreference), exhaustive over tasks and engine families with no catch-all. A `Footprint` states whether it was measured or estimated and reserves its load plus a stated 25% activation margin. ASR, FA and translation reuse the engine tables' `resident_memory_mb`; the speaker models, coreference, the Stanza morphosyntax pipeline and the worker baseline are measured. A `TaskLoad` carries its residency, derived from the same typed keys as its wire overrides. |
-| `LoadAdmission`, `AdmittedLoad`, `ConfirmedLoad`, `Loaded`, `RunPermit`, `LoadPreparation` | structs (private fields) | `crates/batchalign/src/worker/pool/task_load.rs` | The lease order as states: `LoadAdmission::admit` is the only route from a `TaskLoad` to an `AdmittedLoad`, and takes the load's host-memory lease (queued, see `HostMemoryCoordinator::queue_for_lease`) BEFORE the worker is asked; `AdmittedLoad::confirm` settles the lease to its resident size once the worker answers, and `TaskLoads::record` consumes the `ConfirmedLoad` to mint the `Loaded` proof, which owns the lease until the worker's loads are dropped. A load that fails drops its `AdmittedLoad`, and the lease with it. `Loaded::run` is the only route to a `RunPermit`, the one input every transport's execute takes: it pairs the request with its own load (the check each transport used to repeat) and holds a per-batch model's batch lease for the request. |
+| `LoadAdmission`, `AdmittedLoad`, `ConfirmedLoad`, `Loaded`, `RunPermit`, `LoadPreparation` | structs (private fields) | `crates/batchalign/src/worker/pool/task_load.rs` | The lease order as states: `LoadAdmission::admit` is the only route from a `TaskLoad` to an `AdmittedLoad`, and takes the load's host-memory lease (queued, see `HostMemoryCoordinator::queue_for_lease`) BEFORE the worker is asked; `AdmittedLoad::confirm` settles the lease to its resident size once the worker answers, and `TaskLoads::record` consumes the `ConfirmedLoad` to mint the `Loaded` proof, which owns the lease until the worker's loads are dropped. A load that fails drops its `AdmittedLoad`, and the lease with it. A ReadyRequest retains its derived TaskLoad. The sealed actual transport supplies that load through `LoadPreparation::prepare_on`, whose private transition grants the consuming RunPermit. Shared pending work owns model/request leases, executor capacity and job registration through caller departure, rejoin and terminal settlement. |
 | `WorkerCap` | `NonZeroU32` (private) | `crates/batchalign-types/src/domain.rs` | A per-job worker cap an operator sets (`--workers N`), never zero; "auto-tune" is `Option<WorkerCap>::None`. Routes in: `TryFrom<u32>`, `FromStr` (the flag, which refuses `0` with an instruction), `literal::<N>()` and serde, which refuses `0`. Distinct from `NumWorkers`, the count the runner computes under the cap. Travels in a `RequestedRuntime` (`crates/batchalign/src/cli/daemon.rs`) with the `--timeout` `PositiveSeconds`: applied to `ServerConfig.max_workers_per_job` through `get()`, forwarded to a daemon child, recorded in `daemon.json` (a legacy `0` there is read as absent by `zero_as_no_cap`) and reconciled against that record on reuse |
 | `TaskTimeoutOverrides` | struct | `crates/batchalign-types/src/worker_v2/requests.rs` | The operator's audio and analysis transport-ceiling overrides as one value, each `Option<PositiveSeconds>`; `TaskRequestV2::transport_timeout` takes it and returns the ceiling as a `PositiveSeconds`. |
 | `NonNegativeSeconds` | `f64` (private) | `crates/batchalign-types/src/domain.rs` | A LENGTH of time in seconds, finite and non-negative: elapsed and uptime readings, cooldowns, job durations. Built with `validated_numeric!`, so `TryFrom<f64>` (also serde) is the checked route in, plus `From<std::time::Duration>` and `ZERO`. `InferResponse.elapsed_s` is the `ItemElapsed` type below |
@@ -543,3 +556,44 @@ belongs in the Decision Record) or is decided against (with the reason).
 7. **Keep newtypes simple**: `#[serde(transparent)]` struct with a single field. No phantom types, no generics. The `string_id!` macro generates `Deref<Target=str>` for zero-friction migration.
 8. **Boundary rule:** Newtypes live inside Rust. At JSON/Python boundaries, they serialize transparently (newtypes via `#[serde(transparent)]`) or structurally (enums via `#[serde(untagged)]`/`rename_all`). Python never sees the Rust type names.
 9. **Function signatures must be self-documenting through types.** If you need to read the parameter name to understand what a `&str` argument represents, it should be a newtype.
+
+## Collected text and admitted response populations
+
+Text source admission retains the parsed, validated source. Collection produces
+completed file outcomes for rejected or no-work sources and a pending owner for
+actual work. Private file spans belong to that owner's item population.
+
+MatchedPopulation consumes collected items and the externally returned result
+vector. Its sole admission checks their actual lengths before integration or
+per-file partition. Missing and extra responses become worker-protocol failures
+on both single-file and cross-file paths. Completed file outcomes move through
+batch failure without being reclassified.
+
+Per-file partition produces a private MatchedFile retaining the original name,
+valid source, items and responses. Actual successful application and provenance
+injection are the only way to create AppliedText. Consuming output judgment
+produces StampedText, retaining the actual stamp decision. A failed application
+cannot be relabeled as output merely because the old model remains valid.
+The batch gate owns the model and avoids a whole-document validation clone.
+
+```mermaid
+flowchart TD
+    source["Actual source bytes"] --> admission["Admitted source retains parsed valid document"]
+    admission --> collection["Collection owns file identity, items and source spans"]
+    collection --> complete["Completed refusal or exact no-work bytes"]
+    collection --> pending["Pending files and collected items"]
+    pending --> infer["External inference returns result vector"]
+    infer --> matched["MatchedPopulation consumes items and equal-length responses"]
+    infer --> refusal["Mismatched population refuses pending files"]
+    matched --> file["MatchedFile owns original source, name and its responses"]
+    file --> applied["AppliedText after successful application and provenance"]
+    applied --> judged["Consuming strict or localized output judgment"]
+    judged --> output["StampedText retains output and actual stamp decision"]
+    complete --> result["Original named outcome"]
+    output --> result
+    refusal --> result
+```
+
+Localized generated sources retain their held-out utterances. Actual segmented
+layout relocates those observations before output judgment. The residual
+semantic contracts exercise generated word bytes and newly introduced findings.

@@ -4,7 +4,7 @@ mod coref;
 mod kernel;
 pub(crate) mod morphotag;
 pub(crate) mod native_media;
-mod text_io;
+pub(crate) mod text_io;
 mod translate;
 mod utseg;
 mod worker_gateway;

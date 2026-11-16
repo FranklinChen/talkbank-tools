@@ -78,10 +78,42 @@ own bytes rather than the document the gate had judged, and a parse failure
 there was a `warn!` and a continue rather than an answer. Deleting that parse
 without closing the route would leave nothing to stop it growing back.
 
-`WorkerGateway::morphotag_for_compare` therefore returns `PostValidated`, and
-`process_compare_morphotagged_main` takes one. The execution kernel carries the
-proof between its `Morphosyntax` and `CompareAlign` stages and has no text to
-offer in its place.
+`CompareMorphology::morphotag_for_compare` returns `PostValidated`, and
+`process_compare_morphotagged_main` takes one. The consuming execution phases
+carry the proof from morphology into comparison.
+
+```mermaid
+flowchart TD
+    plan["PreparedComparison<br/>Source-bound targets and execution context"]
+    read["ReadComparison<br/>Main bytes and admitted reference"]
+    morph["MorphotaggedComparison<br/>Judged main and admitted reference"]
+    compare["ComparedComparison<br/>Judged CHAT and computed metrics"]
+    written["WrittenComparison<br/>Required writes succeeded"]
+    complete["Complete the carried file and run<br/>Release consolidated metrics row"]
+    plan -->|"Consume and read both inputs"| read
+    read -->|"Consume and run morphology once"| morph
+    morph -->|"Consume and compare once"| compare
+    compare -->|"Consume and publish CHAT plus CSV"| written
+    written -->|"Consume completion"| complete
+```
+
+The phase payloads have private constructors. Reading establishes reference
+admission before morphology becomes callable. Morphology consumes the raw main
+text and carries its judged document forward. Comparison consumes both admitted
+documents and retains computed metrics through CSV encoding. Each phase holds
+the same output owner and execution context, including its run-bound sink.
+Successful publication consumes that owner into the written receipt. Completion
+takes its file and run from the receipt and returns the consolidated row.
+
+The execution context exposes only `CompareMorphology`, whose sole effect
+returns the judged main document. Each text family uses its own worker
+interface. Compare fixtures implement the same narrow capability.
+
+The recipe catalog describes these stages and requires reference admission
+before morphology. Execution follows the concrete consuming methods in
+`execution/kernel/comparison.rs`. Filesystem reads, reference selection,
+validation of new external bytes and required writes retain their boundary
+contracts.
 
 `PostValidated::into_judged_document()` is the transition that hands back the
 model. Every variant carries its admitted model, including unchanged source;

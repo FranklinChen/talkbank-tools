@@ -44,7 +44,7 @@ impl JobStore {
 
     /// Claim exclusive runner ownership of one job (see
     /// [`JobRegistry::begin_runner`]). `None` means the job vanished.
-    pub(crate) async fn begin_runner(
+    pub(in crate::store) async fn begin_runner(
         &self,
         job_id: &JobId,
     ) -> Option<crate::store::BeginRunnerOutcome> {
@@ -71,7 +71,7 @@ impl JobStore {
     }
 
     /// Consume a deferred run's authority before scheduling its replacement.
-    pub(crate) async fn release_run(&self, claim: crate::store::RunnerClaim) {
+    pub(in crate::store) async fn release_run(&self, claim: crate::store::RunnerClaim) {
         let job_id = claim.snapshot().identity.job_id.clone();
         // Keep the owner while clearing its persisted lease. Releasing first
         // could let a replacement persist a new lease that this write erases.

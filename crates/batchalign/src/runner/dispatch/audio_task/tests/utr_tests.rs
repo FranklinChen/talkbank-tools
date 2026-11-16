@@ -115,6 +115,11 @@ impl AudioFileTask for ReportedTask {
     }
 }
 
+/// Guards: UTR shortfalls survive written alignment while cancellation and evidence failures stop retries and publication.
+/// Kind: contract
+/// Not a type: Admitted file inputs cannot determine provider failure policy, cancellation effects or the provenance bytes actually written.
+/// State: An isolated temporary directory exercises actual requested and staged file writes. The shared recording sink replaces registry effects. Typed recovery doubles supply provider and evidence failures without model execution.
+/// Concurrency: The test owns every path and recorder. Awaited writes finish before the temporary directory is dropped.
 #[tokio::test]
 async fn utr_failures_survive_real_audio_writeback_and_cancellation_stops_retry() {
     for route in [
@@ -125,20 +130,7 @@ async fn utr_failures_survive_real_audio_writeback_and_cancellation_stops_retry(
         Route::SystemFailure(SystemFailure::SourceBinding),
     ] {
         let tmp = tempfile::tempdir().unwrap();
-        let mut job = fake_job(&tmp);
-        job.dispatch.command = ReleasedCommand::Align;
-        job.dispatch.options = CommandOptions::Align(Default::default());
-        job.filesystem.inputs = crate::store::test_support::inputs_from_parts(
-            vec![DisplayPath::from("nested/test.cha")],
-            vec![true],
-            true,
-            vec![ClientPath::new("/input/test.cha")],
-            vec![ClientPath::new(
-                tmp.path().join("requested/test.cha").to_string_lossy(),
-            )],
-            vec![],
-        );
-        let job = crate::store::test_support::with_pending(job);
+        let job = FileTaskFixture::Alignment.prepare(&tmp).into_snapshot();
         let file = job.pending_files[0].clone();
         let sink = Arc::new(RecordingSink::default());
         let lifecycle = FileRunTracker::new(sink.as_ref(), file.filename().as_ref());

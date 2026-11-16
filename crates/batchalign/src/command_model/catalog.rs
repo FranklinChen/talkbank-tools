@@ -79,6 +79,11 @@ mod tests {
     /// structurally incapable of stating the truth. It was deleted rather than
     /// synchronised. This test pins the survivor so the contract cannot drift
     /// silently.
+    /// Guards: Every released command declares its promised primary filename transformation.
+    /// Kind: policy
+    /// Not a type: Exhaustive command variants require an entry, while the concrete preserve, extension and stem choices remain observable catalog policy.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn declared_output_naming_is_stable() {
         // Matched on the ENUM with no catch-all arm: adding a `ReleasedCommand`
@@ -138,8 +143,7 @@ mod tests {
                 command_spec(command)
                     .selected_output_policy(&options)
                     .unwrap()
-                    .primary_for_source(&"sample.wav".into())
-                    .naming,
+                    .primary_naming_for_source(&"sample.wav".into()),
                 expected,
                 "output naming changed for {command}"
             );

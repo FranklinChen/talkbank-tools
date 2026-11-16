@@ -9,11 +9,9 @@ use batchalign_transform::compare::{CompareMetricName, CompareMetricsCsvTable};
 use crate::api::{ContentType, DisplayPath};
 use crate::compare::CompareMaterializedOutputs;
 use crate::error::ServerError;
-use crate::planning::PlannedArtifactSet;
-use crate::recipe_runner::materialize::MaterializedArtifactRole;
-use crate::recipe_runner::runtime::{ChatOutputTarget, write_text_output_artifact};
-use crate::runner::util::FileRunTracker;
-use crate::store::RunnerFilesystemConfig;
+use crate::recipe_runner::runtime::write_text_output_artifact;
+
+use super::comparison::ComparisonFile;
 
 /// One source-bound row, never reconstructed from serialized CSV.
 pub(super) struct ConsolidatedCompareMetricsRow {
@@ -41,45 +39,31 @@ impl ConsolidatedCompareMetricsRow {
 
 /// Only the successful writer can construct this receipt. Failed writes cannot
 /// enter the completion method or supply a row to the consolidated report.
-pub(super) struct WrittenComparison {
+pub(super) struct WrittenComparison<'a> {
+    file: ComparisonFile<'a>,
     primary_path: DisplayPath,
     primary_content_type: ContentType,
     metrics: ConsolidatedCompareMetricsRow,
 }
 
-impl WrittenComparison {
-    pub(super) async fn complete(
-        self,
-        lifecycle: FileRunTracker<'_>,
-    ) -> ConsolidatedCompareMetricsRow {
-        lifecycle
+impl WrittenComparison<'_> {
+    pub(super) async fn complete(self) -> ConsolidatedCompareMetricsRow {
+        self.file
+            .lifecycle()
             .complete_with_result(self.primary_path, self.primary_content_type)
             .await;
         self.metrics
     }
 }
 
-pub(super) async fn write_outputs(
-    filesystem: &RunnerFilesystemConfig,
-    location: &crate::store::InputLocation,
-    artifacts: &PlannedArtifactSet,
+pub(super) async fn write_outputs<'a>(
+    file: ComparisonFile<'a>,
     outputs: CompareMaterializedOutputs,
-) -> Result<WrittenComparison, ServerError> {
-    let primary: Vec<_> = artifacts
-        .files
-        .iter()
-        .filter(|artifact| artifact.role == MaterializedArtifactRole::Primary)
-        .collect();
-    let sidecars: Vec<_> = artifacts
-        .files
-        .iter()
-        .filter(|artifact| artifact.role == MaterializedArtifactRole::Sidecar)
-        .collect();
-    let ([primary], [sidecar]) = (primary.as_slice(), sidecars.as_slice()) else {
-        return Err(ServerError::Validation(
-            "compare requires one CHAT output and one metrics sidecar".into(),
-        ));
-    };
+) -> Result<WrittenComparison<'a>, ServerError> {
+    let artifacts = file.artifacts().artifacts();
+    let targets = file.artifacts().targets()?;
+    let primary = artifacts.primary();
+    let sidecar = artifacts.metrics();
     let CompareMaterializedOutputs {
         chat_output,
         metrics,
@@ -87,28 +71,29 @@ pub(super) async fn write_outputs(
     let metrics_csv = metrics.to_csv_string().map_err(|error| {
         ServerError::Persistence(format!("compare CSV serialization failed: {error}"))
     })?;
-    let row = ConsolidatedCompareMetricsRow::from_source(&artifacts.source_display_path, metrics)?;
-    let target = ChatOutputTarget::new(filesystem, location, &primary.display_path);
-    write_text_output_artifact(&target, chat_output.as_str())
+    let row = ConsolidatedCompareMetricsRow::from_source(artifacts.source(), metrics)?;
+    write_text_output_artifact(targets.primary, chat_output.as_str())
         .await
         .map_err(|error| {
             ServerError::Persistence(format!(
                 "failed to write compare CHAT output {}: {error}",
-                primary.display_path
+                primary.display_path()
             ))
         })?;
-    let csv_target = ChatOutputTarget::new(filesystem, location, &sidecar.display_path);
-    write_text_output_artifact(&csv_target, &metrics_csv)
+    write_text_output_artifact(targets.metrics, &metrics_csv)
         .await
         .map_err(|error| {
             ServerError::Persistence(format!(
                 "failed to write compare CSV {}: {error}",
-                sidecar.display_path
+                sidecar.display_path()
             ))
         })?;
+    let primary_path = primary.display_path().clone();
+    let primary_content_type = primary.content_type();
     Ok(WrittenComparison {
-        primary_path: primary.display_path.clone(),
-        primary_content_type: primary.content_type,
+        file,
+        primary_path,
+        primary_content_type,
         metrics: row,
     })
 }
@@ -191,6 +176,11 @@ mod tests {
         }
     }
 
+    /// Guards: Consolidation preserves comma, quote, newline, Unicode and suffix-like source filenames in exactly three CSV cells.
+    /// Kind: wire
+    /// Not a type: A source-bound typed metrics row cannot establish CSV escaping and UTF-8 cell bytes after serialization and decoding.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn compare_csv_roundtrips_source_names_without_rewriting_or_splitting_them() {
         let names = [
@@ -223,6 +213,11 @@ mod tests {
         assert_eq!(records.len(), names.len());
     }
 
+    /// Guards: Sparse comparison metrics encode an empty missing cell while preserving the existing decimal representation.
+    /// Kind: wire
+    /// Not a type: Typed optional metrics preserve absence, while blank-cell encoding, column order and decimal text remain CSV serialization choices.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn compare_absent_metric_cells_stay_blank_and_existing_decimal_format_is_preserved() {
         let mut sparse = metrics();

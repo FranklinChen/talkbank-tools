@@ -11,20 +11,24 @@
 //! Each job still runs as a `tokio::spawn` task, but the store no longer
 //! presents its synchronization primitives as just public fields to poke.
 
+mod admission;
 mod counters;
 mod event_time;
 mod job;
 pub(crate) mod queries;
 mod registry;
+mod run_events;
 
+pub(crate) use admission::{AdmittedRun, RunnerAdmission};
 pub use event_time::EventTime;
 pub use job::*;
 pub(crate) use job::{
-    CompletedFileOutput, FileCompletion, FileFailureRecord, FileProgressRecord, FileRetryRecord,
-    FileWriteRefusal, JobStatusColumns, Stop,
+    CompletedFileOutput, DeferredRun, FileCompletion, FileFailureRecord, FileProgressRecord,
+    FileRetryRecord, FileWriteRefusal, JobStatusColumns, MemoryRequeueOutcome, Stop,
 };
 pub(crate) use queries::LeaseRenewalOutcome;
 pub(crate) use queries::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
+pub(crate) use run_events::StoreRunnerEventSink;
 
 use std::sync::Arc;
 
@@ -36,7 +40,7 @@ use crate::config::ServerConfig;
 #[cfg(test)]
 use crate::host_policy::auto_max_concurrent_from as host_auto_max_concurrent_from;
 use crate::scheduling::FailureCategory;
-use tokio::sync::{AcquireError, Semaphore, SemaphorePermit, broadcast};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, broadcast};
 use tracing::info;
 
 use crate::db::JobDB;
@@ -927,13 +931,13 @@ pub struct JobDetail {
 /// In-memory job store with background execution tasks.
 pub struct JobStore {
     registry: JobRegistry,
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     db: Option<Arc<JobDB>>,
     ws_tx: broadcast::Sender<WsEvent>,
     counters: OperationalCounterStore,
     config: ServerConfig,
     node_id: NodeId,
-    trace_store: crate::trace_store::TraceStore,
+    trace_store: Arc<crate::trace_store::TraceStore>,
     /// The one source of the current time for the store and its runners.
     clock: Arc<dyn crate::clock::Clock>,
     /// The host as read where the server was composed. Every job's dispatch
@@ -969,12 +973,12 @@ impl JobStore {
 
         Self {
             registry: JobRegistry::new(),
-            semaphore: Semaphore::new(max_concurrent),
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
             db,
             ws_tx,
             counters: OperationalCounterStore::new(),
             node_id: NodeId::from(format!("node-{}", uuid::Uuid::new_v4().simple())),
-            trace_store: crate::trace_store::TraceStore::new(),
+            trace_store: Arc::new(crate::trace_store::TraceStore::new()),
             config,
             clock,
             host,
@@ -1024,9 +1028,14 @@ impl JobStore {
         &self.trace_store
     }
 
+    /// Share the same trace owner with a run's immutable dispatch context.
+    pub(crate) fn trace_store_handle(&self) -> &Arc<crate::trace_store::TraceStore> {
+        &self.trace_store
+    }
+
     /// Acquire one global job-concurrency slot from the store-owned semaphore.
-    pub(crate) async fn acquire_job_slot(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
-        self.semaphore.acquire().await
+    pub(crate) async fn acquire_job_slot(&self) -> Result<OwnedSemaphorePermit, AcquireError> {
+        Arc::clone(&self.semaphore).acquire_owned().await
     }
 }
 

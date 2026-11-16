@@ -1,19 +1,19 @@
-//! Live runtime adapters for the recipe-runner spike.
-//!
-//! These helpers let the current runner reuse recipe-runner planning and output
-//! metadata without a flag-day dispatcher rewrite.
+//! Shared runner adapters for input discovery, planning and output publication.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::command_model;
 use crate::store::{PendingJobFile, RunnerFilesystemConfig, RunnerJobSnapshot};
 
-use super::materialize::{
-    MaterializedArtifactRole, PlannedMaterializedFile, plan_materialized_files,
-};
+use super::materialize::{PlannedMaterializedFile, plan_materialized_files};
 use super::planner::{PlanningError, plan_work_units};
 use super::work_unit::{DiscoveredInput, PlannedWorkUnit};
+
+mod targets;
+#[cfg(test)]
+mod targets_tests;
+pub(crate) use targets::{ChatMetricsOutputs, OutputSourceIdentity, OutputTarget, SourceOutputs};
 
 /// Options used by legacy naming controls only, not production admission.
 /// Commands with mandatory user choices must supply those explicitly.
@@ -78,7 +78,7 @@ pub(crate) fn planned_output_artifacts(
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
-) -> Result<Vec<PlannedMaterializedFile>, PlanningError> {
+) -> Result<super::materialize::PlannedArtifactSet, PlanningError> {
     Ok(plan_materialized_files(
         source_display_path,
         command_model::command_spec(command).selected_output_policy(options)?,
@@ -91,24 +91,11 @@ pub(crate) fn primary_output_artifact(
     options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
 ) -> Result<PlannedMaterializedFile, PlanningError> {
-    planned_output_artifacts(command, options, source_display_path)?
-        .into_iter()
-        .find(|artifact| artifact.role == MaterializedArtifactRole::Primary)
-        .ok_or(PlanningError::MissingPrimary(options.command()))
-}
-
-/// Return all sidecar artifacts for one command/input pair.
-#[cfg(test)]
-fn sidecar_output_artifacts(
-    command: ReleasedCommand,
-    options: &crate::options::CommandOptions,
-    source_display_path: &DisplayPath,
-) -> Vec<PlannedMaterializedFile> {
-    planned_output_artifacts(command, options, source_display_path)
-        .unwrap()
-        .into_iter()
-        .filter(|artifact| artifact.role == MaterializedArtifactRole::Sidecar)
-        .collect()
+    Ok(
+        planned_output_artifacts(command, options, source_display_path)?
+            .into_primary()
+            .into_materialized(),
+    )
 }
 
 /// Derive only the primary result display path for one command/input pair.
@@ -118,38 +105,6 @@ pub(crate) fn result_display_path_for_command(
     filename: &str,
 ) -> Result<DisplayPath, PlanningError> {
     Ok(primary_output_artifact(command, options, &DisplayPath::from(filename))?.display_path)
-}
-
-/// Resolve the concrete write path for one planned output artifact.
-pub(crate) fn output_write_path(
-    filesystem: &RunnerFilesystemConfig,
-    location: &crate::store::InputLocation,
-    result_display_path: &DisplayPath,
-) -> PathBuf {
-    match location {
-        // Beside the file's admitted output, under the result's own file
-        // name: admission keeps that folder inside an allowed root.
-        crate::store::InputLocation::Paths(paths) => {
-            paths.output.server().as_path().with_file_name(
-                Path::new(result_display_path.as_ref())
-                    .file_name()
-                    .unwrap_or_default(),
-            )
-        }
-        crate::store::InputLocation::Staged => staged_output_path(filesystem, result_display_path),
-    }
-}
-
-fn staged_output_path(
-    filesystem: &RunnerFilesystemConfig,
-    result_display_path: &DisplayPath,
-) -> PathBuf {
-    filesystem
-        .staging_dir
-        .join("output")
-        .join(result_display_path.as_ref())
-        .as_path()
-        .to_owned()
 }
 
 /// The daemon's one route from an output path to bytes on disk:
@@ -166,54 +121,17 @@ pub(crate) async fn publish_text(path: &Path, content: &str) -> std::io::Result<
         .map_err(std::io::Error::other)?
 }
 
-/// One text-output destination (CHAT, CSV sidecar or evidence document) for
-/// a single file in a job: enough state to derive both the primary on-disk
-/// write path and the staged copy. Bundling the (filesystem, location,
-/// display_path) triple gives all the writers a single typed seam. The paths
-/// it derives are private: the only way bytes reach them is [`publish_text`].
-pub(crate) struct ChatOutputTarget<'a> {
-    filesystem: &'a RunnerFilesystemConfig,
-    location: &'a crate::store::InputLocation,
-    display_path: &'a DisplayPath,
-}
-
-impl<'a> ChatOutputTarget<'a> {
-    pub fn new(
-        filesystem: &'a RunnerFilesystemConfig,
-        location: &'a crate::store::InputLocation,
-        display_path: &'a DisplayPath,
-    ) -> Self {
-        Self {
-            filesystem,
-            location,
-            display_path,
-        }
-    }
-
-    fn primary_path(&self) -> PathBuf {
-        output_write_path(self.filesystem, self.location, self.display_path)
-    }
-
-    fn staged_path(&self) -> PathBuf {
-        staged_output_path(self.filesystem, self.display_path)
-    }
-}
-
 /// Write a text result to the command's primary target and to staged output.
 ///
 /// Paths-mode jobs still write to the execution host's requested output path,
 /// but they also preserve a staged copy so the submitting CLI can download and
 /// write the same result back to its own local filesystem.
 pub(crate) async fn write_text_output_artifact(
-    target: &ChatOutputTarget<'_>,
+    target: OutputTarget<'_, impl Sized>,
     content: &str,
 ) -> std::io::Result<()> {
-    let write_path = target.primary_path();
-    publish_text(&write_path, content).await?;
-
-    let staged_path = target.staged_path();
-    if staged_path != write_path {
-        publish_text(&staged_path, content).await?;
+    for path in target.into_paths() {
+        publish_text(&path, content).await?;
     }
 
     Ok(())
@@ -261,17 +179,13 @@ pub(crate) async fn write_text_output_artifact(
 ///
 /// [`WritableChat`]: crate::pipeline::post_validate::WritableChat
 pub(crate) async fn write_chat_output_artifact_with_provenance_gate(
-    target: &ChatOutputTarget<'_>,
+    target: OutputTarget<'_, super::materialize::PrimaryArtifact>,
     document: &impl crate::pipeline::post_validate::WritableChat,
 ) -> std::io::Result<()> {
     let content = document.chat_text();
     let command = document.chat_command();
-    let write_path = target.primary_path();
-    write_chat_if_meaningful_diff(&write_path, content, command).await?;
-
-    let staged_path = target.staged_path();
-    if staged_path != write_path {
-        write_chat_if_meaningful_diff(&staged_path, content, command).await?;
+    for path in target.into_paths() {
+        write_chat_if_meaningful_diff(&path, content, command).await?;
     }
 
     Ok(())
@@ -354,34 +268,39 @@ const PROVENANCE_LINE_DIFF_BUDGET_BYTES: u64 = 200;
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
 
     use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::api::{CorrelationId, JobId, LanguageSpec, NumSpeakers};
-    use crate::options::{CommandOptions, CommonOptions, CompareOptions};
+    use crate::options::CommandOptions;
     use crate::pipeline::post_validate::PostValidated;
     use crate::store::{
         RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity, RunnerJobSnapshot,
     };
+    use std::path::PathBuf;
 
     /// A paths-mode job whose one input is `<root>/input/sample.cha`, whose
     /// requested output is `host_out`, and whose staging tree is
     /// `<root>/jobs/job-1`: the shape every writer test here uses.
-    fn paths_mode_filesystem(root: &Path, host_out: &Path) -> RunnerFilesystemConfig {
+    fn paths_mode_filesystem(
+        root: &Path,
+        host_out: &Path,
+        display: &str,
+    ) -> RunnerFilesystemConfig {
         let client = |path: PathBuf| {
             batchalign_types::paths::ClientPath::new(path.to_string_lossy().to_string())
         };
         RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                true,
-                vec![client(root.join("input/sample.cha"))],
-                vec![client(host_out.to_path_buf())],
-                Vec::new(),
-            ),
+            inputs: crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                display: display.into(),
+                kind: crate::store::InputKind::Chat,
+                source: crate::store::test_support::admitted(
+                    root.join("input/sample.cha").to_str().unwrap(),
+                ),
+                output: crate::store::test_support::admitted(host_out.to_str().unwrap()),
+                before: None,
+            }]),
             staging_dir: batchalign_types::paths::ServerPath::from(root.join("jobs/job-1")),
             media_mapping: Default::default(),
             media_subdir: Default::default(),
@@ -390,49 +309,25 @@ mod tests {
     }
 
     fn runner_snapshot(
-        command: ReleasedCommand,
-        displays: Vec<&str>,
-        source_paths: Vec<&str>,
-        before_paths: Vec<Option<&str>>,
+        options: CommandOptions,
+        inputs: crate::store::JobInputs,
     ) -> RunnerJobSnapshot {
-        let file_count = displays.len();
         crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-runtime"),
                 correlation_id: CorrelationId::from("corr-runtime"),
             },
             dispatch: RunnerDispatchConfig {
-                command,
+                command: options.command(),
                 // Compare is a per-file command; no job-level language.
                 lang: LanguageSpec::PerFile,
                 num_speakers: NumSpeakers(1),
-                options: CommandOptions::Compare(CompareOptions {
-                    common: CommonOptions::default(),
-                }),
+                options,
                 runtime_state: BTreeMap::new(),
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    displays.into_iter().map(DisplayPath::from).collect(),
-                    Vec::new(),
-                    true,
-                    source_paths
-                        .into_iter()
-                        .map(batchalign_types::paths::ClientPath::from)
-                        .collect(),
-                    // One output per file: two files writing one output is
-                    // refused at admission.
-                    (0..file_count)
-                        .map(|index| {
-                            batchalign_types::paths::ClientPath::new(format!("/out/{index}.cha"))
-                        })
-                        .collect(),
-                    before_paths
-                        .into_iter()
-                        .map(|path| path.map(batchalign_types::paths::ClientPath::from))
-                        .collect(),
-                ),
+                inputs,
                 staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
@@ -441,6 +336,21 @@ mod tests {
             cancel_token: CancellationToken::new(),
             pending_files: Vec::new(),
         })
+    }
+
+    fn admitted_morphotag_output(text: &str) -> PostValidated {
+        let parser = crate::chat_parser();
+        let admitted = crate::pipeline::text_infer::admit_retained_text(
+            &parser,
+            text,
+            talkbank_model::model::TranscriptName::for_path(Path::new("writer-fixture.cha")),
+        )
+        .expect("complete authored CHAT source");
+        PostValidated::gate_owned(
+            admitted.into_valid_file().into_unchecked(),
+            ReleasedCommand::Morphotag,
+        )
+        .expect("complete morphotag output")
     }
 
     /// A transcribe re-run on a new build over identical content changes only
@@ -495,156 +405,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discover_input_carries_before_path() {
-        let job = runner_snapshot(
-            ReleasedCommand::Morphotag,
-            vec!["nested/sample.cha"],
-            vec!["/src/nested/sample.cha"],
-            vec![Some("/before/nested/sample.cha")],
-        );
-        let input = discover_input_for_pending_file(&job.filesystem, &job.pending_files[0]);
-        assert_eq!(input.source_path, PathBuf::from("/src/nested/sample.cha"));
-        assert_eq!(
-            input.before_path,
-            Some(PathBuf::from("/before/nested/sample.cha"))
-        );
-    }
-
+    /// Guards: Discovered nested sources retain each optional prior on its own file.
+    /// Kind: contract
+    /// Not a type: Per-file admitted inputs prevent mismatched lists but cannot prove the adapter copies the correct source and optional prior paths.
+    /// State: Real same-user path admission observes synthetic absolute paths. The contract creates no file or directory and performs no content IO.
+    /// Concurrency: The test owns its immutable input values. It mutates no filesystem path or process state.
     #[test]
     fn optional_priors_keep_recipe_and_text_consumers_on_the_same_file() {
         // A prior belongs to its own file's input, so the second file's prior
         // can reach neither neighbour. (A prior for a file past the end, or
         // in a content-mode job, has no input to live on.)
-        let job = runner_snapshot(
-            ReleasedCommand::Morphotag,
-            vec!["a.cha", "b.cha", "c.cha"],
-            vec!["/a.cha", "/b.cha", "/c.cha"],
-            vec![None, Some("/before/b.cha"), None],
+        let names = ["nested/a.cha", "nested/b.cha", "nested/c.cha"];
+        let inputs = crate::store::test_support::paths_inputs(
+            names
+                .iter()
+                .map(|name| crate::store::PathsInput {
+                    display: (*name).into(),
+                    kind: crate::store::InputKind::Chat,
+                    source: crate::store::test_support::admitted(&format!("/src/{name}")),
+                    output: crate::store::test_support::admitted(&format!("/out/{name}")),
+                    before: (*name == "nested/b.cha")
+                        .then(|| crate::store::test_support::admitted("/before/nested/b.cha")),
+                })
+                .collect(),
         );
+        let job = runner_snapshot(CommandOptions::Morphotag(Default::default()), inputs);
         for (index, file) in job.pending_files.iter().enumerate() {
-            let expected = (index == 1).then(|| std::path::PathBuf::from("/before/b.cha"));
+            let expected = (index == 1).then(|| std::path::PathBuf::from("/before/nested/b.cha"));
+            let observed = discover_input_for_pending_file(&job.filesystem, file);
             assert_eq!(
-                discover_input_for_pending_file(&job.filesystem, file).before_path,
-                expected
+                observed.source_path,
+                PathBuf::from(format!("/src/{}", names[index]))
             );
+            assert_eq!(observed.before_path, expected);
         }
     }
 
-    #[test]
-    fn compare_job_planning_uses_gold_companion_shape() {
-        let job = runner_snapshot(
-            ReleasedCommand::Compare,
-            vec!["nested/sample.cha", "nested/sample.gold.cha"],
-            vec!["/src/nested/sample.cha", "/src/nested/sample.gold.cha"],
-            vec![],
-        );
-        let planned = plan_work_units_for_job(ReleasedCommand::Compare, &job).expect("planned");
-        assert_eq!(planned.len(), 1);
-        let PlannedWorkUnit::Compare(unit) = &planned[0] else {
-            panic!("expected compare unit");
-        };
-        assert_eq!(
-            unit.main.display_path,
-            DisplayPath::from("nested/sample.cha")
-        );
-        assert_eq!(
-            unit.gold.display_path,
-            DisplayPath::from("nested/sample.gold.cha")
-        );
-    }
-
-    #[test]
-    fn result_display_paths_follow_recipe_catalog() {
-        assert_eq!(
-            result_display_path_for_command(
-                ReleasedCommand::Transcribe,
-                &test_options(ReleasedCommand::Transcribe),
-                "sub/nested.wav"
-            )
-            .unwrap(),
-            DisplayPath::from("sub/nested.cha")
-        );
-        assert_eq!(
-            result_display_path_for_command(
-                ReleasedCommand::Benchmark,
-                &test_options(ReleasedCommand::Benchmark),
-                "sub/nested.wav"
-            )
-            .unwrap(),
-            DisplayPath::from("sub/nested.cha")
-        );
-        assert_eq!(
-            result_display_path_for_command(
-                ReleasedCommand::Opensmile,
-                &test_options(ReleasedCommand::Opensmile),
-                "sub/nested.wav"
-            )
-            .unwrap(),
-            DisplayPath::from("sub/nested.opensmile.csv")
-        );
-        assert_eq!(
-            result_display_path_for_command(
-                ReleasedCommand::Avqi,
-                &test_options(ReleasedCommand::Avqi),
-                "sub/nested.cs.wav"
-            )
-            .unwrap(),
-            DisplayPath::from("sub/nested.avqi.txt")
-        );
-    }
-
-    #[test]
-    fn compare_sidecars_follow_recipe_catalog() {
-        let sidecars = sidecar_output_artifacts(
-            ReleasedCommand::Compare,
-            &test_options(ReleasedCommand::Compare),
-            &DisplayPath::from("a/b.cha"),
-        );
-        assert_eq!(sidecars.len(), 1);
-        assert_eq!(
-            sidecars[0].display_path,
-            DisplayPath::from("a/b.compare.csv")
-        );
-    }
-
-    #[test]
-    fn output_write_path_preserves_staging_relative_dirs() {
-        let filesystem = RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                false,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
-            media_mapping: Default::default(),
-            media_subdir: Default::default(),
-            source_dir: batchalign_types::paths::ClientPath::new("/source"),
-        };
-        let write_path = output_write_path(
-            &filesystem,
-            &crate::store::InputLocation::Staged,
-            &DisplayPath::from("nested/result.compare.csv"),
-        );
-        assert_eq!(
-            write_path,
-            PathBuf::from("/tmp/staging/output/nested/result.compare.csv")
-        );
-    }
-
+    /// Guards: Text publication preserves the requested output and nested staged copy byte for byte.
+    /// Kind: contract
+    /// Not a type: Admitted per-file paths cannot establish successful writes or nested directory creation at both actual destinations.
+    /// State: An isolated root supplies admitted paths and actual requested/staged text writes and reads. No document gate, event recorder, registry or model is used.
+    /// Concurrency: The test owns both destinations and awaits publication before byte comparison and root cleanup.
     #[tokio::test]
     async fn write_text_output_artifact_keeps_staged_copy_for_paths_mode() {
         let root = tempfile::tempdir().expect("tempdir");
         let host_out = root.path().join("host/output/sample.cha");
-        let filesystem = paths_mode_filesystem(root.path(), &host_out);
-        let location = crate::store::test_support::only_location(&filesystem.inputs);
+        let filesystem = paths_mode_filesystem(root.path(), &host_out, "nested/sample.cha");
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
 
-        let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, &location, &display);
-        write_text_output_artifact(&target, "@Begin\n@End\n")
+        let outputs = SourceOutputs::plan(
+            &filesystem,
+            &file,
+            ReleasedCommand::Morphotag,
+            &test_options(ReleasedCommand::Morphotag),
+        )
+        .expect("source-bound output plan");
+        let target = outputs.primary_target().expect("primary target");
+        write_text_output_artifact(target, "@Begin\n@End\n")
             .await
             .expect("write output");
 
@@ -672,6 +489,11 @@ mod tests {
     /// (now written as `[fc-ba3 morphotag | ...]`, with a new timestamp and
     /// engine slot). Post-condition: the file's bytes are unchanged, so the
     /// stamp rename alone never rewrites a file.
+    /// Guards: A stamp-only rerun preserves the original primary bytes and modification time.
+    /// Kind: contract
+    /// Not a type: Native source and output admission prove document validity but cannot establish the no-op write decision or actual file metadata.
+    /// State: The isolated root owns an existing primary and its filesystem metadata. Native admission retains the candidate source/output proof and serialization. The test observes preserved bytes and modification time plus staged publication. No event recorder, registry or model runs.
+    /// Concurrency: The test owns all paths and awaits the gated write before inspecting bytes and metadata or dropping its root.
     #[tokio::test]
     async fn write_chat_output_artifact_with_provenance_gate_skips_when_only_provenance_differs() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -686,14 +508,15 @@ mod tests {
 @ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-03-29T18:30:00-04:00]
 *PAR:\thello .
-%mor:\tco|hello .
+%mor:\tintj|hello .
+%gra:\t1|0|ROOT 2|1|PUNCT
 @End
 ";
         std::fs::write(&host_out, original).unwrap();
         let before = std::fs::metadata(&host_out).expect("metadata before");
 
-        let filesystem = paths_mode_filesystem(root.path(), &host_out);
-        let location = crate::store::test_support::only_location(&filesystem.inputs);
+        let filesystem = paths_mode_filesystem(root.path(), &host_out, "nested/sample.cha");
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
 
         // Same content as `original` except for the stamp's name (legacy
         // `ba3` to `fc-ba3`) and its timestamp: the fields are identical.
@@ -708,18 +531,23 @@ mod tests {
 @ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
-%mor:\tco|hello .
+%mor:\tintj|hello .
+%gra:\t1|0|ROOT 2|1|PUNCT
 @End
 ";
 
-        let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, &location, &display);
-        write_chat_output_artifact_with_provenance_gate(
-            &target,
-            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
+        let outputs = SourceOutputs::plan(
+            &filesystem,
+            &file,
+            ReleasedCommand::Morphotag,
+            &test_options(ReleasedCommand::Morphotag),
         )
-        .await
-        .expect("gated write");
+        .expect("source-bound output plan");
+        let target = outputs.primary_target().expect("primary target");
+        let output = admitted_morphotag_output(candidate);
+        write_chat_output_artifact_with_provenance_gate(target, &output)
+            .await
+            .expect("gated write");
 
         let after = std::fs::read_to_string(&host_out).expect("read after");
         assert_eq!(
@@ -742,6 +570,11 @@ mod tests {
     /// names a new inode afterwards (a truncating write keeps the inode).
     /// `atomic_file`'s own tests prove what a new inode implies.
     #[cfg(unix)]
+    /// Guards: Replacing text uses a new inode and writes the requested bytes.
+    /// Kind: contract
+    /// Not a type: Typed destinations cannot establish the operating system inode identity after an actual atomic replacement.
+    /// State: One isolated root owns an existing primary inode. The atomic writer publishes replacement text and its staged copy. Filesystem bytes and inode identity are the observations. No document gate, event recorder, registry or model runs.
+    /// Concurrency: The test owns both destinations and compares the inode only after the replacement future completes.
     #[tokio::test]
     async fn write_text_output_artifact_replaces_the_previous_file_rather_than_rewriting_it() {
         use std::os::unix::fs::MetadataExt;
@@ -750,12 +583,18 @@ mod tests {
         std::fs::create_dir_all(host_out.parent().unwrap()).unwrap();
         std::fs::write(&host_out, "@UTF8\n@Begin\n*CHI:\told .\n@End\n").unwrap();
         let old_inode = std::fs::metadata(&host_out).expect("metadata").ino();
-        let filesystem = paths_mode_filesystem(root.path(), &host_out);
-        let location = crate::store::test_support::only_location(&filesystem.inputs);
+        let filesystem = paths_mode_filesystem(root.path(), &host_out, "nested/sample.cha");
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
 
-        let display = DisplayPath::from("sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, &location, &display);
-        write_text_output_artifact(&target, "@UTF8\n@Begin\n*CHI:\tnew .\n@End\n")
+        let outputs = SourceOutputs::plan(
+            &filesystem,
+            &file,
+            ReleasedCommand::Morphotag,
+            &test_options(ReleasedCommand::Morphotag),
+        )
+        .expect("source-bound output plan");
+        let target = outputs.primary_target().expect("primary target");
+        write_text_output_artifact(target, "@UTF8\n@Begin\n*CHI:\tnew .\n@End\n")
             .await
             .expect("write output");
 
@@ -772,6 +611,11 @@ mod tests {
     /// Real `%mor` content change must still write through. The gate is
     /// strictly a noise-suppressor; any real difference must fall back
     /// to the existing write semantics.
+    /// Guards: Changed morphology publishes the native admitted output through the real writer.
+    /// Kind: contract
+    /// Not a type: A native output proof cannot establish the disk replacement chosen when semantic morphology differs from the retained file.
+    /// State: The root owns an existing CHAT primary. Native admission supplies the candidate proof with changed morphology. Actual publication writes requested/staged text, and the primary bytes are read back. No event recorder, registry or model runs.
+    /// Concurrency: The test owns its root and immutable candidate proof. Publication completes before byte comparison and cleanup.
     #[tokio::test]
     async fn write_chat_output_artifact_with_provenance_gate_writes_when_real_content_differs() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -779,65 +623,100 @@ mod tests {
         std::fs::create_dir_all(host_out.parent().unwrap()).unwrap();
 
         let original = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[ba3 morphotag | engine=stanza-1.11.1 ; lang=eng | 2026-03-29T18:30:00-04:00]
 *PAR:\thello .
-%mor:\tco|hello .
+%mor:\tintj|hello .
+%gra:\t1|0|ROOT 2|1|PUNCT
+@End
 ";
         std::fs::write(&host_out, original).unwrap();
 
-        let filesystem = paths_mode_filesystem(root.path(), &host_out);
-        let location = crate::store::test_support::only_location(&filesystem.inputs);
+        let filesystem = paths_mode_filesystem(root.path(), &host_out, "nested/sample.cha");
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
 
         // Different `%mor` content: a legitimate result update.
         let candidate = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
-%mor:\tco|hi .
+%mor:\tintj|hi .
+%gra:\t1|0|ROOT 2|1|PUNCT
+@End
 ";
 
-        let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, &location, &display);
-        write_chat_output_artifact_with_provenance_gate(
-            &target,
-            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
+        let outputs = SourceOutputs::plan(
+            &filesystem,
+            &file,
+            ReleasedCommand::Morphotag,
+            &test_options(ReleasedCommand::Morphotag),
         )
-        .await
-        .expect("gated write");
+        .expect("source-bound output plan");
+        let target = outputs.primary_target().expect("primary target");
+        let output = admitted_morphotag_output(candidate);
+        write_chat_output_artifact_with_provenance_gate(target, &output)
+            .await
+            .expect("gated write");
 
         let after = std::fs::read_to_string(&host_out).expect("read after");
         assert_eq!(
-            after, candidate,
+            after,
+            output.as_str(),
             "primary output must be replaced when the new %mor content differs"
         );
     }
 
     /// First run (no existing file at the primary output path): the gate
     /// has nothing to compare against and must write through.
+    /// Guards: An absent target receives the exact serialized native admitted output.
+    /// Kind: contract
+    /// Not a type: A native output proof cannot establish whether a previously absent filesystem destination is actually created and written.
+    /// State: The root starts without the requested primary. Native admission supplies the candidate output proof. The real writer creates both requested and staged text copies. No event recorder, registry or model runs.
+    /// Concurrency: The test owns the missing destination and candidate proof, awaits publication, then reads the resulting primary before root cleanup.
     #[tokio::test]
     async fn write_chat_output_artifact_with_provenance_gate_writes_when_target_missing() {
         let root = tempfile::tempdir().expect("tempdir");
         let host_out = root.path().join("host/output/sample.cha");
         // Note: target file does NOT exist yet.
 
-        let filesystem = paths_mode_filesystem(root.path(), &host_out);
-        let location = crate::store::test_support::only_location(&filesystem.inputs);
+        let filesystem = paths_mode_filesystem(root.path(), &host_out, "nested/sample.cha");
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
 
         let candidate = "\
+@UTF8
+@Begin
+@Languages:\teng
+@Participants:\tPAR Participant
+@ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[fc-ba3 morphotag | engine=stanza-1.11.1:eng ; lang=eng | 2026-05-08T02:52:17-04:00]
 *PAR:\thello .
-%mor:\tco|hello .
+%mor:\tintj|hello .
+%gra:\t1|0|ROOT 2|1|PUNCT
+@End
 ";
 
-        let display = DisplayPath::from("nested/sample.cha");
-        let target = ChatOutputTarget::new(&filesystem, &location, &display);
-        write_chat_output_artifact_with_provenance_gate(
-            &target,
-            &PostValidated::for_test(candidate, ReleasedCommand::Morphotag),
+        let outputs = SourceOutputs::plan(
+            &filesystem,
+            &file,
+            ReleasedCommand::Morphotag,
+            &test_options(ReleasedCommand::Morphotag),
         )
-        .await
-        .expect("gated write");
+        .expect("source-bound output plan");
+        let target = outputs.primary_target().expect("primary target");
+        let output = admitted_morphotag_output(candidate);
+        write_chat_output_artifact_with_provenance_gate(target, &output)
+            .await
+            .expect("gated write");
 
         let after = std::fs::read_to_string(&host_out).expect("read after");
-        assert_eq!(after, candidate);
+        assert_eq!(after, output.as_str());
     }
 }

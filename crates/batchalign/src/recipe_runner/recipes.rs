@@ -253,7 +253,10 @@ pub(super) const COMPARE_RECIPE: Recipe = Recipe::new(
             RecipeStagePresence::Required,
             StageExecutionKind::PerWorkUnit,
             FileStage::AnalyzingMorphosyntax,
-            &[RecipeStageId::ReadChatInputs],
+            &[
+                RecipeStageId::ReadChatInputs,
+                RecipeStageId::ReadReferenceInputs,
+            ],
         ),
         RecipeStage::new(
             RecipeStageId::CompareAlign,

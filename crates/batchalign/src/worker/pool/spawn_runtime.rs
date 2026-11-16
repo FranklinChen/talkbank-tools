@@ -38,10 +38,9 @@
 //!
 //! # Why an unbound pool is a real state, and what it may do
 //!
-//! A pool can legitimately be built with no runtime current: two unit tests do
-//! it today, one to exercise capability admission and one as a sync proptest
-//! helper. Neither ever spawns a worker, and neither could: without a reactor
-//! there is nowhere for a child's pipes to register.
+//! A pool can be built outside a runtime for configuration or capability
+//! inspection. It cannot create a worker without a reactor to register that
+//! child's pipes. The unbound state therefore refuses resource creation.
 //!
 //! So "no runtime" is not an error at construction, and construction does not
 //! panic. It is an error only where it actually bites, at the one boundary that
@@ -114,16 +113,39 @@ impl PoolSpawnRuntime {
         config: WorkerConfig,
         idle: super::idle_eviction::IdleWorkers,
     ) -> Result<WorkerHandle, WorkerError> {
+        self.spawn_with_owner(config, idle, ())
+            .await
+            .map(|(worker, ())| worker)
+    }
+
+    /// Keep the capacity owner on the runtime task that creates the resource.
+    /// Abort-on-drop leaves that task responsible for its original reservation
+    /// until cancellation actually destroys its startup future or result.
+    pub(super) async fn spawn_reserved_worker(
+        &self,
+        config: WorkerConfig,
+        idle: super::idle_eviction::IdleWorkers,
+        reservation: super::capacity::ReservedWorkerSlot,
+    ) -> Result<super::capacity::StartedWorker, WorkerError> {
+        let (worker, reservation) = self.spawn_with_owner(config, idle, reservation).await?;
+        Ok(reservation.started(worker))
+    }
+
+    async fn spawn_with_owner<O: Send + 'static>(
+        &self,
+        config: WorkerConfig,
+        idle: super::idle_eviction::IdleWorkers,
+        owner: O,
+    ) -> Result<(WorkerHandle, O), WorkerError> {
         let handle = self
             .0
             .as_ref()
             .ok_or_else(|| Self::unbound("spawn a worker"))?;
         let observation = super::checkout_wait::Observation::current();
-        tokio_util::task::AbortOnDropHandle::new(
-            handle.spawn(observation.scope(async move {
-                WorkerHandle::spawn(config, std::sync::Arc::new(idle)).await
-            })),
-        )
+        tokio_util::task::AbortOnDropHandle::new(handle.spawn(observation.scope(async move {
+            let worker = WorkerHandle::spawn(config, std::sync::Arc::new(idle)).await?;
+            Ok((worker, owner))
+        })))
         .await
         .map_err(|error| {
             WorkerError::SpawnFailed(format!("worker spawn task did not complete: {error}"))
@@ -185,7 +207,7 @@ impl PoolSpawnRuntime {
     /// The choice lives here rather than at the call site so there is one
     /// answer to "where does a retiring worker get dropped", not one per
     /// caller.
-    pub(super) fn retire_worker_handle(&self, worker: WorkerHandle) {
+    pub(super) fn retire_worker_handle(&self, worker: super::capacity::RetiringWorker) {
         match self.0.as_ref() {
             Some(handle) => {
                 handle.spawn(async move {
@@ -204,8 +226,11 @@ mod tests {
     use crate::worker::pool::checkout_wait::{observing_pool_waits, tests::RecordingObserver};
     use std::os::unix::fs::PermissionsExt;
 
-    /// Cancel the actual pool spawn before ready, after its child has
-    /// reported growth. The OS process and its progress must both retire.
+    /// Guards: Cancelling actual startup after model-growth bytes reaps the child and ends the same file's model-loading progress.
+    /// Kind: contract
+    /// Not a type: The owned startup guard prevents publication after cancellation. Kernel process termination and progress bytes crossing the actual child pipe still require the native adapter.
+    /// State: One private executable shell script writes its own PID and actual progress bytes before blocking. Temporary state holds that marker. No model or network is needed.
+    /// Concurrency: A private child and task are owned by this fixture. Observed growth precedes abort and awaited cancellation. Bounded polling observes kernel teardown and the final progress event, without shared environment mutation.
     #[tokio::test]
     async fn model_loading_progress_cancellation_reaps_a_not_ready_worker() {
         let dir = tempfile::tempdir().unwrap();

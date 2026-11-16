@@ -8,12 +8,15 @@
 //! - [`lifecycle`]: Startup helpers, shutdown, Drop, accessors
 
 pub mod config;
+pub(crate) mod control;
 mod ipc;
 mod lifecycle;
 mod progress_preamble;
 pub(crate) use progress_preamble::{ResponseSource, read_skipping_progress};
 mod protocol;
 pub mod spawn;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// The account snapshot [`WorkerRuntimeConfig::provider_accounts`] holds and
 /// the engine setting inside it, re-exported so the runtime's public fields
@@ -186,7 +189,10 @@ impl WorkerHandle {
 
         // The startup wait is a stall window over the worker's progress, not
         // a total limit: see `read_ready_line`.
-        let ready = match Self::read_ready_line(&mut stdout_reader, config.startup_stall).await {
+        let ready = match Self::read_ready_line(&mut stdout_reader, config.startup_stall)
+            .await
+            .and_then(protocol::ReadySignal::into_stdio)
+        {
             Ok(ready) => ready,
             Err(error) => {
                 return Err(
@@ -195,37 +201,11 @@ impl WorkerHandle {
             }
         };
 
-        if !ready.ready {
-            return Err(Self::finalize_startup_failure(
-                &mut child,
-                &mut stderr_reader,
-                WorkerError::ReadyParseFailed(
-                    "worker emitted ready line with ready=false".to_string(),
-                ),
-            )
-            .await);
-        }
-
-        match ready.transport {
-            protocol::ReadyTransport::Stdio => {}
-            protocol::ReadyTransport::Tcp { .. } => {
-                return Err(Self::finalize_startup_failure(
-                    &mut child,
-                    &mut stderr_reader,
-                    WorkerError::ReadyParseFailed(
-                        "a worker spawned for stdio reported a TCP ready line".to_string(),
-                    ),
-                )
-                .await);
-            }
-        }
-
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| WorkerError::SpawnFailed("child stdin not captured".into()))?;
-        let pid = WorkerPid(ready.pid);
-        let runtime = ready.runtime;
+        let (pid, runtime) = ready.into_parts();
         let startup_ms = spawn_start.elapsed().as_millis() as u64;
 
         info!(
@@ -320,7 +300,9 @@ impl WorkerHandle {
             crate::worker::LoadingStall::new(crate::api::PositiveSeconds::literal::<30>()),
         )
         .await
-        .expect("stub must emit a valid ready line as its first stdout line");
+        .and_then(protocol::ReadySignal::into_stdio)
+        .expect("stub must emit a valid stdio ready line as its first stdout line");
+        let (pid, runtime) = ready.into_parts();
 
         #[allow(clippy::expect_used)]
         let stdin = child.stdin.take().expect("stub stdin captured");
@@ -342,8 +324,8 @@ impl WorkerHandle {
         Self {
             config: WorkerConfig::for_tests(),
             child,
-            pid: WorkerPid(ready.pid),
-            runtime: ready.runtime,
+            pid,
+            runtime,
             stdin,
             stdout: stdout_reader,
             last_activity: tokio::time::Instant::now(),
@@ -355,263 +337,4 @@ impl WorkerHandle {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::spawn::build_worker_command;
-    use super::{WorkerConfig, WorkerRuntimeConfig};
-    use crate::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
-    use crate::worker::provider_credentials::HkAsrCredentialSources;
-    use crate::worker::{InferTask, WorkerProfile};
-
-    fn command_args(config: &WorkerConfig) -> Vec<String> {
-        build_worker_command(config)
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    fn command_envs(config: &WorkerConfig) -> BTreeMap<String, String> {
-        build_worker_command(config)
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect()
-    }
-
-    #[test]
-    fn worker_command_forwards_runtime_force_cpu() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            lang: WorkerLanguage::from(LanguageCode3::eng()),
-            num_speakers: NumSpeakers(1),
-            engine_overrides: String::new(),
-            test_echo: false,
-            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
-            verbose: 0,
-            runtime: WorkerRuntimeConfig {
-                force_cpu: true,
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        });
-
-        assert!(args.iter().any(|arg| arg == "--force-cpu"));
-    }
-
-    #[test]
-    fn worker_command_forwards_runtime_allow_mps() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            lang: WorkerLanguage::from(LanguageCode3::eng()),
-            num_speakers: NumSpeakers(1),
-            engine_overrides: String::new(),
-            test_echo: false,
-            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
-            verbose: 0,
-            runtime: WorkerRuntimeConfig {
-                allow_mps: true,
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        });
-
-        assert!(args.iter().any(|arg| arg == "--allow-mps"));
-        assert!(!args.iter().any(|arg| arg == "--force-cpu"));
-    }
-
-    #[test]
-    fn worker_command_uses_task_arg_for_task_bootstrap() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Stanza,
-            task: Some(InferTask::Morphosyntax),
-            ..WorkerConfig::for_tests()
-        });
-
-        assert!(
-            args.windows(2)
-                .any(|window| window[0] == "--task" && window[1] == "morphosyntax")
-        );
-        assert!(!args.iter().any(|arg| arg == "--profile"));
-    }
-
-    #[test]
-    fn worker_command_forwards_gpu_thread_pool_size() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            runtime: WorkerRuntimeConfig {
-                gpu_thread_pool_size: 7,
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        });
-
-        assert!(
-            args.windows(2)
-                .any(|window| { window[0] == "--gpu-thread-pool-size" && window[1] == "7" })
-        );
-        assert!(
-            args.windows(2)
-                .any(|window| { window[0] == "--serving" && window[1] == "concurrent" })
-        );
-    }
-
-    /// Wire format: a stdio worker is told which process supervises it, so it
-    /// exits with the server that launched it.
-    #[test]
-    fn worker_command_names_this_process_as_the_supervisor() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            ..WorkerConfig::for_tests()
-        });
-        let own_pid = std::process::id().to_string();
-
-        assert!(
-            args.windows(2)
-                .any(|window| window[0] == "--supervisor-pid" && window[1] == own_pid)
-        );
-    }
-
-    /// Wire format: a forced-CPU GPU worker is told to serve one request at a
-    /// time, with one serving thread, whatever the configured pool size. The
-    /// pool routes it by exclusive checkout from the same decision.
-    #[test]
-    fn worker_command_tells_a_forced_cpu_gpu_worker_to_serve_sequentially() {
-        let args = command_args(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            runtime: WorkerRuntimeConfig {
-                force_cpu: true,
-                gpu_thread_pool_size: 7,
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        });
-
-        assert!(
-            args.windows(2)
-                .any(|window| { window[0] == "--serving" && window[1] == "sequential" })
-        );
-        assert!(
-            args.windows(2)
-                .any(|window| { window[0] == "--gpu-thread-pool-size" && window[1] == "1" })
-        );
-    }
-
-    #[test]
-    fn worker_command_injects_resolved_revai_key() {
-        let envs = command_envs(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            lang: WorkerLanguage::from(LanguageCode3::eng()),
-            num_speakers: NumSpeakers(1),
-            engine_overrides: String::new(),
-            test_echo: false,
-            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
-            verbose: 0,
-            runtime: WorkerRuntimeConfig {
-                provider_accounts:
-                    crate::worker::provider_credentials::ProviderAccounts::with_revai_api_key(
-                        crate::revai::RevAiApiKey::parse("  injected-key  "),
-                    ),
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        });
-
-        assert_eq!(
-            envs.get("BATCHALIGN_REV_API_KEY").map(String::as_str),
-            Some("injected-key")
-        );
-    }
-
-    #[test]
-    fn worker_provider_envs_only_inject_selected_hk_asr_backend() {
-        let envs = super::spawn::worker_provider_envs(&WorkerConfig {
-            python_path: "python3".to_string(),
-            profile: WorkerProfile::Gpu,
-            lang: WorkerLanguage::from(LanguageCode3::yue()),
-            num_speakers: NumSpeakers(1),
-            engine_overrides: r#"{"asr":"tencent"}"#.to_string(),
-            test_echo: false,
-            startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
-            verbose: 0,
-            runtime: WorkerRuntimeConfig {
-                provider_accounts: crate::worker::provider_credentials::ProviderAccounts::read(
-                    &HkAsrCredentialSources::from_sources(
-                        Some("id"),
-                        Some("key"),
-                        Some("ap-guangzhou"),
-                        Some("bucket"),
-                        None,
-                        None,
-                        None,
-                        Some("/tmp/unused-home"),
-                    ),
-                ),
-                ..WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        })
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-
-        assert_eq!(
-            envs.get("BATCHALIGN_TENCENT_ID").map(String::as_str),
-            Some("id")
-        );
-        assert_eq!(
-            envs.get("BATCHALIGN_TENCENT_BUCKET").map(String::as_str),
-            Some("bucket")
-        );
-    }
-
-    /// Verify that a `ProgressV2` JSON line deserializes correctly into the
-    /// `WorkerResponse` enum.  This is the wire format emitted by Python
-    /// workers during long-running V2 tasks.
-    #[test]
-    fn deserialize_progress_v2_response() {
-        let json = r#"{"op": "progress_v2", "event": {"scope": "request", "request_id": "req-001", "stage": "stanza_processing", "progress": {"completed": 42, "total": 100}}}"#;
-        let resp: super::protocol::WorkerResponse = serde_json::from_str(json).unwrap();
-        match resp {
-            super::protocol::WorkerResponse::ProgressV2 {
-                event: crate::types::worker_v2::ProgressEventV2::Request(request),
-            } => {
-                assert_eq!(&**request.request_id(), "req-001");
-                assert_eq!(
-                    (request.progress().completed(), request.progress().total()),
-                    (42, 100)
-                );
-                assert_eq!(request.stage(), "stanza_processing");
-            }
-            other => panic!("Expected ProgressV2, got {other:?}"),
-        }
-    }
-
-    /// Verify backward compatibility: a response stream with zero progress
-    /// events still deserializes the final `ExecuteV2` response correctly.
-    ///
-    /// The fixture used to claim success while carrying no result, which the
-    /// structural `ExecuteResponseV2` (2026-08-21) now refuses at parse time;
-    /// the pairing was incidental to this test's purpose (op-level routing),
-    /// so the fixture became a legal error response instead.
-    #[test]
-    fn deserialize_execute_v2_without_progress() {
-        let json = r#"{"op": "execute_v2", "response": {"request_id": "req-002", "outcome": {"kind": "error", "code": "runtime_failure", "message": "boom"}, "elapsed_s": 1.5}}"#;
-        let resp: super::protocol::WorkerResponse = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            resp,
-            super::protocol::WorkerResponse::ExecuteV2 { .. }
-        ));
-    }
-}
+mod tests;

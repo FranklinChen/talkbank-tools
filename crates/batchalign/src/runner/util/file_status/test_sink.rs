@@ -193,9 +193,13 @@ impl RunnerEventSink for RecordingSink {
 
     async fn record_job_worker_count(&self, _worker_count: usize) {}
 
-    async fn requeue_job_after_memory_gate(&self, _retry_at: MachineTime) {}
-
-    async fn bump_deferred_work_units(&self) {}
+    async fn requeue_job_after_memory_gate(
+        &self,
+        _retry_at: MachineTime,
+    ) -> crate::store::MemoryRequeueOutcome {
+        // This recording sink has no queue in which to admit a retry.
+        crate::store::MemoryRequeueOutcome::NoLongerRunnable
+    }
 
     async fn bump_memory_gate_aborts(&self) {}
 }

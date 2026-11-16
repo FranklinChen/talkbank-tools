@@ -1,12 +1,11 @@
 # Dispatch and Execution
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** {{git-dates:page}}
 
 How a job moves from the CLI to a running command: the four CLI
 dispatch targets, the workflow families that organize commands, the
-per-command lifecycle, and the recipe-driven execution kernel that's
-gradually replacing per-command dispatch functions.
+per-command lifecycle, and source-bound consuming execution for compare.
 
 ## CLI Dispatch: Four Targets
 
@@ -113,8 +112,8 @@ flowchart TD
 | Class | Commands | Shape |
 |---|---|---|
 | Generation | `transcribe`, `transcribe_s` | Builds `ChatFile` from ASR output via `build_chat()` |
-| Per-file processing | `align`, `morphotag` | Parse, mutate, serialize |
-| Cross-file batch | `utseg`, `coref` | Pool utterances across files in one GPU batch |
+| Per-file processing | `align`, `morphotag`, `utseg` | Parse, mutate, serialize |
+| Cross-file batch | `coref` | Retain the prepared source population in one gateway batch |
 | Per-file, per-utterance | `translate` | One file per gateway call, one worker request per utterance, paced and retried by the engine's provider policy |
 | Reference projection | `compare` | Main transcript + gold companion → projected views from typed compare bundle |
 | Composite | `benchmark` (= `transcribe` + `compare`) | Chains existing workflows without reimplementing |
@@ -202,22 +201,17 @@ deleted: the file's error is the report.
 
 ## Batched Inference
 
-Text-only commands (`morphotag`, `utseg`, `translate`, `coref`) use
-`dispatch_batched_infer()` to pool utterances across multiple files
-into a single worker `execute_v2` request backed by one prepared-text
-artifact. Improves throughput and model reuse compared to per-file
-dispatch without re-expanding the Python control plane. `compare` is
-separate now because it needs both a main transcript and a gold
-companion per file.
+Text commands share prepared-source ownership and command-specific gateways.
+Morphotag and Utseg schedule individual files under the runner's admitted job
+worker count. Translation reads, routes and publishes one file at a time.
+Coreference retains one contiguous input batch and its publication owners.
+Compare carries its main and reference through its own consuming phase graph.
 
-The morphosyntax orchestrator uses three phases for cache interaction:
-
-1. `collect_payloads()`: extract per-utterance payloads with positions.
-2. `inject_from_cache()`: inject cached `%mor`/`%gra` strings.
-3. `inject_results()`: inject freshly inferred results.
-
-All cache logic is in Rust. Python workers receive only structured NLP
-payloads and return raw model output.
+The Rust pipelines own parsing, payload preparation, command-specific reuse,
+worker requests, result application and post-validation. Morphotag reuses
+complete unchanged morphology through its incremental policy. Its source and
+prior are read once by the file-preparation producer. Python workers receive
+structured NLP payloads and return model output.
 
 ## Multi-Step Pipelines
 
@@ -235,7 +229,7 @@ at the workflow level by chaining `transcribe` then `compare`, while
 `compare` itself remains a reference-projection workflow with gold-
 and main-shaped materializers.
 
-## Command Model + Planning + Execution Kernel
+## Command model, planning and consuming execution
 
 Three modules centralize how commands are defined, planned, and
 executed. They replace the old pattern where each command wired its
@@ -244,21 +238,18 @@ constants scattered across macro-generated files.
 
 ```mermaid
 flowchart TD
-    CLI["CLI input\n(batchalign3 compare ...)"]
-    Store["Job submitted\n(RunnerJobSnapshot)"]
-    CmdModel["command_model/\ncommand_spec(command)"]
-    Plan["planning/\nbuild_job_plan(snapshot)"]
-    Exec["execution/\nExecutionKernel + StageExecutor"]
-    Legacy["runner/dispatch/\n(legacy dispatch)"]
-    Output["CHAT output"]
+    CLI["CLI input<br/>(batchalign3 compare ...)"]
+    Store["Job submitted<br/>(RunnerJobSnapshot)"]
+    CmdModel["command_model/<br/>command_spec(command)"]
+    Plan["planning/<br/>build_job_plan(snapshot)"]
+    Exec["execution/<br/>Consuming compare phases"]
+    Output["Required CHAT and CSV artifacts"]
 
     CLI --> Store
     Store --> Plan
     Plan --> CmdModel
     Plan -->|JobPlan| Exec
-    Plan -->|JobPlan| Legacy
     Exec --> Output
-    Legacy --> Output
 ```
 
 ### `command_model/`: authoritative command registry
@@ -315,78 +306,176 @@ planning, and I/O mode resolution.
 
 | Type | Purpose |
 |---|---|
-| `JobPlan` | `CommandSpec` + `Vec<PlannedWorkUnit>` + `Vec<PlannedArtifactSet>` + `IoMode` |
-| `IoMode` | `Paths` (shared filesystem) or `Content` (staged under job directory) |
-| `PlannedWorkUnit` | One input file with its resolved paths |
+| `JobPlan` | Catalog entry, typed work units and planned artifact sets |
+| `PlannedWorkUnit` | Typed text, audio, reference-paired or media-analysis work |
 | `PlannedArtifactSet` | Output artifacts for one source file |
 
 ```rust,ignore
-pub fn build_job_plan(snapshot: RunnerJobSnapshot) -> Result<JobPlan, PlanError>
+pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, PlanningError>
 ```
 
 Calls `command_model::command_spec()` internally and delegates
 work-unit enumeration to `recipe_runner::planner`.
 
-### `execution/`: recipe-driven execution kernel
+### Consuming execution
 
-`crates/batchalign/src/execution/`. Replaces per-command dispatch
-functions with a pluggable stage executor that walks recipe stages in
-order.
+`crates/batchalign/src/execution/` owns compare's concrete phase graph and
+several text-command executors. A `PreparedComparison` carries the admitted
+source/output pair and actual execution context. Reading produces main bytes
+and an admitted reference. Morphology consumes that state into a judged main
+and retained reference. Comparison consumes both documents into judged output
+and computed metrics. Publication consumes the output owner into a written
+receipt, and completion returns its consolidated row through the retained run
+sink.
 
-```rust,ignore
-pub struct ExecutionKernel<E: StageExecutor> { ... }
-
-pub trait StageExecutor {
-    async fn run_stage(
-        &self,
-        stage: RecipeStageId,
-        state: &mut ExecutionState,
-        plan: &JobPlan,
-        ctx: &ExecutionContext,
-    ) -> Result<(), ExecutionError>;
-}
-
-pub trait WorkerGateway {
-    async fn morphotag(...) -> Result<...>;
-    async fn utseg(...) -> Result<...>;
-    async fn translate(...) -> Result<...>;
-    // ... one method per NLP task
-}
-```
-
-Module map:
+`CompareMorphology` exposes exactly the worker effect the compare graph needs.
+The live pooled gateway implements that capability alongside the other text
+operations. Compare's recording double implements the same narrow capability.
+The [compare developer page](../../batchalign/developer/commands/compare.md)
+contains the detailed ownership diagram and external-boundary contracts.
 
 | File | Purpose |
-|---|---|
-| `kernel.rs` | `ExecutionKernel`: runs stages, manages state transitions |
-| `morphotag/` | Morphotag execution: input prep, window policy, progress, writeback |
-| `coref.rs` | Coreference execution stage |
-| `translate.rs` | Translation execution stage |
-| `utseg.rs` | Utterance segmentation execution stage |
-| `text_io.rs` | CHAT file read/write for text-based commands |
-| `worker_gateway.rs` | `WorkerGateway` trait + live implementation over the worker pool |
+| --- | --- |
+| `kernel.rs` | Compare planning, per-file dispatch and consolidated output |
+| `kernel/comparison.rs` | Consuming read, morphology, comparison and publication phases |
+| `kernel/outputs.rs` | Required artifact writes and run-bound completion receipt |
+| `morphotag/` | Prepared morphology policy, per-file work and job progress |
+| `coref.rs` | Coreference execution |
+| `translate.rs` | Translation execution |
+| `utseg.rs` | Utterance segmentation execution |
+| `text_io/` | Producer-owned preparation, adaptive file queue and consuming publication |
+| `worker_gateway.rs` | Command-specific worker capabilities and their shared pooled implementation |
 
-### Compare: first migrated command
+### Worker capabilities
 
-```rust,ignore
-pub fn dispatch_compare_job(job, plan: JobPlan) -> Result<...> {
-    let kernel = ExecutionKernel::new(CompareStageExecutor::new(...));
-    kernel.run(plan).await
-}
+Each executor receives its command's worker interface. The pooled adapter
+implements all five interfaces and retains the shared pool and cache.
+
+| Capability | Accepted work |
+| --- | --- |
+| `CompareMorphology` | Main text, MWT dictionary and cancellation after reference admission |
+| `MorphotagGateway` | One main text, optional prior text, owned options and progress port |
+| `UtsegGateway` | One source and its `ServableUtsegRoute` |
+| `TranslateGateway` | One source and its `TranslationRoute` |
+| `CorefGateway` | The source batch for coreference |
+
+```mermaid
+flowchart TD
+    dispatch["Admitted job dispatch"] --> capability["Select the command's worker capability"]
+    capability --> file["One current source<br/>Morphology, segmentation, translation or compare"]
+    capability --> batch["Source batch<br/>Coreference"]
+    file --> inputs["Carry command inputs<br/>Admitted route, prior or reference, owned options"]
+    inputs --> invoke["Invoke the available operation"]
+    batch --> invoke
+    invoke --> result["Judged outputs or per-file errors"]
+    result --> publish["Source-bound publication and completion"]
 ```
 
-`CompareStageExecutor` recipe stages: `PlanWorkUnits` →
-`ReadChatInputs` → `ReadReferenceInputs` (resolve and parse
-`*.gold.cha` companions) → `Morphosyntax` (morphotag the main
-transcripts) → `CompareAlign` (gold-anchored comparison) →
-`MaterializeOutputs` (write output CHAT + CSV).
+`UtsegGateway::utseg_file` accepts one `TextBatchFileInput`. Its live adapter
+borrows that file as a one-element slice for the internal segmentation pipeline.
+The dispatcher holds the file directly through the call. Morphotag's file task
+moves its owned options into its gateway call.
+
+Recording doubles implement the same narrow interfaces. Captured requests
+retain source names alongside routes, or the source population for a coreference
+batch. These observations check actual scheduling and route propagation through
+the filesystem adapters. Language-to-model selection and registry admission
+retain their constructor-policy contracts.
+
+### Producer-owned file preparation
+
+Recorded preflight produces one non-cloneable `DispatchInputs`. Its private
+fields keep the accepted files attached to their immutable snapshot and
+run-bound host context. Preflight classifies the accepted population once.
+The router borrows that capability during worker selection, then consumes its
+CHAT-only `ChatDispatchInputs` projection into text preparation. Fixtures enter
+through the same preparation edge with files derived from their own snapshot.
+
+Each command admits a distinct preparation state. Morphology retains its actual
+`MorphotagRuntimeOptions`, including the submitted MWT dictionary and prior
+policy. `TranslationText` retains the selected translation options.
+`SegmentationText` and `CoreferenceText` bind their matching command and option
+family. The dispatcher accepts its own state and receives the prepared options
+through that owner. Coreference exposes batch reading. Morphology and
+segmentation expose concurrent file scheduling.
+
+The selected catalog output policy is resolved once for the queue. Each
+accepted file's layout is derived before reading or inference. File owners
+carry the actual pending input, shared immutable run facts and that completed
+layout computation. The former generic batched-text plan and its synthesized
+fallback morphology settings retire. Morphology option translation lives with
+its executor in `execution/morphotag/options.rs`.
+
+```mermaid
+flowchart TD
+    claim["Claimed run and source snapshot"] --> observe["Observe preflight inputs once"]
+    observe --> record["Consume observations and record rejections"]
+    record --> admitted["DispatchInputs owns accepted files and run context"]
+    admitted --> chat["Consume CHAT-only ChatDispatchInputs"]
+    chat --> prepare["Consume into PreparedTextJob and derive each output layout"]
+    prepare --> morph["MorphotagRuntimeOptions retains policy and prior preparation"]
+    prepare --> segment["SegmentationText"]
+    prepare --> translation["TranslationText retains selected options"]
+    prepare --> coreference["CoreferenceText"]
+    segment --> capacity["Use worker count granted by host-memory admission"]
+    morph --> capacity
+    capacity --> read["Move one file into a bounded read and inference slot"]
+    read --> ready["ReadTextFile owns source bytes, prior and publication authority"]
+    read --> refusal["Record input failure on its own source"]
+    ready --> invoke["Command-specific gateway"]
+    invoke --> bind["Admit exact result correspondence once"]
+    bind --> write["Consume source-owned output and required writes"]
+    write --> complete["Complete through the retained run sink"]
+    translation --> serial["Read and publish one source at a time"]
+    serial --> ready
+    coreference --> batch["Coreference reads one source batch"]
+    batch --> invoke
+```
+
+Morphotag and Utseg use one bounded task queue. The queue retains at most the
+admitted number of active file operations and reads the next source only when
+there is room. Reads are sequentially admitted while earlier file tasks can
+continue. Every task retains its loaded input until publication completes.
+The runner retains the job's memory lease while dispatch is active. The queue
+joins submitted file tasks before returning. Cancellation stops further file
+preparation.
+
+Utseg uses the memory-admitted worker count directly. Host sizing reads CPU
+count, effective configuration and memory tier from one `HostSnapshot`.
+Operator limits, file count, command category and memory admission determine
+the grant. The independent four-file fallback and second config lookup are
+removed. Scheduling allows smaller or larger grants through the same path.
+
+The loader distinguishes an absent prior from a failed read of a declared
+prior. Morphotag reports `Failed to read declared prior input` and refuses that
+file when the read fails, preserving the opportunity to repair the path or
+bytes. A readable prior travels with its current source into inference.
+
+Gateway responses still cross a runtime correspondence boundary. A singular
+operation must return exactly its own source. A coreference batch must return
+each prepared source exactly once, in any order. Whole-batch correspondence
+admission precedes every batch write. Missing, repeated or foreign results
+fail the originating prepared sources. Publication consumes private bound
+results, projects the carried output plan and completes through its original
+sink. Source lookup, artifact lookup and layout re-admission retire from these
+four text writeback paths.
+
+### Compare dispatch
+
+`dispatch_compare_job(job, host, gateway, mwt)` builds the immutable plan and
+admits each main file with its catalog-derived output pair. Companion reference
+selection tries `*.gold.cha` first and uses `template.gold.cha` when the
+companion is absent. Reference admission completes before the morphology
+capability becomes callable. Successful output requires CHAT and CSV writes
+before its row reaches the consolidated report.
 
 ### Migration status
 
 | Command | Dispatch model | Notes |
 |---|---|---|
-| `compare` | **`execution/`** kernel | First migration, fully recipe-driven |
-| All others | Legacy `runner/dispatch/` | Migrate incrementally |
+| `compare` | `execution/` | Source-bound consuming phases |
+| `morphotag`, `coref`, `translate`, `utseg` | `execution/` | Named text executors |
+| Audio and media families | `runner/dispatch/` | Family-specific processing and writeback |
 
 New commands with multi-stage workflows (stages that depend on prior
 stage output) should use the execution kernel. Simple single-dispatch

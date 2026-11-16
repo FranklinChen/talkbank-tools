@@ -81,8 +81,9 @@ canonical source of these
 values; an architectural-invariant test in `types/runtime.rs`
 prevents reintroduction of parallel constants.
 
-The Mode-A fallback is further **engine-aware** for the IO profile,
-via `memory_gate::engine_aware_startup_reservation_mb`. The IO
+The Mode-A fallback is **engine-aware** and computed once for each group
+from its actual host and selected engines,
+via the group-owned `memory_gate::StartupReservation`. The IO
 baseline (`tier.io_startup_mb`: 2 GB Small/Medium, 4 GB Large/Fleet)
 is correct for engines that are thin API clients (Google Translate
 via `googletrans`) but under-reserves for engines that load large
@@ -104,9 +105,12 @@ is toward over-permissive; ColdStart bypass implements the bias.
 
 The eviction-side counterpart: `worker/pool/idle_eviction.rs` runs as
 a pre-pass in `run_health_check` and evicts idle workers
-largest-RSS first when `available_mb` falls at or below
-`EVICTION_PRESSURE_THRESHOLD_MB = 4096` MB (= 2× the admission
-floor). There is no `idle_timeout_s` knob, eviction is purely
+largest-RSS first when `available_mb` falls below
+twice the current host tier's admission floor, yielding 2048/4096/8192/8192 MB
+for Small/Medium/Large/Fleet. Selection starts when available memory is strictly
+below that target. Allocation-bound observations retain the actual queue source
+through one kernel RSS refresh and consuming selection. Current queue membership
+is admitted again only at the shutdown effect because it can change during sampling. There is no `idle_timeout_s` knob, eviction is purely
 pressure-driven. A request queued for host memory also asks for room
 directly (see **Queued waits** below), retiring idle workers one at a time
 through the same teardown (`idle_eviction::retire_sampled`).
@@ -439,9 +443,11 @@ stateDiagram-v2
     AdmittedLoad --> ConfirmedLoad: Confirm load and settle reservation
     ConfirmedLoad --> Loaded: Record the confirmed load
     AdmittedLoad --> [*]: Load fails and lease drops
-    Loaded --> RunPermit: Bind prepared request and acquire required lease
-    RunPermit --> Loaded: Request ends and request lease drops
-    Loaded --> [*]: Worker exits and model lease drops
+    Loaded --> RunPermit: Same transport admits carried request and acquires its lease
+    RunPermit --> PendingInvocation: Consume submission authority with executor slot
+    PendingInvocation --> PendingInvocation: Caller leaves or identical retry rejoins
+    PendingInvocation --> Loaded: Terminal reply or stream retirement releases request lease
+    Loaded --> [*]: Last model-proof owner ends and lease drops
 ```
 
 - `LoadAdmission::admit` is the only route to an `AdmittedLoad`, and it takes
@@ -451,10 +457,16 @@ stateDiagram-v2
   `ConfirmedLoad`, so no route
   records a load without its lease, and a load that fails drops the
   `AdmittedLoad` and its lease with it.
-- `Loaded::run` is the only route to the `RunPermit` every transport's
-  execute takes: it pairs the prepared request with its own load and owns any
-  request-scoped lease, including a coreference batch or FA workspace, for the
-  request's life.
+- `LoadPreparation::prepare_on` asks the sealed actual transport to confirm the
+  request's carried TaskLoad. Its private execution transition owns the
+  loaded-model proof and any coreference batch or FA workspace lease. An
+  independently obtained Loaded cannot be paired with another request through
+  a public run constructor. Submission consumes the RunPermit.
+- Shared pending work retains request memory, executor capacity and job tracking
+  after its caller stops waiting. Its terminal reply or stream retirement
+  releases that owner. An identical retry can rejoin detached pending work
+  before further memory admission. Sequential cancellation retires the checked
+  out worker through its existing in-flight ownership.
 - A model lease names its worker's PID from the start, so it is reclaimed
   when the worker dies (and is never mistaken for a pre-spawn intent).
 - A test-echo pool's workers build nothing and take no lease
@@ -672,7 +684,7 @@ ordering or resource-admission behavior.
 | `crates/batchalign/src/worker/pool/cpu_gate.rs` | Layer 0 admission: `getloadavg(3)` vs `available_parallelism()` |
 | `crates/batchalign/src/worker/pool/memory_gate.rs` | Layer 0 admission: `available − reservation > host_min_free_mb_threshold_for_tier(tier)` (Warm); ColdStart bypasses. Tier-scaled floor: 1024/2048/4096/4096 by tier |
 | `crates/batchalign/src/worker/pool/rss_observer.rs` | Per-process RSS sampling for the Mode B admission estimate |
-| `crates/batchalign/src/worker/pool/idle_eviction.rs` | Pressure-driven idle-worker eviction (largest-RSS first when `available <= 4096 MB`), and `IdleWorkers`, the reclaim a queued host-memory request asks for room |
+| `crates/batchalign/src/worker/pool/idle_eviction.rs` | Pressure-driven idle-worker eviction (largest-RSS first when `available < 2 × current tier floor`), and `IdleWorkers`, the reclaim a queued host-memory request asks for room |
 | `crates/batchalign/src/host_memory.rs` | Host-wide ledger, lease kinds including model-request workspace, queued waits (`queue_for_lease`), settling a resident model's lease, job execution leases, ML test lock; TTL-cached `read_system_memory` shared by every memory poll |
 | `crates/batchalign/src/worker/residency.rs` | The residency table (`Residency::of`), the worker baseline, the activation margin |
 | `crates/batchalign/src/worker/pool/task_load.rs` | The lease order as states: `LoadAdmission`, `AdmittedLoad`, `Loaded`, `RunPermit` |

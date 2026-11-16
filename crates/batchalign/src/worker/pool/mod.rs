@@ -7,36 +7,33 @@
 //!
 //! Each key maps to a `WorkerGroup` containing up to `max_workers_per_key`
 //! workers, spawned lazily on demand. Background tasks handle health checking
-//! and idle timeouts.
+//! and memory-pressure eviction.
 //!
 //! ## Concurrency model
 //!
-//! Workers are *owned values* in a `VecDeque`, not wrapped in `Arc<Mutex>`.
-//! Availability is tracked by a `tokio::sync::Semaphore` (one permit per idle
-//! worker). Callers *check out* a worker via `checkout()`, which acquires a
-//! semaphore permit (async wait if all busy) then pops from the idle queue.
-//! The returned `CheckedOutWorker` is an RAII guard that returns the worker
-//! to the pool on drop.
-//!
-//! This eliminates the previous `Arc<tokio::sync::Mutex<WorkerHandle>>` pattern
-//! where a tokio mutex was held for 10-300 seconds during dispatch.
+//! Idle queues hold complete native-worker and capacity owners. Read-only views
+//! expose their actual contents. Checkout registers change notifications before
+//! observing availability, then owns a departure from its original queue.
+//! Consuming TrackedCheckout::run binds the actual exchange result to return.
+//! Dropping unfinished work retires its handle and original slot.
 //!
 //! ## Module layout
 //!
 //! | File | Responsibility |
 //! |------|----------------|
 //! | `mod.rs` | Types, pool struct, construction, accessors, GPU worker creation |
-//! | `checkout.rs` | `CheckedOutWorker` RAII guard |
+//! | `checkout.rs` | Consuming exclusive exchange ownership |
 //! | `dispatch.rs` | Checkout loop, batch infer, V2 execute, TCP routing |
 //! | `discovery.rs` | Registry-based TCP worker discovery |
 //! | `pre_scale.rs` | Eager per-job worker pre-spawning |
 //! | `shutdown.rs` | Graceful shutdown and `Drop` cleanup |
-//! | `lifecycle.rs` | Background health checking, idle timeout, spawn helpers |
+//! | `lifecycle.rs` | Background health checking, pressure eviction, spawn helpers |
 //! | `execute_v2.rs` | V2 request key resolution helpers |
 //! | `status.rs` | Status query methods (has_idle_workers, worker_count, etc.) |
 //! | `shared_gpu/` | Shared concurrent GPU worker wrappers (stdio, TCP, reader) |
 //! | `reaper.rs` | Orphaned worker process reaping |
 
+mod capacity;
 mod checkout;
 pub(crate) mod checkout_wait;
 mod cpu_gate;
@@ -52,7 +49,6 @@ pub(crate) mod job_tracker;
 mod lifecycle;
 pub(crate) mod memory_gate;
 mod model_plan;
-mod permit;
 mod pre_scale;
 pub(crate) mod reaper;
 mod rss_observer;
@@ -61,6 +57,7 @@ mod shutdown;
 mod spawn_runtime;
 pub mod status;
 mod task_load;
+mod worker_plan;
 pub(crate) use dispatch::dispatch_prepared;
 pub(crate) use fa_preparation::FaProbeCompletion;
 pub use fa_preparation::{
@@ -78,9 +75,9 @@ pub use task_load::{
     TaskLoad,
 };
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use crate::api::ReleasedCommand;
@@ -91,7 +88,7 @@ use crate::types::engines::EngineOverrides;
 use crate::types::worker_v2::TaskTimeoutOverrides;
 use crate::worker::{WorkerBootstrapMode, WorkerCapabilities, WorkerProfile, WorkerTarget};
 use batchalign_types::worker::InferTask;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
@@ -115,7 +112,8 @@ use crate::worker::tcp_handle::TcpWorkerHandle;
 /// `HashMap` containers with short (microsecond) critical sections. If a
 /// panic occurs during a push/pop, the data structure may have been partially
 /// mutated, but it is still structurally valid -- the worst case is a
-/// missing or double-counted worker, which the health checker will reconcile.
+/// interrupted operation. The queue still owns every worker it contains, and
+/// each worker retains its original capacity until retirement.
 /// Recovering from poison keeps the server alive instead of cascading the
 /// panic into every subsequent request.
 pub(crate) fn lock_recovered<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -173,25 +171,6 @@ impl EngineSelection {
             | CommandOptions::Convert(_) => {}
         }
         overrides
-    }
-
-    /// The engine identity of a text or IO worker, from one request's task.
-    ///
-    /// Both routes to such a worker end here: the command route
-    /// ([`WorkerKey::from_command_options`], from the job's options) and the
-    /// V2 request route (`execute_v2_worker_key`, from the request). They used
-    /// to be two derivations that agreed only when the shared overrides were
-    /// empty: the command route started from the WHOLE `--engine-overrides`
-    /// map, the request route from what the request carried, so a translate
-    /// job given an ASR extra, or any morphotag job given any override, spawned
-    /// one worker at its capability probe and dispatched to a second one.
-    ///
-    /// The identity is a pure function of the task's own keys
-    /// ([`Self::task_keys`]). GPU workers are not keyed here: a GPU worker
-    /// hosts every task of its profile, so its identity is its job's whole
-    /// model plan ([`Self::for_job_plan`]).
-    pub(super) fn derive(task: InferTask, selected: EngineOverrides) -> Self {
-        Self::from_overrides(Self::task_keys(task, selected))
     }
 
     /// The identity of a worker serving a job's GPU model plan.
@@ -419,25 +398,6 @@ impl WorkerKey {
         }
     }
 
-    /// A text or IO command's worker, from its options. GPU commands go
-    /// through [`Self::for_command`], which keys them by their model plan.
-    fn from_command_options(
-        requirement: crate::command_model::InferenceRequirement,
-        language: WorkerLanguage,
-        options: &CommandOptions,
-        bootstrap_mode: WorkerBootstrapMode,
-    ) -> Self {
-        let target = WorkerTarget::for_inference_with_mode(requirement, bootstrap_mode);
-        let task = requirement.task();
-        let engine_selection =
-            EngineSelection::derive(task, EngineSelection::overrides_for_command(options));
-        Self {
-            target,
-            language,
-            engine_selection,
-        }
-    }
-
     /// The worker a job's command is probed on, pre-scaled for and checked
     /// for: its plan's worker for a GPU command, its options' worker for a
     /// text or IO command. The one place a command-level key is derived, so
@@ -449,10 +409,9 @@ impl WorkerKey {
         gpu: &GpuModelPlan,
         bootstrap_mode: WorkerBootstrapMode,
     ) -> Self {
-        match GpuTask::of(requirement.task()) {
-            Some(task) => GpuRoute::worker_key(gpu, task, language, bootstrap_mode),
-            None => Self::from_command_options(requirement, language, options, bootstrap_mode),
-        }
+        worker_plan::CommandWorkerPlan::new(requirement, language, options, gpu, bootstrap_mode)
+            .key()
+            .clone()
     }
 
     pub(super) fn from_registry_json(
@@ -489,6 +448,7 @@ const DEFAULT_MAX_WORKERS_PER_KEY: PerProfile<usize> = PerProfile {
 /// use a concrete constant rather than a sysinfo probe so behavior is
 /// deterministic across machines.
 const DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS: usize = 32;
+const _: () = assert!(DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS > 0);
 
 /// Configuration for the worker pool.
 #[derive(Debug, Clone)]
@@ -606,53 +566,18 @@ impl PoolConfig {
 ///
 /// Each group independently tracks its own pool of workers. Workers are
 /// spawned lazily on first demand and capped at `max_workers_per_key`.
-/// The group uses a split concurrency model: a semaphore for async
-/// waiting and a mutex for the actual worker queue, so the mutex is
-/// never held across an `.await` point.
+/// Queue contents are the sole availability authority. Register a change
+/// notification before observing the queue, and keep its read-only mutex view
+/// out of every `.await` point. Capacity travels with the actual worker.
 pub(super) struct WorkerGroup {
-    /// Owned worker handles that are currently idle (not checked out).
-    ///
-    /// Protected by a `std::sync::Mutex` (not `tokio::sync::Mutex`)
-    /// because it is held only for the duration of a `push_back` or
-    /// `pop_front` -- microseconds, never across an `.await`. This avoids
-    /// the overhead of a tokio-aware mutex and is safe because the
-    /// critical section cannot yield.
-    pub(super) idle: std::sync::Mutex<VecDeque<WorkerHandle>>,
+    /// Read-only consumers observe the actual queued owners. Only capacity's
+    /// consuming publication and departure transitions mutate these queues.
+    idle: capacity::IdleQueue<WorkerHandle>,
+    tcp_workers: capacity::IdleQueue<TcpWorkerHandle>,
 
-    /// Semaphore with one permit per idle worker.
-    ///
-    /// `checkout()` acquires a permit (blocking asynchronously if all
-    /// workers are busy), then pops from `idle`. When a `CheckedOutWorker`
-    /// is dropped, it pushes the worker back into `idle` and adds a
-    /// permit, waking the next waiter. Permits are managed manually
-    /// (`.forget()` after acquire, `.add_permits(1)` on return) rather
-    /// than via RAII `SemaphorePermit` guards.
-    pub(super) available: Semaphore,
-
-    /// TCP worker handles discovered from the registry. These are
-    /// persistent daemons that survive server restarts.
-    pub(super) tcp_workers: std::sync::Mutex<VecDeque<TcpWorkerHandle>>,
-
-    /// Semaphore with one permit per idle TCP worker.
-    pub(super) tcp_available: Semaphore,
-
-    /// Total number of live workers in this group: idle + checked-out
-    /// (both stdio and TCP).
-    ///
-    /// `AtomicUsize` so that `worker_count()` and spawn-cap checks can
-    /// read it without acquiring any mutex. Incremented in
-    /// `try_claim_spawn_slot()` (via `compare_exchange`) before the
-    /// worker is spawned, and decremented when a worker is removed
-    /// (idle timeout, health failure, or `CheckedOutWorker::take()`).
-    pub(super) total: AtomicUsize,
-
-    /// Workers counted in `total` that are not in either idle queue right
-    /// now: checked out, being spawned, or drained for a health check. Moved
-    /// only by [`AwayFromQueue`] guards, so it cannot drift: every increment
-    /// is matched by the guard's drop. It is what lets a saturated checkout
-    /// tell congestion (every counted worker is held by something) from
-    /// broken accounting (`total` counts workers nothing holds).
-    pub(super) away: AtomicUsize,
+    /// Count of actual reserved and live slot owners for this group. The
+    /// capacity producer owns mutation, and observers read the carried count.
+    total: capacity::SlotAccounting,
 
     /// Serialize worker bootstrap for one key.
     ///
@@ -667,14 +592,9 @@ pub(super) struct WorkerGroup {
     /// groups share the same `Notify` instance.
     pub(super) worker_returned: Arc<tokio::sync::Notify>,
 
-    /// Clone of [`WorkerPool::spawn_permits`] so worker-exit paths
-    /// (`CheckedOutWorker::take`, eviction, the health-check reaper,
-    /// shutdown drain) can refund global-cap admission slots without
-    /// reaching back to the owning [`WorkerPool`]. All groups share
-    /// the same `Semaphore` instance, it represents the pool-wide
-    /// `max_total_workers` budget, not per-key capacity. Released
-    /// once per `group.total.fetch_sub(1)` increment.
-    pub(super) spawn_permits: Arc<Semaphore>,
+    /// Original pool-wide budget used by the capacity producer. Observers can
+    /// inspect availability. Slot owners retain and refund actual permits.
+    spawn_permits: capacity::GlobalCapacity,
 
     /// Worker profile for this group's key. Recovered from
     /// `WorkerTarget::profile_kind()` at construction; stable for the
@@ -682,49 +602,31 @@ pub(super) struct WorkerGroup {
     /// the per-profile slot in `PoolConfig::max_workers_per_key`.
     pub(super) profile: WorkerProfile,
 
-    /// Typed engine selection for this group's key. Stored on the group so admission control can
-    /// consult the engine selection without re-locating the key. Used
-    /// by the engine-aware memory reservation
-    /// ([`super::memory_gate::engine_aware_startup_reservation_mb`])
-    /// to inflate the per-spawn reservation when the translate engine
-    /// is a heavy local-model backend (NLLB, SeamlessM4T).
-    pub(super) engine_selection: EngineSelection,
+    /// Completed reservation derived once from this group's engines and host.
+    startup_reservation: memory_gate::StartupReservation,
 }
 
 impl WorkerGroup {
-    pub(super) fn new(
-        worker_returned: Arc<tokio::sync::Notify>,
-        spawn_permits: Arc<Semaphore>,
+    fn new(
+        spawn_permits: capacity::GlobalCapacity,
         profile: WorkerProfile,
         engine_selection: EngineSelection,
     ) -> Self {
+        let startup_reservation = memory_gate::StartupReservation::for_worker(
+            profile,
+            engine_selection.overrides(),
+            spawn_permits.host(),
+        );
         Self {
-            idle: std::sync::Mutex::new(VecDeque::new()),
-            available: Semaphore::new(0),
-            tcp_workers: std::sync::Mutex::new(VecDeque::new()),
-            tcp_available: Semaphore::new(0),
-            total: AtomicUsize::new(0),
-            away: AtomicUsize::new(0),
+            startup_reservation,
+            idle: capacity::IdleQueue::new(),
+            tcp_workers: capacity::IdleQueue::new(),
+            total: capacity::SlotAccounting::default(),
             bootstrap: AsyncMutex::new(()),
-            worker_returned,
+            worker_returned: spawn_permits.notifier(),
             spawn_permits,
             profile,
-            engine_selection,
         }
-    }
-
-    /// Record that `n` workers were removed from this group: decrement
-    /// `total` and refund `n` global-cap permits in lockstep, so
-    /// steady-state holds (`sum(group.total) + permits_available ==
-    /// max_total_workers`). Single source of truth for the
-    /// removal-side accounting; called by every eviction path
-    /// (time-based, pressure-driven, health-check).
-    pub(super) fn record_worker_removed(&self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        self.total.fetch_sub(n, Ordering::Relaxed);
-        permit::SpawnPermitGuard::release_n(&self.spawn_permits, n);
     }
 
     /// True when this group has no workers (live, idle, or in-flight
@@ -738,62 +640,7 @@ impl WorkerGroup {
     /// so a stale ColdStart classification cannot cause incorrect
     /// admission.
     pub(super) fn is_empty(&self) -> bool {
-        self.total.load(Ordering::Relaxed) == 0
-    }
-
-    /// How many workers `total` counts that no idle queue holds and no
-    /// [`AwayFromQueue`] guard accounts for. Zero in a consistent pool; a
-    /// transition can make it briefly positive (a worker between a queue and
-    /// its guard), so a caller acts only on a value that persists.
-    pub(super) fn unaccounted(&self) -> usize {
-        let held = lock_recovered(&self.idle).len()
-            + lock_recovered(&self.tcp_workers).len()
-            + self.away.load(Ordering::Relaxed);
-        self.total.load(Ordering::Relaxed).saturating_sub(held)
-    }
-}
-
-/// `n` workers of one group that are counted in its `total` but are not in
-/// an idle queue while this guard lives: checked out, spawning, or drained
-/// for a health check. The only mover of [`WorkerGroup::away`].
-pub(super) struct AwayFromQueue {
-    group: Arc<WorkerGroup>,
-    n: usize,
-}
-
-impl AwayFromQueue {
-    /// Account for `n` workers of `group` leaving its queues.
-    pub(super) fn new(group: &Arc<WorkerGroup>, n: usize) -> Self {
-        group.away.fetch_add(n, Ordering::Relaxed);
-        Self {
-            group: Arc::clone(group),
-            n,
-        }
-    }
-
-    /// The `n` workers this guard accounts for leave the group for good.
-    ///
-    /// They are removed from `total` (and their global permits refunded)
-    /// before the guard stops counting them in `away`, so no instant shows
-    /// them as counted workers that nothing holds, and none shows the guard
-    /// still counting workers `total` no longer has (which would mask a real
-    /// loss elsewhere in the group). The only way a guarded worker is
-    /// removed, so removal and release cannot be done in the wrong order or
-    /// with an await between them.
-    pub(super) fn retire(self) {
-        self.group.record_worker_removed(self.n);
-    }
-}
-
-impl Drop for AwayFromQueue {
-    fn drop(&mut self) {
-        self.group.away.fetch_sub(self.n, Ordering::Relaxed);
-    }
-}
-
-impl std::fmt::Debug for AwayFromQueue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwayFromQueue").field("n", &self.n).finish()
+        self.total.count() == 0
     }
 }
 
@@ -870,11 +717,12 @@ pub struct WorkerPool {
     /// Shared GPU workers discovered from registry (TCP transport).
     pub(super) gpu_tcp_workers:
         Arc<tokio::sync::Mutex<HashMap<WorkerKey, Arc<shared_gpu::SharedGpuTcpWorker>>>>,
+    registry_admissions: crate::worker::registry::RegistryAdmissions,
     /// Distinct content-addressed Python runtimes observed since server start.
     /// This history remains available while a sequential worker is checked out
     /// and after a crash, unlike an instantaneous idle-worker listing.
     observed_worker_runtimes: Arc<crate::worker::runtime_identity::ObservedWorkerRuntimes>,
-    /// Pulsed on every `CheckedOutWorker::drop`. Parks saturated
+    /// Pulsed by actual queue publication and original capacity release. Parks saturated
     /// checkouts that have no live worker for their key and no idle
     /// worker elsewhere to evict; wakes them to retry spawn + eviction
     /// when any worker anywhere in the pool becomes available.
@@ -907,15 +755,11 @@ pub struct WorkerPool {
     pub(crate) job_tracker: job_tracker::JobWorkerTracker,
     /// Monotonic counters for every worker-admission rejection reason.
     pub(super) rejection_counters: WorkerRejectionCounters,
-    /// Global-cap admission semaphore. Sized at construction time to
-    /// `max_total_workers`. Each live worker (across all groups) holds
-    /// exactly one permit for its lifetime; spawn attempts park on
-    /// `acquire()` rather than the legacy `worker_returned`
-    /// `notify_waiters()` re-probe storm. FIFO-fair: a single permit
-    /// release wakes exactly one waiter, eliminating the thundering
-    /// herd documented in BUG-028. See `pool/permit.rs` for the RAII
-    /// guard that wraps an [`tokio::sync::OwnedSemaphorePermit`].
-    pub(super) spawn_permits: Arc<tokio::sync::Semaphore>,
+    /// Pool-wide capacity and its global-refund event. The producer carries
+    /// the original permit through speculative admission and worker lifetime.
+    /// SpawnOutcome retains the actual deferral cause for selecting global
+    /// refunds, worker changes or queue availability. See pool/capacity.rs.
+    spawn_permits: capacity::GlobalCapacity,
     /// The runtime every worker process this pool creates is bound to.
     ///
     /// Captured at construction rather than taken from whichever runtime is
@@ -1034,17 +878,19 @@ impl WorkerPool {
         // Sized once at construction; never grows. Each successful
         // worker spawn consumes one permit (held in the worker's RAII
         // guard for its lifetime); each worker exit releases one.
-        let spawn_permits = Arc::new(tokio::sync::Semaphore::new(effective_cap));
+        let spawn_permits =
+            capacity::GlobalCapacity::for_host(effective_cap, config.runtime.host.clone());
 
         Self {
             config,
             groups: Arc::new(std::sync::Mutex::new(HashMap::new())),
             gpu_workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             gpu_tcp_workers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            registry_admissions: crate::worker::registry::RegistryAdmissions::default(),
             observed_worker_runtimes: Arc::new(
                 crate::worker::runtime_identity::ObservedWorkerRuntimes::default(),
             ),
-            worker_returned: Arc::new(tokio::sync::Notify::new()),
+            worker_returned: spawn_permits.notifier(),
             cancel: CancellationToken::new(),
             first_admitted_capabilities: std::sync::OnceLock::new(),
             admitted_capabilities: std::sync::Mutex::new(HashMap::new()),
@@ -1074,7 +920,7 @@ impl WorkerPool {
         {
             let groups = lock_recovered(&self.groups);
             for group in groups.values() {
-                let n = group.total.load(Ordering::Relaxed);
+                let n = group.total.count();
                 active_total += n;
                 match group.profile {
                     WorkerProfile::Gpu => by_profile.gpu += n,
@@ -1540,6 +1386,12 @@ mod capability_admission_tests {
 
     /// A refused report is not log-only: it is the key's recorded state,
     /// returned for `/health`, until the key reports again and is admitted.
+    /// Guards: the keyed capability store publishes the exact refusal and replaces it only after an admitted report.
+    /// Kind: contract
+    /// Not a type: actual report bytes select admission and the observable replacement policy remains a mutable store effect.
+    /// State: a local empty declared pool exercises its real in-memory report
+    /// and registry stores. No worker, model, process or filesystem is created.
+    /// Concurrency: this test owns every key and store, with no shared mutation.
     #[test]
     fn a_refused_report_is_returned_with_its_key_and_reason_until_replaced() {
         let pool = WorkerPool::new(PoolConfig::for_tests());
@@ -1589,6 +1441,12 @@ mod capability_admission_tests {
     /// map, which the pool read as "no Stanza", so morphotag refused every
     /// language without a reason. The failure now reaches the registry
     /// lookup, and so every morphotag refusal, with the worker's reason.
+    /// Guards: the actual admitted worker key and Stanza failure reason reach registry lookup unchanged.
+    /// Kind: contract
+    /// Not a type: externally supplied Stanza failure text must survive the actual registry publication and lookup policy.
+    /// State: a local empty declared pool exercises its real in-memory report
+    /// and registry stores. No worker, model, process or filesystem is created.
+    /// Concurrency: this test owns every key and store, with no shared mutation.
     #[test]
     fn a_failed_stanza_report_is_the_registrys_stated_reason() {
         let pool = WorkerPool::new(PoolConfig::for_tests());
@@ -1624,41 +1482,17 @@ mod capability_admission_tests {
 mod default_pool_config_tests {
     use super::*;
 
-    /// `PoolConfig::for_tests()` must produce concrete numeric values rather
-    /// than a sentinel that routes to a sysinfo probe at runtime
-    /// production fills the field from `EffectiveConfig` and tests must
-    /// be deterministic across machines.
-    #[test]
-    fn pool_default_has_concrete_max_total_workers() {
-        let cfg = PoolConfig::for_tests();
-        assert!(
-            cfg.max_total_workers > 0,
-            "Default::default() must use a concrete value, not the legacy 0-sentinel"
-        );
-    }
-
-    #[test]
-    fn pool_default_effective_cap_is_deterministic() {
-        let a = PoolConfig::for_tests().effective_max_total_workers();
-        let b = PoolConfig::for_tests().effective_max_total_workers();
-        assert_eq!(
-            a, b,
-            "effective_max_total_workers must not depend on transient sysinfo state"
-        );
-        assert!(a > 0, "effective cap must be a real concrete value");
-    }
-
     use super::PerProfile;
     use crate::api::{LanguageCode3, WorkerLanguage};
     use crate::types::engines::{AsrEngineName, EngineOverrides};
     use crate::types::options::{AlignOptions, CommandOptions};
     use crate::worker::{InferTask, WorkerTarget};
 
-    /// A GPU command's worker key comes from its job's model plan, never from
-    /// its options: shared overrides naming other engines and extras cannot
-    /// reach it. (Until 2026-09-22 an align job's stray ASR extra entered its
-    /// probe key; until 2026-10-21 the probe keyed from the options at all,
-    /// and an align job with worker-hosted UTR used two GPU workers.)
+    /// Guards: A command's model plan determines its GPU key despite conflicting engine options and unrelated provider extras.
+    /// Kind: policy
+    /// Not a type: The route's private key prevents retargeting an admitted plan. Choosing the command plan over crowded incoming options remains producer policy exercised at command admission.
+    /// State: Pure typed command options and a model plan require no worker, host probe or model loading.
+    /// Concurrency: none
     #[test]
     fn a_gpu_commands_key_comes_from_its_plan_not_its_options() {
         let mut options = AlignOptions::default();
@@ -1692,85 +1526,11 @@ mod default_pool_config_tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn metrics_snapshot_reflects_per_profile_active_counts() {
-        let pool = WorkerPool::new(PoolConfig {
-            max_workers_per_key: PerProfile::uniform(4),
-            max_total_workers: 16,
-            // Disable the CPU-loadavg gate so the test isolates
-            // permit / per-key-cap / metrics behavior. CI runners
-            // are CPU-saturated by parallel cargo-test workers and
-            // the gate would otherwise reject every claim with
-            // CpuSaturated before the assertions run.
-            ..PoolConfig::for_tests()
-        });
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-
-        // Ground-truth shape on a fresh pool: zero workers, zero rejections.
-        let m0 = pool.metrics_snapshot();
-        assert_eq!(m0.active_workers_total, 0);
-        assert_eq!(
-            m0.active_workers_by_profile,
-            PerProfile {
-                gpu: 0,
-                stanza: 0,
-                io: 0
-            }
-        );
-        assert_eq!(m0.spawn_rejections_total, 0);
-        assert_eq!(m0.memory_gate_rejections_total, 0);
-        assert_eq!(
-            m0.permits_available, 16,
-            "spawn_permits semaphore must be sized to max_total_workers at startup"
-        );
-        assert_eq!(m0.permit_rejections_total, 0);
-
-        // Force a stanza-keyed group total to 3 and a gpu-keyed group
-        // total to 2 (simulating spawned workers without going through
-        // the real Python path).
-        let stanza_target = WorkerTarget::infer_task(InferTask::Morphosyntax);
-        let stanza_key = WorkerKey::without_engine_selection(stanza_target, lang.clone());
-        let stanza_group = pool.get_or_create_group(&stanza_key);
-        stanza_group.total.store(3, Ordering::Relaxed);
-        let gpu_target = WorkerTarget::infer_task(InferTask::Asr);
-        let gpu_key = WorkerKey::without_engine_selection(gpu_target, lang.clone());
-        let gpu_group = pool.get_or_create_group(&gpu_key);
-        gpu_group.total.store(2, Ordering::Relaxed);
-
-        let m1 = pool.metrics_snapshot();
-        assert_eq!(m1.active_workers_total, 5);
-        assert_eq!(m1.active_workers_by_profile.stanza, 3);
-        assert_eq!(m1.active_workers_by_profile.gpu, 2);
-        assert_eq!(m1.active_workers_by_profile.io, 0);
-
-        // Drive a global-cap rejection. Post-refactor the global cap is
-        // enforced by the spawn_permits semaphore, not by summing
-        // group.total values, so we must drain the semaphore directly.
-        // Probing a fresh io-keyed group then hits PermitRejected and
-        // increments permit_rejections_total. The legacy
-        // spawn_rejections_total now counts only per-key cap rejections
-        // (none fired in this scenario, so it stays at 0).
-        let _drained = pool
-            .spawn_permits
-            .clone()
-            .try_acquire_many_owned(16)
-            .expect("drain all 16 global permits");
-        let io_target = WorkerTarget::infer_task(InferTask::Translate);
-        let io_key = WorkerKey::without_engine_selection(io_target, lang);
-        let io_group = pool.get_or_create_group(&io_key);
-        let _ = pool.try_claim_spawn_slot(&io_group);
-
-        let m2 = pool.metrics_snapshot();
-        assert_eq!(
-            m2.permit_rejections_total, 1,
-            "global-cap rejection must increment permit_rejections_total exactly once"
-        );
-        assert_eq!(
-            m2.spawn_rejections_total, 0,
-            "no per-key cap was hit in this scenario, so spawn_rejections_total stays at 0"
-        );
-    }
-
+    /// Guards: An actual failed executable spawn releases original capacity, and releasing a held startup slot wakes its own-group waiter to retry without waiting for a report interval.
+    /// Kind: boundary
+    /// Not a type: Private slot ownership excludes forged refunds and owns rollback. The operating system can still refuse executable creation, and that real error must unwind through the normal spawn producer without retaining capacity.
+    /// State: An isolated pool uses the declared test host and an intentionally missing executable path. The native process adapter must report the spawn failure. No subprocess succeeds and no model, socket or inference server is launched.
+    /// Concurrency: One current-thread runtime owns the pool and observations. The failed spawn is awaited. One explicit poll establishes the blocked checkout before releasing its held slot. All capacity remains local, with no shared mutable environment or elapsed-time assumptions.
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_failure_releases_permit() {
         // Force WorkerHandle::spawn to fail by pointing python_path
@@ -1779,12 +1539,10 @@ mod default_pool_config_tests {
         // groups don't see the slot as permanently consumed.
         let pool = WorkerPool::new(PoolConfig {
             max_total_workers: 4,
-            max_workers_per_key: PerProfile::uniform(8),
+            max_workers_per_key: PerProfile::uniform(1),
             python_path: "/nonexistent/python-binary-that-will-fail".to_string(),
             test_echo: false,
-            // Disable Layer 0 so the test exercises the spawn-failure
-            // permit-refund path and is not gated out on saturated
-            // CI runners.
+            // Use the shared declared test-host admission policy.
             ..PoolConfig::for_tests()
         });
         let baseline = pool.metrics_snapshot().permits_available;
@@ -1802,270 +1560,25 @@ mod default_pool_config_tests {
             "spawn failure must refund the global permit (baseline {baseline}, after {after})",
         );
         assert_eq!(
-            group.total.load(Ordering::Relaxed),
+            group.total.count(),
             0,
             "spawn failure must roll back the per-key total"
         );
-    }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_refunds_permits_for_drained_idle_workers() {
-        // Plant fake worker counts on a fresh pool, then call the
-        // shutdown drain path indirectly via direct manipulation of
-        // group.total and the matching permit accounting. This is the
-        // unit-test analogue of "a normal shutdown returns
-        // permits_available to max_total_workers."
-        let pool = WorkerPool::new(PoolConfig {
-            max_total_workers: 8,
-            max_workers_per_key: PerProfile::uniform(4),
-            ..PoolConfig::for_tests()
-        });
-        // Acquire 5 permits to simulate 5 live workers across two
-        // groups; track them in the group totals as well.
-        let drained = pool
-            .spawn_permits
-            .clone()
-            .try_acquire_many_owned(5)
-            .expect("drain 5");
-        drained.forget();
-        assert_eq!(pool.metrics_snapshot().permits_available, 3);
-
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-        let key = WorkerKey::without_engine_selection(
-            WorkerTarget::infer_task(InferTask::Morphosyntax),
-            lang,
-        );
-        let group = pool.get_or_create_group(&key);
-        group.total.store(5, Ordering::Relaxed);
-
-        // Mirror what shutdown.rs's drain branch does: fetch_sub +
-        // release_n. After this, both group.total and permits_available
-        // should reflect 0 live workers.
-        let drained_count = group.total.swap(0, Ordering::Relaxed);
-        super::permit::SpawnPermitGuard::release_n(&group.spawn_permits, drained_count);
-        assert_eq!(
-            pool.metrics_snapshot().permits_available,
-            8,
-            "shutdown drain must restore permits_available to max_total_workers"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn admission_rejects_when_no_permit_available() {
-        let pool = WorkerPool::new(PoolConfig {
-            max_workers_per_key: PerProfile::uniform(8),
-            max_total_workers: 1,
-            // Disable Layer 0: see the parallel test fixture above.
-            ..PoolConfig::for_tests()
-        });
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-        let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
-        let key = WorkerKey::without_engine_selection(target, lang);
-        let group = pool.get_or_create_group(&key);
-
-        // Drain the only permit out-of-band to simulate "global cap
-        // already saturated by other workers."
-        let _hold = pool
-            .spawn_permits
-            .clone()
-            .try_acquire_owned()
-            .expect("first permit");
-
-        let result = pool.try_claim_spawn_slot(&group);
-        assert!(result.is_err(), "expected admission rejection");
-        let m = pool.metrics_snapshot();
-        assert_eq!(
-            m.permit_rejections_total, 1,
-            "permit-pool exhaustion must increment permit_rejections_total"
-        );
-        assert_eq!(
-            group.total.load(Ordering::Relaxed),
-            0,
-            "rejected admission must not bump group.total"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn admission_releases_permit_on_per_key_cap_failure() {
-        let pool = WorkerPool::new(PoolConfig {
-            max_workers_per_key: PerProfile::uniform(1),
-            max_total_workers: 8,
-            // Disable Layer 0: see the parallel test fixture above.
-            ..PoolConfig::for_tests()
-        });
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-        let target = WorkerTarget::infer_task(InferTask::Morphosyntax);
-        let key = WorkerKey::without_engine_selection(target, lang);
-        let group = pool.get_or_create_group(&key);
-
-        let permits_before = pool.metrics_snapshot().permits_available;
-        // First claim succeeds. We immediately drop the returned guard
-        // so the permit refunds back to the pool, what we want to
-        // exercise next is that a per-key cap rejection ALSO refunds.
-        let first = pool.try_claim_spawn_slot(&group).expect("first claim");
-        drop(first);
-        assert_eq!(
-            pool.metrics_snapshot().permits_available,
-            permits_before,
-            "dropping the success guard must refund the permit"
-        );
-
-        // group.total is now 1, which equals max_workers_per_key. The
-        // next probe must hit the per-key cap. The speculatively-acquired
-        // permit must be released by the auto-drop.
-        let result = pool.try_claim_spawn_slot(&group);
+        // A released startup slot wakes an own-group waiter immediately.
+        // Its retry reaches the same real executable error and refunds again.
+        let held = pool
+            .try_claim_spawn_slot(&group)
+            .expect("hold the group's one slot");
+        let mut waiting = Box::pin(pool.checkout(&key));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(held);
+        let retry = waiting.await;
         assert!(
-            result.is_err(),
-            "per-key cap must reject when group.total == max"
+            retry.is_err(),
+            "the resumed checkout reaches the missing executable"
         );
-        assert_eq!(
-            pool.metrics_snapshot().permits_available,
-            permits_before,
-            "per-key rejection must release the speculatively-acquired permit"
-        );
-        // Per-key rejection bumps the legacy spawn_rejections_total
-        // counter (post-refactor it counts ONLY per-key rejections).
-        assert_eq!(pool.metrics_snapshot().spawn_rejections_total, 1);
-    }
-
-    // ------------------------------------------------------------------
-    // Property test: arbitrary admission/exit/shutdown op sequences must
-    // preserve the BUG-028 invariant
-    //   sum(group.total) + permits_available == max_total_workers.
-    // The harness drives the same primitives the production paths use
-    // (try_claim_spawn_slot, fetch_sub + add_permits) so any accounting
-    // bug at any C5/C6 site surfaces here under a small composite trace.
-    // ------------------------------------------------------------------
-
-    use proptest::prelude::*;
-
-    const PROPTEST_MAX_TOTAL: usize = 6;
-    const PROPTEST_NUM_KEYS: usize = 3;
-
-    #[derive(Debug, Clone)]
-    enum LifecycleOp {
-        SpawnAttempt(usize),
-        WorkerExit(usize),
-        ShutdownGroup(usize),
-    }
-
-    fn lifecycle_op_strategy() -> impl Strategy<Value = LifecycleOp> {
-        prop_oneof![
-            (0..PROPTEST_NUM_KEYS).prop_map(LifecycleOp::SpawnAttempt),
-            (0..PROPTEST_NUM_KEYS).prop_map(LifecycleOp::WorkerExit),
-            (0..PROPTEST_NUM_KEYS).prop_map(LifecycleOp::ShutdownGroup),
-        ]
-    }
-
-    fn proptest_groups(pool: &WorkerPool) -> Vec<Arc<WorkerGroup>> {
-        let lang = WorkerLanguage::from(LanguageCode3::eng());
-        let tasks = [
-            InferTask::Morphosyntax,
-            InferTask::Translate,
-            InferTask::Coref,
-        ];
-        tasks
-            .iter()
-            .map(|task| {
-                let target = WorkerTarget::infer_task(*task);
-                let key = WorkerKey::without_engine_selection(target, lang.clone());
-                pool.get_or_create_group(&key)
-            })
-            .collect()
-    }
-
-    fn run_lifecycle_ops(ops: &[LifecycleOp]) -> Result<(), TestCaseError> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rt");
-        rt.block_on(async {
-            let pool = WorkerPool::new(PoolConfig {
-                max_total_workers: PROPTEST_MAX_TOTAL,
-                max_workers_per_key: PerProfile::uniform(PROPTEST_MAX_TOTAL),
-                test_echo: true,
-                ..PoolConfig::for_tests()
-            });
-            let groups = proptest_groups(&pool);
-            let mut bookkept = [0usize; PROPTEST_NUM_KEYS];
-
-            for (i, op) in ops.iter().enumerate() {
-                match *op {
-                    LifecycleOp::SpawnAttempt(g) => {
-                        if let Ok((_, guard)) = pool.try_claim_spawn_slot(&groups[g]) {
-                            guard.forget();
-                            bookkept[g] += 1;
-                        }
-                    }
-                    LifecycleOp::WorkerExit(g) => {
-                        if bookkept[g] > 0 {
-                            bookkept[g] -= 1;
-                            groups[g].total.fetch_sub(1, Ordering::Relaxed);
-                            pool.spawn_permits.add_permits(1);
-                        }
-                    }
-                    LifecycleOp::ShutdownGroup(g) => {
-                        if bookkept[g] > 0 {
-                            let n = bookkept[g];
-                            bookkept[g] = 0;
-                            groups[g].total.fetch_sub(n, Ordering::Relaxed);
-                            permit::SpawnPermitGuard::release_n(&groups[g].spawn_permits, n);
-                        }
-                    }
-                }
-
-                let active: usize = groups.iter().map(|g| g.total.load(Ordering::Relaxed)).sum();
-                let permits = pool.metrics_snapshot().permits_available;
-                let total_bookkept: usize = bookkept.iter().sum();
-                prop_assert_eq!(
-                    active,
-                    total_bookkept,
-                    "after op #{}: pool's group.total sum ({}) must equal harness ({}); op={:?}",
-                    i,
-                    active,
-                    total_bookkept,
-                    op,
-                );
-                prop_assert_eq!(
-                    active + permits,
-                    PROPTEST_MAX_TOTAL,
-                    "after op #{}: invariant violated, active={} permits={} max={}; op={:?}",
-                    i,
-                    active,
-                    permits,
-                    PROPTEST_MAX_TOTAL,
-                    op,
-                );
-            }
-
-            // Final cleanup: drain any remaining workers and confirm
-            // permits return to PROPTEST_MAX_TOTAL.
-            for g in 0..PROPTEST_NUM_KEYS {
-                let n = bookkept[g];
-                if n > 0 {
-                    bookkept[g] = 0;
-                    groups[g].total.fetch_sub(n, Ordering::Relaxed);
-                    permit::SpawnPermitGuard::release_n(&groups[g].spawn_permits, n);
-                }
-            }
-            let m = pool.metrics_snapshot();
-            prop_assert_eq!(m.active_workers_total, 0);
-            prop_assert_eq!(m.permits_available, PROPTEST_MAX_TOTAL);
-            Ok(())
-        })
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 64,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn invariant_holds_under_arbitrary_op_sequence(
-            ops in proptest::collection::vec(lifecycle_op_strategy(), 0..64)
-        ) {
-            run_lifecycle_ops(&ops)?;
-        }
+        assert_eq!(group.total.count(), 0);
+        assert_eq!(pool.spawn_permits.available_permits(), baseline);
     }
 }

@@ -20,9 +20,13 @@ mod tests {
 
     use super::super::tests::{make_job, test_config};
     use super::*;
-    use crate::api::ReleasedCommand;
 
     /// Runner snapshots include only unfinished files and clone stable config.
+    /// Guards: Runner projection keeps stable dispatch metadata and excludes the completed file.
+    /// Kind: contract
+    /// Not a type: A claimed run cannot establish which files the actor snapshot projects after a later file-completion event.
+    /// State: A private registry actor observes actual transitions and projections. SQLite, files and workers contribute no effect. File completion uses the actual admitted binding before snapshot inspection.
+    /// Concurrency: The test owns its actor and broadcast channel. Ordered awaited requests specify the interleaving without shared global state.
     #[tokio::test]
     async fn runner_snapshot_filters_terminal_files() {
         let (tx, _rx) = broadcast::channel(BROADCAST_CAPACITY);
@@ -33,19 +37,27 @@ mod tests {
             std::sync::Arc::new(crate::clock::SystemClock),
         );
 
-        let mut job = make_job(
+        let job = make_job(
             "j1",
-            ReleasedCommand::Morphotag,
+            crate::store::queries::tests::FixtureCommand::Morphotag,
             vec!["a.cha".into(), "b.cha".into()],
         );
-        if let Some(status) = job.execution.file_statuses.get_mut("a.cha") {
-            status.phase = crate::store::FilePhase::Done {
-                exclusions: Vec::new(),
-                started_at: None,
-                finished_at: Some(crate::unix_time(5.0)),
-            };
-        }
         store.submit(job).await.unwrap();
+        let id = JobId::from("j1");
+        let claim = crate::store::queries::tests::claim_registry_runner(&store, &id).await;
+        store
+            .mark_file_done(
+                claim.binding(),
+                "a.cha",
+                store.event_time(),
+                crate::store::FileCompletion::Clean(crate::store::CompletedFileOutput {
+                    exclusions: Vec::new(),
+                    filename: "a.cha".into(),
+                    content_type: crate::api::ContentType::Chat,
+                    stamp: crate::api::FileStampOutcome::Unrecorded,
+                }),
+            )
+            .await;
 
         let snapshot = store
             .runner_snapshot(&JobId::from("j1"))
@@ -53,7 +65,14 @@ mod tests {
             .expect("runner snapshot");
 
         assert_eq!(snapshot.dispatch.command.as_ref(), "morphotag");
-        assert_eq!(snapshot.pending_files.len(), 1);
-        assert_eq!(snapshot.pending_files[0].filename().as_ref(), "b.cha");
+        assert_eq!(
+            snapshot
+                .pending_files
+                .iter()
+                .map(|file| file.filename().as_ref())
+                .collect::<Vec<_>>(),
+            ["b.cha"]
+        );
+        store.release_run(claim).await;
     }
 }

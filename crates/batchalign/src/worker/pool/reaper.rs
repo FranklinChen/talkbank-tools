@@ -25,6 +25,8 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Directory name under the configured batchalign3 state directory.
+use crate::worker::process_id::NativePid;
+
 const PID_DIR_NAME: &str = "worker-pids";
 
 fn pid_dir_from_layout(layout: &crate::config::RuntimeLayout) -> PathBuf {
@@ -124,13 +126,13 @@ pub(crate) fn reap_orphaned_workers() -> usize {
                 debug!(worker_pid, "Removing stale PID file (worker already dead)");
                 let _ = fs::remove_file(&path);
             }
-            PidFileStatus::Orphan { server_pid } => {
+            PidFileStatus::Orphan { server_pid, worker } => {
                 info!(
                     worker_pid,
-                    dead_server_pid = server_pid,
+                    dead_server_pid = server_pid.get(),
                     "Reaping orphaned worker (parent server is dead)"
                 );
-                kill_orphan(worker_pid);
+                kill_orphan(worker);
                 let _ = fs::remove_file(&path);
                 reaped += 1;
             }
@@ -142,7 +144,7 @@ pub(crate) fn reap_orphaned_workers() -> usize {
                 // Another live server owns this worker, leave it alone.
                 debug!(
                     worker_pid,
-                    other_server_pid = server_pid,
+                    other_server_pid = server_pid.get(),
                     "PID file belongs to another live server, skipping"
                 );
             }
@@ -165,11 +167,14 @@ enum PidFileStatus {
     /// Worker process is dead. File is stale.
     Stale,
     /// Worker is alive but its server is dead, orphan.
-    Orphan { server_pid: u32 },
+    Orphan {
+        server_pid: NativePid,
+        worker: NativePid,
+    },
     /// Worker belongs to the current server process.
     OwnedByUs,
     /// Worker belongs to another server that is still alive.
-    OwnedByOtherLiveServer { server_pid: u32 },
+    OwnedByOtherLiveServer { server_pid: NativePid },
     /// PID file could not be parsed.
     Unreadable,
 }
@@ -187,100 +192,75 @@ fn classify_pid_file(path: &Path, worker_pid: u32, current_server_pid: u32) -> P
     };
 
     // Is the worker still alive?
-    if !process_alive(worker_pid) {
+    let Some(worker) = NativePid::admit(worker_pid) else {
+        return PidFileStatus::Unreadable;
+    };
+    if !worker.is_alive() {
         return PidFileStatus::Stale;
     }
 
     // Worker is alive. Is its server still alive?
-    if server_pid == current_server_pid {
+    if server_pid.get() == current_server_pid {
         return PidFileStatus::OwnedByUs;
     }
 
-    if process_alive(server_pid) {
+    if server_pid.is_alive() {
         return PidFileStatus::OwnedByOtherLiveServer { server_pid };
     }
 
-    PidFileStatus::Orphan { server_pid }
+    PidFileStatus::Orphan { server_pid, worker }
 }
 
 /// Parse `server_pid=12345` from the PID file content.
-fn parse_server_pid(content: &str) -> Option<u32> {
+fn parse_server_pid(content: &str) -> Option<NativePid> {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("server_pid=") {
-            return value.trim().parse::<u32>().ok();
+            return value.trim().parse::<u32>().ok().and_then(NativePid::admit);
         }
     }
     None
 }
 
-/// Check if a process is alive via `kill(pid, 0)`. Single home for
-/// the existence check used by the orphan reaper, the cancel-driven
-/// worker shutdown (`job_tracker::signal_workers`), `WorkerHandle::Drop`,
-/// and integration tests.
-#[cfg(unix)]
+/// Legacy raw-ID boundary. A non-process selector cannot acquire native authority.
 pub(crate) fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) sends no signal, just checks if the process exists
-    // and we have permission to signal it.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    NativePid::admit(pid).is_some_and(NativePid::is_alive)
 }
 
-#[cfg(not(unix))]
-pub(crate) fn process_alive(_pid: u32) -> bool {
-    // On non-Unix, conservatively assume alive (don't reap).
-    true
+fn signal_target(pid: u32) -> Option<NativePid> {
+    let target = NativePid::admit(pid);
+    if target.is_none() {
+        tracing::warn!(pid, "Refusing invalid native worker process ID");
+    }
+    target
 }
-
-/// Send SIGTERM to a worker's process group plus the PID directly.
-/// Workers are spawned with `setpgid(0,0)` so PGID == PID; the
-/// direct fallback covers TCP daemons whose PGID may differ.
-/// Single primitive for `WorkerHandle::Drop`, `kill_orphan`, and
-/// `job_tracker::send_terminate`.
-#[cfg(unix)]
 pub(crate) fn terminate_pgid(pid: u32) {
-    let raw = pid as libc::pid_t;
-    // SAFETY: SIGTERM to the worker's process group plus the PID.
-    unsafe {
-        libc::killpg(raw, libc::SIGTERM);
-        libc::kill(raw, libc::SIGTERM);
+    if let Some(target) = signal_target(pid) {
+        target.terminate();
     }
 }
-
-/// Send SIGKILL to a worker's process group plus the PID. Same
-/// shape as `terminate_pgid`: the only operational difference
-/// is the signal.
-#[cfg(unix)]
 pub(crate) fn kill_pgid(pid: u32) {
-    let raw = pid as libc::pid_t;
-    // SAFETY: SIGKILL to the worker's process group plus the PID.
-    unsafe {
-        libc::killpg(raw, libc::SIGKILL);
-        libc::kill(raw, libc::SIGKILL);
+    if let Some(target) = signal_target(pid) {
+        target.kill();
     }
 }
-
-#[cfg(not(unix))]
-pub(crate) fn terminate_pgid(_pid: u32) {}
-
-#[cfg(not(unix))]
-pub(crate) fn kill_pgid(_pid: u32) {}
 
 /// Kill an orphaned worker: SIGTERM, wait 2s, SIGKILL.
 #[cfg(unix)]
-fn kill_orphan(worker_pid: u32) {
-    terminate_pgid(worker_pid);
+fn kill_orphan(worker: NativePid) {
+    worker.terminate();
     std::thread::sleep(Duration::from_secs(2));
-    if process_alive(worker_pid) {
+    if worker.is_alive() {
         info!(
-            worker_pid,
+            worker_pid = worker.get(),
             "Orphan didn't exit after SIGTERM, sending SIGKILL"
         );
-        kill_pgid(worker_pid);
+        worker.kill();
     }
 }
 
 #[cfg(not(unix))]
-fn kill_orphan(_worker_pid: u32) {
+fn kill_orphan(_worker_pid: NativePid) {
     // No-op on non-Unix platforms. Workers on Windows don't use setpgid
     // and are tied to the parent process.
 }
@@ -289,20 +269,36 @@ fn kill_orphan(_worker_pid: u32) {
 mod tests {
     use super::*;
 
+    /// Guards: PID marker bytes retain their actual positive owner ID and
+    /// refuse malformed, zero and out-of-range native process selectors.
+    /// Kind: wire
+    /// Not a type: external marker text and numeric range must earn NativePid
+    /// admission before any process/group syscall can consume the result.
+    /// State: immutable strings exercise the real marker parser and target admission.
+    /// Concurrency: none
     #[test]
-    fn parse_server_pid_extracts_value() {
-        assert_eq!(parse_server_pid("server_pid=12345\n"), Some(12345));
-        assert_eq!(parse_server_pid("server_pid=1\n"), Some(1));
-        assert_eq!(parse_server_pid("  server_pid=99999  \n"), Some(99999));
+    fn marker_bytes_admit_only_native_process_ids() {
+        for (bytes, expected) in [
+            ("server_pid=12345\n", Some(12345)),
+            ("server_pid=1\n", Some(1)),
+            ("  server_pid=99999  \n", Some(99999)),
+            ("", None),
+            ("garbage", None),
+            ("server_pid=notanumber\n", None),
+            ("server_pid=0", None),
+        ] {
+            assert_eq!(parse_server_pid(bytes).map(NativePid::get), expected);
+        }
+        #[cfg(unix)]
+        assert!(NativePid::admit(u32::MAX).is_none());
     }
 
-    #[test]
-    fn parse_server_pid_rejects_invalid() {
-        assert_eq!(parse_server_pid(""), None);
-        assert_eq!(parse_server_pid("garbage"), None);
-        assert_eq!(parse_server_pid("server_pid=notanumber\n"), None);
-    }
-
+    /// Guards: PID records use the selected state root's worker-pids child.
+    /// Kind: policy
+    /// Not a type: the externally recognized directory name is a layout choice
+    /// shared with cleanup, after RuntimeLayout owns the admitted source root.
+    /// State: local path values require no directory or environment mutation.
+    /// Concurrency: none
     #[test]
     fn pid_dir_is_under_configured_state_root() {
         let layout = crate::config::RuntimeLayout::from_state_dir(PathBuf::from("/tmp/ba3-state"));
@@ -312,16 +308,54 @@ mod tests {
         );
     }
 
+    /// Guards: native liveness observes the owned current process and rejects
+    /// a raw zero selector instead of interpreting it as the current group.
+    /// Kind: boundary
+    /// Not a type: syscall existence results are kernel observations after native-ID
+    /// admission. The legacy wrapper must actually use that admission edge.
+    /// State: one signal-zero query observes this test process without signalling it.
+    /// Concurrency: the current process owns its PID and no environment or process group changes.
     #[cfg(unix)]
     #[test]
-    fn current_process_is_alive() {
+    fn native_liveness_observes_the_admitted_process() {
         assert!(process_alive(std::process::id()));
+        assert!(!process_alive(0));
     }
 
+    /// Guards: PID zero is refused before signalling, so an invalid worker ID
+    /// cannot become a signal to the caller's entire process group.
+    /// Kind: boundary
+    /// Not a type: the legacy raw-PID entry must actually use native-ID admission
+    /// before its kernel effect. The child process observes that external boundary.
+    /// State: a child running this exact test has its own process group, isolating
+    /// the original zero-target failure from the controller and other processes.
+    /// Concurrency: only the child receives the probe environment. Its isolated
+    /// group contains no other task, and the parent waits for its actual exit.
     #[cfg(unix)]
     #[test]
-    fn nonexistent_process_is_not_alive() {
-        // PID 4_000_000 is almost certainly not in use.
-        assert!(!process_alive(4_000_000));
+    fn invalid_signal_ids_never_reach_the_kernel() {
+        use std::os::unix::process::CommandExt;
+        const PROBE: &str = "BA3_REAPER_PID_PROBE";
+        if std::env::var_os(PROBE).as_deref() == Some(std::ffi::OsStr::new("isolated")) {
+            terminate_pgid(0);
+            kill_pgid(0);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "worker::pool::reaper::tests::invalid_signal_ids_never_reach_the_kernel",
+                "--nocapture",
+            ])
+            .env(PROBE, "isolated")
+            .process_group(0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated PID-zero probe exited {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

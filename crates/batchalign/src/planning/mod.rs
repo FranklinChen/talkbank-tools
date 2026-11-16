@@ -1,29 +1,13 @@
 //! Typed planning layer from runner snapshots to immutable job plans.
 
 use crate::api::DisplayPath;
-use crate::command_model::{self, CatalogEntry, PlannedMaterializedFile};
+use crate::command_model::{self, CatalogEntry};
 use crate::recipe_runner::planner::{PlanningError, plan_work_units};
 use crate::recipe_runner::runtime::discover_inputs_for_job;
 use crate::recipe_runner::work_unit::{PlannedWorkUnit, TextWorkUnit};
 use crate::store::RunnerJobSnapshot;
 
-/// How the executor will resolve input and output files for a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IoMode {
-    /// Runner reads and writes through the shared filesystem.
-    Paths,
-    /// Runner reads and writes from staged content under the job directory.
-    Content,
-}
-
-/// All materialized output artifacts derived from one planned work unit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedArtifactSet {
-    /// Source display path that owns these output artifacts.
-    pub source_display_path: DisplayPath,
-    /// Primary output plus any sidecars for the work unit.
-    pub files: Vec<PlannedMaterializedFile>,
-}
+pub(crate) use crate::recipe_runner::materialize::PlannedArtifactSet;
 
 /// Immutable execution input for one job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +18,6 @@ pub(crate) struct JobPlan {
     pub work_units: Vec<PlannedWorkUnit>,
     /// Planned output artifacts for each work unit.
     pub artifacts: Vec<PlannedArtifactSet>,
-    /// Resolved I/O mode for execution.
-    pub io_mode: IoMode,
 }
 
 /// Build one immutable job plan from the current runner snapshot.
@@ -47,15 +29,10 @@ pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, Plannin
     let artifacts = work_units
         .iter()
         .map(|work_unit| {
-            let source_display_path = primary_display_path_for_work_unit(work_unit).clone();
-            let files = crate::recipe_runner::materialize::plan_materialized_files(
-                &source_display_path,
+            crate::recipe_runner::materialize::plan_materialized_files(
+                primary_display_path_for_work_unit(work_unit),
                 output_policy,
-            );
-            PlannedArtifactSet {
-                source_display_path,
-                files,
-            }
+            )
         })
         .collect();
 
@@ -63,10 +40,6 @@ pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, Plannin
         spec,
         work_units,
         artifacts,
-        io_mode: match job.filesystem.inputs {
-            crate::store::JobInputs::Paths { .. } => IoMode::Paths,
-            crate::store::JobInputs::Content(_) => IoMode::Content,
-        },
     })
 }
 
@@ -77,7 +50,7 @@ pub(crate) fn artifact_set_for_source<'a>(
 ) -> Option<&'a PlannedArtifactSet> {
     plan.artifacts
         .iter()
-        .find(|artifacts| &artifacts.source_display_path == source_display_path)
+        .find(|artifacts| artifacts.source() == source_display_path)
 }
 
 fn primary_display_path_for_work_unit(work_unit: &PlannedWorkUnit) -> &DisplayPath {
@@ -109,7 +82,7 @@ mod tests {
     use crate::options::{CommandOptions, CommonOptions, CompareOptions};
     use crate::store::{RunnerDispatchConfig, RunnerFilesystemConfig, RunnerJobIdentity};
 
-    fn compare_snapshot(paths_mode: bool) -> RunnerJobSnapshot {
+    fn compare_snapshot(inputs: crate::store::JobInputs) -> RunnerJobSnapshot {
         crate::store::test_support::with_pending(RunnerJobSnapshot {
             identity: RunnerJobIdentity {
                 job_id: JobId::from("job-plan"),
@@ -127,23 +100,7 @@ mod tests {
                 debug_traces: false,
             },
             filesystem: RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    vec![
-                        DisplayPath::from("nested/sample.cha"),
-                        DisplayPath::from("nested/sample.gold.cha"),
-                    ],
-                    vec![true, true],
-                    paths_mode,
-                    vec![
-                        batchalign_types::paths::ClientPath::from("/src/nested/sample.cha"),
-                        batchalign_types::paths::ClientPath::from("/src/nested/sample.gold.cha"),
-                    ],
-                    vec![
-                        batchalign_types::paths::ClientPath::from("/out/nested/sample.cha"),
-                        batchalign_types::paths::ClientPath::from("/out/nested/sample.gold.cha"),
-                    ],
-                    Vec::new(),
-                ),
+                inputs,
                 staging_dir: batchalign_types::paths::ServerPath::new("/tmp/staging"),
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
@@ -154,27 +111,75 @@ mod tests {
         })
     }
 
+    /// Guards: Compare planning selects reference projection, pairs main and gold sources, and derives the named CHAT and CSV outputs from that same main source.
+    /// Kind: policy
+    /// Not a type: Sealed layouts exclude missing or reversed roles, while reference-projection selection, nested suffixes and primary-first transport projection remain catalog and adapter semantics.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn compare_plan_uses_one_pair_and_compare_sidecar() {
-        let plan = build_job_plan(&compare_snapshot(true)).expect("compare plan");
+        let plan = build_job_plan(&compare_snapshot(crate::store::JobInputs::Content(
+            ["nested/sample.cha", "nested/sample.gold.cha"]
+                .into_iter()
+                .map(|name| crate::store::ContentInput {
+                    display: name.into(),
+                    kind: crate::store::InputKind::Chat,
+                })
+                .collect(),
+        )))
+        .expect("compare plan");
         assert_eq!(plan.spec.command, ReleasedCommand::Compare);
-        assert_eq!(plan.io_mode, IoMode::Paths);
-        assert_eq!(plan.work_units.len(), 1);
+        assert!(
+            matches!(plan.work_units.as_slice(), [PlannedWorkUnit::Compare(unit)]
+            if unit.main.display_path.as_ref() == "nested/sample.cha"
+                && unit.gold.display_path.as_ref() == "nested/sample.gold.cha")
+        );
         assert_eq!(plan.artifacts.len(), 1);
         assert_eq!(
-            plan.artifacts[0].source_display_path,
+            *plan.artifacts[0].source(),
             DisplayPath::from("nested/sample.cha")
         );
-        assert_eq!(plan.artifacts[0].files.len(), 2);
         assert_eq!(
-            plan.artifacts[0].files[1].display_path,
+            plan.spec.family,
+            crate::recipe_runner::command_spec::CommandFamily::ReferenceProjection
+        );
+        assert_eq!(
+            plan.spec.recipe.mode,
+            crate::recipe_runner::recipe::ExecutionMode::ReferenceProjection
+        );
+        let outputs = plan.artifacts[0]
+            .chat_metrics()
+            .expect("comparison output layout");
+        assert_eq!(
+            *outputs.primary().display_path(),
+            DisplayPath::from("nested/sample.cha")
+        );
+        assert_eq!(
+            outputs.primary().content_type(),
+            crate::api::ContentType::Chat
+        );
+        assert_eq!(
+            outputs.metrics().content_type(),
+            crate::api::ContentType::Csv
+        );
+        assert_eq!(
+            *outputs.metrics().display_path(),
             DisplayPath::from("nested/sample.compare.csv")
         );
-    }
-
-    #[test]
-    fn content_mode_job_plan_tracks_content_io() {
-        let plan = build_job_plan(&compare_snapshot(false)).expect("compare plan");
-        assert_eq!(plan.io_mode, IoMode::Content);
+        assert_eq!(
+            plan.artifacts[0].clone().into_iter().collect::<Vec<_>>(),
+            vec![
+                crate::recipe_runner::materialize::PlannedMaterializedFile {
+                    display_path: "nested/sample.cha".into(),
+                    content_type: crate::api::ContentType::Chat,
+                    role: crate::recipe_runner::materialize::MaterializedArtifactRole::Primary,
+                },
+                crate::recipe_runner::materialize::PlannedMaterializedFile {
+                    display_path: "nested/sample.compare.csv".into(),
+                    content_type: crate::api::ContentType::Csv,
+                    role: crate::recipe_runner::materialize::MaterializedArtifactRole::Sidecar,
+                },
+            ]
+        );
     }
 }

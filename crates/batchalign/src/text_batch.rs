@@ -186,7 +186,7 @@ impl TextWorkflowFileError {
     /// Written as an exhaustive `match` with no catch-all so a new variant
     /// has to state its own category instead of inheriting a default. The
     /// call site that used to hardcode `ProviderTerminal` for every text
-    /// failure is `execution::text_io::write_text_results`. There is
+    /// failure is `execution::text_io::preparation`. There is
     /// deliberately no uncategorised variant left for a new call site to
     /// reach for.
     pub(crate) fn category(&self) -> FailureCategory {
@@ -338,7 +338,7 @@ pub(crate) struct TextBatchFileResult {
     ///
     /// The success side carries a [`PostValidated`] proof and analysis report,
     /// not a bare string: the
-    /// writer (`execution::text_io::write_text_results`) reads this field, so
+    /// writer (`execution::text_io::preparation`) reads this field, so
     /// output that has not passed the post-validation gate has no route to
     /// disk.
     pub result: Result<crate::morphosyntax::report::MorphosyntaxOutput, TextWorkflowFileError>,
@@ -433,7 +433,7 @@ mod tests {
     use super::*;
 
     /// A file refused on validity grounds must reach the control plane as
-    /// `Validation`, not as a provider failure. `write_text_results` used to
+    /// `Validation`, not as a provider failure. The text writer used to
     /// hardcode `ProviderTerminal` for every text failure, which reported bad
     /// CHAT as "the provider gave up on this file".
     /// RED FIRST (review item 5): a per-item PROVIDER failure must reach the

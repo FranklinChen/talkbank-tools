@@ -12,12 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::api::{MachineTime, NumWorkers};
+use crate::api::NumWorkers;
 use crate::cache::UtteranceCache;
 use crate::config::ServerConfig;
-use crate::host_facts::EffectiveConfig;
 use crate::runner::util::{RunnerEventSink, StoreRunnerEventSink};
-use crate::store::{JobStore, RunnerJobSnapshot};
+use crate::store::{AdmittedRun, JobStore, RunnerJobSnapshot};
 use crate::worker::pool::WorkerPool;
 
 /// Shared dependencies needed to build per-job runner tasks.
@@ -60,9 +59,8 @@ impl ExecutionEngine {
     pub(super) async fn dispatch_job(
         &self,
         request: JobDispatchRequest,
-        host: &DispatchHostContext,
     ) -> Result<DispatchEnd, crate::error::ServerError> {
-        super::routing::dispatch_job_with_execution_context(request, host, &self.context).await
+        super::routing::dispatch_job_with_execution_context(request, &self.context).await
     }
 
     /// Borrow the underlying worker pool for cancel-driven shutdown.
@@ -87,7 +85,7 @@ impl ExecutionEngine {
 /// `book/src/batchalign/developer/host-facts.md`).
 #[derive(Clone)]
 pub(crate) struct DispatchHostContext {
-    store: Arc<JobStore>,
+    trace_store: Arc<crate::trace_store::TraceStore>,
     config: Arc<ServerConfig>,
     /// The store's host snapshot: job sizing and the dispatch plans take the
     /// tier, policy and resolved knobs from it rather than reading the machine.
@@ -99,14 +97,29 @@ impl DispatchHostContext {
     /// The dispatch context of the run that `claim` owns: its sink writes
     /// only as that run. The only production route, so dispatch cannot hold
     /// a sink that is not bound to a run.
-    pub(crate) fn for_run(store: Arc<JobStore>, claim: &crate::store::RunnerClaim) -> Self {
-        Self::with_sink(StoreRunnerEventSink::for_run(store.clone(), claim), store)
+    pub(crate) fn for_run(claim: &AdmittedRun) -> Self {
+        Self::with_sink(
+            StoreRunnerEventSink::for_run(claim),
+            Arc::clone(claim.store()),
+        )
     }
 
-    /// A dispatch context for a test job in its first run.
+    /// A policy fixture uses the shared effect recorder and one declared host.
     #[cfg(test)]
-    pub(crate) fn from_store(store: Arc<JobStore>, job_id: &crate::api::JobId) -> Self {
-        Self::with_sink(StoreRunnerEventSink::wrap(store.clone(), job_id), store)
+    pub(crate) fn for_test_effects() -> Self {
+        Self::for_recorded_effects(Arc::new(super::util::test_sink::RecordingSink::default()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_recorded_effects(sink: Arc<super::util::test_sink::RecordingSink>) -> Self {
+        let config = Arc::new(ServerConfig::default());
+        let host = Arc::new(crate::host_facts::HostSnapshot::for_tests(&config));
+        Self {
+            config,
+            host,
+            trace_store: Arc::new(crate::trace_store::TraceStore::new()),
+            sink,
+        }
     }
 
     fn with_sink(sink: Arc<dyn RunnerEventSink>, store: Arc<JobStore>) -> Self {
@@ -117,13 +130,12 @@ impl DispatchHostContext {
             config: Arc::new(store.config().clone()),
             host: store.host().clone(),
             sink,
-            store,
+            trace_store: Arc::clone(store.trace_store_handle()),
         }
     }
 
-    /// The host's memory tier, from the store's snapshot.
-    pub(crate) fn memory_tier(&self) -> crate::types::runtime::MemoryTier {
-        self.host.tier()
+    pub(in crate::runner) fn host_snapshot(&self) -> &crate::host_facts::HostSnapshot {
+        &self.host
     }
 
     /// The host-memory ledger coordinator, deciding on the store's host:
@@ -139,12 +151,6 @@ impl DispatchHostContext {
 
     pub(crate) fn config(&self) -> &ServerConfig {
         self.config.as_ref()
-    }
-
-    /// Resolved per-host configuration view (operator overrides merged with
-    /// host-facts recommendations).
-    pub(crate) fn effective_config(&self) -> &EffectiveConfig {
-        self.host.effective()
     }
 
     pub(crate) fn sink(&self) -> &Arc<dyn RunnerEventSink> {
@@ -165,7 +171,42 @@ impl DispatchHostContext {
     }
 
     pub(crate) fn trace_store(&self) -> &crate::trace_store::TraceStore {
-        self.store.trace_store()
+        self.trace_store.as_ref()
+    }
+}
+
+/// The immutable snapshot and run-bound host context derived from one claim.
+/// Consumers cannot independently assemble their source and event sink.
+pub(super) struct ClaimedDispatch {
+    job: Arc<RunnerJobSnapshot>,
+    host: DispatchHostContext,
+}
+
+pub(super) struct ClaimedDispatchParts {
+    pub(super) job: Arc<RunnerJobSnapshot>,
+    pub(super) host: DispatchHostContext,
+}
+
+impl ClaimedDispatch {
+    pub(super) fn for_run(claim: &AdmittedRun) -> Self {
+        Self {
+            job: Arc::clone(claim.snapshot()),
+            host: DispatchHostContext::for_run(claim),
+        }
+    }
+
+    pub(super) fn job(&self) -> &Arc<RunnerJobSnapshot> {
+        &self.job
+    }
+    pub(super) fn host(&self) -> &DispatchHostContext {
+        &self.host
+    }
+
+    pub(super) fn into_parts(self) -> ClaimedDispatchParts {
+        ClaimedDispatchParts {
+            job: self.job,
+            host: self.host,
+        }
     }
 }
 
@@ -216,26 +257,11 @@ impl DirectExecutionHost {
 /// Execution-phase request handed from the host-owned runner wrapper into the
 /// shared dispatch kernel.
 pub(super) struct JobDispatchRequest {
-    pub(super) job: Arc<RunnerJobSnapshot>,
-    pub(super) file_list: Vec<crate::store::PendingJobFile>,
+    pub(super) preflight: super::preflight::PreflightedJob,
     pub(super) num_workers: NumWorkers,
 }
 
-/// Host-memory reservation failures separated from the rest of job execution.
-pub(super) enum ExecutionReservationError {
-    Capacity {
-        requested_workers: NumWorkers,
-        error: crate::host_memory::WaitExpired,
-    },
-    Fatal(crate::error::ServerError),
-}
-
-/// Host-owned orchestration decision after a memory-gate rejection.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum MemoryGateRejectionDisposition {
-    /// The host re-queued the job for a later eligibility deadline.
-    Requeued { retry_at: MachineTime },
-}
+pub(crate) use crate::store::MemoryRequeueOutcome as MemoryGateRejectionDisposition;
 
 /// A whole job that dispatch declined to run, with the reason the run's
 /// failure records on the job and on every file it leaves unfinished.
@@ -272,15 +298,6 @@ pub(crate) enum DispatchEnd {
     Refused(JobRefusal),
 }
 
-/// Result of one host-owned job execution attempt.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum HostedJobRunOutcome {
-    /// The job finished its current lifecycle attempt.
-    Completed,
-    /// The host deferred the job for a later eligibility deadline.
-    Requeued { retry_at: MachineTime },
-}
-
 /// Host-owned orchestration seam for queued job execution policy.
 ///
 /// This keeps the shared runner from knowing how a specific server backend
@@ -295,12 +312,4 @@ pub(crate) trait QueuedJobOrchestrator: Send + Sync {
         &self,
         sink: &Arc<dyn RunnerEventSink>,
     ) -> Result<MemoryGateRejectionDisposition, crate::error::ServerError>;
-}
-
-/// Policy for handling memory-gate failures during job execution.
-pub(super) enum MemoryGateFailurePolicy {
-    Queued {
-        orchestrator: Arc<dyn QueuedJobOrchestrator>,
-    },
-    FailJob,
 }

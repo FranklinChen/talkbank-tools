@@ -1,7 +1,7 @@
 # Server Dispatch Architecture
 
 **Status:** Current
-**Last updated:** 2026-10-06 19:57 EDT
+**Last updated:** {{git-dates:page}}
 
 This page describes the implemented `batchalign3` runtime:
 
@@ -279,40 +279,205 @@ submitter conflict with each other.
 
 ## Runner boundary
 
-The runner now has a sharper read/write split:
+A runner takes a job ID to the registry actor. That observation can report a
+missing job, wait for an earlier runner to release its claim, settle an already
+stopped job, or mint an exclusive `AdmittedRun`. Store admission completes the
+registry and lease observation and binds the raw claim to the actual
+`Arc<JobStore>` that granted it. The capability carries the exact immutable
+snapshot and run generation. Its private fields and consuming `complete`,
+`fail` and `release` methods keep finalization on that owner.
 
-- dispatchers receive immutable `RunnerJobSnapshot` values for static job
-  configuration
-- `JobStore` owns named execution mutations, and `JobRegistry` owns the
-  in-memory projection/transition API, but the actual job-level state
-  transitions for re-queue, running, failure, and finalization now live on
-  `Job`
-- registry methods now return typed summary/file projections for WebSocket
-  publication, so query modules no longer borrow raw `Job` values just to
-  publish live updates
-- queue dispatch now uses typed `QueuePoll` snapshots and
-  `LeaseRenewalOutcome` instead of raw strings, timestamps, and booleans
-- file-level status transitions now reconcile through `Job` methods and then
-  flow through runner utility helpers, instead of open-coded store-lock blocks
-  in every dispatcher
+`StoppedAdmission` has only consuming completion authority. It cannot create a
+dispatch context or reserve execution resources. Raw `RunnerClaim`, `RunBinding`
+and registry transitions are private to the store layer. `store/admission.rs`
+owns these capabilities and `store/run_events.rs` owns the real event adapter.
+`DispatchHostContext::for_run` and `StoreRunnerEventSink::for_run` accept only
+`&AdmittedRun`, deriving their store and binding together. Trace access
+retains its shared handle directly. The concrete sink retains the store needed
+for writes, while recording-sink fixtures need no store.
+
+`ClaimedExecution` binds the host, cancellation scope and `ExecutionPreparation`
+at that edge. Preparation consumes itself to acquire an owned concurrency permit
+from the bound store and its host-memory plan. Only `PreparedExecution` can dispatch, and it owns both leases
+until dispatch returns or cancellation drops the future. The input snapshot and
+run-bound event sink travel with that owner. Dispatch moves the snapshot into
+its request and clones the pending-file list only after resource admission.
 
 ```mermaid
-flowchart LR
-    runner["run_job"] --> snapshot["RunnerJobSnapshot"]
-    runner --> mutations["JobStore execution methods"]
-    mutations --> jobexec["Job execution transitions"]
-    snapshot --> dispatch["FA / transcribe / infer dispatchers"]
-    dispatch --> fileops["File status helpers"]
-    fileops --> job["Job file transitions"]
-    jobexec --> store["JobStore"]
-    job --> store
+flowchart TD
+    lookup["Job ID + host"] --> observe["Registry observation"]
+    observe -->|"registry + lease admitted"| admitted["AdmittedRun owns actual store and claim"]
+    admitted --> context["Derive snapshot, host, event sink and slot owner"]
+    context --> claimed["ClaimedExecution"]
+    observe -->|"stopped before admission"| stopped["StoppedAdmission"]
+    stopped -->|"consume complete"| settled["Settled attempt"]
+    observe -->|"missing"| missing["JobNotInLocalStore"]
+    observe -->|"terminal"| settled
+    observe -->|"earlier runner live"| wait["Wait for claim release<br/>then observe again"]
+    claimed --> scope["RunScope supervises preparation"]
+    scope --> prepare["ExecutionPreparation"]
+    prepare -->|"slot + memory plan"| ready["PreparedExecution owns both leases"]
+    ready --> dispatch["Dispatch using carried snapshot and sink"]
+    dispatch --> ended["EndedAttempt owns claim and actual outcome"]
+    scope -->|"cancellation"| ended
+    prepare -->|"fatal refusal or inline capacity timeout"| ended
+    prepare -->|"queued capacity timeout"| requeue["Store observes current run"]
+    requeue -->|"accepted"| defer["DeferredRun carries retry deadline"]
+    requeue -->|"cancelled or superseded"| ended
+    defer --> ended
+    ended -->|"dispatch, refusal, failure or cancellation"| finish["Consume AdmittedRun on its own store"]
+    ended -->|"deferred"| release["Release claim before returning retry"]
+    release --> retry["Schedule next queued attempt"]
 ```
 
-That still leaves a shared logical job registry, but callers now cross the
-registry actor boundary instead of reaching for a shared lock or open-coded
-store-wide collection helpers. The remaining bulk escape hatches stay inside
-`JobRegistry` for recovery-style operations that genuinely need collection-wide
-ownership.
+`ExecutionHost::Deferred` fixes the available transitions for each host. A queued
+host can return the opaque, non-cloneable `DeferredRun` only after the store
+accepts its retry deadline. The store attempts persistence before returning
+that observation. Cancellation or supersession can instead produce
+`MemoryRequeueOutcome::NoLongerRunnable`, which carries no retry. The
+store records the deferred-work event only for that accepted requeue. The
+orchestrator relays the store outcome and has no separate counter operation. A direct host uses `Infallible`, so a deferred direct
+result has no constructible payload. Its entry point eliminates that variant
+with an exhaustive empty match. The earlier runtime error for an unexpected
+direct requeue is gone.
+
+Cancellation wins before preparation is polled. `RunScope` owns the heartbeat
+and cancellation race, then returns the claim with the observed execution
+outcome. `EndedAttempt::finalize` consumes that pair exactly once. A restart or
+shutdown can supersede the generation during execution, so store writes still
+admit the changing generation and cancellation state. These observations remain
+at the store boundary.
+
+The source layout follows these owners under `runner/execution/`.
+
+| Module | Responsibility |
+| --- | --- |
+| `mod.rs` | Queued scheduling and direct execution entry points |
+| `attempt.rs` | Claim admission, supervised execution and consuming finalization |
+| `preparation.rs` | Resource admission, lease ownership and entry into preflight and dispatch |
+| `host.rs` | Host-specific capacity outcomes and propagation of store admission |
+| `tests.rs` | Focused missing-job and refusal contracts using an in-memory registry |
+
+### Option-family planning
+
+The router projects the dispatch configuration and snapshot pending-file count
+into a planning request. `PlanRequest<AlignOptions>`,
+`PlanRequest<TranscribeOptions>` and `PlanRequest<BenchmarkOptions>` have private
+fields. Their admission edge selects the concrete option family and verifies
+its command identity once. Borrowed language, speaker and runtime facts remain
+associated with that configuration. A media request carries a closed openSMILE,
+AVQI or diarization selection.
+
+Plan construction consumes the request. Extractors take concrete option types
+and return complete parameter bundles. Alignment root admission uses that same
+selected `AlignOptions`, removing its second family check. The resulting owned
+plan retains cache policy, engine selection, speaker admission and the host's
+resource policy through worker preparation. Its kernel command comes from the
+identity already established at request admission. Text planning reads submitted
+options directly. Reusing a consumed planning request or changing its borrowed
+configuration before planning is a compiler error.
+
+```mermaid
+flowchart TD
+    source["Dispatch configuration and pending workload"] --> admit["Select family and verify command once"]
+    admit --> align["PlanRequest AlignOptions"]
+    admit --> transcribe["PlanRequest TranscribeOptions"]
+    admit --> benchmark["PlanRequest BenchmarkOptions"]
+    admit --> media["Closed MediaAnalysisRequest"]
+    align -->|"consume"| plans["Owned executable family plan"]
+    transcribe -->|"consume"| plans
+    benchmark -->|"consume"| plans
+    media -->|"consume"| plans
+    plans --> engines["Carry engine and cache decisions into worker selection"]
+    engines --> resources["Retain plan through resource admission and dispatch"]
+```
+
+### Source-bound output layouts
+
+The catalog declares a primary result or a CHAT result with comparison metrics.
+Diarization resolves its CHAT/media choice from the admitted source name.
+`plan_materialized_files` derives the layout, source identity and filenames
+together. The opaque `PlannedArtifactSet` always contains a primary artifact.
+Its private layout selects either one `PrimaryArtifact` or a
+`ChatMetricsArtifacts` pair with a distinct `MetricsArtifact`. The metrics type
+owns the CSV content type and sidecar transport role. Read-only projections
+retain these facts through planning and writing.
+
+Compare admits and borrows the named pair before reading or inference.
+Benchmark consumes its selected pair into an output plan associated with the
+pending file. Text transforms project the primary directly. Native export
+admits the single-primary layout before checking destination collisions and
+current filesystem occupancy. Consumers receive the source-derived names
+without rebuilding artifact lists or filtering transport roles.
+
+`SourceOutputs` admits the pending file against its indexed declaration,
+including name, kind and admitted source, output and prior paths. A supplied
+layout must name that same source. The resulting private owner retains the
+filesystem, file and layout. Owned audio plans derive their names once before
+attempts. Compare plans retain the earlier computation. For morphotag, segmentation,
+translation and coreference, recorded preflight owns the accepted file
+population. Consuming text preparation derives each layout from its actual
+source and retains both through publication. Those writers project the
+producer-owned proof directly. See the
+[text preparation graph](../../architecture/runtime/dispatch.md#producer-owned-file-preparation).
+Selecting the comparison shape consumes this owner into `ChatMetricsOutputs`.
+
+Only these admitted owners project `OutputTarget` values. Their artifact type
+distinguishes primary and metrics roles. Destination preparation selects one
+path or distinct requested/staged copies once. Text writers consume each target
+and traverse its carried destinations. A caller supplies neither a replacement
+location nor a result name to a writer. Read-only metadata can project a fresh
+target, and the surrounding task still owns retry and persistence policy.
+Native export carries the resolved destinations into its existing encoding
+and publication owner.
+
+```mermaid
+flowchart TD
+    catalog["Catalog policy and admitted source"] --> derive["Derive source-bound output layout once"]
+    derive --> single["PrimaryArtifact with source identity"]
+    derive --> pair["ChatMetricsArtifacts owns source, primary and metrics"]
+    single --> text["Text preparation owns source and derived layout"]
+    single --> native["Native export admits single-primary layout"]
+    pair --> compare["Compare retains pair before inference"]
+    pair --> benchmark["Benchmark output plan consumes selected pair"]
+    compare --> bind["SourceOutputs admits declared input and matching layout"]
+    benchmark --> bind
+    text --> carried["Project producer-owned SourceOutputs"]
+    carried --> targets
+    native --> bind
+    bind --> targets["Prepare typed targets and Single or Copies destinations"]
+    targets --> writes["Use carried destinations for required writes"]
+    writes -->|"all required writes succeed"| receipt["Written receipt grants completion"]
+    writes -->|"write fails"| failure["Record failure with completed effects retained"]
+    receipt --> complete["Complete the carried input identity and publish metrics"]
+```
+
+The transport projection consumes a layout and yields the primary first,
+followed by its metrics sidecar when present. It creates no temporary artifact
+vector. Conditional diagnostic files retain their separate reporting path.
+Immutable layout metadata can be cloned. Benchmark persistence and successful
+completion receipts remain consuming effect capabilities. A failed write can
+leave an earlier artifact on disk, and completion requires every requested and
+staged write to succeed.
+
+Audio's `WrittenOutput` has private fields and a closed private clean/diagnosed
+outcome. The successful writer retains a sealed `OutputSourceIdentity` in the receipt.
+Consuming completion receives the run sink and derives its file tracker from
+that identity. Compare carries the admitted targets and execution context
+through consuming read, morphology, comparison and publication phases. Its
+written receipt owns that same file session and completes through its retained
+run sink. Consumers cannot manufacture a written outcome or replace the
+completion identity. See the [compare phase graph](../developer/commands/compare.md).
+
+Dispatchers receive immutable snapshots and a run-bound sink. Named `JobStore`
+methods cross the registry actor boundary, and `Job` owns its lifecycle and file
+transitions. `store/job/deferral.rs` owns the private retry constructor and
+requeue outcome. Recovery operations that require collection-wide ownership remain
+inside `JobRegistry`.
+
+The [preflight graph](path-provenance.md#preflight-observations-travel-with-the-job)
+retains completed observations and the exact snapshot through rejection
+recording. Its `PreflightedJob` is required by the dispatch request.
 
 ## Queue and lease boundary
 
@@ -814,7 +979,9 @@ flowchart LR
     start --> child["child server"]
     child -->|"publish_listening"| hs["server.pid<br/>(PublishedHandshake)"]
     child -->|"retire: only if it names us"| hs
-``` `started_at` in the state file is
+```
+
+`started_at` in the state file is
 a `MachineTime`; a state file from an older build, which wrote Unix seconds
 there, still reads, so the stale-build check can find and replace that
 daemon rather than orphan it.

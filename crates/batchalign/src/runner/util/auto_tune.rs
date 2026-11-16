@@ -1,34 +1,17 @@
 //! Per-job file parallelism auto-tuning.
 
 use crate::api::{NumWorkers, ReleasedCommand};
-use crate::host_facts::EffectiveConfig;
+use crate::host_facts::HostSnapshot;
 use crate::runtime;
 
-/// Compute the number of parallel file workers for a job.
-///
-/// Reads from the resolved [`EffectiveConfig`] (operator override merged
-/// with host-facts recommendation) for the per-command worker cap, the
-/// host-facts-derived GPU thread-pool cap, and the GPU-heavy-vs-CPU
-/// category split. `memory_tier` is the dispatch host's snapshot
-/// (`DispatchHostContext::memory_tier`, which honors the operator's
-/// `memory_tier` override), passed in so sizing a job never reads the
-/// machine; this knob has no `EffectiveConfig` analog yet.
-///
-/// File-count clamping (`min(num_files)`) and CPU clamping
-/// (`min(available_parallelism)`) stay at the dispatch site because
-/// they're per-job quantities; host-quantities live in `EffectiveConfig`.
-///
-/// This function intentionally does **not** do host-memory math anymore.
-/// It only applies file-count, operator-configured, CPU, and
-/// per-category caps. Host-wide memory clamping now happens in the
-/// coordinator-backed admission step so worker startup and job
-/// execution share one memory model.
+/// Compute parallelism from one retained host snapshot and the workload.
+/// The host memory coordinator subsequently admits the requested workers.
 pub(in crate::runner) fn compute_job_workers(
     command: ReleasedCommand,
     num_files: usize,
-    effective: &EffectiveConfig,
-    memory_tier: crate::types::runtime::MemoryTier,
+    host: &HostSnapshot,
 ) -> NumWorkers {
+    let effective = host.effective();
     if num_files <= 1 {
         return NumWorkers(1);
     }
@@ -40,22 +23,15 @@ pub(in crate::runner) fn compute_job_workers(
     // GPU model process to contend on, so per-job parallelism is bounded
     // by CPU/thread caps, not by `gpu_thread_pool_size`.
     //
-    // Without this guard, `--workers N` is silently shadowed: the
-    // operator requests N, `gpu_thread_pool_size = 1` (recommended for
-    // non-functional GPUs) collapses `category_cap` to 1, and the
-    // final clamp ignores the explicit knob. The integration test
-    // `tests/serve_start_workers_persisted.rs` pins the user-visible
-    // symptom; the unit test
-    // `compute_workers_force_cpu_treats_gpu_commands_as_cpu_bound` in
-    // `runner::util` pins the planner-level invariant.
+    // CPU-only execution follows the CPU category even for a command whose
+    // catalog profile usually uses a GPU. The declared-host policy matrix
+    // retains this choice alongside the file, CPU, operator and tier limits.
     let is_gpu_heavy = batchalign_types::command_spec::command_spec_for(command).profile
         == Some(batchalign_types::worker_profile::WorkerProfile::Gpu)
         && !effective.force_cpu;
 
-    let by_cpu = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
-    let tier_cap = memory_tier.max_suggested_workers;
+    let by_cpu = host.facts().cpu_logical_count as usize;
+    let tier_cap = host.tier().max_suggested_workers;
 
     // Apply per-category cap. GPU commands share one model process and
     // should not dispatch more in-process requests than the configured

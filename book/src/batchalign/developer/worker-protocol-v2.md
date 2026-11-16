@@ -326,6 +326,39 @@ GPU reader routes a `load` event to the waiting load by its scope. See the
 time-transparency chapter's "Progress as liveness" section for the rule and
 its reasons.
 
+### Deadline ownership
+
+RunningWait consumes its operation's ResponseWait into one closed owner.
+FixedBudget retains an immutable deadline and exposes no renewal operation.
+LoadingWindow owns its deadline together with the progress history that can
+renew it. Callers receive an immutable wait API with source-specific observation.
+The former shared deadline and independent kind fields have been removed.
+Each loading stage retains one StageEvidence value, carrying a positive download
+mark, a nonempty observed phase set, or both. Zero growth adds no fact. Completed
+observations update that same stage record. Repeated packets allocate no new
+stage key, and growth and phase history share one map.
+
+The timed effect itself returns its operation-bound Timeout or Stalled error
+when its actual deadline elapses. Startup, sequential stdio/TCP and shared
+control readers propagate that result. They cannot independently ask an active
+wait to manufacture an expiration error. Download marks and phase observations
+retain their existing semantics. Request progress leaves both deadlines alone.
+
+```mermaid
+flowchart TD
+    operation["Consume operation-specific ResponseWait"] --> kind{"Closed deadline owner"}
+    kind -- fixed budget --> fixed["FixedBudget owns immutable deadline"]
+    kind -- loading window --> loading["LoadingWindow owns deadline and observed history"]
+    event["Actual load progress"] --> observation{"New stage growth or phase edge"}
+    observation -- advances --> loading
+    observation -- repeated --> retained["Retain current deadline"]
+    request["Request progress"] --> retained
+    fixed --> effect["Await actual effect against its owned deadline"]
+    loading --> effect
+    effect -- completed --> value["Return actual effect output"]
+    effect -- elapsed --> expired["Private expiration edge issues Timeout or Stalled"]
+```
+
 `ShutdownRequest`
 
 ```text
@@ -1116,8 +1149,11 @@ Key components:
   `DispatchReceipt` whose `reply_within(limit)` yields a
   `DispatchReply = Result<ExecuteResponseV2, WorkerError>` (the worker's
   response, or the error its reply amounted to; see "Failure replies on the
-  two worker paths"), or `None` at the time limit, withdrawing the
-  registration. A second registration under an id already waiting is refused.
+  two worker paths"), or `None` at the time limit, ending caller interest. The pending owner
+  retains its request/model leases, owned executor permit and job registration
+  through terminal reply or stream retirement. An identical retry can rejoin a
+  detached reply before new admission. Active duplicate IDs and changed input
+  are refused. A consuming write guard retires an interrupted stream.
 - **`ControlSlot`** (`routes.rs`): the one sequential op (capabilities,
   `ensure_task`, shutdown) waiting for its reply. Arming it
   (`arm_capabilities`, `arm_ensure_task(task)`) mints a `ControlRequestId`
@@ -1148,12 +1184,11 @@ Key components:
   and `WorkerPool::live_gpu_tcp_worker` drops a closed daemon connection so
   dispatch falls back to a spawned worker and the next discovery sweep
   connects afresh (discovery replaces a closed entry and keeps a live one).
-- **Loaded-task cache**: `ensure_task` first checks a Rust-side set of
-  tasks this worker has already loaded, before and again after taking the
-  control gate, and skips the IPC on a hit. Every path returns `Ok(())`: the
-  worker's own response (`loaded` or `already_loaded`, with the `elapsed_s`
-  it measured) is logged where it arrives, and a cache hit, which has no
-  response, invents none.
+- **Loaded-task cache** keeps TaskLoad identities and their lease-owning
+  Loaded proofs. `ensure_task` checks before and after taking the control gate,
+  skipping IPC and another model-load lease on a hit. Both paths return the
+  actual shared proof. A worker reply retains its own status and elapsed time
+  in the log, while a cache hit creates no response measurement.
 
 ### The dispatch semaphore contract
 
@@ -1167,7 +1202,11 @@ either side. The two sides are kept in sync by a single config knob.
 The permit is acquired before `pending.insert()` and before the
 `tokio::time::timeout` wrap, so each caller's timer ticks only during
 the work that has been issued to the worker. A caller waiting for a
-permit holds no timer.
+permit holds no timer. The owned permit transfers to submitted work, so a
+caller timeout cannot falsely advertise executor capacity while the worker
+still runs. Rejoining an identical detached request takes neither a new slot
+nor another model/request lease. Stream retirement is the local ownership
+boundary for an external daemon.
 
 Tuning rule by underlying device:
 
@@ -1250,5 +1289,19 @@ its stream closes, which `check_available` observes.
 - `SharedConcurrent` (GPU with `force_cpu` off and a pool above 1) →
   `dispatch_gpu_execute_v2()` → `SharedGpuWorker::execute_v2()`
 - `OneRequestPerProcess` (GPU with `force_cpu` or a pool of 1; Stanza in
-  every runtime; IO) → `checkout()` → `CheckedOutWorker::execute_v2()`,
+  every runtime; IO) → `checkout()` → consuming `TrackedCheckout::run()` → admitted handle exchange,
   scaled to `max_workers_per_key` processes per key.
+
+### Typed sequential control completion
+
+Health, capabilities, infer, batch-infer and ensure-task each carry their
+request-specific expected terminal and wait policy. The shared progress reader
+returns an admitted ControlCompletion. Stdio reuse follows that proof, including
+an explicit reported failure. Foreign or malformed terminals leave the exchange
+in flight so checkout retirement handles uncertainty. Ensure-task completion
+also checks the loaded task before confirming the original memory grant.
+The existing infer and batch-infer wire pathways remain supported.
+
+Text adapters admit the actual response population against the collected item
+owner before application. Missing or extra results produce a worker-protocol
+failure instead of indexing missing results or discarding extras.

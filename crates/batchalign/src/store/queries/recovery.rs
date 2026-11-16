@@ -917,7 +917,11 @@ mod tests {
         assert_eq!(retained.lang, "not a language");
     }
 
-    /// Startup recovery re-queues resumable work and persists the queued state.
+    /// Guards: Startup retains written files and resets unfinished files only when current path authority admits execution.
+    /// Kind: contract
+    /// Not a type: Live fixture types cannot establish decoding of persisted rows or the subsequent SQLite rewrites under changed filesystem authority.
+    /// State: A private SQLite database and registry exercise actual row decoding and persistence. No worker or model is loaded.
+    /// Concurrency: Each mode owns its directory, database and actor. All mutations are awaited before reload and inspection.
     #[tokio::test]
     async fn load_from_db_requeues_resumable_interrupted_jobs() {
         // On a server with no paths-mode folders: a content-mode job resumes;
@@ -983,6 +987,14 @@ mod tests {
                 .unwrap();
             assert_eq!(requeued_file.status, file_status);
             assert!(info.active_lease.is_none());
+            assert_eq!(
+                info.file_statuses
+                    .iter()
+                    .find(|file| file.filename == "a.cha")
+                    .unwrap()
+                    .status,
+                FileStatusKind::Done
+            );
 
             let rows = db.load_all_jobs().await.unwrap();
             assert_eq!(rows[0].status, row_status);
@@ -993,13 +1005,21 @@ mod tests {
                 .unwrap();
             assert_eq!(persisted_file.status, file_row);
             if !paths_mode {
+                assert!(info.error.is_none());
+                assert!(info.completed_at.is_none());
+                assert!(requeued_file.finished_at.is_none());
                 assert!(requeued_file.started_at.is_none());
                 assert!(persisted_file.started_at.is_none());
+                assert!(persisted_file.finished_at.is_none());
             }
         }
     }
 
-    /// Startup recovery finalizes all-terminal interrupted jobs and clears leases.
+    /// Guards: Startup exposes a partial file failure with its actual reason and clears the stopped runner lease.
+    /// Kind: contract
+    /// Not a type: Live fixture types cannot establish the stored status decoding, aggregated failure reason or durable lease removal during startup.
+    /// State: A private SQLite database and registry exercise actual row decoding and persistence. No worker or model is loaded.
+    /// Concurrency: Each mode owns its directory, database and actor. All mutations are awaited before reload and inspection.
     #[tokio::test]
     async fn load_from_db_finalizes_terminal_interrupted_jobs() {
         // Nothing left to run, so no admission is needed in either mode,
@@ -1063,10 +1083,21 @@ mod tests {
             let info = store.get(&JobId::from("job-2")).await.unwrap();
             assert_eq!(info.status, JobStatus::Failed);
             assert_eq!(info.completed_files, 2);
+            assert!(
+                info.error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("boom"))
+            );
             assert!(info.active_lease.is_none());
 
             let rows = db.load_all_jobs().await.unwrap();
             assert_eq!(rows[0].status, "failed");
+            assert!(
+                rows[0]
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("boom"))
+            );
             assert!(rows[0].lease.is_none());
         }
     }

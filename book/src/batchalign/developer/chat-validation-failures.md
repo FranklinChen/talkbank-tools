@@ -1,7 +1,7 @@
 # CHAT Validation Failures
 
 **Status:** Current
-**Last updated:** 2026-11-05 14:17 EST
+**Last updated:** {{git-dates:page}}
 
 The [command contract](../architecture/command-contracts.md) is the authoritative
 input-admission and output policy. This page explains how validation failures
@@ -207,9 +207,11 @@ itself); the shortfall is logged, since it is not part of benchmark's outputs.
 
 ## The file's outcome
 
-A diagnosed output reaches the runner through the writer, which reports
-`WrittenOutput::Diagnosed` from `OutputReport::of` over the proof it actually
-wrote (after any merge) and the run's shortfalls. The runner records `FileCompletion::Diagnosed`, which the store keeps as
+A diagnosed output reaches the runner through the writer's private
+`WrittenOutcome::Diagnosed` inside `WrittenOutput`. `OutputReport::of` judges
+the proof actually written after any merge and the run's shortfalls. Only a
+successful writer constructs the receipt. Consuming it records completion
+against its carried input name. The runner records `FileCompletion::Diagnosed`, which the store keeps as
 `FilePhase::Diagnosed { started_at, finished_at, diagnostics, exclusions }`:
 
 - On the API, `FileStatusKind::Diagnosed` (wire value `"diagnosed"`) is

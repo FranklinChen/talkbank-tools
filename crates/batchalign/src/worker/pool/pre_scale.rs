@@ -12,8 +12,6 @@
 //! serves that need now: both act on demonstrated demand rather than on a
 //! guess made at startup.
 
-use std::sync::atomic::Ordering;
-
 use crate::api::{ReleasedCommand, WorkerLanguage};
 use crate::options::CommandOptions;
 use crate::worker::WorkerTarget;
@@ -130,7 +128,7 @@ impl WorkerPool {
                 let groups = lock_recovered(&self.groups);
                 groups
                     .get(&key)
-                    .is_some_and(|g| !lock_recovered(&g.tcp_workers).is_empty())
+                    .is_some_and(|g| !g.tcp_workers.view().is_empty())
             };
             if has_tcp {
                 info!(
@@ -174,19 +172,19 @@ impl WorkerPool {
         let group = self.get_or_create_group(&key);
 
         loop {
-            let current = group.total.load(Ordering::Relaxed);
+            let current = group.total.count();
             if current >= target {
                 break;
             }
 
             match self.try_spawn_into_group(&group, &key).await {
-                Ok(true) => {}      // Keep going
-                Ok(false) => break, // At capacity
+                Ok(super::lifecycle::SpawnOutcome::Published) => {}
+                Ok(super::lifecycle::SpawnOutcome::Deferred(_)) => break,
                 Err(e) => {
                     warn!(
                         target = %key.target.label(),
                         lang = %key.language,
-                        current = group.total.load(Ordering::Relaxed),
+                        current = group.total.count(),
                         target = target,
                         error = %e,
                         "Pre-scale spawn failed, stopping early"

@@ -121,6 +121,73 @@ def after_attribute(line: str) -> str:
     return ""
 
 
+# Only lexical regions that can conceal a test attribute are masked. Source
+# validity and macro expansion remain the Rust compiler's responsibility.
+RUST_NON_CODE = re.compile(
+    r'//|/\*|r(?P<hashes>\#*)"|(?P<string>")|'
+    r"(?P<character>'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|[^\n])|[^'\\\r\n])')"
+)
+RUST_BLOCK_MARKER = re.compile(r"/\*|\*/")
+
+
+def rust_code_only(source: str) -> str:
+    """Mask literals/comments while preserving every character position and newline."""
+    chunks: list[str] = []
+    cursor = 0
+    while token := RUST_NON_CODE.search(source, cursor):
+        start = token.start()
+        end = token.end()
+        chunks.append(source[cursor:start])
+        if token.group() == "//":
+            newline = source.find("\n", end)
+            end = len(source) if newline < 0 else newline
+        elif token.group() == "/*":
+            depth = 1
+            while depth and (marker := RUST_BLOCK_MARKER.search(source, end)):
+                depth += 1 if marker.group() == "/*" else -1
+                end = marker.end()
+            if depth:
+                end = len(source)
+        elif token.group("hashes") is not None:
+            closing = '"' + token.group("hashes")
+            closing_at = source.find(closing, end)
+            end = len(source) if closing_at < 0 else closing_at + len(closing)
+        elif token.group("string") is not None:
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                elif source[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            end = min(end, len(source))
+        # Character tokens already include their closing quote. Lifetimes
+        # have no closing character quote and do not match this token family.
+        # Allocate padding per lexical region/line, without one list slot
+        # per source character. Newline and character positions stay exact.
+        chunks.append("\n".join(" " * len(line) for line in source[start:end].split("\n")))
+        cursor = end
+    chunks.append(source[cursor:])
+    return "".join(chunks)
+
+
+@dataclass(frozen=True, init=False)
+class RustSource:
+    """One raw source and its position-preserving lexical code view.
+
+    Construction performs masking once. Consumers cannot supply an unrelated
+    code view or mutate either retained line sequence.
+    """
+
+    source_lines: tuple[str, ...]
+    code_lines: tuple[str, ...]
+
+    def __init__(self, source: str) -> None:
+        object.__setattr__(self, "source_lines", tuple(source.split("\n")))
+        object.__setattr__(self, "code_lines", tuple(rust_code_only(source).split("\n")))
+
+
 def rust_tests(path: str, text: str) -> list[FoundTest]:
     """Every test function in a Rust file (see `RUST_TEST_ATTR`), with its `///` text.
 
@@ -128,11 +195,13 @@ def rust_tests(path: str, text: str) -> list[FoundTest]:
     from the `fn` to the first later line that is exactly the `fn` line's indentation
     followed by `}` (rustfmt's layout), or ends on its own line when that closes it.
     """
-    lines = text.split("\n")
+    source = RustSource(text)
+    lines = source.source_lines
+    code_lines = source.code_lines
     found: list[FoundTest] = []
     seen: dict[str, int] = {}
-    for at, line in enumerate(lines):
-        if not RUST_TEST_ATTR.match(line):
+    for at, code_line in enumerate(code_lines):
+        if not RUST_TEST_ATTR.match(code_line):
             continue
         doc: list[str] = []
         before = at - 1
@@ -141,24 +210,28 @@ def rust_tests(path: str, text: str) -> list[FoundTest]:
                 doc.insert(0, lines[before].strip()[3:])
             before -= 1
         after = at + 1
-        same_line = RUST_FN.match(after_attribute(line).lstrip())
+        same_line = RUST_FN.match(after_attribute(code_line).lstrip())
         if same_line is not None:
             after = at
-        while same_line is None and after < len(lines) and not RUST_FN.match(lines[after]):
+        while same_line is None and after < len(lines) and not RUST_FN.match(code_lines[after]):
             if lines[after].strip().startswith("///"):
                 doc.append(lines[after].strip()[3:])
             elif not lines[after].strip().startswith("#["):
                 break
             after += 1
-        match = same_line or (RUST_FN.match(lines[after]) if after < len(lines) else None)
+        match = same_line or (RUST_FN.match(code_lines[after]) if after < len(lines) else None)
         if match is None:
             continue
         name = match.group(2)
         indent = lines[after][: len(lines[after]) - len(lines[after].lstrip())]
         end = after
-        if not lines[after].rstrip().endswith("}"):
+        if not code_lines[after].rstrip().endswith("}"):
             end = next(
-                (i for i in range(after + 1, len(lines)) if lines[i].rstrip() == f"{indent}}}"),
+                (
+                    i
+                    for i in range(after + 1, len(lines))
+                    if code_lines[i].rstrip() == f"{indent}}}"
+                ),
                 len(lines) - 1,
             )
         seen[name] = seen.get(name, 0) + 1

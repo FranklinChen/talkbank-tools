@@ -11,7 +11,7 @@
 //! | `stdio.rs` | `SharedGpuWorker`: the channel over a spawned child's stdio, plus process ownership |
 //! | `tcp.rs` | `SharedGpuTcpWorker`: the channel over a daemon's TCP connection |
 
-mod channel;
+pub(in crate::worker::pool) mod channel;
 mod reader;
 mod routes;
 mod stdio;

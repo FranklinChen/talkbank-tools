@@ -1,7 +1,7 @@
 # Adding a New Command
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** {{git-dates:page}}
 
 This guide walks through adding a new batchalign3 command end-to-end.
 
@@ -132,18 +132,25 @@ CatalogEntry {
     capability_kind: CommandCapabilityKind::DirectInfer,
     io_profile: CommandIoProfile::Text,
     runner_dispatch_kind: RunnerDispatchKind::BatchedTextInfer,
-    capabilities: CapabilityPlan {
-        primary_infer_task: InferTask::YourTask,
-        surface: CapabilitySurface::RecipeOwned,
-    },
-    output_policy: OutputPolicy {
+    capabilities: CapabilityPlan::inference(
+        InferTask::YourTask,
+        CapabilitySurface::RecipeOwned,
+    ),
+    output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
         primary: FileNamingPolicy::PreserveInput,
         primary_content_type: ContentType::Chat,
-        sidecars: NO_SIDECARS,
-    },
+    }),
     recipe: &YOUR_COMMAND_RECIPE,
 },
 ```
+
+Use `OutputPolicy::ChatMetrics` for the required CHAT/CSV pair. Its producer
+derives both names from the same source and assigns their distinct roles.
+`OutputPolicy::Diarize` selects the source-dependent CHAT or turns-JSON result.
+Native encoding uses `OutputDeclaration::AudioExport` so submitted options
+select the output format. Extend the
+[closed output layouts](../architecture/server-architecture.md#source-bound-output-layouts)
+when a new command requires a different artifact contract.
 
 **Every field is stated; none is inferred.** Until 2026-07-29 three of them
 (`capability_kind`, `io_profile`, `runner_dispatch_kind`) were computed by
@@ -392,10 +399,13 @@ BA3 splits this into layers:
     - `materialize_released()`: released compare output path
     - `materialize_main_annotated()`: internal benchmark/main output path
 
-3. **`execution/`**: recipe-driven server integration (new model):
-    - `dispatch_compare_job()` builds a `JobPlan` and runs `ExecutionKernel`
-    - `CompareStageExecutor` handles recipe stages: plan work units, read
-      inputs, morphosyntax, compare-align, materialize outputs
+3. **`execution/`**: planned server integration:
+    - `dispatch_compare_job()` builds a `JobPlan` and admits each compare file
+    - Consuming phases in `execution/kernel/comparison.rs` retain source-bound
+      targets, the admitted reference, judged morphology and completed metrics
+      through required writes and run-bound completion
+    - `CompareMorphology` exposes only compare's morphology effect to the
+      phase graph and its doubles
     - Resolves gold file from `*.gold.cha` companion via planner
 
 ### How to extend structural gold projection

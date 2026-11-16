@@ -19,8 +19,9 @@ pub(crate) mod test_sink;
 mod tests;
 
 // Re-export everything at the same paths callers already use.
+pub(crate) use crate::store::StoreRunnerEventSink;
 pub(crate) use attempts::{AfterFailure, FileAttempts};
-pub(crate) use event_sink::{RunnerEventSink, StoreRunnerEventSink};
+pub(crate) use event_sink::RunnerEventSink;
 pub(crate) use file_stage::FileStage;
 pub(crate) use tracker::{
     FileRunTracker, FileTaskOutcome, ProgressSender, ProgressUpdate, TerminalRecorded,

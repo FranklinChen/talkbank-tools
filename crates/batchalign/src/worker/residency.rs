@@ -67,7 +67,10 @@ pub enum Basis {
 /// Built only from the constants in this module, so every size in the table
 /// states its basis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Footprint {
+pub struct Footprint(FootprintKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FootprintKind {
     /// Measured with `scripts/measure_model_residency.py`: what building the
     /// model adds over the baseline, and the most it holds over the
     /// baseline while running a request (never less than `built`).
@@ -89,20 +92,20 @@ impl Footprint {
             in_use >= built,
             "a model holds at least what building it added"
         );
-        Self::Measured {
+        Self(FootprintKind::Measured {
             built: MemoryMb(built),
             in_use: MemoryMb(in_use),
-        }
+        })
     }
 
     const fn estimated(mb: u64) -> Self {
-        Self::Estimated(MemoryMb(mb))
+        Self(FootprintKind::Estimated(MemoryMb(mb)))
     }
 
     /// The most the load holds while running a request.
     pub const fn in_use(self) -> MemoryMb {
-        match self {
-            Self::Measured { in_use, .. } | Self::Estimated(in_use) => in_use,
+        match self.0 {
+            FootprintKind::Measured { in_use, .. } | FootprintKind::Estimated(in_use) => in_use,
         }
     }
 
@@ -110,17 +113,17 @@ impl Footprint {
     /// so the host's reading of used memory does not show it until the first
     /// request: nothing for an estimate, which has no built figure apart.
     pub const fn unread(self) -> MemoryMb {
-        match self {
-            Self::Measured { built, in_use } => MemoryMb(in_use.0 - built.0),
-            Self::Estimated(_) => MemoryMb(0),
+        match self.0 {
+            FootprintKind::Measured { built, in_use } => MemoryMb(in_use.0 - built.0),
+            FootprintKind::Estimated(_) => MemoryMb(0),
         }
     }
 
     /// How the footprint is known.
     pub const fn basis(self) -> Basis {
-        match self {
-            Self::Measured { .. } => Basis::Measured,
-            Self::Estimated(_) => Basis::Estimated,
+        match self.0 {
+            FootprintKind::Measured { .. } => Basis::Measured,
+            FootprintKind::Estimated(_) => Basis::Estimated,
         }
     }
 
@@ -296,147 +299,4 @@ impl Residency {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::engines::{AsrEngineName, FaEngineName};
-
-    fn engines(set: impl FnOnce(&mut EngineOverrides)) -> EngineOverrides {
-        let mut overrides = EngineOverrides::default();
-        set(&mut overrides);
-        overrides
-    }
-
-    /// A lease reserves the in-use figure and a quarter of it, rounded up,
-    /// and settles to the unread part and the margin.
-    #[test]
-    fn a_lease_reserves_use_and_a_quarter_and_settles_to_the_unread_part() {
-        assert_eq!(PYANNOTE_DIARIZATION.margin(), MemoryMb(569));
-        assert_eq!(PYANNOTE_DIARIZATION.reserved(), MemoryMb(2_843));
-        assert_eq!(PYANNOTE_DIARIZATION.unread(), MemoryMb(1_896));
-        assert_eq!(PYANNOTE_DIARIZATION.settled(), MemoryMb(2_465));
-        assert_eq!(Footprint::measured(1, 1).margin(), MemoryMb(1));
-        assert_eq!(WORKER_BASELINE.reserved(), MemoryMb(344));
-        assert_eq!(WORKER_BASELINE.unread(), MemoryMb(0));
-        // An estimate has no built figure apart, so nothing is unread.
-        assert_eq!(Footprint::estimated(1_000).settled(), MemoryMb(250));
-    }
-
-    /// ASR, FA and translation reuse the engine tables' own figures, as
-    /// estimates, and are never restated here.
-    #[test]
-    fn engine_loads_reuse_the_engine_tables() {
-        let whisper = Residency::of(
-            InferTask::Asr,
-            &engines(|e| e.asr = Some(AsrEngineName::Whisper)),
-        );
-        assert_eq!(
-            whisper,
-            Residency::WorkerLife(Footprint::estimated(
-                AsrEngineName::Whisper.resident_memory_mb()
-            ))
-        );
-        let wav2vec = Residency::of(
-            InferTask::Fa,
-            &engines(|e| e.fa = Some(FaEngineName::Wave2Vec)),
-        );
-        assert_eq!(
-            wav2vec.loading(),
-            Some(Footprint::estimated(FaEngineName::Wave2Vec.resident_memory_mb()).reserved())
-        );
-        let nllb = Residency::of(
-            InferTask::Translate,
-            &engines(|e| e.translate = Some(TranslateEngineName::Nllb)),
-        );
-        assert_eq!(
-            nllb,
-            Residency::WorkerLife(Footprint::estimated(
-                TranslateEngineName::Nllb.resident_memory_mb()
-            ))
-        );
-    }
-
-    /// An unnamed translate engine is the worker's default (Google), not
-    /// nothing; an ASR engine that runs in Rust and an FA load naming no
-    /// engine load nothing in the worker.
-    #[test]
-    fn defaults_and_rust_hosted_engines() {
-        assert_eq!(
-            Residency::of(InferTask::Translate, &EngineOverrides::default()),
-            Residency::WorkerLife(Footprint::estimated(
-                TranslateEngineName::Google.resident_memory_mb()
-            ))
-        );
-        assert_eq!(
-            Residency::of(
-                InferTask::Asr,
-                &engines(|e| e.asr = Some(AsrEngineName::RevAi))
-            ),
-            Residency::Nothing
-        );
-        assert_eq!(
-            Residency::of(InferTask::Asr, &EngineOverrides::default()),
-            Residency::Nothing
-        );
-        assert_eq!(
-            Residency::of(InferTask::Fa, &EngineOverrides::default()),
-            Residency::Nothing
-        );
-    }
-
-    /// The speaker task holds the model its load names, measured; the
-    /// hosted engine holds nothing.
-    #[test]
-    fn speaker_loads_hold_the_named_model() {
-        let local = Residency::of(
-            InferTask::Speaker,
-            &engines(|e| e.speaker = Some(SpeakerEngineName::Pyannote)),
-        );
-        assert_eq!(local, Residency::WorkerLife(PYANNOTE_DIARIZATION));
-        let embedding = Residency::of(
-            InferTask::Speaker,
-            &engines(|e| e.speaker_embedding = Some(SpeakerEmbeddingBackendV2::Pyannote)),
-        );
-        assert_eq!(embedding, Residency::WorkerLife(SPEAKER_EMBEDDING));
-        assert_eq!(
-            Residency::of(
-                InferTask::Speaker,
-                &engines(|e| e.speaker = Some(SpeakerEngineName::PyannoteAi))
-            ),
-            Residency::Nothing
-        );
-        assert_eq!(PYANNOTE_DIARIZATION.basis(), Basis::Measured);
-    }
-
-    /// Coreference is the one per-batch model: its load reserves one build,
-    /// keeps nothing reserved once loaded, and each batch reserves a build.
-    #[test]
-    fn coreference_reserves_per_batch() {
-        let coref = Residency::of(InferTask::Coref, &EngineOverrides::default());
-        assert_eq!(coref.loading(), Some(COREF.reserved()));
-        assert_eq!(coref.resident(), MemoryMb(0));
-        assert_eq!(coref.batch(), Some(COREF.reserved()));
-        let morph = Residency::of(InferTask::Morphosyntax, &EngineOverrides::default());
-        assert_eq!(morph.batch(), None);
-        assert_eq!(morph.resident(), MORPHOSYNTAX.settled());
-    }
-
-    /// Every task has an entry, and the model-free ones take no lease.
-    #[test]
-    fn every_task_has_a_residency() {
-        for &task in InferTask::ALL {
-            let residency = Residency::of(task, &EngineOverrides::default());
-            match task {
-                InferTask::Opensmile | InferTask::Avqi | InferTask::WordSegmentation => {
-                    assert_eq!(residency, Residency::Nothing, "{task:?}");
-                }
-                InferTask::Morphosyntax
-                | InferTask::Utseg
-                | InferTask::Translate
-                | InferTask::Coref => assert!(residency.loading().is_some(), "{task:?}"),
-                InferTask::Fa | InferTask::Asr | InferTask::Speaker => {
-                    assert_eq!(residency, Residency::Nothing, "{task:?} with no engine");
-                }
-            }
-        }
-    }
-}
+mod tests;

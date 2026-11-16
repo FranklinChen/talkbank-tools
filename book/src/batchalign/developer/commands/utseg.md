@@ -162,7 +162,7 @@ Three things about its shape are deliberate:
   word long bypassed it and reported success for a language with no segmenter.
 
 Resolution happens where the answer is first knowable:
-`TranscribeDispatchPlan::from_job` refuses before any ASR is dispatched, and
+`TranscribeDispatchPlan::from_request` refuses before any ASR is dispatched, and
 `runner::routing` refuses a standalone `utseg` job before dispatch. Under
 `--lang auto` the language is not known until ASR returns, so that case alone
 resolves the same route inside the pipeline instead.

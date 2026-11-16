@@ -10,35 +10,26 @@
 //! isolation); [`WorkerPool::try_evict_idle_from_other_group`] is the
 //! imperative wrapper that acquires the live state.
 
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::atomic::Ordering;
-
 use tracing::info;
 
 use super::{WorkerKey, WorkerPool, lock_recovered};
 
-/// Immutable per-group view used by the pure eviction-target selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct GroupSnapshot {
-    pub idle_count: usize,
-}
-
-/// Pick an eviction target: any group other than `skip_key` with at least
-/// one idle worker. Ties are broken by picking the group with the highest
-/// idle count so the most "wasted" slot is freed first.
-pub(super) fn select_eviction_target<K>(
-    groups: &HashMap<K, GroupSnapshot>,
+/// Selection consumes actual metadata with each observation. Empty and excluded
+/// groups never acquire candidate status, so the effect receives its original home.
+fn select_eviction_target<K: Eq, T>(
+    groups: impl IntoIterator<Item = (K, T, usize)>,
     skip_key: &K,
-) -> Option<K>
-where
-    K: Clone + Eq + Hash,
-{
+) -> Option<(K, T)> {
     groups
-        .iter()
-        .filter(|(key, snap)| *key != skip_key && snap.idle_count > 0)
-        .max_by_key(|(_, snap)| snap.idle_count)
-        .map(|(key, _)| key.clone())
+        .into_iter()
+        .filter_map(|(key, source, count)| {
+            if &key == skip_key {
+                return None;
+            }
+            std::num::NonZeroUsize::new(count).map(|count| (key, source, count))
+        })
+        .max_by_key(|(_, _, count)| *count)
+        .map(|(key, source, _)| (key, source))
 }
 
 /// Result of a single eviction attempt. Named so callers don't have to
@@ -60,42 +51,24 @@ impl WorkerPool {
     /// drop on a detached task so the on-request-path `checkout` never
     /// waits on worker shutdown.
     pub(super) fn try_evict_idle_from_other_group(&self, skip_key: &WorkerKey) -> EvictionOutcome {
-        let victim_group = {
+        let victim = {
             let groups = lock_recovered(&self.groups);
-            let snapshots: HashMap<WorkerKey, GroupSnapshot> = groups
-                .iter()
-                .map(|(key, group)| {
-                    let idle_count = lock_recovered(&group.idle).len();
-                    (key.clone(), GroupSnapshot { idle_count })
-                })
-                .collect();
-            let Some(victim_key) = select_eviction_target(&snapshots, skip_key) else {
-                return EvictionOutcome::NoIdleElsewhere;
-            };
-            match groups.get(&victim_key) {
-                Some(group) => (victim_key, group.clone()),
-                None => return EvictionOutcome::NoIdleElsewhere,
-            }
+            select_eviction_target(
+                groups
+                    .iter()
+                    .map(|(key, home)| (key, home, home.idle.view().len())),
+                &skip_key,
+            )
+            .map(|(key, home)| (key.clone(), home.clone()))
         };
-        let (victim_key, victim_group) = victim_group;
-
-        let Ok(permit) = victim_group.available.try_acquire() else {
-            return EvictionOutcome::NoIdleElsewhere;
-        };
-        permit.forget();
-
-        let Some(handle) = lock_recovered(&victim_group.idle).pop_front() else {
-            // Permit without a matching idle worker, restore the
-            // invariant (permits == idle.len()) and bail.
-            victim_group.available.add_permits(1);
+        let Some((victim_key, victim_group)) = victim else {
             return EvictionOutcome::NoIdleElsewhere;
         };
 
-        victim_group.total.fetch_sub(1, Ordering::Relaxed);
-        // The victim worker is gone; refund its global-cap permit so
-        // the requester (or any other admission) can acquire it on
-        // the next try_claim_spawn_slot loop iteration.
-        victim_group.spawn_permits.add_permits(1);
+        let Some(handle) = victim_group.take_stdio() else {
+            return EvictionOutcome::NoIdleElsewhere;
+        };
+
         info!(
             victim = ?victim_key,
             requesting = ?skip_key,
@@ -110,61 +83,11 @@ impl WorkerPool {
         // eviction is triggered by whichever checkout happens to be saturated,
         // which in the harness is an arbitrary test's runtime. The owner also
         // decides what to do when the pool has no runtime at all.
-        self.spawn_runtime.retire_worker_handle(handle);
+        self.spawn_runtime.retire_worker_handle(handle.retiring());
 
         EvictionOutcome::Evicted
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snap(idle: usize) -> GroupSnapshot {
-        GroupSnapshot { idle_count: idle }
-    }
-
-    #[test]
-    fn select_returns_none_when_only_skip_key_has_idle() {
-        let mut groups: HashMap<&'static str, GroupSnapshot> = HashMap::new();
-        groups.insert("deu", snap(2));
-        groups.insert("eng", snap(0));
-        assert_eq!(select_eviction_target(&groups, &"deu"), None);
-    }
-
-    #[test]
-    fn select_returns_none_when_no_group_has_idle_workers() {
-        let mut groups: HashMap<&'static str, GroupSnapshot> = HashMap::new();
-        groups.insert("eng", snap(0));
-        groups.insert("deu", snap(0));
-        assert_eq!(select_eviction_target(&groups, &"deu"), None);
-    }
-
-    #[test]
-    fn select_picks_other_group_with_idle_workers() {
-        let mut groups: HashMap<&'static str, GroupSnapshot> = HashMap::new();
-        groups.insert("eng", snap(3));
-        groups.insert("deu", snap(0));
-        assert_eq!(select_eviction_target(&groups, &"deu"), Some("eng"));
-    }
-
-    /// Regression guard for the saturation pattern: multiple idle groups
-    /// exist, picker prefers the one with the highest idle count so the
-    /// most wasted slot frees first.
-    #[test]
-    fn select_prefers_group_with_highest_idle_count() {
-        let mut groups: HashMap<&'static str, GroupSnapshot> = HashMap::new();
-        groups.insert("eng", snap(4));
-        groups.insert("fra", snap(1));
-        groups.insert("deu", snap(0));
-        assert_eq!(select_eviction_target(&groups, &"deu"), Some("eng"));
-    }
-
-    #[test]
-    fn select_never_returns_the_skip_key_even_if_its_idle_count_is_highest() {
-        let mut groups: HashMap<&'static str, GroupSnapshot> = HashMap::new();
-        groups.insert("deu", snap(9));
-        groups.insert("eng", snap(1));
-        assert_eq!(select_eviction_target(&groups, &"deu"), Some("eng"));
-    }
-}
+mod tests;

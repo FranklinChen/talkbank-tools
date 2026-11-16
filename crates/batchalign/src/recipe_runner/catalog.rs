@@ -11,20 +11,12 @@ use super::command_spec::{
     CapabilityPlan, CapabilitySurface, CatalogEntry, CommandCapabilityKind, CommandFamily,
     CommandIoProfile, NativeMediaCapability, PlannerKind, RunnerDispatchKind,
 };
-use super::materialize::{
-    FileNamingPolicy, OutputDeclaration, OutputPolicy, SidecarPolicy, StemRewrite,
-};
+use super::materialize::{FileNamingPolicy, OutputDeclaration, OutputPolicy, StemRewrite};
 use super::recipes::{
     ALIGN_RECIPE, AVQI_RECIPE, BENCHMARK_RECIPE, COMPARE_RECIPE, CONVERT_RECIPE, COREF_RECIPE,
     DIARIZE_RECIPE, MORPHOTAG_RECIPE, OPENSMILE_RECIPE, SPEAKER_IDENTIFY_RECIPE, TRANSCRIBE_RECIPE,
     TRANSCRIBE_S_RECIPE, TRANSLATE_RECIPE, UTSEG_RECIPE,
 };
-
-const NO_SIDECARS: &[SidecarPolicy] = &[];
-const COMPARE_SIDECARS: &[SidecarPolicy] = &[SidecarPolicy {
-    naming: FileNamingPolicy::ReplaceExtension("compare.csv"),
-    content_type: ContentType::Csv,
-}];
 
 /// Every released command, declared once.
 ///
@@ -49,7 +41,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &MORPHOTAG_RECIPE,
     },
@@ -64,7 +55,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &UTSEG_RECIPE,
     },
@@ -82,7 +72,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &TRANSLATE_RECIPE,
     },
@@ -97,7 +86,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &COREF_RECIPE,
     },
@@ -112,7 +100,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::PreserveInput,
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &ALIGN_RECIPE,
     },
@@ -127,7 +114,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &TRANSCRIBE_RECIPE,
     },
@@ -142,7 +128,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
             primary_content_type: ContentType::Chat,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &TRANSCRIBE_S_RECIPE,
     },
@@ -157,10 +142,8 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
             InferTask::Morphosyntax,
             CapabilitySurface::RecipeOwned,
         ),
-        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
+        output_policy: OutputDeclaration::Source(OutputPolicy::ChatMetrics {
             primary: FileNamingPolicy::PreserveInput,
-            primary_content_type: ContentType::Chat,
-            sidecars: COMPARE_SIDECARS,
         }),
         recipe: &COMPARE_RECIPE,
     },
@@ -174,10 +157,8 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
         io_profile: CommandIoProfile::MediaInput,
         runner_dispatch_kind: RunnerDispatchKind::BenchmarkAudioInfer,
         capabilities: CapabilityPlan::inference(InferTask::Asr, CapabilitySurface::Composite),
-        output_policy: OutputDeclaration::Source(OutputPolicy::Fixed {
+        output_policy: OutputDeclaration::Source(OutputPolicy::ChatMetrics {
             primary: FileNamingPolicy::ReplaceExtension("cha"),
-            primary_content_type: ContentType::Chat,
-            sidecars: COMPARE_SIDECARS,
         }),
         recipe: &BENCHMARK_RECIPE,
     },
@@ -199,7 +180,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
                 extension: "csv",
             }),
             primary_content_type: ContentType::Csv,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &OPENSMILE_RECIPE,
     },
@@ -218,7 +198,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
                 extension: "txt",
             }),
             primary_content_type: ContentType::Text,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &AVQI_RECIPE,
     },
@@ -256,7 +235,6 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
                 extension: "json",
             }),
             primary_content_type: ContentType::Json,
-            sidecars: NO_SIDECARS,
         }),
         recipe: &SPEAKER_IDENTIFY_RECIPE,
     },
@@ -286,7 +264,7 @@ mod tests {
     use crate::api::DisplayPath;
     use crate::command_model::command_spec;
     use crate::recipe_runner::materialize::plan_materialized_files;
-    use crate::recipe_runner::recipe::{ExecutionMode, RecipeStageId, RecipeStagePresence};
+    use crate::recipe_runner::recipe::{RecipeStageId, RecipeStagePresence};
 
     /// Every released command must have a catalog entry.
     ///
@@ -340,24 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn compare_spec_keeps_reference_projection_and_sidecar_output() {
-        let spec = command_spec(ReleasedCommand::Compare);
-        assert_eq!(spec.family, CommandFamily::ReferenceProjection);
-        assert_eq!(spec.recipe.mode, ExecutionMode::ReferenceProjection);
-        let outputs = plan_materialized_files(
-            &"sample.cha".into(),
-            spec.selected_output_policy(&crate::recipe_runner::runtime::test_options(spec.command))
-                .unwrap(),
-        );
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].display_path, DisplayPath::from("sample.cha"));
-        assert_eq!(
-            outputs[1].display_path,
-            DisplayPath::from("sample.compare.csv")
-        );
-    }
-
-    #[test]
     fn transcribe_recipe_keeps_asr_before_chat_build() {
         let spec = command_spec(ReleasedCommand::Transcribe);
         assert_eq!(
@@ -389,6 +349,11 @@ mod tests {
         assert_eq!(diarization.presence, RecipeStagePresence::Required);
     }
 
+    /// Guards: The actual analysis catalog produces the promised openSMILE suffix and AVQI stripped-stem filename.
+    /// Kind: policy
+    /// Not a type: Producer-owned primary roles cannot establish the semantic suffixes chosen by the catalog or the exact rewritten path bytes.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn media_analysis_specs_match_current_output_filenames() {
         let opensmile = command_spec(ReleasedCommand::Opensmile);
@@ -407,11 +372,11 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(
-            opensmile_outputs[0].display_path,
+            *opensmile_outputs.primary().display_path(),
             DisplayPath::from("sample.opensmile.csv")
         );
         assert_eq!(
-            avqi_outputs[0].display_path,
+            *avqi_outputs.primary().display_path(),
             DisplayPath::from("sample.avqi.txt")
         );
     }

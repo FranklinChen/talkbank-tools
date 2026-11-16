@@ -8,8 +8,6 @@
 //! The `Drop` impl (Layer 2) catches test code and panic unwinds where the pool
 //! goes out of scope without a graceful `shutdown()` call.
 
-use std::sync::atomic::Ordering;
-
 use tracing::{info, warn};
 
 use super::{WorkerPool, lock_recovered};
@@ -95,10 +93,9 @@ impl WorkerPool {
         };
 
         for (key, group) in all_groups {
-            let workers: Vec<crate::worker::handle::WorkerHandle> =
-                { lock_recovered(&group.idle).drain(..).collect() };
+            let workers = group.drain_stdio();
             let idle_count = workers.len();
-            let total = group.total.load(Ordering::Relaxed);
+            let total = group.total.count();
             let checked_out = total.saturating_sub(idle_count);
 
             if checked_out > 0 {
@@ -111,16 +108,6 @@ impl WorkerPool {
                      they will be killed when their RAII guard drops"
                 );
             }
-
-            // Decrement total for drained workers and refund the
-            // matching number of global-cap permits. (Checked-out
-            // workers are not refunded here, their permits will
-            // refund via CheckedOutWorker's drop/take paths once the
-            // dispatch path returns. If shutdown races those returns,
-            // the worst-case is a transient permit underflow that
-            // resolves naturally.)
-            group.total.fetch_sub(idle_count, Ordering::Relaxed);
-            super::permit::SpawnPermitGuard::release_n(&group.spawn_permits, idle_count);
 
             for mut handle in workers {
                 if let Err(e) = handle.shutdown_in_place().await {
@@ -156,12 +143,9 @@ impl Drop for WorkerPool {
         if let Ok(mut groups) = self.groups.lock() {
             for (_, group) in groups.drain() {
                 drained_groups += 1;
-                if let Ok(mut idle) = group.idle.lock() {
-                    for handle in idle.drain(..) {
-                        // WorkerHandle::Drop sends SIGTERM+SIGKILL.
-                        killed_handles += 1;
-                        drop(handle);
-                    }
+                for handle in group.drain_stdio() {
+                    killed_handles += 1;
+                    drop(handle);
                 }
             }
         }

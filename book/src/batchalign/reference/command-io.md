@@ -1,7 +1,7 @@
 # Batchalign Command I/O Parity: Local CLI vs Server
 
 **Status:** Current
-**Last updated:** 2026-11-05 19:37 EST
+**Last updated:** {{git-dates:page}}
 
 This document describes the input/output flow for every batchalign command,
 comparing direct local CLI execution with the server-based (`--server`)
@@ -64,6 +64,14 @@ full disk mid-write leaves the original whole rather than truncated. CSV
 sidecars and evidence documents are written the same way. An original that
 is a symlink is written through, so the file it names changes and the link
 stays a link.
+
+Server writers admit each pending file against its declared input and associate
+the catalog's output layout with that same source. They carry the selected
+destinations into the write. A mismatched internal source or layout produces a
+planning failure before output publication. Successful per-file completion
+uses the original input name retained by the writer's receipt. Paths mode
+requires both requested and staged copies before success is recorded. See the
+[output ownership graph](../architecture/server-architecture.md#source-bound-output-layouts).
 
 For generation commands such as `transcribe` and `benchmark`, omitting `-o` or
 passing `--in-place` still creates new output files next to the source media; it

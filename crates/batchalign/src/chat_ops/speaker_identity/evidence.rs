@@ -79,7 +79,7 @@ pub struct SpeakerIdentityProvenance {
     pub prepared_sample_rate_hz: u32,
     /// Embedding backend, as selected on the wire.
     pub embedding_backend: SpeakerEmbeddingBackendV2,
-    /// Exact model revision the worker loaded, echoed from the worker.
+    /// Embedding Hub revision read from the server binary's packaged manifest.
     pub embedding_model_revision: EmbeddingModelRevision,
     /// Width of every vector this run compared, echoed from the worker.
     pub embedding_dimension: EmbeddingDimension,
@@ -154,7 +154,7 @@ pub struct RunFacts {
     pub prepared_sample_rate_hz: u32,
     /// Embedding backend, as selected on the wire.
     pub embedding_backend: SpeakerEmbeddingBackendV2,
-    /// Exact model revision the worker loaded.
+    /// Embedding Hub revision read from the server binary's packaged manifest.
     pub embedding_model_revision: EmbeddingModelRevision,
     /// The tiers whose utterances were scored.
     pub tiers: Vec<String>,

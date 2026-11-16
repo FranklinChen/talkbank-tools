@@ -9,8 +9,8 @@ use crate::api::NumWorkers;
 use crate::media::export::{AudioExportError, AudioExportFormat, AudioExportPlan};
 use crate::options::CommandOptions;
 use crate::planning::{artifact_set_for_source, build_job_plan};
-use crate::recipe_runner::materialize::{MaterializedArtifactRole, PlannedMaterializedFile};
-use crate::recipe_runner::runtime::{discover_input_for_pending_file, output_write_path};
+use crate::recipe_runner::materialize::PlannedMaterializedFile;
+use crate::recipe_runner::runtime::{SourceOutputs, discover_input_for_pending_file};
 use crate::runner::DispatchHostContext;
 use crate::runner::util::{
     FileRunTracker, FileStage, FileTaskOutcome, drain_supervised_file_tasks,
@@ -61,25 +61,20 @@ fn admit_work(
     for file in files {
         let set = artifact_set_for_source(&plan, file.filename())
             .ok_or_else(|| NativeExportAdmissionError::Artifact(file.filename().clone()))?;
-        let [artifact] = set.files.as_slice() else {
+        let Some(artifact) = set.single() else {
             return Err(NativeExportAdmissionError::Artifact(
                 file.filename().clone(),
             ));
         };
-        if artifact.role != MaterializedArtifactRole::Primary || !artifact.content_type.is_binary()
-        {
+        if !artifact.content_type().is_binary() {
             return Err(NativeExportAdmissionError::Artifact(
                 file.filename().clone(),
             ));
         }
-        let primary = output_write_path(&job.filesystem, file.location(), &artifact.display_path);
-        let staged = job
-            .filesystem
-            .staging_dir
-            .join("output")
-            .join(artifact.display_path.as_ref())
-            .as_path()
-            .to_owned();
+        let outputs = SourceOutputs::admit_planned(&job.filesystem, file, set)?;
+        let target = outputs.primary_target()?;
+        let primary = target.primary_path().to_owned();
+        let staged = target.staged_path().to_owned();
         for destination in [&primary, &staged] {
             if destination == &staged && primary == staged {
                 continue;
@@ -101,7 +96,7 @@ fn admit_work(
         work.push(NativeExportWork {
             file: file.clone(),
             source: discover_input_for_pending_file(&job.filesystem, file).source_path,
-            artifact: artifact.clone(),
+            artifact: target.artifact().clone().into_materialized(),
             primary,
             staged,
             format: options.format,

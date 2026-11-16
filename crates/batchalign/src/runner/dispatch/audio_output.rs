@@ -13,16 +13,18 @@
 //! separate call site is a relationship maintained by convention, where the
 //! wrong combination type-checks.
 
+#[cfg(test)]
 use crate::api::{DisplayPath, ReleasedCommand};
 use crate::pipeline::post_validate::{
     Exclusion, OutputReport, PostValidationFailure, ProducedOutput, Shortfall,
 };
 use crate::recipe_runner::materialize::PlannedMaterializedFile;
 use crate::recipe_runner::runtime::{
-    ChatOutputTarget, primary_output_artifact, write_chat_output_artifact_with_provenance_gate,
+    OutputSourceIdentity, SourceOutputs, write_chat_output_artifact_with_provenance_gate,
     write_text_output_artifact,
 };
 use crate::scheduling::FailureCategory;
+#[cfg(test)]
 use crate::store::RunnerFilesystemConfig;
 
 /// A judged CHAT document with what the writer must report beside it.
@@ -119,14 +121,19 @@ impl OutputWriteFailure {
     }
 }
 
-/// What a writer persisted, and whether the bytes were admitted.
+/// Writer-owned completion receipt, constructed only after persistence succeeds.
 ///
-/// A sum, so the runner records a diagnosed file as diagnosed without being
-/// able to forget to ask: there is no artifact without its standing. Both
-/// arms carry the producer's exclusions, which are information whatever the
-/// standing.
+/// The private outcome retains clean or diagnosed standing and exclusions.
+/// The borrowed input identity determines which source receives completion.
+/// Only the successful writer constructs this consuming receipt.
 #[derive(Debug)]
-pub(crate) enum WrittenOutput {
+pub(crate) struct WrittenOutput<'a> {
+    source: OutputSourceIdentity<'a>,
+    outcome: WrittenOutcome,
+}
+
+#[derive(Debug)]
+enum WrittenOutcome {
     /// Admitted CHAT with nothing requested missing, or a document kind with
     /// no admission (evidence JSON).
     Clean {
@@ -146,15 +153,17 @@ pub(crate) enum WrittenOutput {
     },
 }
 
-impl WrittenOutput {
+impl WrittenOutput<'_> {
     /// Record the file's terminal phase for what was written: `Done` for a
     /// clean output, `Diagnosed` (never an error, never retried) otherwise.
     pub(crate) async fn record(
         self,
-        lifecycle: &crate::runner::util::FileRunTracker<'_>,
+        sink: &dyn crate::runner::util::RunnerEventSink,
     ) -> crate::runner::util::TerminalRecorded {
-        match self {
-            Self::Clean {
+        let lifecycle =
+            crate::runner::util::FileRunTracker::new(sink, self.source.filename().as_ref());
+        match self.outcome {
+            WrittenOutcome::Clean {
                 artifact,
                 exclusions,
             } => {
@@ -162,7 +171,7 @@ impl WrittenOutput {
                     .complete_clean(artifact.display_path, artifact.content_type, exclusions)
                     .await
             }
-            Self::Diagnosed {
+            WrittenOutcome::Diagnosed {
                 artifact,
                 diagnostics,
                 exclusions,
@@ -186,14 +195,10 @@ impl WrittenOutput {
 /// because the provenance gate is a CHAT-specific policy with its own reasons,
 /// and because the naming and staging behaviour it pins is what `align` and
 /// `transcribe` have always done.
-pub(crate) async fn write_primary_chat_output_artifact(
-    filesystem: &RunnerFilesystemConfig,
-    command: ReleasedCommand,
-    options: &crate::options::CommandOptions,
-    location: &crate::store::InputLocation,
-    source_filename: &str,
+pub(crate) async fn write_primary_chat_output_artifact<'a>(
+    outputs: SourceOutputs<'a>,
     output: ChatOutput,
-) -> Result<WrittenOutput, OutputWriteFailure> {
+) -> Result<WrittenOutput<'a>, OutputWriteFailure> {
     // The proof is written as judged: nothing between the judgement and the
     // write touches the bytes.
     let ChatOutput {
@@ -201,36 +206,37 @@ pub(crate) async fn write_primary_chat_output_artifact(
         shortfalls,
         exclusions,
     } = output;
-    let primary_output =
-        primary_output_artifact(command, options, &DisplayPath::from(source_filename))?;
-    if primary_output.content_type != crate::api::ContentType::Chat {
-        return Err(OutputWriteFailure::ContentKind(primary_output.content_type));
+    let source = outputs.source_identity();
+    let primary_output = outputs.primary();
+    if primary_output.content_type() != crate::api::ContentType::Chat {
+        return Err(OutputWriteFailure::ContentKind(
+            primary_output.content_type(),
+        ));
     }
-    let target = ChatOutputTarget::new(filesystem, location, &primary_output.display_path);
-    write_chat_output_artifact_with_provenance_gate(&target, &proof).await?;
+    let target = outputs.primary_target()?;
+    write_chat_output_artifact_with_provenance_gate(target, &proof).await?;
     // Read from the proof that was WRITTEN, so the reported
     // findings describe the bytes on disk, with every shortfall of the run.
     // Exclusions are not asked: they never decide the standing.
-    Ok(match OutputReport::of(&proof, &shortfalls) {
-        OutputReport::Clean => WrittenOutput::Clean {
-            artifact: primary_output,
-            exclusions,
-        },
-        OutputReport::Diagnosed(draft) => {
-            // A finding list too long for the record is written once, in
-            // full, beside the job's staged outputs, never into the user's
-            // output tree.
-            let sidecar = filesystem
-                .staging_dir
-                .as_path()
-                .join("diagnostics")
-                .join(format!("{}.findings.json", primary_output.display_path));
-            WrittenOutput::Diagnosed {
-                diagnostics: draft.record(&sidecar).await,
-                artifact: primary_output,
+    Ok(WrittenOutput {
+        source,
+        outcome: match OutputReport::of(&proof, &shortfalls) {
+            OutputReport::Clean => WrittenOutcome::Clean {
+                artifact: outputs.into_primary(),
                 exclusions,
+            },
+            OutputReport::Diagnosed(draft) => {
+                // A finding list too long for the record is written once, in
+                // full, beside the job's staged outputs, never into the user's
+                // output tree.
+                let sidecar = outputs.diagnostics_path();
+                WrittenOutcome::Diagnosed {
+                    diagnostics: draft.record(&sidecar).await,
+                    artifact: outputs.into_primary(),
+                    exclusions,
+                }
             }
-        }
+        },
     })
 }
 
@@ -240,44 +246,35 @@ pub(crate) async fn write_primary_chat_output_artifact(
 /// The single writeback seam for every audio-backed command. Both arms derive
 /// the output path from the catalog's own `output_policy`, so a command's
 /// artifact name is stated once, in the catalog, whichever kind it writes.
-pub(crate) async fn write_primary_output_artifact(
-    filesystem: &RunnerFilesystemConfig,
-    command: ReleasedCommand,
-    options: &crate::options::CommandOptions,
-    location: &crate::store::InputLocation,
-    source_filename: &str,
+pub(crate) async fn write_primary_output_artifact<'a>(
+    outputs: SourceOutputs<'a>,
     output: FileOutput,
-) -> Result<WrittenOutput, OutputWriteFailure> {
+) -> Result<WrittenOutput<'a>, OutputWriteFailure> {
     match output {
-        FileOutput::Chat(chat) => {
-            write_primary_chat_output_artifact(
-                filesystem,
-                command,
-                options,
-                location,
-                source_filename,
-                chat,
-            )
-            .await
-        }
+        FileOutput::Chat(chat) => write_primary_chat_output_artifact(outputs, chat).await,
         FileOutput::Evidence { body } => {
-            let primary_output =
-                primary_output_artifact(command, options, &DisplayPath::from(source_filename))?;
-            if primary_output.content_type.is_binary()
-                || primary_output.content_type == crate::api::ContentType::Chat
+            let source = outputs.source_identity();
+            let primary_output = outputs.primary();
+            if primary_output.content_type().is_binary()
+                || primary_output.content_type() == crate::api::ContentType::Chat
             {
-                return Err(OutputWriteFailure::ContentKind(primary_output.content_type));
+                return Err(OutputWriteFailure::ContentKind(
+                    primary_output.content_type(),
+                ));
             }
-            let target = ChatOutputTarget::new(filesystem, location, &primary_output.display_path);
+            let target = outputs.primary_target()?;
             // No provenance gate. That gate exists because re-running a CHAT
             // command rewrites a `[fc-ba3 ...]` timestamp line and produces
             // semantically empty corpus diffs. An evidence document IS a
             // record of one run, so a fresh one differing from the last is
             // the information, not noise.
-            write_text_output_artifact(&target, &body).await?;
-            Ok(WrittenOutput::Clean {
-                artifact: primary_output,
-                exclusions: Vec::new(),
+            write_text_output_artifact(target, &body).await?;
+            Ok(WrittenOutput {
+                source,
+                outcome: WrittenOutcome::Clean {
+                    artifact: outputs.into_primary(),
+                    exclusions: Vec::new(),
+                },
             })
         }
     }
@@ -290,23 +287,30 @@ mod tests {
     use crate::pipeline::post_validate::PostValidated;
     use batchalign_types::paths::{ClientPath, ServerPath};
 
+    /// Guards: A text evidence body refuses the native audio artifact contract before any output exists.
+    /// Kind: contract
+    /// Not a type: Typed input records cannot establish the semantic refusal when external command output kind and body kind disagree.
+    /// State: A temporary output root supports the no-output assertion and a declared media input supplies source membership. No file write, codec, model or registry runs.
+    /// Concurrency: The test owns its root and observations. Refusal finishes before root cleanup.
     #[tokio::test]
     async fn document_output_cannot_publish_a_native_binary_destination() {
         let root = tempfile::tempdir().unwrap();
-        let filesystem = RunnerFilesystemConfig {
-            staging_dir: ServerPath::new(root.path()),
-            ..sample_filesystem(false)
-        };
+        let filesystem = output_filesystem(
+            ServerPath::new(root.path()),
+            crate::store::JobInputs::Content(vec![crate::store::ContentInput {
+                display: "source.wav".into(),
+                kind: crate::store::InputKind::Media,
+            }]),
+        );
         let options = crate::options::CommandOptions::Convert(crate::options::ConvertOptions {
             common: crate::options::CommonOptions::default(),
             format: crate::media::export::AudioExportFormat::Wav,
         });
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
+        let outputs = SourceOutputs::plan(&filesystem, &file, ReleasedCommand::Convert, &options)
+            .expect("source-bound output plan");
         let failure = write_primary_output_artifact(
-            &filesystem,
-            ReleasedCommand::Convert,
-            &options,
-            &crate::store::InputLocation::Staged,
-            "source.wav",
+            outputs,
             FileOutput::Evidence {
                 body: "not audio".into(),
             },
@@ -321,17 +325,13 @@ mod tests {
         assert!(!root.path().join("output").exists());
     }
 
-    fn sample_filesystem(paths_mode: bool) -> RunnerFilesystemConfig {
+    fn output_filesystem(
+        staging_dir: ServerPath,
+        inputs: crate::store::JobInputs,
+    ) -> RunnerFilesystemConfig {
         RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                paths_mode,
-                vec![ClientPath::new("/input/test.cha")],
-                vec![ClientPath::new("/tmp/output/test.cha")],
-                Vec::new(),
-            ),
-            staging_dir: ServerPath::new("/tmp/staging-audio-output"),
+            inputs,
+            staging_dir,
             media_mapping: Default::default(),
             media_subdir: Default::default(),
             source_dir: ClientPath::new("/input"),
@@ -342,6 +342,11 @@ mod tests {
     /// judged. This seam returned a bare `String`, so output that fails the
     /// gate reached `write_chat_output_artifact_with_provenance_gate`
     /// unexamined.
+    /// Guards: A generated CHAT document missing its utterance terminator is refused before write admission and retains the system failure category.
+    /// Kind: boundary
+    /// Not a type: Post-validation proof constructors must judge the actual generated CHAT terminator bytes and map their refusal into the writer's error policy.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn gating_a_built_output_refuses_a_document_that_lost_its_terminator() {
         let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\tF B I do it\n@End\n";
@@ -370,23 +375,26 @@ mod tests {
     }
 
     /// A valid NoAlign source retains exact bytes through the real writer.
+    /// Guards: A valid NoAlign pass-through keeps its exact source bytes through publication.
+    /// Kind: contract
+    /// Not a type: The admitted unchanged-source proof cannot establish actual primary and staged file bytes after the writer adapter.
+    /// State: An isolated root supplies actual requested and staged CHAT writes and byte reads. Native source admission supplies the unchanged-document proof. No input audio, model or registry runs.
+    /// Concurrency: The test owns both destinations and awaits publication before reading or dropping its root.
     #[tokio::test]
     async fn a_declared_pass_through_is_written_unchanged_not_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let filesystem = RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                true,
-                vec![ClientPath::new("/input/test.cha")],
-                vec![ClientPath::new(
-                    tmp.path().join("requested/dummy.cha").to_string_lossy(),
-                )],
-                Vec::new(),
-            ),
-            staging_dir: ServerPath::new(tmp.path().join("staging")),
-            ..sample_filesystem(true)
-        };
+        let filesystem = output_filesystem(
+            ServerPath::new(tmp.path().join("staging")),
+            crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                display: "nested/dummy.cha".into(),
+                kind: crate::store::InputKind::Chat,
+                source: crate::store::test_support::admitted("/input/dummy.cha"),
+                output: crate::store::test_support::admitted(
+                    tmp.path().join("requested/dummy.cha").to_str().unwrap(),
+                ),
+                before: None,
+            }]),
+        );
         let dummy = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Child\n@Options:\tNoAlign\n\
 @ID:\teng|test|CHI|||||Child|||\n*CHI:\tF B I hello .\n@End\n";
@@ -396,12 +404,16 @@ mod tests {
             .expect("NoAlign carries source admission")
             .clone();
 
-        let artifact = write_primary_chat_output_artifact(
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
+        let outputs = SourceOutputs::plan(
             &filesystem,
+            &file,
             ReleasedCommand::Align,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Align),
-            &crate::store::test_support::only_location(&filesystem.inputs),
-            "nested/dummy.cha",
+        )
+        .expect("source-bound output plan");
+        let artifact = write_primary_chat_output_artifact(
+            outputs,
             ChatOutput {
                 document: PostValidated::pass_through(unchanged, ReleasedCommand::Align).into(),
                 shortfalls: Vec::new(),
@@ -410,7 +422,7 @@ mod tests {
         )
         .await
         .expect("a declared pass-through must be written, not refused");
-        let WrittenOutput::Clean { artifact, .. } = artifact else {
+        let WrittenOutcome::Clean { artifact, .. } = artifact.outcome else {
             panic!("an unchanged admitted source is written clean");
         };
 
@@ -423,6 +435,11 @@ mod tests {
         );
     }
 
+    /// Guards: Declaring NoAlign still refuses invalid retained morphology in the source document.
+    /// Kind: boundary
+    /// Not a type: A source declaration cannot establish whether actual retained mor/gra tiers satisfy CHAT admission before an unchanged-source proof exists.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn no_align_cannot_exempt_corrupt_retained_morphology() {
         let valid = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -445,31 +462,38 @@ mod tests {
         );
     }
 
+    /// Guards: An admitted transcript with exclusions stays clean, publishes both destinations and records completion against its input media name.
+    /// Kind: contract
+    /// Not a type: Source-bound targets constrain identity and destinations, while exact written CHAT bytes and emitted clean completion carrying exclusions remain filesystem and event-adapter observations.
+    /// State: An isolated root supplies both CHAT outputs. The shared recording sink observes source-name completion and exclusions without registry state. No audio decoder or model runs.
+    /// Concurrency: The test owns every destination and its recording sink. Publication completes before completion is recorded and the root is dropped.
     #[tokio::test]
-    async fn write_primary_chat_output_artifact_uses_command_primary_path() {
+    async fn admitted_transcript_with_exclusions_publishes_both_destinations_cleanly() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let filesystem = RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                true,
-                vec![ClientPath::new("/input/test.cha")],
-                vec![ClientPath::new(
-                    tmp.path().join("requested/test.cha").to_string_lossy(),
-                )],
-                Vec::new(),
-            ),
-            staging_dir: ServerPath::new(tmp.path().join("staging")),
-            ..sample_filesystem(true)
-        };
+        let filesystem = output_filesystem(
+            ServerPath::new(tmp.path().join("staging")),
+            crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                display: "nested/test.mp3".into(),
+                kind: crate::store::InputKind::Media,
+                source: crate::store::test_support::admitted("/input/test.mp3"),
+                output: crate::store::test_support::admitted(
+                    tmp.path().join("requested/test.cha").to_str().unwrap(),
+                ),
+                before: None,
+            }]),
+        );
         let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
 
-        let artifact = write_primary_chat_output_artifact(
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
+        let outputs = SourceOutputs::plan(
             &filesystem,
+            &file,
             ReleasedCommand::Transcribe,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Transcribe),
-            &crate::store::test_support::only_location(&filesystem.inputs),
-            "nested/test.mp3",
+        )
+        .expect("source-bound output plan");
+        let written_output = write_primary_chat_output_artifact(
+            outputs,
             ChatOutput {
                 document: PostValidated::gate_owned(
                     batchalign_transform::parse::parse_lenient(&crate::chat_parser(), chat).0,
@@ -484,20 +508,28 @@ mod tests {
         .await
         .expect("write artifact");
         // Clean despite the exclusion, which the writer carries through.
-        let WrittenOutput::Clean {
+        let WrittenOutcome::Clean {
             artifact,
             exclusions,
-        } = artifact
+        } = &written_output.outcome
         else {
             panic!("an admitted document with only an exclusion is written clean");
         };
-        assert_eq!(exclusions, [excluded_note()]);
+        assert_eq!(exclusions.as_slice(), [excluded_note()]);
 
         assert_eq!(artifact.content_type, ContentType::Chat);
         assert_eq!(artifact.display_path, DisplayPath::from("nested/test.cha"));
         let written = std::fs::read_to_string(tmp.path().join("requested/test.cha"))
             .expect("read written output");
         assert!(written.contains("*PAR:\thello ."));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("staging/output/nested/test.cha"))
+                .expect("staged CHAT"),
+            written
+        );
+        let sink = crate::runner::util::test_sink::RecordingSink::default();
+        written_output.record(&sink).await;
+        assert_eq!(sink.completed_files(), ["nested/test.mp3"]);
     }
 
     /// One utterance left out of alignment, as align reports it.
@@ -520,25 +552,28 @@ mod tests {
     /// RED FIRST (2026-10-06): a generating producer's diagnosed output
     /// reaches disk through the real writer, and the writer reports the
     /// diagnosis instead of a clean write or a refusal.
+    /// Guards: A diagnosed producer output is written and retains its exact findings in the outcome.
+    /// Kind: contract
+    /// Not a type: Closed diagnosed-output variants cannot establish actual written text or diagnostic projection across the output adapter.
+    /// State: An isolated root supplies requested and staged CHAT writes. Native admission of the generated model supplies real findings observed in the returned receipt. No registry, recording sink, codec or model runs.
+    /// Concurrency: The test owns both destinations and awaits publication before inspecting the receipt and file bytes.
     #[tokio::test]
     async fn a_diagnosed_transcript_is_written_and_reported_diagnosed() {
         use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let filesystem = RunnerFilesystemConfig {
-            inputs: crate::store::test_support::inputs_from_parts(
-                Vec::new(),
-                Vec::new(),
-                true,
-                vec![ClientPath::new("/input/test.cha")],
-                vec![ClientPath::new(
-                    tmp.path().join("requested/test.cha").to_string_lossy(),
-                )],
-                Vec::new(),
-            ),
-            staging_dir: ServerPath::new(tmp.path().join("staging")),
-            ..sample_filesystem(true)
-        };
+        let filesystem = output_filesystem(
+            ServerPath::new(tmp.path().join("staging")),
+            crate::store::test_support::paths_inputs(vec![crate::store::PathsInput {
+                display: "nested/test.mp3".into(),
+                kind: crate::store::InputKind::Media,
+                source: crate::store::test_support::admitted("/input/test.mp3"),
+                output: crate::store::test_support::admitted(
+                    tmp.path().join("requested/test.cha").to_str().unwrap(),
+                ),
+                before: None,
+            }]),
+        );
         let chat = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
         let mut generated =
             batchalign_transform::parse::parse_lenient(&crate::chat_parser(), chat).0;
@@ -558,12 +593,16 @@ mod tests {
             }
         }
 
-        let written = write_primary_chat_output_artifact(
+        let file = crate::store::test_support::only_file(&filesystem.inputs);
+        let outputs = SourceOutputs::plan(
             &filesystem,
+            &file,
             ReleasedCommand::Transcribe,
             &crate::recipe_runner::runtime::test_options(ReleasedCommand::Transcribe),
-            &crate::store::test_support::only_location(&filesystem.inputs),
-            "nested/test.mp3",
+        )
+        .expect("source-bound output plan");
+        let written = write_primary_chat_output_artifact(
+            outputs,
             ChatOutput {
                 document: PostValidated::produced(generated, ReleasedCommand::Transcribe),
                 shortfalls: Vec::new(),
@@ -573,11 +612,11 @@ mod tests {
         .await
         .expect("a diagnosed transcript is written, not refused");
 
-        let WrittenOutput::Diagnosed {
+        let WrittenOutcome::Diagnosed {
             artifact,
             diagnostics,
             ..
-        } = written
+        } = written.outcome
         else {
             panic!("the writer must report the diagnosis");
         };

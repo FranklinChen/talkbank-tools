@@ -1,7 +1,7 @@
 # align: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-11-10 16:43 EST
+**Last updated:** {{git-dates:page}}
 
 Implementation guide for the `align` command. For user-facing documentation,
 see [User Guide: align](../../user-guide/commands/align.md).
@@ -68,8 +68,8 @@ absolute roots and absent roots need no cwd lookup. Direct API submissions must
 already declare an absolute root: `JobSubmission::validate` refuses ambiguous
 values before job staging creates directories or writes files.
 
-`FaDispatchPlan::from_job` independently admits stored metadata and owns an
-`AbsoluteMediaRoot`. Its checked constructors preserve Unicode, symlinks and
+The selected alignment request retains the original root declaration.
+`FaDispatchPlan::from_request` admits it and owns an `AbsoluteMediaRoot`. Its checked constructors preserve Unicode, symlinks and
 `..`; they do not canonicalize, normalize, replace invalid bytes lossily or
 claim existence. Unadmitted historical roots produce an explicit plan refusal,
 never execution against a daemon-selected cwd. `FaFileContext` and media search
@@ -129,9 +129,10 @@ never clean. The complete account is logged once. A document in which no word
 could be timed is written and diagnosed the same way. The exclusion account
 leaves on its own channel: `AdmittedFaResult::into_document` returns an
 `AlignedOutput { document, shortfalls, exclusions }`, `ChatOutput` carries the
-exclusions beside the shortfalls, and the writer reports them on both
-`WrittenOutput` arms without asking `OutputReport::of`, which decides clean
-versus diagnosed from findings and shortfalls alone.
+exclusions beside the shortfalls. The writer retains them in both private
+`WrittenOutcome` variants inside its `WrittenOutput` receipt.
+`OutputReport::of` decides clean versus diagnosed from findings and shortfalls
+alone. The receipt carries its actual input name through consuming completion.
 `AlignmentCompletionFailure::SourceChanged` (the aligned document's words no
 longer match the source) remains an internal producer fault (HTTP 500) that
 refuses the file, and so does `OffRecordUtteranceTimed`: an utterance not in

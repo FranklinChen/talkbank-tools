@@ -2,367 +2,182 @@
 //!
 //! Split into focused submodules by responsibility:
 //!
-//! - [`types`]: struct definitions (`Job`, `JobIdentity`, runner snapshots, etc.)
+//! - `model`: job metadata and runner snapshots
+//! - `inputs`: admitted inputs and their database representation
+//! - `state`: lifecycle states and transitions
+//! - `run`: run generations, claims and completion authority
+//! - `pending`: source-bound pending files and preflight classification
+//! - `completion`: file effect records
+//! - `submitter`: submitter identity and database admission
 //! - [`lease`]: queue lease management (claim, renew, release, expiry)
 //! - [`file_status`]: per-file status mutations (processing, done, error, retry)
 //! - [`lifecycle`]: job-level state transitions (running, failed, cancelled, restart, recovery)
 //! - [`projections`]: API response projections (`JobInfo`, `JobListItem`, `RunnerJobSnapshot`)
 //! - [`conflict`]: file-level conflict detection between incoming and active jobs
 
+mod completion;
 mod conflict;
+mod deferral;
 mod file_status;
+mod inputs;
 mod lease;
 mod lifecycle;
+mod model;
+mod pending;
 mod projections;
-mod types;
+mod run;
+mod state;
+mod submitter;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub(crate) use completion::*;
 pub use conflict::*;
+pub(crate) use deferral::{DeferredRun, MemoryRequeueOutcome};
 pub(crate) use file_status::FileWriteRefusal;
+pub use inputs::*;
+pub use model::*;
+pub use pending::*;
 pub(crate) use projections::{JobStatusColumns, Stop};
-pub use types::*;
+pub use run::*;
+pub use state::*;
+pub use submitter::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{
-        ContentType, CorrelationId, DisplayPath, FileProgressStage, FileStatusKind, JobId,
-        JobStatus, LanguageSpec, MachineTime, NodeId, NumSpeakers, ReleasedCommand,
+        ContentType, DisplayPath, FileProgressStage, FileStatusKind, JobStatus, NodeId,
     };
-    use crate::options::CommandOptions;
     use crate::scheduling::LeaseRecord;
-    use crate::store::{FileResultEntry, FileStatus};
-    use std::collections::{BTreeMap, HashMap};
+    use crate::store::test_support::{ChatFileFixture, JobFixture};
+    use std::collections::HashMap;
 
-    /// Build a small queued job for projection and conflict tests.
-    fn sample_job(job_id: &str, filenames: &[&str]) -> Job {
-        let file_statuses = filenames
-            .iter()
-            .map(|filename| {
-                let name = DisplayPath::from(*filename);
-                (String::from(name.clone()), FileStatus::new(name))
-            })
-            .collect();
-        let has_chat = filenames.iter().map(|_| true).collect();
+    /// One admitted input is sufficient for file-operation and lease contracts.
+    fn sample_job(job_id: &str, filename: &str) -> Job {
+        JobFixture::content(job_id, ChatFileFixture::new(filename).pending(), [])
+            .expect("one input")
+            .into_subject()
+    }
 
-        Job {
-            identity: JobIdentity {
-                job_id: JobId::from(job_id),
-                correlation_id: CorrelationId::from(format!("corr-{job_id}")),
-            },
-            dispatch: JobDispatchConfig {
-                command: ReleasedCommand::Morphotag,
-                lang: LanguageSpec::Resolved(crate::api::LanguageCode3::eng()),
-                num_speakers: NumSpeakers(1),
-                options: CommandOptions::Morphotag(crate::options::MorphotagOptions {
-                    common: crate::options::CommonOptions::default(),
+    /// Guards: Pending projection excludes written files and retains unfinished names.
+    /// Kind: policy
+    /// Not a type: The fixture binds completion to its input but cannot establish which files the pending projection selects.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
+    #[test]
+    fn pending_files_skip_terminal_entries() {
+        let fixture = JobFixture::content(
+            "pending",
+            ChatFileFixture::new("a.cha")
+                .processing(crate::unix_time(1.0))
+                .written(crate::unix_time(2.0)),
+            [ChatFileFixture::new("b.cha").pending()],
+        )
+        .expect("distinct inputs")
+        .start(
+            &NodeId::from("fixture-node"),
+            crate::unix_time(0.0),
+            crate::config::LeaseTtl::from_secs(90).unwrap(),
+        );
+        let pending = fixture.subject().pending_files().expect("admitted content");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|file| file.filename().as_ref())
+                .collect::<Vec<_>>(),
+            ["b.cha"]
+        );
+    }
 
-                    ..Default::default()
-                }),
-                runtime_state: BTreeMap::new(),
-                debug_traces: false,
-            },
-            source: JobSourceContext {
-                submitter: Some(crate::store::Submitter::client(
-                    std::net::Ipv4Addr::LOCALHOST.into(),
-                    "localhost".into(),
-                )),
-                source_dir: "/corpus".into(),
-            },
-            filesystem: JobFilesystemConfig {
-                staging_dir: "/tmp/job".into(),
-                media_mapping: Default::default(),
-                media_subdir: Default::default(),
-            },
-            execution: JobExecutionState {
-                lifecycle: crate::store::JobLifecycle::for_test(
-                    JobStatus::Queued,
-                    crate::store::job::test_support::inputs_from_parts(
-                        filenames
-                            .iter()
-                            .map(|filename| DisplayPath::from(*filename))
-                            .collect(),
-                        has_chat,
-                        false,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                ),
-                file_statuses,
-                results: Vec::new(),
-                error: None,
-            },
-            schedule: JobScheduleState {
-                submitted_at: crate::unix_time(100.0),
-                completed_at: None,
-                next_eligible_at: None,
-                num_workers: None,
-                lease: None,
-                last_cancel: None,
-            },
-            runtime: JobRuntimeControl::unclaimed(),
-            execution_plan: None,
+    /// Guards: Conflicts require matching submitter, source directory and filename.
+    /// Kind: policy
+    /// Not a type: Distinct admitted jobs cannot encode whether independently submitted scopes overlap under the conflict policy.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
+    #[test]
+    fn find_conflicts_uses_submitter_and_source_scope() {
+        enum Scope {
+            Same,
+            OtherSubmitter,
+            OtherDirectory,
+        }
+        for scope in [Scope::Same, Scope::OtherSubmitter, Scope::OtherDirectory] {
+            let active = JobFixture::content("active", ChatFileFixture::new("a.cha").pending(), [])
+                .expect("one input")
+                .start(
+                    &NodeId::from("fixture-node"),
+                    crate::unix_time(0.0),
+                    crate::config::LeaseTtl::from_secs(90).unwrap(),
+                )
+                .into_subject();
+            let source = match scope {
+                Scope::Same => active.source.clone(),
+                Scope::OtherSubmitter => JobSourceContext {
+                    submitter: Some(Submitter::client(
+                        std::net::Ipv4Addr::new(192, 0, 2, 1).into(),
+                        String::new(),
+                    )),
+                    source_dir: active.source.source_dir.clone(),
+                },
+                Scope::OtherDirectory => JobSourceContext {
+                    submitter: active.source.submitter.clone(),
+                    source_dir: "/other".into(),
+                },
+            };
+            let incoming =
+                JobFixture::content("incoming", ChatFileFixture::new("a.cha").pending(), [])
+                    .expect("one input")
+                    .with_source(source);
+            let jobs = HashMap::from([(active.identity.job_id.clone(), active)]);
+            let conflicts = find_conflicts(&jobs, incoming.subject());
+            let actual: Vec<(&str, &str)> = conflicts
+                .iter()
+                .map(|conflict| (conflict.filename.as_ref(), conflict.job_id.as_ref()))
+                .collect::<Vec<_>>();
+            let expected = match scope {
+                Scope::Same => vec![("a.cha", "active")],
+                Scope::OtherSubmitter | Scope::OtherDirectory => Vec::new(),
+            };
+            assert_eq!(actual, expected);
         }
     }
 
-    /// Pending files exclude terminal file states.
-    #[test]
-    fn pending_files_skip_terminal_entries() {
-        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
-            crate::store::FilePhase::Done {
-                exclusions: Vec::new(),
-                started_at: None,
-                finished_at: Some(crate::unix_time(5.0)),
-            };
-
-        let pending = job
-            .pending_files()
-            .expect("content-mode inputs are admitted");
-
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].filename().as_ref(), "b.cha");
-    }
-
-    /// Conflict detection keys on submitter and source-scoped filename.
-    #[test]
-    fn find_conflicts_uses_submitter_and_source_scope() {
-        let mut active = sample_job("active", &["a.cha"]);
-        active
-            .execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Running);
-
-        let incoming = sample_job("incoming", &["a.cha"]);
-        let jobs = HashMap::from([(active.identity.job_id.clone(), active)]);
-
-        let conflicts = find_conflicts(&jobs, &incoming);
-
-        assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].filename, "a.cha");
-        assert_eq!(conflicts[0].job_id.as_ref(), "active");
-    }
-
-    /// `find_conflicts` trusts the store HashMap it receives. This layer is
-    /// intentionally pure over current store state: any non-terminal entry is
-    /// treated as a conflict until normal shutdown/recovery transitions move it
-    /// forward.
+    /// Guards: Conflict lookup preserves a queued owner regardless of submission age.
+    /// Kind: policy
+    /// Not a type: The admitted queued state cannot establish the lookup policy for stale timestamps in the registry.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
     #[test]
     fn find_conflicts_trusts_store_state_and_does_not_reconcile() {
-        let mut abandoned = sample_job("abandoned-job", &["020724a.mp3"]);
-        abandoned
-            .execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Queued);
-        abandoned.schedule.submitted_at =
-            MachineTime::now().minus(std::time::Duration::from_secs(3 * 3600));
-        abandoned.runtime.runner_active = false;
-
-        let incoming = sample_job("resubmit", &["020724a.mp3"]);
+        let abandoned =
+            JobFixture::content("abandoned", ChatFileFixture::new("stale.cha").pending(), [])
+                .expect("one input")
+                .submitted_at(crate::unix_time(0.0))
+                .into_subject();
+        let incoming =
+            JobFixture::content("incoming", ChatFileFixture::new("stale.cha").pending(), [])
+                .expect("one input");
         let jobs = HashMap::from([(abandoned.identity.job_id.clone(), abandoned)]);
-
-        let conflicts = find_conflicts(&jobs, &incoming);
-
+        let conflicts = find_conflicts(&jobs, incoming.subject());
         assert_eq!(
-            conflicts.len(),
-            1,
-            "find_conflicts is pure over the current store HashMap. Cleanup \
-             of stale jobs happens through normal shutdown/recovery paths, not \
-             inside conflict detection."
+            conflicts
+                .iter()
+                .map(|conflict| conflict.job_id.as_ref())
+                .collect::<Vec<_>>(),
+            ["abandoned"]
         );
     }
 
-    /// Restart preparation keeps successful work and resets unfinished state.
-    #[test]
-    fn prepare_for_restart_resets_unfinished_state() {
-        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Failed);
-        job.execution.error = Some("failed".into());
-        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
-            crate::store::FilePhase::Done {
-                exclusions: Vec::new(),
-                started_at: None,
-                finished_at: Some(crate::unix_time(5.0)),
-            };
-        let retry_file = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        retry_file.phase = crate::store::FilePhase::Error {
-            started_at: Some(crate::unix_time(10.0)),
-            finished_at: Some(crate::unix_time(12.0)),
-            failure: crate::store::FileFailure::of_failed_row(Some("boom".into()), None),
-        };
-        retry_file.progress.stage = Some(FileProgressStage::Aligning);
-        job.execution.results.push(FileResultEntry {
-            filename: DisplayPath::from("a.cha"),
-            content_type: ContentType::Chat,
-            error: None,
-        });
-        job.execution.results.push(FileResultEntry {
-            filename: DisplayPath::from("b.cha"),
-            content_type: ContentType::Chat,
-            error: Some("boom".into()),
-        });
-        job.schedule.completed_at = Some(crate::unix_time(20.0));
-        job.schedule.next_eligible_at = Some(crate::unix_time(25.0));
-        job.schedule.lease = Some(
-            LeaseRecord::new(
-                NodeId::from("node-1"),
-                crate::unix_time(28.0),
-                crate::unix_time(30.0),
-            )
-            .expect("an ordered fixture lease"),
-        );
-        job.runtime.runner_active = true;
-
-        job.prepare_for_restart(&batchalign_types::paths::AllowedRoots::same_user())
-            .expect("admitted restart");
-
-        assert_eq!(job.status(), JobStatus::Queued);
-        assert_eq!(job.execution.error, None);
-        assert_eq!(job.execution.completed_files(), 1);
-        assert_eq!(job.execution.results.len(), 1);
-        assert_eq!(
-            job.execution.file_statuses["a.cha"].status(),
-            FileStatusKind::Done
-        );
-        assert_eq!(
-            job.execution.file_statuses["b.cha"].status(),
-            FileStatusKind::Queued
-        );
-        assert!(job.schedule.completed_at.is_none());
-        assert!(job.schedule.next_eligible_at.is_none());
-        assert!(job.schedule.lease.is_none());
-        // Restart must NOT pretend the old runner is gone: the claim is
-        // released only by the runner itself, and the restarted runner
-        // waits on it (begin_runner). What restart does do is move the
-        // job to a new run generation, making the old runner stale.
-        assert!(job.runtime.runner_active);
-        assert_eq!(
-            job.runtime.run_generation,
-            crate::store::RunGeneration::FIRST.next()
-        );
-    }
-
-    /// Recovery re-queues interrupted jobs when resumable file work remains.
-    #[test]
-    fn recover_requeues_resumable_files() {
-        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Interrupted);
-        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
-            crate::store::FilePhase::Done {
-                exclusions: Vec::new(),
-                started_at: None,
-                finished_at: Some(crate::unix_time(5.0)),
-            };
-        let resumable = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        resumable.phase = crate::store::FilePhase::Interrupted {
-            started_at: Some(crate::unix_time(10.0)),
-            last_failure: None,
-        };
-        job.execution.error = Some("an earlier run failed".into());
-        job.schedule.completed_at = Some(crate::unix_time(20.0));
-        job.schedule.next_eligible_at = Some(crate::unix_time(21.0));
-        job.schedule.lease = Some(
-            LeaseRecord::new(
-                NodeId::from("node-1"),
-                crate::unix_time(28.0),
-                crate::unix_time(30.0),
-            )
-            .expect("an ordered fixture lease"),
-        );
-
-        let disposition = job.recover(
-            &batchalign_types::paths::AllowedRoots::none(),
-            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
-        );
-
-        assert_eq!(
-            disposition,
-            crate::store::Recovered::Rewritten(vec![(
-                "b.cha".to_owned(),
-                crate::store::FilePhase::Queued
-            )]),
-            "the disposition names each file moved back, for the database"
-        );
-        assert_eq!(job.status(), JobStatus::Queued);
-        assert_eq!(
-            job.status_columns().error,
-            None,
-            "a requeued job carries no earlier error into its row"
-        );
-        assert_eq!(
-            job.execution.file_statuses["b.cha"].status(),
-            FileStatusKind::Queued
-        );
-        assert_eq!(
-            job.execution.file_statuses["b.cha"].phase,
-            crate::store::FilePhase::Queued,
-            "a requeued file keeps no times"
-        );
-        assert!(job.schedule.completed_at.is_none());
-        assert!(job.schedule.lease.is_none());
-    }
-
-    /// Recovery promotes all-terminal interrupted jobs to a lease-free final
-    /// state: failed, because a file failed (`Completed` means none did).
-    #[test]
-    fn recover_settles_terminal_jobs() {
-        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        job.execution
-            .lifecycle
-            .force_status_for_test(JobStatus::Interrupted);
-        job.execution.file_statuses.get_mut("a.cha").unwrap().phase =
-            crate::store::FilePhase::Done {
-                exclusions: Vec::new(),
-                started_at: None,
-                finished_at: Some(crate::unix_time(5.0)),
-            };
-        let failed = job.execution.file_statuses.get_mut("b.cha").unwrap();
-        failed.phase = crate::store::FilePhase::Error {
-            started_at: None,
-            finished_at: None,
-            failure: crate::store::FileFailure::of_failed_row(Some("boom".into()), None),
-        };
-        job.schedule.completed_at = Some(crate::unix_time(20.0));
-        job.schedule.next_eligible_at = Some(crate::unix_time(21.0));
-        job.schedule.lease = Some(
-            LeaseRecord::new(
-                NodeId::from("node-1"),
-                crate::unix_time(28.0),
-                crate::unix_time(30.0),
-            )
-            .expect("an ordered fixture lease"),
-        );
-
-        let disposition = job.recover(
-            &batchalign_types::paths::AllowedRoots::none(),
-            crate::store::EventTime::fixed(crate::unix_time(1_778_518_100.0)),
-        );
-
-        assert_eq!(disposition, crate::store::Recovered::Rewritten(Vec::new()));
-        assert_eq!(job.status(), JobStatus::Failed);
-        assert!(
-            job.execution
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("boom")),
-            "the failed file's cause is the job's"
-        );
-        assert_eq!(job.execution.completed_files(), 2);
-        assert!(job.schedule.next_eligible_at.is_none());
-        assert!(job.schedule.lease.is_none());
-    }
-
-    /// Local queue claims and renewals stay on the job boundary.
+    /// Guards: Claim, heartbeat and release expose the ordered lease values on the owned job.
+    /// Kind: policy
+    /// Not a type: The admitted job cannot encode the lease arithmetic and owner policy for caller-supplied clock observations.
+    /// State: Pure owned job values and fixed instants exercise the model. No filesystem, database or worker is used.
+    /// Concurrency: Each test owns its job and input declarations. No shared state or background task is involved.
     #[test]
     fn local_dispatch_claim_and_renew_roundtrip() {
-        let mut job = sample_job("job-1", &["a.cha"]);
+        let mut job = sample_job("job-1", "a.cha");
         let node_id = NodeId::from("node-a");
         let claimed = job
             .claim_for_local_dispatch(
@@ -392,10 +207,14 @@ mod tests {
         assert!(job.schedule.lease.is_none());
     }
 
-    /// Jobs with live leases or deferrals do not report ready for dispatch.
+    /// Guards: Dispatch readiness and wake time reflect live lease expiry and memory deferral.
+    /// Kind: policy
+    /// Not a type: The queued fixture cannot encode scheduling decisions for changing clock observations and independent persisted deadline values.
+    /// State: Pure owned job values and fixed instants exercise the model. No filesystem, database or worker is used.
+    /// Concurrency: Each test owns its job and input declarations. No shared state or background task is involved.
     #[test]
     fn ready_for_local_dispatch_respects_leases_and_deferrals() {
-        let mut job = sample_job("job-1", &["a.cha"]);
+        let mut job = sample_job("job-1", "a.cha");
         let now = crate::unix_time(10.0);
         assert!(job.ready_for_local_dispatch(now));
 
@@ -422,69 +241,109 @@ mod tests {
         );
     }
 
-    /// A diagnosed file wrote its output: a restart of the job (after another
-    /// file failed) keeps it rather than requeueing it, so it is never
-    /// retried, and it counts as completed, not failed.
+    /// Guards: Restart preserves written results, requeues failures, clears deadlines and waits for the old claim release without replaying preparation.
+    /// Kind: contract
+    /// Not a type: Consuming setup forbids restarting before failure or starting before release but cannot establish the production restart policy for retained outputs.
+    /// State: Pure in-memory job values exercise model transitions. No filesystem, database or worker is required.
+    /// Concurrency: Each case owns its inputs and job. No shared mutable state or asynchronous task is involved.
     #[test]
-    fn a_restart_keeps_a_diagnosed_file_and_requeues_only_the_failure() {
-        let mut job = sample_job("job-1", &["a.cha", "b.cha"]);
-        let t = crate::unix_time;
-        assert_eq!(job.mark_file_processing("a.cha", t(1.0)), Ok(()));
-        assert_eq!(
-            job.mark_file_done(
-                "a.cha",
-                t(2.0),
-                FileCompletion::Diagnosed {
-                    result: CompletedFileOutput {
-                        exclusions: Vec::new(),
-                        filename: DisplayPath::from("a.cha"),
-                        content_type: ContentType::Chat,
-                        stamp: crate::api::FileStampOutcome::Unrecorded,
-                    },
-                    diagnostics: crate::api::FileOutputDiagnostics::of_findings(
-                        vec![crate::api::FileOutputDiagnostics::coded_finding(
-                            "E241",
-                            "reserved marker",
-                        )],
-                        Vec::new(),
+    fn restart_keeps_written_files_and_requeues_failure() {
+        enum Written {
+            Clean,
+            Diagnosed,
+        }
+        for written in [Written::Clean, Written::Diagnosed] {
+            let t = crate::unix_time;
+            let file = ChatFileFixture::new("a.cha").processing(t(1.0));
+            let (file, expected) = match written {
+                Written::Clean => (file.written(t(2.0)), FileStatusKind::Done),
+                Written::Diagnosed => (
+                    file.diagnosed(
+                        t(2.0),
+                        crate::api::FileOutputDiagnostics::of_findings(
+                            vec![crate::api::FileOutputDiagnostics::coded_finding(
+                                "E241",
+                                "reserved marker",
+                            )],
+                            Vec::new(),
+                        ),
                     ),
-                },
-            ),
-            Ok(())
-        );
-        assert_eq!(job.mark_file_processing("b.cha", t(1.0)), Ok(()));
-        assert_eq!(
-            job.mark_file_error(
-                "b.cha",
-                &FileFailureRecord {
-                    message: "worker crashed".into(),
-                    category: crate::scheduling::FailureCategory::WorkerCrash,
-                    finished_at: crate::store::EventTime::fixed(t(3.0)),
-                },
-            ),
-            Ok(())
-        );
-        assert!(job.any_terminal_files_failed(), "the error is a failure");
-
-        job.execution
-            .lifecycle
-            .force_status_for_test(crate::api::JobStatus::Failed);
-        job.prepare_for_restart(&batchalign_types::paths::AllowedRoots::same_user())
-            .expect("admitted restart");
-
-        let a = job.execution.file_statuses["a.cha"].to_entry();
-        assert_eq!(a.status, FileStatusKind::Diagnosed, "never retried");
-        assert_eq!(
-            job.execution.file_statuses["b.cha"].status(),
-            FileStatusKind::Queued
-        );
-        assert_eq!(job.execution.completed_files(), 1);
+                    FileStatusKind::Diagnosed,
+                ),
+            };
+            let fixture = JobFixture::content(
+                "restart",
+                file,
+                [ChatFileFixture::new("b.cha")
+                    .processing(t(1.0))
+                    .failed(FileFailureRecord {
+                        message: "worker crashed".into(),
+                        category: crate::scheduling::FailureCategory::WorkerCrash,
+                        finished_at: crate::store::EventTime::fixed(t(3.0)),
+                    })],
+            )
+            .expect("distinct inputs")
+            .start(
+                &NodeId::from("fixture-node"),
+                t(0.0),
+                crate::config::LeaseTtl::from_secs(90).unwrap(),
+            )
+            .defer(t(25.0))
+            .fail("worker crashed", t(20.0));
+            assert!(fixture.subject().any_terminal_files_failed());
+            assert_eq!(fixture.subject().schedule.completed_at, Some(t(20.0)));
+            assert_eq!(fixture.subject().schedule.next_eligible_at, Some(t(25.0)));
+            assert!(fixture.subject().schedule.lease.is_some());
+            let fixture = fixture
+                .restart(&batchalign_types::paths::AllowedRoots::same_user())
+                .expect("admitted restart");
+            let job = fixture.subject();
+            assert_eq!(job.status(), JobStatus::Queued);
+            assert!(job.execution.error.is_none());
+            assert_eq!(job.execution.completed_files(), 1);
+            assert_eq!(job.execution.results.len(), 1);
+            assert_eq!(job.execution.file_statuses["a.cha"].status(), expected);
+            assert_eq!(
+                job.execution.file_statuses["b.cha"].status(),
+                FileStatusKind::Queued
+            );
+            assert!(job.schedule.completed_at.is_none());
+            assert!(job.schedule.next_eligible_at.is_none());
+            assert!(job.schedule.lease.is_none());
+            assert!(job.runtime.runner_active);
+            assert_eq!(
+                job.runtime.run_generation,
+                crate::store::RunGeneration::FIRST.next()
+            );
+            let fixture = fixture.release();
+            assert!(!fixture.subject().runtime.runner_active);
+            let fixture = fixture.start(
+                &NodeId::from("next-node"),
+                t(30.0),
+                crate::config::LeaseTtl::from_secs(90).unwrap(),
+            );
+            let job = fixture.subject();
+            assert_eq!(
+                job.execution.results.len(),
+                1,
+                "completed work is never replayed"
+            );
+            assert_eq!(job.execution.file_statuses["a.cha"].status(), expected);
+            assert_eq!(
+                job.execution.file_statuses["b.cha"].status(),
+                FileStatusKind::Queued
+            );
+        }
     }
 
-    /// File completion mutates file state and appends a success result.
+    /// Guards: Written output removes retry errors and preserves exclusions in the file projection and success result.
+    /// Kind: contract
+    /// Not a type: Input ownership cannot establish the completion operation's semantic projection of authored exclusions and prior retry data.
+    /// State: Pure owned job values and fixed instants exercise the model. No filesystem, database or worker is used.
+    /// Concurrency: Each test owns its job and input declarations. No shared state or background task is involved.
     #[test]
     fn mark_file_done_updates_file_state() {
-        let mut job = sample_job("job-1", &["a.cha"]);
+        let mut job = sample_job("job-1", "a.cha");
         assert_eq!(
             job.mark_file_retry_pending(
                 "a.cha",
@@ -539,10 +398,14 @@ mod tests {
         assert_eq!(job.execution.results.len(), 1);
     }
 
-    /// Retry scheduling stays on the job boundary.
+    /// Guards: A retry deadline exposes processing and retry progress without a terminal duration.
+    /// Kind: contract
+    /// Not a type: Admitted input ownership cannot establish the displayed retry timestamp, progress stage and absence of a terminal duration.
+    /// State: Pure owned job values and fixed instants exercise the model. No filesystem, database or worker is used.
+    /// Concurrency: Each test owns its job and input declarations. No shared state or background task is involved.
     #[test]
     fn mark_file_retry_pending_sets_retry_metadata() {
-        let mut job = sample_job("job-1", &["a.cha"]);
+        let mut job = sample_job("job-1", "a.cha");
 
         assert_eq!(
             job.mark_file_retry_pending(
@@ -569,10 +432,14 @@ mod tests {
         assert_eq!(entry.duration_s, None);
     }
 
-    /// Clearing retry state also clears stale retry errors before a new attempt.
+    /// Guards: Clearing a prior retry removes its error, finish and next-attempt columns.
+    /// Kind: contract
+    /// Not a type: The admitted job cannot establish how the real retry clearing operation projects previously recorded failure columns.
+    /// State: Pure owned job values and fixed instants exercise the model. No filesystem, database or worker is used.
+    /// Concurrency: Each test owns its job and input declarations. No shared state or background task is involved.
     #[test]
     fn clear_file_retry_state_clears_retry_error_metadata() {
-        let mut job = sample_job("job-1", &["a.cha"]);
+        let mut job = sample_job("job-1", "a.cha");
         assert_eq!(
             job.mark_file_retry_pending(
                 "a.cha",

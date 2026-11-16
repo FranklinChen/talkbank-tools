@@ -1,101 +1,29 @@
-//! Typed dispatch plans derived from persisted runner snapshots.
+//! Consuming dispatch plans derived from selected option families.
 //!
-//! The store owns durable job state (`RunnerJobSnapshot`, `CommandOptions`,
-//! `runtime_state`). Dispatch modules own orchestration. This module is the seam
-//! between those responsibilities: it translates the store-facing shapes once
-//! into narrower, command-family-specific plans before orchestration begins.
+//! Request admission binds a concrete option family to borrowed language,
+//! speaker, runtime and workload facts. Plan construction consumes that request
+//! before orchestration begins. Callers retain the resulting plan through
+//! worker selection and resource admission.
 
-use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
+use crate::chat_ops::morphosyntax_ops::MwtDict;
 
-use crate::api::ReleasedCommand;
 use crate::chat_ops::CacheTaskName;
 use crate::host_policy::HostExecutionPolicy;
+use crate::options::{AlignOptions, BenchmarkOptions, TranscribeOptions as TranscribeCommand};
 use crate::params::{CacheOverrides, CachePolicy};
 use crate::runner::dispatch::kernel_plan::CommandKernelPlan;
-use crate::store::RunnerJobSnapshot;
+
+mod request;
 use crate::transcribe::{AsrBackend, TranscribeCachePolicies, TranscribeOptions};
 use crate::types::worker_v2::SpeakerBackendV2;
+use request::MediaOptions;
+pub(crate) use request::{MediaAnalysisRequest, PlanRequest};
 
 use super::options::{
-    BenchmarkDispatchParams, FaDispatchParams, MorphotagDispatchParams, OpensmileDispatchParams,
-    TranscribeDispatchParams, extract_benchmark_dispatch_params, extract_fa_dispatch_params,
-    extract_morphotag_dispatch_params, extract_opensmile_dispatch_params,
-    extract_transcribe_dispatch_params,
+    BenchmarkDispatchParams, FaDispatchParams, OpensmileDispatchParams, TranscribeDispatchParams,
+    extract_benchmark_dispatch_params, extract_fa_dispatch_params,
+    extract_opensmile_dispatch_params, extract_transcribe_dispatch_params,
 };
-
-/// Typed plan for the batched text infer family.
-///
-/// This plan carries the option-derived behavior knobs for the
-/// morphotag / utseg / translate / coref / compare commands. Its consumer is
-/// `runner::routing`, which reads these knobs to build the runtime options for
-/// the recipe-owned execution path in `crate::execution`. It no longer feeds a
-/// dispatch module of its own: the batched-text dispatch module was retired
-/// once every one of those five commands had a name-matched arm.
-///
-/// It deliberately carries NO resource-execution profile. It used to hold a
-/// `CommandKernelPlan`, whose only reader was that retired dispatch module; the
-/// recipe stack derives parallelism from the recipe instead. Do not re-add one
-/// speculatively.
-#[derive(Clone)]
-pub(crate) struct BatchedInferDispatchPlan {
-    /// Morphotag-specific retokenization policy. Other text commands keep the
-    /// default `Preserve` behavior.
-    pub tokenization_mode: TokenizationMode,
-    /// Morphotag-specific multilingual routing policy.
-    pub multilingual_policy: MultilingualPolicy,
-    /// Optional multi-word-token lexicon loaded by the CLI.
-    pub mwt: MwtDict,
-    /// [Experimental] Route @s words to secondary language Stanza models.
-    pub l2_policy: crate::params::L2MorphotagPolicy,
-    /// Apply transcriber `$POS` hints as a post-pass on %mor (default on;
-    /// CLI exposes `--no-pos-hints` to opt out).
-    pub pos_hint_policy: crate::params::PosHintPolicy,
-    /// How morphotag treats a transcript carrying `@Options: CA`.
-    pub ca_policy: crate::options::CaMorphotagPolicy,
-    /// Legacy review-level request retained for stored-job compatibility.
-    /// No value emits CHAT decision tiers.
-    pub review_level: crate::chat_ops::fa::ReviewLevel,
-}
-
-impl BatchedInferDispatchPlan {
-    /// Build the batched-text plan once from the runner snapshot.
-    ///
-    /// Takes no `ServerConfig`: every field is derived from the job's submitted
-    /// options alone. That became true when the plan's `CommandKernelPlan` went
-    /// away with the retired batched-text dispatch, and it is worth preserving,
-    /// since a plan that depends on nothing host-shaped is one that can move
-    /// into a pure crate unchanged.
-    pub(crate) fn from_job(job: &RunnerJobSnapshot) -> Self {
-        let morphotag_params = extract_morphotag_dispatch_params(&job.dispatch.options);
-        let MorphotagDispatchParams {
-            tokenization_mode,
-            multilingual_policy,
-            override_media_cache: _,
-            l2_policy,
-            pos_hint_policy,
-            ca_policy,
-            review_level,
-        } = morphotag_params.unwrap_or(MorphotagDispatchParams {
-            tokenization_mode: TokenizationMode::Preserve,
-            multilingual_policy: MultilingualPolicy::ProcessAll,
-            override_media_cache: job.dispatch.options.common().override_media_cache,
-            l2_policy: crate::params::L2MorphotagPolicy::Placeholder,
-            pos_hint_policy: crate::params::PosHintPolicy::Ignore,
-            ca_policy: crate::options::CaMorphotagPolicy::Honor,
-            review_level: crate::chat_ops::fa::ReviewLevel::None,
-        });
-
-        Self {
-            tokenization_mode,
-            multilingual_policy,
-            mwt: job.dispatch.options.common().mwt.clone(),
-            l2_policy,
-            pos_hint_policy,
-            ca_policy,
-            review_level,
-        }
-    }
-}
 
 /// Typed plan for forced alignment dispatch.
 pub(crate) struct FaDispatchPlan {
@@ -114,33 +42,31 @@ pub(crate) struct FaDispatchPlan {
 }
 
 impl FaDispatchPlan {
-    /// Build the FA option plan from the persisted job snapshot.
+    /// Consume a selected alignment request into its executable plan.
     ///
     /// Returns the typed refusal rather than `None` for the reason
     /// [`DispatchPlanRefusal`] gives: an `Option` here reached a `warn!` and a
     /// bare `return` in `runner::routing`, so an align job whose persisted
     /// options could not be read vanished with no file failed and nothing for
     /// the operator to act on.
-    pub(crate) fn from_job(
-        job: &RunnerJobSnapshot,
+    pub(crate) fn from_request(
+        request: PlanRequest<'_, AlignOptions>,
         host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
-        let overrides = resolve_cache_overrides(job)?;
+        let options = request.options();
+        let context = request.context();
+        let overrides = CacheOverrides::from_common(&options.common)?;
         let fa_cache_policy = overrides.policy_for(CacheTaskName::ForcedAlignment);
         let utr_cache_policy = crate::params::UtrCachePolicies::from_overrides(&overrides);
-        let options = extract_fa_dispatch_params(&job.dispatch.options, fa_cache_policy)
-            .ok_or(DispatchPlanRefusal::Options)?;
-        let media_dir = match &job.dispatch.options {
-            crate::options::CommandOptions::Align(options) => options
-                .media_dir
-                .as_ref()
-                .map(crate::options::MediaRootDeclaration::admit_absolute)
-                .transpose()?,
-            _ => return Err(DispatchPlanRefusal::Options),
-        };
+        let params = extract_fa_dispatch_params(options, fa_cache_policy);
+        let media_dir = options
+            .media_dir
+            .as_ref()
+            .map(crate::options::MediaRootDeclaration::admit_absolute)
+            .transpose()?;
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, host_policy),
-            options,
+            kernel_plan: context.kernel_plan(host_policy),
+            options: params,
             utr_cache_policy,
             media_dir,
         })
@@ -177,7 +103,7 @@ pub(crate) enum DispatchPlanRefusal {
     /// involves can take.
     #[error(transparent)]
     SpeakerPolicy(#[from] crate::transcribe::SpeakerPlanError),
-    /// The persisted options could not be read into a plan at all.
+    /// The command and options did not establish the requested plan family.
     #[error("command plan could not be built from job options")]
     Options,
     #[error(transparent)]
@@ -218,13 +144,15 @@ pub(crate) struct TranscribeDispatchPlan {
 }
 
 impl TranscribeDispatchPlan {
-    /// Build the transcribe plan from the persisted job snapshot.
-    pub(crate) fn from_job(
-        job: &RunnerJobSnapshot,
+    /// Consume a selected transcription request into its executable plan.
+    pub(crate) fn from_request(
+        request: PlanRequest<'_, TranscribeCommand>,
         host_policy: &HostExecutionPolicy,
         tencent: &crate::model_manifest::TencentEngineSetting,
     ) -> Result<Self, DispatchPlanRefusal> {
-        let overrides = resolve_cache_overrides(job)?;
+        let options = request.options();
+        let context = request.context();
+        let overrides = CacheOverrides::from_common(&options.common)?;
         let cache_policies = TranscribeCachePolicies {
             rev_asr: overrides.policy_for(CacheTaskName::RevAsrEvidence),
             speaker: overrides.policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
@@ -240,10 +168,9 @@ impl TranscribeDispatchPlan {
             utseg_fallback,
             batch_size: _,
             engine_extras,
-        } = extract_transcribe_dispatch_params(&job.dispatch.options, cache_policies)
-            .ok_or(DispatchPlanRefusal::Options)?;
-        let with_utseg = runtime_flag(job, "utseg", true);
-        let with_morphosyntax = runtime_flag(job, "morphosyntax", false);
+        } = extract_transcribe_dispatch_params(options, cache_policies);
+        let with_utseg = runtime_flag(context.runtime_state, "utseg", true);
+        let with_morphosyntax = runtime_flag(context.runtime_state, "morphosyntax", false);
 
         // Refuse a language with no segmenter HERE, before a single ASR
         // request is dispatched. Whether utterance segmentation can run at all
@@ -259,13 +186,13 @@ impl TranscribeDispatchPlan {
         let asr = crate::transcribe::TranscribeAsrPlan::from_request(
             AsrBackend::try_from_engine(&asr_engine)?,
             &engine_extras,
-            &job.dispatch.lang,
+            context.language,
         )?;
         // The speaker plan is admitted against the recognizer, so a count an
         // engine the run involves cannot take is refused here, by name, and
         // the recognizer path never sees the count at all.
         let speakers = crate::transcribe::SpeakerPlan::admit(
-            crate::transcribe::SpeakerCount::admit(auto_speakers, job.dispatch.num_speakers)?,
+            crate::transcribe::SpeakerCount::admit(auto_speakers, context.num_speakers)?,
             crate::transcribe::SpeakerSeparation::from_request(diarize, speaker_engine),
             // Planned with the account's Tencent engine, which decides
             // whether a Tencent recognizer separates speakers.
@@ -282,7 +209,7 @@ impl TranscribeDispatchPlan {
         )?;
 
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, host_policy),
+            kernel_plan: context.kernel_plan(host_policy),
             base_options: TranscribeOptions {
                 plan,
                 speakers,
@@ -316,31 +243,33 @@ pub(crate) struct BenchmarkDispatchPlan {
 }
 
 impl BenchmarkDispatchPlan {
-    /// Build the benchmark plan from the persisted job snapshot.
-    pub(crate) fn from_job(
-        job: &RunnerJobSnapshot,
+    /// Consume a selected benchmark request into its executable plan.
+    pub(crate) fn from_request(
+        request: PlanRequest<'_, BenchmarkOptions>,
         host_policy: &HostExecutionPolicy,
         tencent: &crate::model_manifest::TencentEngineSetting,
     ) -> Result<Self, DispatchPlanRefusal> {
+        let options = request.options();
+        let context = request.context();
         // Refused here, once, for the whole job. This used to be a check inside
         // each file's retry loop that failed the file and continued, so every
         // retry attempt failed the same way and the file ended with no terminal
         // state recorded. The code itself is read by the ASR plan below; the
         // comparison takes none (each transcript's `@Languages:` decides its
         // morphotag), so nothing here keeps it.
-        let crate::api::LanguageSpec::Resolved(_) = &job.dispatch.lang else {
+        let crate::api::LanguageSpec::Resolved(_) = context.language else {
             return Err(DispatchPlanRefusal::BenchmarkNeedsOneLanguage(
-                job.dispatch.lang.clone(),
+                context.language.clone(),
             ));
         };
-        let cache_policy = resolve_cache_overrides(job)?.policy_for(CacheTaskName::RevAsrEvidence);
+        let cache_policy =
+            CacheOverrides::from_common(&options.common)?.policy_for(CacheTaskName::RevAsrEvidence);
         let BenchmarkDispatchParams {
             asr_engine,
             wor_tier,
             cache_policy,
             engine_extras,
-        } = extract_benchmark_dispatch_params(&job.dispatch.options, cache_policy)
-            .ok_or(DispatchPlanRefusal::Options)?;
+        } = extract_benchmark_dispatch_params(options, cache_policy);
 
         // A refusal here means a persisted job names an engine this build
         // cannot run. Submission validation refuses those up front, so
@@ -350,12 +279,12 @@ impl BenchmarkDispatchPlan {
         let asr = crate::transcribe::TranscribeAsrPlan::from_request(
             AsrBackend::try_from_engine(&asr_engine)?,
             &engine_extras,
-            &job.dispatch.lang,
+            context.language,
         )?;
         // Benchmark scores the recognizer alone: its count reaches the
         // recognizer's own diarization and nothing else.
         let speakers = crate::transcribe::SpeakerPlan::admit(
-            crate::transcribe::SpeakerCount::admit(false, job.dispatch.num_speakers)?,
+            crate::transcribe::SpeakerCount::admit(false, context.num_speakers)?,
             crate::transcribe::SpeakerSeparation::RecognizerOnly,
             // Planned with the account's Tencent engine, which decides
             // whether a Tencent recognizer separates speakers.
@@ -366,7 +295,7 @@ impl BenchmarkDispatchPlan {
         )?;
 
         Ok(Self {
-            kernel_plan: kernel_plan_for_job(job, host_policy),
+            kernel_plan: context.kernel_plan(host_policy),
             base_options: TranscribeOptions {
                 plan: crate::transcribe::types::AdmittedTranscribePlan::admit(
                     asr,
@@ -439,86 +368,45 @@ impl MediaAnalysisDispatchPlan {
         }
     }
 
-    /// Build the media-analysis plan from the persisted job snapshot.
-    ///
-    /// Returns the typed refusal for the same reason `FaDispatchPlan` does:
-    /// the `Option` this used to return reached a `warn!` and a bare `return`,
-    /// so a media-analysis job with a corrupt options row was dropped in
-    /// silence.
-    pub(crate) fn from_job(
-        job: &RunnerJobSnapshot,
+    /// Consume one selected media request under the host's retained policy.
+    pub(crate) fn from_request(
+        request: MediaAnalysisRequest<'_>,
         host_policy: &HostExecutionPolicy,
     ) -> Result<Self, DispatchPlanRefusal> {
-        match job.dispatch.command {
-            ReleasedCommand::Opensmile => {
+        let options = request.options();
+        let context = request.context();
+        let kernel_plan = context.kernel_plan(host_policy);
+        Ok(match options {
+            MediaOptions::Opensmile(options) => {
                 let OpensmileDispatchParams { feature_set } =
-                    extract_opensmile_dispatch_params(&job.dispatch.options)
-                        .ok_or(DispatchPlanRefusal::Options)?;
-                Ok(Self::Opensmile {
-                    kernel_plan: kernel_plan_for_job(job, host_policy),
+                    extract_opensmile_dispatch_params(options);
+                Self::Opensmile {
+                    kernel_plan,
                     feature_set,
-                })
+                }
             }
-            ReleasedCommand::Avqi => Ok(Self::Avqi {
-                kernel_plan: kernel_plan_for_job(job, host_policy),
-            }),
-            ReleasedCommand::Diarize => {
-                // A diarize job snapshot must carry diarize options; any
-                // other variant means the persisted options row is corrupt.
-                // Refusing fails plan construction visibly (same contract as
-                // the opensmile params extractor above) instead of silently
-                // proceeding with default settings.
-                let crate::options::CommandOptions::Diarize(options) = &job.dispatch.options else {
-                    return Err(DispatchPlanRefusal::Options);
-                };
-                Ok(Self::Diarize {
-                    kernel_plan: kernel_plan_for_job(job, host_policy),
-                    backend: options.speaker_engine.worker_backend(),
-                    // The option type admits only a count a diarizer can answer
-                    // (at least two, or absent for automatic); the worker
-                    // request still speaks the provider's own parameter.
-                    expected_speakers: options
-                        .expected_speakers
-                        .map(|count| crate::api::NumSpeakers(count.get())),
-                    cache_policy: resolve_cache_overrides(job)?
-                        .policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
-                    output_mode: options.output_mode.clone(),
-                })
-            }
-            _ => Err(DispatchPlanRefusal::Options),
-        }
+            MediaOptions::Avqi => Self::Avqi { kernel_plan },
+            MediaOptions::Diarize(options) => Self::Diarize {
+                kernel_plan,
+                backend: options.speaker_engine.worker_backend(),
+                expected_speakers: options
+                    .expected_speakers
+                    .map(|count| crate::api::NumSpeakers(count.get())),
+                cache_policy: CacheOverrides::from_common(&options.common)?
+                    .policy_for(CacheTaskName::SpeakerDiarizationRawEvidence),
+                output_mode: options.output_mode.clone(),
+            },
+        })
     }
 }
 
-/// Resolve [`CacheOverrides`] from the common options on a job snapshot.
-///
-/// Reads `override_media_cache_tasks` (per-task) and `override_media_cache` (all-or-nothing)
-/// from `CommonOptions` and produces a typed `CacheOverrides` value.
-fn resolve_cache_overrides(
-    job: &RunnerJobSnapshot,
-) -> Result<CacheOverrides, crate::params::InvalidCachePolicy> {
-    CacheOverrides::from_common(job.dispatch.options.common())
-}
-
-/// The policy is the dispatch host's snapshot ([`DispatchHostContext`]), not a
-/// fresh reading of the machine per plan.
-///
-/// [`DispatchHostContext`]: crate::runner::context::DispatchHostContext
-fn kernel_plan_for_job(
-    job: &RunnerJobSnapshot,
-    host_policy: &HostExecutionPolicy,
-) -> CommandKernelPlan {
-    CommandKernelPlan::for_command_with_policy(
-        job.dispatch.command,
-        job.pending_files.len(),
-        host_policy,
-    )
-}
-
 /// Resolve one runtime-only flag with its documented default.
-fn runtime_flag(job: &RunnerJobSnapshot, key: &str, default: bool) -> bool {
-    job.dispatch
-        .runtime_state
+fn runtime_flag(
+    state: &std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+    default: bool,
+) -> bool {
+    state
         .get(key)
         .and_then(|value| value.as_bool())
         .unwrap_or(default)

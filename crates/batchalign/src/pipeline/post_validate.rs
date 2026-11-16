@@ -1573,7 +1573,7 @@ impl PostValidated {
         }
     }
 
-    /// Test-only route, for the fake `WorkerGateway` doubles.
+    /// Test-only route for recording worker-effect doubles.
     ///
     /// See the module docs: these doubles replace a gateway whose production
     /// implementation runs the gate, so the double is upstream of it and never

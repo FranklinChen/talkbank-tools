@@ -188,9 +188,7 @@ impl QueuedJobOrchestrator for LocalJobOrchestrator {
                 .backoff_for_retry(1)
                 .duration(),
         );
-        sink.requeue_job_after_memory_gate(retry_at).await;
-        sink.bump_deferred_work_units().await;
-        Ok(MemoryGateRejectionDisposition::Requeued { retry_at })
+        Ok(sink.requeue_job_after_memory_gate(retry_at).await)
     }
 }
 
@@ -506,12 +504,9 @@ pub(crate) async fn store_backed_control_plane_snapshot(
 mod tests {
     use super::*;
 
-    use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::api::{
-        CorrelationId, DisplayPath, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
-    };
+    use crate::api::{CorrelationId, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand};
     use crate::cache::UtteranceCache;
     use crate::options::{CommandOptions, CommonOptions, MorphotagOptions};
     use crate::runner::{ExecutionEngine, RunnerExecutionContext};
@@ -521,13 +516,16 @@ mod tests {
     };
     use crate::worker::pool::{PoolConfig, WorkerPool};
 
-    fn sample_job(job_id: &str) -> Job {
+    fn sample_job(job_id: &str, staging_dir: batchalign_types::paths::ServerPath) -> Job {
         let filename = "sample.cha";
-        let mut file_statuses = HashMap::new();
-        file_statuses.insert(
-            filename.to_string(),
-            FileStatus::new(DisplayPath::from(filename)),
-        );
+        let inputs = crate::store::JobInputs::Content(vec![crate::store::ContentInput {
+            display: filename.into(),
+            kind: crate::store::InputKind::Chat,
+        }]);
+        let file_statuses = inputs
+            .displays()
+            .map(|name| (name.to_string(), FileStatus::new(name.clone())))
+            .collect();
 
         Job {
             identity: JobIdentity {
@@ -554,22 +552,15 @@ mod tests {
                 source_dir: Default::default(),
             },
             filesystem: JobFilesystemConfig {
-                staging_dir: Default::default(),
+                staging_dir,
                 media_mapping: Default::default(),
                 media_subdir: Default::default(),
             },
             execution: JobExecutionState {
-                lifecycle: crate::store::JobLifecycle::for_test(
-                    JobStatus::Queued,
-                    crate::store::test_support::inputs_from_parts(
-                        vec![DisplayPath::from(filename)],
-                        vec![true],
-                        false,
-                        Vec::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                ),
+                lifecycle: crate::store::JobLifecycle::Active {
+                    status: crate::api::ActiveStatus::Queued,
+                    inputs,
+                },
                 file_statuses,
                 results: Vec::new(),
                 error: None,
@@ -587,11 +578,23 @@ mod tests {
         }
     }
 
+    /// Guards: Backend submission reaches terminal completion and writes the staged source through the owned echo runtime.
+    /// Kind: journey
+    /// Not a type: Typed input records cannot establish background scheduling, actual database transitions or output bytes from the runtime journey.
+    /// State: An isolated runtime layout owns SQLite, cache, staged source and output. The model-free echo pool exercises actual scheduling and publication.
+    /// Concurrency: The test owns its runtime and directory. It awaits terminal state under a bounded timeout and then shuts down the runtime.
     #[tokio::test]
     async fn test_backend_submit_dispatches_job() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let layout = crate::config::RuntimeLayout::from_state_dir(tempdir.path().join("state"));
         std::fs::create_dir_all(layout.state_dir()).expect("create state dir");
+
+        let jobs_dir = tempdir.path().join("jobs");
+        let staging_dir = jobs_dir.join("job-test-dispatch");
+        let input_dir = staging_dir.join("input");
+        std::fs::create_dir_all(&input_dir).expect("create staged input");
+        let source = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
+        std::fs::write(input_dir.join("sample.cha"), source).expect("stage authored CHAT");
 
         let db = Arc::new(
             crate::db::JobDB::open_with_layout(&layout, Some(layout.state_dir()))
@@ -617,7 +620,7 @@ mod tests {
             )),
             db,
             engine,
-            tempdir.path().join("jobs"),
+            jobs_dir,
             Arc::new(crate::clock::SystemClock),
         )
         .await
@@ -625,18 +628,29 @@ mod tests {
 
         bootstrap
             .backend
-            .submit_job(sample_job("job-test-dispatch"))
+            .submit_job(sample_job("job-test-dispatch", staging_dir.clone().into()))
             .await
             .expect("local backend should submit the job");
 
-        // Verify the job exists in the store.
-        assert!(
-            bootstrap
-                .backend
-                .get_job(&JobId::from("job-test-dispatch"))
-                .await
-                .is_some(),
-            "local backend should expose submitted job state"
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let info = bootstrap
+                    .backend
+                    .get_job(&JobId::from("job-test-dispatch"))
+                    .await
+                    .expect("submitted job");
+                if info.status.is_terminal() {
+                    break info;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("echo dispatch completes");
+        assert_eq!(completed.status, JobStatus::Completed);
+        assert_eq!(
+            std::fs::read_to_string(staging_dir.join("output/sample.cha")).expect("echo output"),
+            source
         );
 
         bootstrap

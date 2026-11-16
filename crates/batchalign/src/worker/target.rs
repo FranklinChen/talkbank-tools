@@ -5,8 +5,6 @@
 //! as `infer:asr` so one small machine does not speculatively hold unrelated
 //! models in memory.
 
-#[cfg(test)]
-use crate::api::ReleasedCommand;
 use crate::command_model::InferenceRequirement;
 
 use super::InferTask;
@@ -91,18 +89,6 @@ impl WorkerTarget {
         }
     }
 
-    /// Return the infer-task worker target used for one released command.
-    #[cfg(test)]
-    pub(crate) fn for_command(command: ReleasedCommand) -> Self {
-        Self::InferTask(
-            crate::command_model::command_spec(command)
-                .capabilities
-                .require_inference()
-                .expect("test command requires inference")
-                .task(),
-        )
-    }
-
     /// Derive a target only from admitted inference requirements. A native
     /// command cannot be passed to this constructor.
     pub(crate) fn for_inference_with_mode(
@@ -120,152 +106,5 @@ pub(crate) fn task_name(task: InferTask) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{InferTask, WorkerBootstrapMode, WorkerProfile, WorkerTarget};
-    use crate::api::ReleasedCommand;
-    use crate::types::runtime;
-
-    #[test]
-    fn command_target_maps_transcribe_to_asr() {
-        let target = WorkerTarget::for_command(ReleasedCommand::Transcribe);
-        assert_eq!(target, WorkerTarget::InferTask(InferTask::Asr));
-    }
-
-    #[test]
-    fn command_target_maps_compare_to_morphosyntax() {
-        assert_eq!(
-            WorkerTarget::for_command(ReleasedCommand::Compare),
-            WorkerTarget::InferTask(InferTask::Morphosyntax)
-        );
-    }
-
-    #[test]
-    fn infer_target_label_is_prefixed() {
-        assert_eq!(WorkerTarget::infer_task(InferTask::Fa).label(), "infer:fa");
-    }
-
-    #[test]
-    fn profile_target_label_is_prefixed() {
-        assert_eq!(
-            WorkerTarget::profile(WorkerProfile::Gpu).label(),
-            "profile:gpu"
-        );
-    }
-
-    #[test]
-    fn profile_mode_maps_task_to_profile_target() {
-        assert_eq!(
-            WorkerTarget::from_infer_task(InferTask::Asr, WorkerBootstrapMode::Profile),
-            WorkerTarget::Profile(WorkerProfile::Gpu)
-        );
-    }
-
-    #[test]
-    fn command_target_respects_bootstrap_mode() {
-        let requirement = crate::command_model::command_spec(ReleasedCommand::Morphotag)
-            .capabilities
-            .require_inference()
-            .expect("morphotag requires inference");
-        assert_eq!(
-            WorkerTarget::for_inference_with_mode(requirement, WorkerBootstrapMode::Profile),
-            WorkerTarget::Profile(WorkerProfile::Stanza)
-        );
-        assert_eq!(
-            WorkerTarget::for_inference_with_mode(requirement, WorkerBootstrapMode::Task),
-            WorkerTarget::InferTask(InferTask::Morphosyntax)
-        );
-    }
-
-    // -- WorkerProfile tests --
-
-    #[test]
-    fn gpu_tasks_map_to_gpu_profile() {
-        assert_eq!(WorkerProfile::for_task(InferTask::Asr), WorkerProfile::Gpu);
-        assert_eq!(WorkerProfile::for_task(InferTask::Fa), WorkerProfile::Gpu);
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Speaker),
-            WorkerProfile::Gpu
-        );
-    }
-
-    #[test]
-    fn stanza_tasks_map_to_stanza_profile() {
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Morphosyntax),
-            WorkerProfile::Stanza
-        );
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Utseg),
-            WorkerProfile::Stanza
-        );
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Coref),
-            WorkerProfile::Stanza
-        );
-    }
-
-    #[test]
-    fn io_tasks_map_to_io_profile() {
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Translate),
-            WorkerProfile::Io
-        );
-        assert_eq!(
-            WorkerProfile::for_task(InferTask::Opensmile),
-            WorkerProfile::Io
-        );
-        assert_eq!(WorkerProfile::for_task(InferTask::Avqi), WorkerProfile::Io);
-    }
-
-    #[test]
-    fn profile_for_command_maps_align_to_gpu() {
-        assert_eq!(
-            WorkerProfile::for_command(ReleasedCommand::Align),
-            Some(WorkerProfile::Gpu)
-        );
-    }
-
-    #[test]
-    fn profile_for_command_maps_morphotag_to_stanza() {
-        assert_eq!(
-            WorkerProfile::for_command(ReleasedCommand::Morphotag),
-            Some(WorkerProfile::Stanza)
-        );
-    }
-
-    #[test]
-    fn gpu_default_max_workers_is_one() {
-        assert_eq!(WorkerProfile::Gpu.default_max_workers(4), 1);
-        assert_eq!(WorkerProfile::Stanza.default_max_workers(4), 4);
-        assert_eq!(WorkerProfile::Io.default_max_workers(4), 1);
-    }
-
-    #[test]
-    fn startup_reservations_for_large_tier_match_toml_constants() {
-        let tier = runtime::MemoryTier::from_total_mb(64_000);
-        let gpu = WorkerProfile::Gpu.startup_reservation_mb_for_tier(&tier);
-        let stanza = WorkerProfile::Stanza.startup_reservation_mb_for_tier(&tier);
-        let io = WorkerProfile::Io.startup_reservation_mb_for_tier(&tier);
-
-        assert_eq!(gpu.0, 16_000, "GPU Large tier should match TOML constant");
-        assert_eq!(
-            stanza.0, 12_000,
-            "Stanza Large tier should match TOML constant"
-        );
-        assert_eq!(io.0, 4_000, "IO Large tier should match TOML constant");
-    }
-
-    #[test]
-    fn startup_reservations_for_small_tier_are_reduced() {
-        let tier = runtime::MemoryTier::from_total_mb(16_000);
-        let gpu = WorkerProfile::Gpu.startup_reservation_mb_for_tier(&tier);
-        let stanza = WorkerProfile::Stanza.startup_reservation_mb_for_tier(&tier);
-
-        assert!(gpu.0 < 16_000, "GPU Small tier must be less than Large");
-        assert!(
-            stanza.0 < 12_000,
-            "Stanza Small tier must be less than Large"
-        );
-        assert!(gpu.0 > stanza.0, "GPU must still exceed Stanza");
-    }
-}
+#[path = "target_tests.rs"]
+mod tests;

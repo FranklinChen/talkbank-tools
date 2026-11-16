@@ -26,15 +26,6 @@ pub(crate) enum FileNamingPolicy {
     RewriteStem(StemRewrite),
 }
 
-/// Sidecar output policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SidecarPolicy {
-    /// How to derive the sidecar path from the source path.
-    pub naming: FileNamingPolicy,
-    /// User-facing content type.
-    pub content_type: ContentType,
-}
-
 /// Output policy for a released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputPolicy {
@@ -44,8 +35,11 @@ pub(crate) enum OutputPolicy {
         primary: FileNamingPolicy,
         /// Primary output content type.
         primary_content_type: ContentType,
-        /// Additional sidecars generated per work unit.
-        sidecars: &'static [SidecarPolicy],
+    },
+    /// A CHAT result and its source-derived comparison metrics CSV.
+    ChatMetrics {
+        /// Primary CHAT naming policy.
+        primary: FileNamingPolicy,
     },
     /// Admitted CHAT sources retain their name; media sources produce turns JSON.
     /// Submission checks the source against the explicit diarization mode first.
@@ -87,33 +81,42 @@ impl OutputDeclaration {
                         extension: options.format.extension(),
                     }),
                     primary_content_type: content_type,
-                    sidecars: &[],
                 })
             }
         }
     }
 }
 
+/// Source-specific shape after diarization's input-kind choice is resolved.
+enum SelectedOutputPolicy {
+    Primary {
+        naming: FileNamingPolicy,
+        content_type: ContentType,
+    },
+    ChatMetrics {
+        naming: FileNamingPolicy,
+    },
+}
+
 impl OutputPolicy {
-    pub(crate) fn primary_for_source(self, source: &DisplayPath) -> SidecarPolicy {
+    fn for_source(self, source: &DisplayPath) -> SelectedOutputPolicy {
         match self {
             Self::Fixed {
                 primary,
                 primary_content_type,
-                ..
-            } => SidecarPolicy {
+            } => SelectedOutputPolicy::Primary {
                 naming: primary,
                 content_type: primary_content_type,
             },
+            Self::ChatMetrics { primary } => SelectedOutputPolicy::ChatMetrics { naming: primary },
             Self::Diarize => {
-                let chat = crate::types::request::is_chat_source_name(source.as_ref());
-                if chat {
-                    SidecarPolicy {
+                if crate::types::request::is_chat_source_name(source.as_ref()) {
+                    SelectedOutputPolicy::Primary {
                         naming: FileNamingPolicy::PreserveInput,
                         content_type: ContentType::Chat,
                     }
                 } else {
-                    SidecarPolicy {
+                    SelectedOutputPolicy::Primary {
                         naming: FileNamingPolicy::RewriteStem(StemRewrite {
                             strip_suffix: None,
                             append_suffix: ".turns",
@@ -126,10 +129,14 @@ impl OutputPolicy {
         }
     }
 
-    fn sidecars(self) -> &'static [SidecarPolicy] {
-        match self {
-            Self::Fixed { sidecars, .. } => sidecars,
-            Self::Diarize => &[],
+    #[cfg(test)]
+    pub(crate) fn primary_naming_for_source(self, source: &DisplayPath) -> FileNamingPolicy {
+        match self.for_source(source) {
+            SelectedOutputPolicy::Primary {
+                naming,
+                content_type: _,
+            }
+            | SelectedOutputPolicy::ChatMetrics { naming } => naming,
         }
     }
 }
@@ -154,29 +161,189 @@ pub(crate) struct PlannedMaterializedFile {
     pub role: MaterializedArtifactRole,
 }
 
-/// Plan all materialized files for one source-relative path.
+/// A primary result. Transport roles are derived from its type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrimaryArtifact {
+    display_path: DisplayPath,
+    content_type: ContentType,
+}
+
+impl PrimaryArtifact {
+    fn for_source(
+        source: &DisplayPath,
+        naming: FileNamingPolicy,
+        content_type: ContentType,
+    ) -> Self {
+        Self {
+            display_path: apply_file_naming_policy(source, naming),
+            content_type,
+        }
+    }
+
+    pub(crate) fn display_path(&self) -> &DisplayPath {
+        &self.display_path
+    }
+    pub(crate) fn content_type(&self) -> ContentType {
+        self.content_type
+    }
+    pub(crate) fn into_materialized(self) -> PlannedMaterializedFile {
+        PlannedMaterializedFile {
+            display_path: self.display_path,
+            content_type: self.content_type,
+            role: MaterializedArtifactRole::Primary,
+        }
+    }
+}
+
+/// CSV metrics have a fixed sidecar role and content type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MetricsArtifact {
+    display_path: DisplayPath,
+}
+
+impl MetricsArtifact {
+    pub(crate) fn display_path(&self) -> &DisplayPath {
+        &self.display_path
+    }
+    pub(crate) fn content_type(&self) -> ContentType {
+        ContentType::Csv
+    }
+    fn into_materialized(self) -> PlannedMaterializedFile {
+        let content_type = self.content_type();
+        PlannedMaterializedFile {
+            display_path: self.display_path,
+            content_type,
+            role: MaterializedArtifactRole::Sidecar,
+        }
+    }
+}
+
+/// Named comparison outputs derived together from the same source.
+/// Fields remain private to the naming producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChatMetricsArtifacts {
+    source: DisplayPath,
+    primary: PrimaryArtifact,
+    metrics: MetricsArtifact,
+}
+
+impl ChatMetricsArtifacts {
+    pub(crate) fn source(&self) -> &DisplayPath {
+        &self.source
+    }
+    pub(crate) fn primary(&self) -> &PrimaryArtifact {
+        &self.primary
+    }
+    pub(crate) fn metrics(&self) -> &MetricsArtifact {
+        &self.metrics
+    }
+    pub(crate) fn into_primary(self) -> PrimaryArtifact {
+        self.primary
+    }
+}
+
+/// Source-bound output layout. Every variant owns exactly one primary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlannedArtifactSet {
+    layout: ArtifactLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtifactLayout {
+    Primary {
+        source: DisplayPath,
+        primary: PrimaryArtifact,
+    },
+    ChatMetrics(ChatMetricsArtifacts),
+}
+
+impl PlannedArtifactSet {
+    pub(crate) fn source(&self) -> &DisplayPath {
+        match &self.layout {
+            ArtifactLayout::Primary { source, .. } => source,
+            ArtifactLayout::ChatMetrics(pair) => pair.source(),
+        }
+    }
+
+    pub(crate) fn primary(&self) -> &PrimaryArtifact {
+        match &self.layout {
+            ArtifactLayout::Primary { primary, .. } => primary,
+            ArtifactLayout::ChatMetrics(pair) => pair.primary(),
+        }
+    }
+
+    pub(crate) fn single(&self) -> Option<&PrimaryArtifact> {
+        match &self.layout {
+            ArtifactLayout::Primary { primary, .. } => Some(primary),
+            ArtifactLayout::ChatMetrics(_) => None,
+        }
+    }
+
+    pub(crate) fn chat_metrics(&self) -> Option<&ChatMetricsArtifacts> {
+        match &self.layout {
+            ArtifactLayout::Primary { .. } => None,
+            ArtifactLayout::ChatMetrics(pair) => Some(pair),
+        }
+    }
+
+    pub(crate) fn into_chat_metrics(self) -> Result<ChatMetricsArtifacts, Self> {
+        match self.layout {
+            ArtifactLayout::ChatMetrics(pair) => Ok(pair),
+            ArtifactLayout::Primary { .. } => Err(self),
+        }
+    }
+
+    pub(crate) fn into_primary(self) -> PrimaryArtifact {
+        match self.layout {
+            ArtifactLayout::Primary { primary, .. } => primary,
+            ArtifactLayout::ChatMetrics(pair) => pair.into_primary(),
+        }
+    }
+}
+
+impl IntoIterator for PlannedArtifactSet {
+    type Item = PlannedMaterializedFile;
+    type IntoIter =
+        std::iter::Chain<std::iter::Once<Self::Item>, std::option::IntoIter<Self::Item>>;
+    fn into_iter(self) -> Self::IntoIter {
+        let (primary, metrics) = match self.layout {
+            ArtifactLayout::Primary { primary, .. } => (primary.into_materialized(), None),
+            ArtifactLayout::ChatMetrics(pair) => (
+                pair.primary.into_materialized(),
+                Some(pair.metrics.into_materialized()),
+            ),
+        };
+        std::iter::once(primary).chain(metrics)
+    }
+}
+
+/// Derive the supported output layout once, retaining its source and roles.
 pub(crate) fn plan_materialized_files(
-    source_path: &DisplayPath,
+    source: &DisplayPath,
     policy: OutputPolicy,
-) -> Vec<PlannedMaterializedFile> {
-    let primary = policy.primary_for_source(source_path);
-    let mut planned = Vec::with_capacity(policy.sidecars().len() + 1);
-    planned.push(PlannedMaterializedFile {
-        display_path: apply_file_naming_policy(source_path, primary.naming),
-        content_type: primary.content_type,
-        role: MaterializedArtifactRole::Primary,
-    });
-    planned.extend(
-        policy
-            .sidecars()
-            .iter()
-            .map(|sidecar| PlannedMaterializedFile {
-                display_path: apply_file_naming_policy(source_path, sidecar.naming),
-                content_type: sidecar.content_type,
-                role: MaterializedArtifactRole::Sidecar,
-            }),
-    );
-    planned
+) -> PlannedArtifactSet {
+    let layout = match policy.for_source(source) {
+        SelectedOutputPolicy::Primary {
+            naming,
+            content_type,
+        } => ArtifactLayout::Primary {
+            source: source.clone(),
+            primary: PrimaryArtifact::for_source(source, naming, content_type),
+        },
+        SelectedOutputPolicy::ChatMetrics { naming } => {
+            ArtifactLayout::ChatMetrics(ChatMetricsArtifacts {
+                source: source.clone(),
+                primary: PrimaryArtifact::for_source(source, naming, ContentType::Chat),
+                metrics: MetricsArtifact {
+                    display_path: apply_file_naming_policy(
+                        source,
+                        FileNamingPolicy::ReplaceExtension("compare.csv"),
+                    ),
+                },
+            })
+        }
+    };
+    PlannedArtifactSet { layout }
 }
 
 fn apply_file_naming_policy(source_path: &DisplayPath, policy: FileNamingPolicy) -> DisplayPath {
@@ -217,6 +384,11 @@ fn rewrite_display_path(source_path: &DisplayPath, rewrite: StemRewrite) -> Disp
 mod tests {
     use super::*;
 
+    /// Guards: Media, lowercase CHAT and uppercase CHAT sources select the promised name and content type together.
+    /// Kind: policy
+    /// Not a type: The closed layout prevents empty or mixed-role results but cannot choose the promised filename and content type for external source spellings.
+    /// State: None
+    /// Concurrency: None
     #[test]
     fn diarize_names_and_content_types_follow_the_admitted_source_kind_together() {
         for (source, name, content_type) in [
@@ -237,55 +409,9 @@ mod tests {
             ),
         ] {
             let outputs = plan_materialized_files(&source.into(), OutputPolicy::Diarize);
-            assert_eq!(outputs.len(), 1);
-            assert_eq!(outputs[0].display_path.as_ref(), name);
-            assert_eq!(outputs[0].content_type, content_type);
+            let primary = outputs.single().expect("one source-selected output");
+            assert_eq!(primary.display_path().as_ref(), name);
+            assert_eq!(primary.content_type(), content_type);
         }
-    }
-
-    #[test]
-    fn compare_policy_preserves_chat_name_and_adds_csv_sidecar() {
-        const SIDECARS: &[SidecarPolicy] = &[SidecarPolicy {
-            naming: FileNamingPolicy::ReplaceExtension("compare.csv"),
-            content_type: ContentType::Csv,
-        }];
-        let outputs = plan_materialized_files(
-            &DisplayPath::from("nested/sample.cha"),
-            OutputPolicy::Fixed {
-                primary: FileNamingPolicy::PreserveInput,
-                primary_content_type: ContentType::Chat,
-                sidecars: SIDECARS,
-            },
-        );
-        assert_eq!(
-            outputs[0].display_path,
-            DisplayPath::from("nested/sample.cha")
-        );
-        assert_eq!(
-            outputs[1].display_path,
-            DisplayPath::from("nested/sample.compare.csv")
-        );
-    }
-
-    #[test]
-    fn rewrite_stem_policy_matches_opensmile_and_avqi_output_shapes() {
-        let opensmile = apply_file_naming_policy(
-            &DisplayPath::from("sample.wav"),
-            FileNamingPolicy::RewriteStem(StemRewrite {
-                strip_suffix: None,
-                append_suffix: ".opensmile",
-                extension: "csv",
-            }),
-        );
-        let avqi = apply_file_naming_policy(
-            &DisplayPath::from("sample.cs.wav"),
-            FileNamingPolicy::RewriteStem(StemRewrite {
-                strip_suffix: Some(".cs"),
-                append_suffix: ".avqi",
-                extension: "txt",
-            }),
-        );
-        assert_eq!(opensmile, DisplayPath::from("sample.opensmile.csv"));
-        assert_eq!(avqi, DisplayPath::from("sample.avqi.txt"));
     }
 }

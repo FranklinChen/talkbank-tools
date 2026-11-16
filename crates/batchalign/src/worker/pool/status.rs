@@ -9,8 +9,6 @@
 //! be scoped in a block that ends before any `.await` point. This ensures the
 //! resulting future is `Send` (required by axum handlers and tokio tasks).
 
-use std::sync::atomic::Ordering;
-
 use crate::api::{ReleasedCommand, WorkerLanguage};
 use crate::options::CommandOptions;
 
@@ -72,8 +70,7 @@ impl WorkerPool {
         // does not live across any .await (MutexGuard is !Send).
         let groups = lock_recovered(&self.groups);
         groups.get(&key).is_some_and(|group| {
-            !lock_recovered(&group.idle).is_empty()
-                || !lock_recovered(&group.tcp_workers).is_empty()
+            !group.idle.view().is_empty() || !group.tcp_workers.view().is_empty()
         })
     }
 
@@ -112,10 +109,7 @@ impl WorkerPool {
         // Scope the std::sync::MutexGuard so it is dropped before .await.
         let groups_count: usize = {
             let groups = lock_recovered(&self.groups);
-            groups
-                .values()
-                .map(|g| g.total.load(Ordering::Relaxed))
-                .sum()
+            groups.values().map(|g| g.total.count()).sum()
         };
         // Keys whose spawn is in flight have no worker process yet, so they are
         // not counted: this total is compared against worker CAPS, and counting
@@ -141,8 +135,8 @@ impl WorkerPool {
             groups
                 .iter()
                 .map(|(key, group)| {
-                    let total = group.total.load(Ordering::Relaxed);
-                    let idle = lock_recovered(&group.idle).len();
+                    let total = group.total.count();
+                    let idle = group.idle.view().len();
                     let suffix = if key.engine_selection.is_none() {
                         String::new()
                     } else {
@@ -233,7 +227,7 @@ impl WorkerPool {
             let groups = lock_recovered(&self.groups);
             let mut v = Vec::new();
             for group in groups.values() {
-                let idle = lock_recovered(&group.idle);
+                let idle = group.idle.view();
                 for worker in idle.iter() {
                     v.push(WorkerSummaryEntry {
                         profile: worker.profile_label().to_string(),
@@ -284,7 +278,7 @@ impl WorkerPool {
         {
             let groups = lock_recovered(&self.groups);
             for group in groups.values() {
-                let tcp = lock_recovered(&group.tcp_workers);
+                let tcp = group.tcp_workers.view();
                 for worker in tcp.iter() {
                     entries.push(WorkerSummaryEntry {
                         profile: worker.profile_label().to_string(),

@@ -417,37 +417,18 @@ mod tests {
     use crate::types::worker_v2::ProtocolErrorCodeV2;
     use std::path::Path;
 
-    /// The regression this function exists for (2026-09-02): a worker
-    /// protocol failure carrying `ModelAccessDenied` (the category set when
-    /// pyannote's speaker-diarization load hits a gated Hugging Face Hub
-    /// repository) must become `ServerError::ModelAccessDenied`, and NEVER
-    /// `Validation`. Before this, every speaker V2 parse failure collapsed
-    /// into `Validation`, which the dashboard then labelled a pipeline bug,
-    /// even when the true cause was the operator's own missing Hub
-    /// credentials.
-    #[test]
-    fn model_access_denied_protocol_failure_never_becomes_validation() {
-        let error = protocol_failure(
-            ProtocolErrorCodeV2::ModelAccessDenied,
-            "could not download the Hugging Face model at \
-             pyannote/speaker-diarization-community-1: its repository is gated",
-        );
-
-        let mapped = speaker_parse_failure_to_server_error(
-            error,
-            crate::worker::execute_result_v2::ModelLocality::Remote,
-        );
-
-        assert!(
-            matches!(mapped, ServerError::ModelAccessDenied(_)),
-            "expected ServerError::ModelAccessDenied, got {mapped:?}"
-        );
-        assert!(!matches!(mapped, ServerError::Validation(_)));
-    }
-
     fn protocol_failure(code: ProtocolErrorCodeV2, message: &str) -> SpeakerResultParseError {
         SpeakerResultParseError::Protocol(
-            crate::worker::execute_result_v2::ExecuteFailureRead::for_test(code, message),
+            crate::worker::execute_result_v2::require_success_result(
+                &crate::types::worker_v2::ExecuteResponseV2::failure(
+                    crate::types::worker_v2::WorkerRequestIdV2::from("declared-speaker-failure"),
+                    code,
+                    message.to_owned(),
+                    crate::api::NonNegativeSeconds::ZERO,
+                ),
+                "speaker",
+            )
+            .expect_err("declared failed outcome"),
         )
     }
 
@@ -456,6 +437,12 @@ mod tests {
     /// or a provider's runtime failure read as bad client input. Each code
     /// now has its own category, and none of them, nor a shape mismatch, is
     /// `Validation`. (The cases are a remote provider's, pyannoteAI's.)
+    /// Guards: speaker failure codes and shape refusals retain their exact scheduler categories.
+    /// Kind: policy
+    /// Not a type: failure code to category mapping is a semantic policy across the speaker adapter and scheduler.
+    /// State: actual outcome readers admit typed failure fixtures with synthetic
+    /// messages and no model, credential, process or filesystem effects.
+    /// Concurrency: none
     #[test]
     fn no_speaker_protocol_failure_or_shape_mismatch_is_validation() {
         use crate::runner::util::classify_server_error;
@@ -503,6 +490,12 @@ mod tests {
 
     /// Local and remote runtime failures both receive bounded retries, but
     /// the local failure must not be described as a transient remote outage.
+    /// Guards: local model runtime failures preserve their local category and bounded retry behavior.
+    /// Kind: policy
+    /// Not a type: backend locality and retry budget decisions remain semantic policy choices after outcome admission.
+    /// State: actual outcome readers admit typed failure fixtures with synthetic
+    /// messages and no model, credential, process or filesystem effects.
+    /// Concurrency: none
     #[test]
     fn a_local_model_runtime_failure_retries_with_its_own_category() {
         use crate::runner::util::classify_server_error;

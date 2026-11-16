@@ -1,7 +1,7 @@
 # Rust CLI and Server
 
 **Status:** Current
-**Last updated:** 2026-11-11 23:05 EST
+**Last updated:** 2026-11-16 23:55 EST
 
 This page covers the Rust control plane that powers `batchalign3`: the CLI
 client, the HTTP server, and how to extend them.
@@ -436,11 +436,25 @@ there. Every other kind goes to its module under
 - `media_analysis_v2.rs`: `dispatch_media_analysis_v2()` for opensmile/avqi/diarize
 - `speaker_identity_pipeline.rs`: `dispatch_speaker_identity()` for speaker identification
 
-**Recipe-driven execution (new model):** Compare has been migrated from
-`runner/dispatch/` to the recipe-driven `execution/` kernel. New commands
-should prefer the `execution/` model when they have multi-stage workflows.
-See `crates/batchalign/src/execution/` for the `StageExecutor` trait
-and `crates/batchalign/src/planning/` for `build_job_plan()`.
+**Planned execution:** Compare runs in `execution/`. Its consuming phases bind
+source-bound targets, admitted inputs, completed computations and the run sink
+through publication. `CompareMorphology` restricts its worker effects to the
+one operation that produces the judged main. Use this ownership pattern for
+multi-stage workflows.
+See `crates/batchalign/src/execution/kernel/comparison.rs` and
+`crates/batchalign/src/planning/` for `build_job_plan()`.
+
+The other text executors receive `MorphotagGateway`, `UtsegGateway`,
+`TranslateGateway` or `CorefGateway`. Their signatures restrict work to the
+command's effect, with a singular source for segmentation and translation.
+See the [worker capability graph](../../architecture/runtime/dispatch.md#worker-capabilities).
+
+Their file preparation consumes recorded preflight once. Each command selects
+its own preparation state and carries its actual options. A loaded file retains
+source bytes, optional prior and its source-owned publication authority. Morphotag and
+Utseg schedule under the existing memory-admitted worker count. Share immutable
+run facts through `Arc` and move per-file work authority. See the
+[preparation graph](../../architecture/runtime/dispatch.md#producer-owned-file-preparation).
 
 ### 6. Orchestrator module
 

@@ -1,77 +1,11 @@
 //! Media resolution, preflight validation, and output path handling.
 
-use std::collections::HashMap;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use crate::store::PendingJobFile;
-
-use crate::media::MediaExtensions;
 use crate::media::probe::{AudioDuration, MediaProbe};
 use tracing::{debug, warn};
-
-/// Pre-validate media files before dispatch.
-///
-/// For each recording read in place (a paths-mode input), checks:
-/// 1. File exists on disk
-/// 2. File is non-empty
-/// 3. File extension is a known audio/video format
-///
-/// Returns the set of file indices that failed validation.
-pub(in crate::runner) async fn preflight_validate_media(
-    file_list: &[PendingJobFile],
-) -> HashMap<usize, String> {
-    let mut failures = HashMap::new();
-
-    for file in file_list {
-        // Only media read in place (paths mode) is checked here: a staged
-        // file is checked where it is staged, and a transcript is not media.
-        let path = match (&file.kind(), &file.location()) {
-            (crate::store::InputKind::Media, crate::store::InputLocation::Paths(paths)) => {
-                paths.source.server().clone()
-            }
-            (crate::store::InputKind::Chat, _) | (_, crate::store::InputLocation::Staged) => {
-                continue;
-            }
-        };
-
-        // Check file exists and non-empty via metadata (one syscall)
-        match tokio::fs::metadata(&path).await {
-            Err(_) => {
-                failures.insert(file.file_index(), format!("File not found: {}", path));
-                continue;
-            }
-            Ok(meta) if meta.len() == 0 => {
-                failures.insert(file.file_index(), format!("File is empty: {}", path));
-                continue;
-            }
-            Ok(_) => {}
-        }
-
-        // Check known extension
-        let ext = path
-            .as_path()
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
-        if let Some(ref ext) = ext {
-            if !MediaExtensions::is_known(ext) {
-                failures.insert(
-                    file.file_index(),
-                    format!("Unknown media format '.{ext}': {}", path),
-                );
-            }
-        } else {
-            failures.insert(
-                file.file_index(),
-                format!("File has no extension: {}", path),
-            );
-        }
-    }
-
-    failures
-}
 
 /// Compute audio identity for cache keying.
 ///

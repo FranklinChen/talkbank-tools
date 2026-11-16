@@ -182,9 +182,6 @@ async fn check_worker_health(entry: &RegistryEntry) -> &'static str {
         engine_overrides: entry.engine_overrides.clone(),
         pid: WorkerPid(entry.pid),
         task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
-        // CLI-side health/stop probes use TcpWorkerHandle (one request at a
-        // time), not SharedGpuTcpWorker: the dispatch semaphore is unused.
-        gpu_thread_pool_size: 1,
     };
 
     match TcpWorkerHandle::connect(info).await {
@@ -252,9 +249,6 @@ async fn stop(args: &WorkerStopArgs) -> Result<(), CliError> {
             engine_overrides: entry.engine_overrides.clone(),
             pid: WorkerPid(entry.pid),
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
-            // Stop probes use TcpWorkerHandle (single-shot); the dispatch
-            // semaphore is unused on this path.
-            gpu_thread_pool_size: 1,
         };
 
         match TcpWorkerHandle::connect(info).await {

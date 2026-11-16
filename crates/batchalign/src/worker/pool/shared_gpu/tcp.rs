@@ -7,8 +7,6 @@
 //! daemon is not this server's process, so retiring the worker sends
 //! `shutdown` and drops the connection, never a signal.
 
-use tokio::io::BufReader;
-
 use crate::types::worker_v2::ExecuteResponseV2;
 use crate::worker::WorkerPid;
 use crate::worker::error::WorkerError;
@@ -21,21 +19,37 @@ pub(crate) struct SharedGpuTcpWorker {
 }
 
 impl SharedGpuTcpWorker {
-    /// Connect to a TCP GPU worker and start routing its replies.
-    pub(crate) async fn connect(
+    /// Consume the actual probed/admitted stream and preserve buffered bytes.
+    pub(in crate::worker::pool) fn from_registry(
+        worker: crate::worker::registry::AdmittedRegistryWorker,
+        capacity: std::num::NonZeroU32,
+    ) -> (super::super::WorkerKey, Self) {
+        let (key, parts) = crate::worker::tcp_handle::TcpWorkerHandle::promote_registry(worker);
+        let channel = SharedGpuChannel::open(
+            parts.reader,
+            parts.writer,
+            parts.info.pid,
+            parts.info.task_timeouts,
+            capacity.get(),
+        );
+        (key, Self { channel })
+    }
+    #[cfg(test)]
+    async fn connect(
         info: crate::worker::tcp_handle::TcpWorkerInfo,
+        capacity: std::num::NonZeroU32,
     ) -> Result<Self, WorkerError> {
-        let addr = format!("{}:{}", info.host, info.port);
-        let stream = crate::worker::tcp_handle::connect_within(&addr).await?;
-
-        let (read_half, write_half) = tokio::io::split(stream);
+        let stream =
+            crate::worker::tcp_handle::connect_within(&format!("{}:{}", info.host, info.port))
+                .await?;
+        let (reader, writer) = tokio::io::split(stream);
         Ok(Self {
             channel: SharedGpuChannel::open(
-                BufReader::new(read_half),
-                write_half,
+                tokio::io::BufReader::new(reader),
+                writer,
                 info.pid,
                 info.task_timeouts,
-                info.gpu_thread_pool_size,
+                capacity.get(),
             ),
         })
     }
@@ -43,9 +57,13 @@ impl SharedGpuTcpWorker {
     /// Send one typed V2 execute request concurrently.
     pub(crate) async fn execute_v2(
         &self,
-        permit: &crate::worker::pool::RunPermit<'_>,
+        prepared: crate::worker::pool::ReadyRequest,
+        preparation: &crate::worker::pool::LoadPreparation,
+        registration: crate::worker::pool::job_tracker::TrackerGuard,
     ) -> Result<ExecuteResponseV2, WorkerError> {
-        self.channel.execute_v2(permit).await
+        self.channel
+            .execute_v2(prepared, preparation, registration)
+            .await
     }
 
     /// Prepare this daemon for `load` (`ensure_task`), returning its proof.
@@ -95,9 +113,11 @@ mod tests {
     use crate::worker::WorkerProfile;
     use crate::worker::tcp_handle::TcpWorkerInfo;
 
-    /// A daemon connection whose stream has ended reports itself unavailable,
-    /// the observation the pool uses to drop it and dispatch elsewhere rather
-    /// than leave every request to wait out its timeout on a dead connection.
+    /// Guards: The actual shared reader observes peer EOF and refuses later use of that same daemon connection.
+    /// Kind: contract
+    /// Not a type: A peer can close the real socket after static admission. Kernel EOF and the background reader's availability projection remain native effects after ownership is fixed.
+    /// State: One private loopback listener and its accepted peer exercise the shared channel with no model or daemon process.
+    /// Concurrency: The fixture owns both socket endpoints and awaits acceptance before dropping the peer. A bounded wait observes the reader's EOF transition, with no shared ports or mutable environment.
     #[tokio::test]
     async fn a_closed_daemon_connection_reports_itself_unavailable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -105,16 +125,18 @@ mod tests {
             .expect("bind a local port");
         let port = listener.local_addr().expect("local address").port();
         let accepted = tokio::spawn(async move { listener.accept().await });
-        let worker = SharedGpuTcpWorker::connect(TcpWorkerInfo {
-            host: "127.0.0.1".into(),
-            port,
-            profile: WorkerProfile::Gpu,
-            lang: WorkerLanguage::from(LanguageCode3::eng()),
-            engine_overrides: String::new(),
-            pid: WorkerPid(4242),
-            task_timeouts: TaskTimeoutOverrides::NONE,
-            gpu_thread_pool_size: 2,
-        })
+        let worker = SharedGpuTcpWorker::connect(
+            TcpWorkerInfo {
+                host: "127.0.0.1".into(),
+                port,
+                profile: WorkerProfile::Gpu,
+                lang: WorkerLanguage::from(LanguageCode3::eng()),
+                engine_overrides: String::new(),
+                pid: WorkerPid(4242),
+                task_timeouts: TaskTimeoutOverrides::NONE,
+            },
+            std::num::NonZeroU32::new(2).unwrap(),
+        )
         .await
         .expect("connect to the local listener");
         let (daemon_side, _) = accepted

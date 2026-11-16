@@ -12,7 +12,6 @@ use tokio::process::Command;
 use tracing::info;
 
 use super::config::WorkerConfig;
-use super::protocol::ReadyTransport;
 use crate::worker::error::WorkerError;
 use crate::worker::python::worker_command;
 use crate::worker::serving::WorkerServing;
@@ -292,15 +291,8 @@ pub async fn spawn_tcp_daemon(
     let started = async {
         let ready =
             super::WorkerHandle::read_ready_line(&mut stdout_reader, config.startup_stall).await?;
-        match (ready.ready, ready.transport) {
-            (true, ReadyTransport::Tcp { host, port }) => Ok((ready.pid, host, port)),
-            (false, _) => Err(WorkerError::ReadyParseFailed(
-                "TCP daemon emitted ready line with ready=false".to_string(),
-            )),
-            (true, ReadyTransport::Stdio) => Err(WorkerError::ReadyParseFailed(
-                "a worker spawned as a TCP daemon reported a stdio ready line".to_string(),
-            )),
-        }
+        let (pid, _runtime, host, port) = ready.into_tcp()?.into_parts();
+        Ok((pid.0, host, port))
     }
     .await;
     let (pid, host, port) = match started {

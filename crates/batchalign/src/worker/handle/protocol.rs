@@ -122,33 +122,8 @@ impl NoiseRun {
 /// Maximum bytes of response/error text to include in a failure dump.
 const FAILED_REQUEST_DUMP_MAX_RESPONSE_BYTES: usize = 1_024 * 1_024;
 
-/// Ready signal emitted by the Python worker on stdout, after its startup
-/// progress: a stdio worker's and a TCP daemon's alike, read by the one
-/// reader (`WorkerHandle::read_ready_line`).
-#[derive(Debug, Deserialize)]
-pub(super) struct ReadySignal {
-    pub ready: bool,
-    pub pid: u32,
-    /// How the worker serves from now on, and where.
-    #[serde(flatten)]
-    pub transport: ReadyTransport,
-    pub runtime: crate::worker::runtime_identity::WorkerRuntimeIdentity,
-}
-
-/// The transport a ready worker serves on, named by its ready line.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "transport", rename_all = "snake_case")]
-pub(super) enum ReadyTransport {
-    /// Requests on the worker's stdin, replies on the stdout just read.
-    Stdio,
-    /// A daemon listening on `host:port`; its stdout ends at the ready line.
-    Tcp {
-        /// The address it listens on.
-        host: String,
-        /// The port it listens on.
-        port: u16,
-    },
-}
+mod ready;
+pub(super) use ready::ReadySignal;
 
 /// Wire-level request envelope sent to a Python worker, over stdio or TCP.
 #[derive(Debug, Serialize)]
@@ -405,11 +380,11 @@ mod tests {
     use crate::worker::error::WorkerAfterError;
 
     fn ensure_task_failure(kind: WorkerErrorKind) -> WorkerError {
-        ReportedFailure {
-            message: "the load failed".to_owned(),
-            kind,
-        }
-        .into_ensure_task_error()
+        let bytes =
+            serde_json::json!({"op":"error","error":"the load failed","kind":kind}).to_string();
+        serde_json::from_str::<ReportedFailure>(&bytes)
+            .expect("declared worker error")
+            .into_ensure_task_error()
     }
 
     /// Every model now loads in `ensure_task`, so a load that fails there
@@ -418,6 +393,13 @@ mod tests {
     /// worker, a memory shortfall after a backoff, a refused gated repository
     /// is an access denial (not retried, its remedy named), and anything
     /// else is a deterministic bootstrap failure.
+    /// Guards: decoded load-failure tags retain download, memory, access, bootstrap
+    /// and refusal categories with the worker's actual exit policy.
+    /// Kind: wire
+    /// Not a type: external tag spelling and retry/category choices remain semantic
+    /// obligations after typed control completion has bound the actual load reply.
+    /// State: local reported-error JSON exercises the real decoding and classifier.
+    /// Concurrency: none
     #[test]
     fn a_failed_load_keeps_its_classification() {
         let download = ensure_task_failure(WorkerErrorKind::Download);

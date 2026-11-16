@@ -11,11 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::api::WorkerLanguage;
-use crate::worker::tcp_handle::{TcpWorkerHandle, TcpWorkerInfo};
-use crate::worker::{WorkerCapabilities, WorkerPid, WorkerProfile};
+use crate::worker::WorkerProfile;
 
 // ---------------------------------------------------------------------------
 // Registry entry (JSON schema matches Python `WorkerRegistryEntry`)
@@ -32,17 +31,13 @@ pub enum RegistryOwnership {
     ServerOwned,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DiscoveryDisposition {
-    Accept,
-    SkipForeignOwner,
-    ReapStaleOwned,
-    /// Owned by nobody else, or by this server, but written by another build.
-    RefuseForeignBuild(ForeignBuildDaemon),
-}
+mod admission;
+mod adoption;
+use admission::{DiscoveryDisposition, discovery_disposition};
+pub(super) use adoption::{AdmittedRegistryWorker, ConnectionOwnership, RegistryAdmissions};
 
 /// One worker's entry in the `workers.json` registry file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegistryEntry {
     /// Worker process ID.
     pub pid: u32,
@@ -104,27 +99,11 @@ impl RegistryEntry {
     }
 }
 
-/// A discovered worker that has been health-checked and is ready for use.
-#[derive(Debug, Clone)]
-pub struct DiscoveredWorker {
-    /// Registry entry data.
-    pub entry: RegistryEntry,
-    /// Parsed worker profile.
-    pub profile: WorkerProfile,
-    /// Parsed worker-runtime language string.
-    pub lang: WorkerLanguage,
-    /// The raw capability report probed on this worker's discovery
-    /// connection, for the one worker a scan probes. It travels with the
-    /// worker it came from, so the pool admits it under that worker's key
-    /// rather than guessing which worker a detached report described.
-    pub capabilities: Option<WorkerCapabilities>,
-}
-
 /// Result of one registry scan.
-#[derive(Debug, Clone, Default)]
-pub struct RegistryDiscovery {
+#[derive(Default)]
+pub(super) struct RegistryDiscovery {
     /// Healthy registry workers that can be integrated into the pool.
-    pub workers: Vec<DiscoveredWorker>,
+    pub workers: Vec<adoption::ReportReadyRegistryWorker>,
     /// Daemons the scan refused to adopt because their entry names another
     /// build, or none. Not reaped: they may belong to a server of their own
     /// build. The pool reports them in `/health`.
@@ -263,53 +242,12 @@ fn write_registry(path: &Path, entries: &[RegistryEntry]) -> Result<(), std::io:
 
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) only checks process existence/permission.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    crate::worker::pool::reaper::process_alive(pid)
 }
 
 #[cfg(not(unix))]
 fn process_alive(_pid: u32) -> bool {
     false
-}
-
-/// Decide what discovery does with one registry entry.
-///
-/// Ownership is settled first (a live foreign owner's daemon is skipped, a
-/// dead owner's is reaped). An entry this server could adopt, external or its
-/// own, is then adopted only if it was written by `our_build`.
-fn discovery_disposition(
-    entry: &RegistryEntry,
-    current_server_instance_id: &str,
-    our_build: &str,
-) -> DiscoveryDisposition {
-    if entry.is_server_owned() {
-        let Some(owner_server_instance_id) = entry.owner_server_instance_id() else {
-            return DiscoveryDisposition::ReapStaleOwned;
-        };
-        let Some(owner_server_pid) = entry.owner_server_pid else {
-            return DiscoveryDisposition::ReapStaleOwned;
-        };
-        if owner_server_instance_id != current_server_instance_id {
-            return if process_alive(owner_server_pid) {
-                DiscoveryDisposition::SkipForeignOwner
-            } else {
-                DiscoveryDisposition::ReapStaleOwned
-            };
-        }
-    }
-
-    let reported = match entry.build_identity.as_deref() {
-        Some(build) if build == our_build => return DiscoveryDisposition::Accept,
-        Some(build) => ReportedBuild::Build(build.to_owned()),
-        None => ReportedBuild::Unreported,
-    };
-    DiscoveryDisposition::RefuseForeignBuild(ForeignBuildDaemon {
-        pid: entry.pid,
-        profile: entry.profile.clone(),
-        lang: entry.lang.clone(),
-        reported,
-        ours: our_build.to_owned(),
-    })
 }
 
 fn should_shutdown_entry(entry: &RegistryEntry, current_server_instance_id: &str) -> bool {
@@ -319,16 +257,14 @@ fn should_shutdown_entry(entry: &RegistryEntry, current_server_instance_id: &str
 fn terminate_registered_daemon(pid: u32, profile: &str) {
     #[cfg(unix)]
     {
-        // SAFETY: sending SIGTERM to a known PID. If the process already
-        // exited, `kill()` returns ESRCH which we ignore.
-        let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        if ret == 0 {
-            info!(pid, profile, "Sent SIGTERM to TCP daemon worker");
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                warn!(pid, profile, error = %err, "Failed to SIGTERM TCP daemon worker");
-            }
+        let Some(target) = crate::worker::process_id::NativePid::admit(pid) else {
+            warn!(pid, profile, "Refusing invalid registry process ID");
+            return;
+        };
+        match target.terminate_process() {
+            Ok(()) => info!(pid, profile, "Sent SIGTERM to TCP daemon worker"),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(error) => warn!(pid,profile,%error,"Failed to SIGTERM TCP daemon worker"),
         }
     }
 
@@ -384,10 +320,11 @@ pub fn kill_owned_daemons(registry_path: &Path, current_server_instance_id: &str
 /// removes stale entries (workers that crashed without cleanup). Returns
 /// only healthy, connectable workers plus one capability snapshot probed on the
 /// same TCP connection used during discovery.
-pub async fn discover_workers(
+pub(super) async fn discover_workers(
     registry_path: &Path,
     task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides,
     current_server_instance_id: &str,
+    admissions: &RegistryAdmissions,
 ) -> RegistryDiscovery {
     let entries = read_registry(registry_path);
     if entries.is_empty() {
@@ -402,171 +339,135 @@ pub async fn discover_workers(
 
     let mut discovered = Vec::new();
     let mut refused = Vec::new();
-    let mut probed_capabilities = false;
+    enum CapabilityProbe {
+        Needed,
+        Observed,
+    }
+    let mut capability_probe = CapabilityProbe::Needed;
     let mut stale_indices = Vec::new();
+    let mut rejected_workers = Vec::new();
 
     for (i, entry) in entries.iter().enumerate() {
-        match discovery_disposition(entry, current_server_instance_id, crate::build_hash()) {
-            DiscoveryDisposition::Accept => {}
-            DiscoveryDisposition::RefuseForeignBuild(refusal) => {
-                // Not reaped and not removed from the registry: the daemon is
-                // alive and may belong to a server of its own build. It is
-                // simply never adopted by this one, and the refusal is
-                // returned for `/health`.
-                warn!(error = %refusal, "Refusing registry worker from another build");
-                refused.push(refusal);
-                continue;
-            }
-            DiscoveryDisposition::SkipForeignOwner => {
-                info!(
-                    pid = entry.pid,
-                    profile = %entry.profile,
-                    owner_server_instance_id = ?entry.owner_server_instance_id(),
-                    owner_server_pid = ?entry.owner_server_pid,
-                    "Skipping registry worker owned by another live server"
-                );
-                continue;
-            }
-            DiscoveryDisposition::ReapStaleOwned => {
-                warn!(
-                    pid = entry.pid,
-                    profile = %entry.profile,
-                    owner_server_instance_id = ?entry.owner_server_instance_id(),
-                    owner_server_pid = ?entry.owner_server_pid,
-                    "Reaping stale server-owned registry worker"
-                );
-                terminate_registered_daemon(entry.pid, &entry.profile);
-                stale_indices.push(i);
-                continue;
-            }
-        }
-
-        let Some(profile) = entry.worker_profile() else {
-            warn!(
-                profile = %entry.profile,
-                pid = entry.pid,
-                "Unknown worker profile in registry, skipping"
-            );
-            stale_indices.push(i);
-            continue;
-        };
-
-        let lang = match WorkerLanguage::parse_untrusted(&entry.lang) {
-            Ok(code) => code,
-            Err(e) => {
-                warn!(
-                    lang = %entry.lang,
-                    pid = entry.pid,
-                    error = %e,
-                    "Registry entry has invalid worker language, skipping"
-                );
-                stale_indices.push(i);
-                continue;
-            }
-        };
-        // Health-check connect uses TcpWorkerHandle (one-request-at-a-time),
-        // not SharedGpuTcpWorker. The dispatch semaphore is unused on this
-        // path, so any non-zero default suffices; the pool will rebuild with
-        // the correct value at integration time (pool/discovery.rs).
-        let info = TcpWorkerInfo {
-            host: entry.host.clone(),
-            port: entry.port,
-            profile,
-            lang: lang.clone(),
-            engine_overrides: entry.engine_overrides.clone(),
-            pid: WorkerPid(entry.pid),
-            task_timeouts,
-            // Placeholder per the comment above, the registry walker
-            // does not own the host-facts pipeline; the discovery /
-            // pool integration step replaces this with the real
-            // `EffectiveConfig.gpu_thread_pool_size`. The literal
-            // matches the legacy static default so any code path
-            // that *does* read it before integration sees the same
-            // value as before the host-facts migration.
-            gpu_thread_pool_size: 4,
-        };
-
-        match TcpWorkerHandle::connect(info).await {
-            Ok(mut handle) => {
-                match handle.health_check().await {
-                    Ok(_) => {
-                        info!(
-                            profile = %entry.profile,
-                            lang = %entry.lang,
-                            host = %entry.host,
-                            port = entry.port,
-                            pid = entry.pid,
-                            "Discovered healthy TCP worker"
-                        );
-                        // One probe per scan. The report stays raw here: the
-                        // pool admits it, once, under this worker's key.
-                        let capabilities = if probed_capabilities {
-                            None
-                        } else {
-                            match handle.capabilities().await {
-                                Ok(caps) => {
-                                    probed_capabilities = true;
-                                    Some(caps)
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        host = %entry.host,
-                                        port = entry.port,
-                                        pid = entry.pid,
-                                        error = %e,
-                                        "Failed to detect capabilities from discovered TCP worker"
-                                    );
-                                    None
-                                }
-                            }
-                        };
-                        discovered.push(DiscoveredWorker {
-                            entry: entry.clone(),
-                            profile,
-                            lang: lang.clone(),
-                            capabilities,
-                        });
-                    }
-                    Err(e) => {
-                        warn!(
-                            host = %entry.host,
-                            port = entry.port,
-                            pid = entry.pid,
-                            error = %e,
-                            "TCP worker health check failed, marking stale"
-                        );
-                        if entry.is_server_owned() {
-                            terminate_registered_daemon(entry.pid, &entry.profile);
-                        }
-                        stale_indices.push(i);
-                    }
+        let compatible =
+            match discovery_disposition(entry, current_server_instance_id, crate::build_hash()) {
+                DiscoveryDisposition::Accept(compatible) => compatible,
+                DiscoveryDisposition::RefuseForeignBuild(refusal) => {
+                    // Not reaped and not removed from the registry: the daemon is
+                    // alive and may belong to a server of its own build. It is
+                    // simply never adopted by this one, and the refusal is
+                    // returned for `/health`.
+                    warn!(error = %refusal, "Refusing registry worker from another build");
+                    refused.push(refusal);
+                    continue;
                 }
-                // Drop the handle: the pool will create its own connection.
-                drop(handle);
-            }
-            Err(e) => {
-                debug!(
-                    host = %entry.host,
-                    port = entry.port,
-                    pid = entry.pid,
-                    error = %e,
-                    "Cannot connect to registered worker, marking stale"
-                );
-                if entry.is_server_owned() {
+                DiscoveryDisposition::SkipForeignOwner => {
+                    info!(
+                        pid = entry.pid,
+                        profile = %entry.profile,
+                        owner_server_instance_id = ?entry.owner_server_instance_id(),
+                        owner_server_pid = ?entry.owner_server_pid,
+                        "Skipping registry worker owned by another live server"
+                    );
+                    continue;
+                }
+                DiscoveryDisposition::ReapStaleOwned => {
+                    warn!(
+                        pid = entry.pid,
+                        profile = %entry.profile,
+                        owner_server_instance_id = ?entry.owner_server_instance_id(),
+                        owner_server_pid = ?entry.owner_server_pid,
+                        "Reaping stale server-owned registry worker"
+                    );
                     terminate_registered_daemon(entry.pid, &entry.profile);
+                    stale_indices.push(i);
+                    continue;
                 }
+            };
+
+        let prepared = match compatible.prepare() {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                warn!(pid=entry.pid, %error, "Registry entry cannot be prepared");
                 stale_indices.push(i);
+                continue;
             }
-        }
+        };
+        let claimed = match admissions.claim(prepared) {
+            Ok(adoption::ClaimDisposition::Claimed(claimed)) => claimed,
+            Ok(adoption::ClaimDisposition::AlreadyClaimed) => continue,
+            Err(error) => {
+                warn!(pid=entry.pid,%error,"Registry daemon identity could not be admitted");
+                continue;
+            }
+        };
+        let connection = match claimed.prepare(task_timeouts) {
+            Ok(connection) => connection,
+            Err(error) => {
+                warn!(pid=entry.pid,%error,"Registry key could not be admitted");
+                continue;
+            }
+        };
+        let probed = match connection.connect().await {
+            Ok(connection) => connection.check().await,
+            Err(rejected) => Err(rejected),
+        };
+        let worker = match probed {
+            Ok(worker) => worker,
+            Err(rejected) => {
+                let source = rejected.source();
+                warn!(
+                    host = %source.host,
+                    port = source.port,
+                    pid = source.pid,
+                    error = %rejected.error(),
+                    "Registry worker probe failed, marking stale"
+                );
+                if source.is_server_owned() {
+                    terminate_registered_daemon(source.pid, &source.profile);
+                }
+                rejected_workers.push(rejected);
+                continue;
+            }
+        };
+
+        info!(
+            profile = %entry.profile,
+            lang = %entry.lang,
+            host = %entry.host,
+            port = entry.port,
+            pid = entry.pid,
+            "Discovered healthy TCP worker"
+        );
+        let worker = match capability_probe {
+            CapabilityProbe::Needed => match worker.observe_capabilities().await {
+                Ok(worker) => {
+                    if worker.observed_report() {
+                        capability_probe = CapabilityProbe::Observed;
+                    }
+                    worker
+                }
+                Err(error) => {
+                    warn!(pid=entry.pid,%error,"Registry capability exchange did not complete safely");
+                    continue;
+                }
+            },
+            CapabilityProbe::Observed => worker.defer_report(),
+        };
+        discovered.push(worker);
     }
 
     // Remove stale entries from the registry file, by identity under the
     // registry's lock, off the async runtime.
-    if !stale_indices.is_empty() {
+    if !stale_indices.is_empty() || !rejected_workers.is_empty() {
         let stale: Vec<RegistryEntry> = stale_indices.iter().map(|&i| entries[i].clone()).collect();
         let path = registry_path.to_path_buf();
         let removal = crate::blocking::spawn_in_span(move || {
-            remove_entries(&path, |entry| stale.iter().any(|s| s.is_same_daemon(entry)))
+            remove_entries(&path, |entry| {
+                stale.iter().any(|stale| stale.is_same_daemon(entry))
+                    || rejected_workers
+                        .iter()
+                        .any(|rejected| rejected.source() == entry)
+            })
         })
         .await
         .map_err(std::io::Error::other)
@@ -584,188 +485,4 @@ pub async fn discover_workers(
 }
 
 #[cfg(test)]
-mod refused_registry_worker_tests {
-    use super::{ForeignBuildDaemon, ReportedBuild};
-    use crate::api::{RefusedRegistryWorker, RegistryWorkerRefusal};
-
-    fn refusal(reported: ReportedBuild) -> ForeignBuildDaemon {
-        ForeignBuildDaemon {
-            pid: 4242,
-            profile: "stanza".into(),
-            lang: "eng".into(),
-            reported,
-            ours: "0.8.5-this".into(),
-        }
-    }
-
-    /// A refused daemon is returned as a typed entry naming its key and why,
-    /// for both refusal kinds, not only logged.
-    #[test]
-    fn a_refused_daemon_is_a_typed_entry_with_its_key_and_reason() {
-        assert_eq!(
-            refusal(ReportedBuild::Build("0.8.4-other".into())).to_refused_registry_worker(),
-            RefusedRegistryWorker {
-                worker_key: "profile:stanza:eng".into(),
-                pid: 4242,
-                reason: RegistryWorkerRefusal::ForeignBuild {
-                    reported_build: "0.8.4-other".into(),
-                    server_build: "0.8.5-this".into(),
-                },
-            }
-        );
-        assert_eq!(
-            refusal(ReportedBuild::Unreported)
-                .to_refused_registry_worker()
-                .reason,
-            RegistryWorkerRefusal::UnreportedBuild {
-                server_build: "0.8.5-this".into(),
-            }
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        DiscoveryDisposition, RegistryEntry, RegistryOwnership, discovery_disposition,
-        read_registry, remove_stale_entry, should_shutdown_entry,
-    };
-
-    fn external_entry() -> RegistryEntry {
-        RegistryEntry {
-            pid: 10,
-            host: "127.0.0.1".to_string(),
-            port: 1234,
-            profile: "stanza".to_string(),
-            lang: "eng".to_string(),
-            engine_overrides: String::new(),
-            ownership: RegistryOwnership::External,
-            owner_server_instance_id: None,
-            owner_server_pid: None,
-            started_at: String::new(),
-            build_identity: Some(OUR_BUILD.to_string()),
-        }
-    }
-
-    const OUR_BUILD: &str = "our-build";
-
-    /// Removal rereads the registry under its lock and removes by identity:
-    /// an entry another writer added after a snapshot survives, and the
-    /// shared lock file (the one the Python writers take) sits beside it.
-    #[test]
-    fn removal_keeps_entries_it_was_not_asked_to_remove() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("workers.json");
-        let mut second = external_entry();
-        second.pid = 11;
-        second.port = 1235;
-        std::fs::write(
-            &path,
-            serde_json::to_string(&[external_entry(), second]).expect("encode"),
-        )
-        .expect("seed");
-
-        assert!(remove_stale_entry(&path, 10));
-        let left = read_registry(&path);
-        assert_eq!(left.len(), 1);
-        assert!(left[0].is_same_daemon(&{
-            let mut expected = external_entry();
-            expected.pid = 11;
-            expected.port = 1235;
-            expected
-        }));
-        assert!(dir.path().join("workers.json.lock").exists());
-        assert!(!remove_stale_entry(&path, 10), "nothing left to remove");
-    }
-
-    #[test]
-    fn discovery_accepts_external_entry() {
-        let entry = external_entry();
-        assert_eq!(
-            discovery_disposition(&entry, "current-server", OUR_BUILD),
-            DiscoveryDisposition::Accept
-        );
-    }
-
-    /// An adoptable daemon written by another build, or by a build that did
-    /// not record one, is refused with the restart remedy, and not reaped.
-    #[test]
-    fn discovery_refuses_a_daemon_from_another_or_an_unreported_build() {
-        for (build_identity, reported) in [
-            (Some("older-build".to_string()), "build older-build"),
-            (None, "an unreported build"),
-        ] {
-            let mut entry = external_entry();
-            entry.build_identity = build_identity;
-            let DiscoveryDisposition::RefuseForeignBuild(refusal) =
-                discovery_disposition(&entry, "current-server", OUR_BUILD)
-            else {
-                panic!("a foreign build must be refused");
-            };
-            let message = refusal.to_string();
-            assert!(message.contains(reported), "{message}");
-            assert!(
-                message.contains("batchalign3 worker start --profile stanza --lang eng"),
-                "{message}"
-            );
-        }
-    }
-
-    /// Ownership is settled before build identity: a live foreign owner's
-    /// daemon is skipped whatever build wrote it.
-    #[test]
-    fn a_foreign_owner_is_skipped_before_its_build_is_judged() {
-        let mut entry = external_entry();
-        entry.ownership = RegistryOwnership::ServerOwned;
-        entry.owner_server_instance_id = Some("other-server".to_string());
-        entry.owner_server_pid = Some(std::process::id());
-        entry.build_identity = Some("older-build".to_string());
-        assert_eq!(
-            discovery_disposition(&entry, "current-server", OUR_BUILD),
-            DiscoveryDisposition::SkipForeignOwner
-        );
-    }
-
-    #[test]
-    fn discovery_accepts_current_server_owned_entry() {
-        let mut entry = external_entry();
-        entry.ownership = RegistryOwnership::ServerOwned;
-        entry.owner_server_instance_id = Some("current-server".to_string());
-        entry.owner_server_pid = Some(std::process::id());
-
-        assert_eq!(
-            discovery_disposition(&entry, "current-server", OUR_BUILD),
-            DiscoveryDisposition::Accept
-        );
-    }
-
-    #[test]
-    fn discovery_skips_foreign_live_server_owned_entry() {
-        let mut entry = external_entry();
-        entry.ownership = RegistryOwnership::ServerOwned;
-        entry.owner_server_instance_id = Some("other-server".to_string());
-        entry.owner_server_pid = Some(std::process::id());
-
-        assert_eq!(
-            discovery_disposition(&entry, "current-server", OUR_BUILD),
-            DiscoveryDisposition::SkipForeignOwner
-        );
-    }
-
-    #[test]
-    fn shutdown_only_targets_current_server_owned_entries() {
-        let mut owned = external_entry();
-        owned.ownership = RegistryOwnership::ServerOwned;
-        owned.owner_server_instance_id = Some("current-server".to_string());
-        owned.owner_server_pid = Some(std::process::id());
-
-        let mut foreign = external_entry();
-        foreign.ownership = RegistryOwnership::ServerOwned;
-        foreign.owner_server_instance_id = Some("other-server".to_string());
-        foreign.owner_server_pid = Some(std::process::id());
-
-        assert!(should_shutdown_entry(&owned, "current-server"));
-        assert!(!should_shutdown_entry(&foreign, "current-server"));
-        assert!(!should_shutdown_entry(&external_entry(), "current-server"));
-    }
-}
+mod tests;

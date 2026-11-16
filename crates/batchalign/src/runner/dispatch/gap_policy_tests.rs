@@ -9,7 +9,7 @@ use crate::chat_ops::fa::{
     cache_key,
 };
 use crate::cli::args::{Cli, build_typed_options};
-use crate::options::CommandOptions;
+use crate::options::{AlignOptions, CommandOptions};
 use crate::types::params::CachePolicy;
 use crate::types::worker_v2::FaTextModeV2;
 use clap::Parser;
@@ -18,17 +18,26 @@ use talkbank_model::model::WriteChat;
 use talkbank_parser::TreeSitterParser;
 use talkbank_parser_tests::test_error::ParseProductTestExt;
 
-fn submitted(flags: &[&str]) -> CommandOptions {
+fn submitted(flags: &[&str]) -> AlignOptions {
     let mut argv = vec!["batchalign3", "align", "input.cha"];
     argv.extend_from_slice(flags);
     let cli = Cli::try_parse_from(argv).expect("valid CLI policy");
     let options = build_typed_options(&cli.command, &cli.global)
         .expect("admission")
         .expect("align options");
-    serde_json::from_value(serde_json::to_value(options).expect("persist options"))
-        .expect("read submitted options")
+    let stored: CommandOptions =
+        serde_json::from_value(serde_json::to_value(options).expect("persist options"))
+            .expect("read submitted options");
+    let CommandOptions::Align(options) = stored else {
+        panic!("align CLI selected another command")
+    };
+    options
 }
-
+/// Guards: CLI gap choices reach final word timings while retaining model-input shaping.
+/// Kind: contract
+/// Not a type: The selected family cannot establish the measured-end versus healing policy on actual authored CHAT words and the resulting serialized timing bullets.
+/// State: Authored CHAT bytes exercise real parsing, timing projection and serialization entirely in memory. No model or filesystem is used.
+/// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
 #[test]
 fn measured_end_policy_reaches_final_wor_without_changing_model_inputs() {
     let controls: &[(&[&str], u64, WhisperTextMode)] = &[
@@ -43,8 +52,7 @@ fn measured_end_policy_reaches_final_wor_without_changing_model_inputs() {
     ];
     let mut keys = Vec::new();
     for &(flags, expected_end, expected_text) in controls {
-        let dispatch = extract_fa_dispatch_params(&submitted(flags), CachePolicy::UseCache)
-            .expect("align dispatch");
+        let dispatch = extract_fa_dispatch_params(&submitted(flags), CachePolicy::UseCache);
         let params = dispatch.fa_params;
         assert_eq!(params.whisper_text, expected_text);
         let words = vec!["hello".to_owned(), "world".to_owned()];
@@ -109,7 +117,11 @@ fn measured_end_policy_reaches_final_wor_without_changing_model_inputs() {
         "neither gap policy nor Whisper-only shaping changes interval-model input"
     );
 }
-
+/// Guards: Whisper shaping determines historical cache bytes independently of output gap healing.
+/// Kind: contract
+/// Not a type: The option family proof cannot establish the exact request text-mode value and historical cache-key literal for actual CLI argument combinations.
+/// State: Real CLI and JSON decoding, worker-request construction and cache-key calculation run in memory. No model, database or filesystem effect is used.
+/// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
 #[test]
 fn whisper_shaping_and_legacy_cache_keys_are_independent_of_gap_healing() {
     use crate::worker::request_builder_v2::{fa_backend_for_engine, text_mode_for};
@@ -122,9 +134,8 @@ fn whisper_shaping_and_legacy_cache_keys_are_independent_of_gap_healing() {
             if pauses {
                 flags.push("--pauses");
             }
-            let params = extract_fa_dispatch_params(&submitted(&flags), CachePolicy::UseCache)
-                .expect("dispatch")
-                .fa_params;
+            let params =
+                extract_fa_dispatch_params(&submitted(&flags), CachePolicy::UseCache).fa_params;
             assert_eq!(
                 text_mode_for(fa_backend_for_engine(params.engine), params.whisper_text),
                 expected_mode
@@ -151,18 +162,23 @@ fn whisper_shaping_and_legacy_cache_keys_are_independent_of_gap_healing() {
         }
     }
 }
-
+/// Guards: Omitted JSON policy preserves measured ends and unknown CLI or JSON policy values refuse admission.
+/// Kind: contract
+/// Not a type: An admitted family cannot establish decoding defaults or rejection of the actual absent and unknown policy bytes at the CLI and JSON edges.
+/// State: Real CLI and JSON decoding, worker-request construction and cache-key calculation run in memory. No model, database or filesystem effect is used.
+/// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
 #[test]
 fn omitted_wire_policy_preserves_measured_ends_and_unknown_policy_is_refused() {
-    let default = extract_fa_dispatch_params(&submitted(&[]), CachePolicy::UseCache)
-        .expect("default")
-        .fa_params;
-    let mut value = serde_json::to_value(submitted(&[])).expect("wire");
+    let default = extract_fa_dispatch_params(&submitted(&[]), CachePolicy::UseCache).fa_params;
+    let mut value = serde_json::to_value(CommandOptions::Align(submitted(&[]))).expect("wire");
     value.as_object_mut().expect("object").remove("word_gaps");
     for pauses in [false, true] {
         value["pauses"] = serde_json::json!(pauses);
         let options: CommandOptions = serde_json::from_value(value.clone()).expect("old request");
-        let actual = extract_fa_dispatch_params(&options, CachePolicy::UseCache).expect("dispatch");
+        let CommandOptions::Align(options) = options else {
+            panic!("align wire selected another command")
+        };
+        let actual = extract_fa_dispatch_params(&options, CachePolicy::UseCache);
         assert_eq!(
             actual.fa_params.gap_healing,
             WordGapHealing::PreserveMeasured

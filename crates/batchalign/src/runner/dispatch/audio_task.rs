@@ -96,6 +96,20 @@ where
     } = reporting;
     let job_id = &job.identity.job_id;
     let filename = file.filename().as_ref();
+    let outputs = match crate::recipe_runner::runtime::SourceOutputs::plan(
+        &job.filesystem,
+        file,
+        job.dispatch.command,
+        &job.dispatch.options,
+    ) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            return lifecycle
+                .fail(&error.to_string(), FailureCategory::System)
+                .await
+                .into();
+        }
+    };
     let mut attempts = FileAttempts::begin(lifecycle, work_unit_kind, running_stage).await;
     loop {
         // The observer records each checkout of this attempt that waits on a
@@ -133,16 +147,7 @@ where
                     }
                 };
                 lifecycle.stage(FileStage::Writing).await;
-                let written = match write_primary_output_artifact(
-                    &job.filesystem,
-                    job.dispatch.command,
-                    &job.dispatch.options,
-                    file.location(),
-                    filename,
-                    file_output,
-                )
-                .await
-                {
+                let written = match write_primary_output_artifact(outputs, file_output).await {
                     Ok(written) => written,
                     Err(error) => {
                         warn!(
@@ -171,7 +176,7 @@ where
                 // Done, or Diagnosed when a generating producer's output was
                 // written with its findings: terminal either way, never an
                 // error and never retried.
-                return written.record(lifecycle).await.into();
+                return written.record(sink.as_ref()).await.into();
             }
             Err(error) => {
                 let category = classify_server_error(&error);
@@ -229,8 +234,7 @@ mod tests {
 
     use super::*;
     use crate::api::{
-        CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
-        ReleasedCommand,
+        CorrelationId, JobId, LanguageCode3, LanguageSpec, NumSpeakers, ReleasedCommand,
     };
     use crate::options::{
         AsrEngineName, CommandOptions, CommonOptions, TranscribeOptions, WorTierPolicy,
@@ -293,17 +297,21 @@ mod tests {
         }
     }
 
-    fn fake_job(tmp: &tempfile::TempDir) -> RunnerJobSnapshot {
-        crate::store::test_support::with_pending(RunnerJobSnapshot {
-            identity: RunnerJobIdentity {
-                job_id: JobId::from("audio-shell"),
-                correlation_id: CorrelationId::from("corr-audio-shell"),
-            },
-            dispatch: RunnerDispatchConfig {
-                command: ReleasedCommand::Transcribe,
-                lang: LanguageSpec::Resolved(LanguageCode3::eng()),
-                num_speakers: NumSpeakers(1),
-                options: CommandOptions::Transcribe(TranscribeOptions {
+    enum FileTaskFixture {
+        Transcription,
+        Alignment,
+    }
+
+    /// The selected family, admitted file set and staging owner stay together.
+    struct PreparedFileTaskFixture {
+        options: CommandOptions,
+        filesystem: RunnerFilesystemConfig,
+    }
+
+    impl FileTaskFixture {
+        fn prepare(self, tmp: &tempfile::TempDir) -> PreparedFileTaskFixture {
+            let options = match &self {
+                Self::Transcription => CommandOptions::Transcribe(TranscribeOptions {
                     auto_speakers: false,
                     common: CommonOptions::default(),
                     asr_engine: AsrEngineName::Whisper,
@@ -313,37 +321,71 @@ mod tests {
                     utseg_fallback: false.into(),
                     batch_size: 8,
                 }),
-                runtime_state: BTreeMap::new(),
-                debug_traces: false,
-            },
-            filesystem: RunnerFilesystemConfig {
-                inputs: crate::store::test_support::inputs_from_parts(
-                    vec![DisplayPath::from("nested/test.mp3")],
-                    vec![false],
-                    true,
-                    vec![ClientPath::new("/input/test.mp3")],
-                    vec![ClientPath::new(
-                        tmp.path()
-                            .join("requested/test.cha")
-                            .to_string_lossy()
-                            .to_string(),
-                    )],
-                    Vec::new(),
-                ),
-                staging_dir: ServerPath::new(tmp.path().join("staging")),
-                media_mapping: Default::default(),
-                media_subdir: Default::default(),
-                source_dir: ClientPath::new("/input"),
-            },
-            cancel_token: CancellationToken::new(),
-            pending_files: Vec::new(),
-        })
+                Self::Alignment => CommandOptions::Align(Default::default()),
+            };
+            let output = crate::store::test_support::admitted(
+                tmp.path().join("requested/test.cha").to_str().unwrap(),
+            );
+            let input = match self {
+                Self::Transcription => crate::store::PathsInput {
+                    display: "nested/test.mp3".into(),
+                    kind: crate::store::InputKind::Media,
+                    source: crate::store::test_support::admitted("/input/test.mp3"),
+                    output,
+                    before: None,
+                },
+                Self::Alignment => crate::store::PathsInput {
+                    display: "nested/test.cha".into(),
+                    kind: crate::store::InputKind::Chat,
+                    source: crate::store::test_support::admitted("/input/test.cha"),
+                    output,
+                    before: None,
+                },
+            };
+            PreparedFileTaskFixture {
+                options,
+                filesystem: RunnerFilesystemConfig {
+                    inputs: crate::store::test_support::paths_inputs(vec![input]),
+                    staging_dir: ServerPath::new(tmp.path().join("staging")),
+                    media_mapping: Default::default(),
+                    media_subdir: Default::default(),
+                    source_dir: ClientPath::new("/input"),
+                },
+            }
+        }
     }
 
+    impl PreparedFileTaskFixture {
+        fn into_snapshot(self) -> RunnerJobSnapshot {
+            crate::store::test_support::with_pending(RunnerJobSnapshot {
+                identity: RunnerJobIdentity {
+                    job_id: JobId::from("audio-shell"),
+                    correlation_id: CorrelationId::from("corr-audio-shell"),
+                },
+                dispatch: RunnerDispatchConfig {
+                    command: self.options.command(),
+                    lang: LanguageSpec::Resolved(LanguageCode3::eng()),
+                    num_speakers: NumSpeakers(1),
+                    options: self.options,
+                    runtime_state: BTreeMap::new(),
+                    debug_traces: false,
+                },
+                filesystem: self.filesystem,
+                cancel_token: CancellationToken::new(),
+                pending_files: Vec::new(),
+            })
+        }
+    }
+
+    /// Guards: One retryable attempt recovers once and writes one successful terminal output.
+    /// Kind: contract
+    /// Not a type: Owned input paths cannot determine how external attempt failures drive retry policy or actual output publication.
+    /// State: An isolated temporary directory exercises actual requested and staged file writes. The shared recording sink replaces registry effects. The typed task double supplies attempts without a worker process.
+    /// Concurrency: The test owns every path and recorder. Awaited writes finish before the temporary directory is dropped.
     #[tokio::test]
     async fn audio_shell_retries_retryable_worker_failures_then_writes_output() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let job = fake_job(&tmp);
+        let job = FileTaskFixture::Transcription.prepare(&tmp).into_snapshot();
         let file = job.pending_files[0].clone();
         let sink_impl = Arc::new(RecordingSink::default());
         let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename().as_ref());
@@ -438,10 +480,15 @@ mod tests {
     /// RED FIRST (2026-10-06): the runner shell writes a diagnosed transcript
     /// and records the file as diagnosed with its findings: not done, not an
     /// error, and not retried.
+    /// Guards: Diagnosed generated speech is written once without retry and exposes its native findings.
+    /// Kind: contract
+    /// Not a type: A diagnosed proof cannot establish the shell retry decision, actual written bytes or recorded terminal attempt outcome.
+    /// State: An isolated temporary directory exercises actual requested and staged file writes. The shared recording sink replaces registry effects. The typed task double supplies attempts without a worker process.
+    /// Concurrency: The test owns every path and recorder. Awaited writes finish before the temporary directory is dropped.
     #[tokio::test]
     async fn audio_shell_writes_a_diagnosed_transcript_and_records_it_diagnosed() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let job = fake_job(&tmp);
+        let job = FileTaskFixture::Transcription.prepare(&tmp).into_snapshot();
         let file = job.pending_files[0].clone();
         let sink_impl = Arc::new(RecordingSink::default());
         let lifecycle = FileRunTracker::new(sink_impl.as_ref(), file.filename().as_ref());

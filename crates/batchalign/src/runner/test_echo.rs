@@ -3,9 +3,7 @@
 //! without any ML inference. Used by worker integration tests.
 
 use crate::api::ContentType;
-use crate::recipe_runner::runtime::{
-    ChatOutputTarget, result_display_path_for_command, write_text_output_artifact,
-};
+use crate::recipe_runner::runtime::{SourceOutputs, write_text_output_artifact};
 use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
 
@@ -37,10 +35,11 @@ pub(super) async fn dispatch_test_echo_files(
             .begin_first_attempt(WorkUnitKind::FileProcess, FileStage::Processing)
             .await;
 
-        let result_display_path = match result_display_path_for_command(
+        let outputs = match SourceOutputs::plan(
+            &job.filesystem,
+            file,
             job.dispatch.command,
             &job.dispatch.options,
-            filename,
         ) {
             Ok(path) => path,
             Err(error) => {
@@ -72,8 +71,17 @@ pub(super) async fn dispatch_test_echo_files(
             crate::store::InputKind::Media => "@UTF8\n@Begin\n@End\n".to_string(),
         };
 
-        let target = ChatOutputTarget::new(&job.filesystem, file.location(), &result_display_path);
-        if let Err(error) = write_text_output_artifact(&target, &output_text).await {
+        let result_display_path = outputs.primary().display_path().clone();
+        let target = match outputs.primary_target() {
+            Ok(target) => target,
+            Err(error) => {
+                lifecycle
+                    .fail(&error.to_string(), FailureCategory::System)
+                    .await;
+                continue;
+            }
+        };
+        if let Err(error) = write_text_output_artifact(target, &output_text).await {
             let err_msg = format!("Failed to write test-echo output: {error}");
             lifecycle.fail(&err_msg, FailureCategory::Validation).await;
             continue;

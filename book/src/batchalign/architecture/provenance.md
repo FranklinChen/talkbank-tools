@@ -1,13 +1,27 @@
 # Processing Provenance System
 
 **Status:** Current
-**Last updated:** 2026-10-25 08:12 EDT
+**Last updated:** {{git-dates:page}}
 
 ## Overview
 
 The provenance system injects structured `@Comment` headers into CHAT
 files recording what batchalign3 did, when, and with what engines. This
 enables reproducibility, auditing, and UI display of processing history.
+
+### Evidence scope
+
+CHAT stamps record the fields their producing stage establishes. Speaker
+identity JSON has its own schema-2 provenance block, including the server build,
+scoring policy and the embedding revision in the server binary's packaged
+manifest. Its embedding dimensions and minimum frame count come from the
+worker response.
+
+The health endpoint separately reports the server build and the worker pool's
+admitted runtime fingerprints. Invocation-bound provenance additionally requires
+input-content hashes, request/output association, executing worker identity and
+cache-producing identity. The generic completion export for these facts remains
+planned. Binary result descriptors use BLAKE3 for their `digest` field.
 
 ## Architecture
 

@@ -8,20 +8,10 @@
 //! long requests failed with "pool saturated" although nothing was wrong with
 //! it.
 //!
-//! Congestion is not the only way to find no worker, though: a group whose
-//! live count (`total`) counts a worker that nothing holds would make the
-//! wait endless. Every worker counted in `total` is in an idle queue or held
-//! by an [`super::AwayFromQueue`] guard (a checkout, a spawn, a health
-//! check, an eviction's shutdown), so the pool can reconcile the two. The
-//! same group showing the same mismatch at two consecutive report intervals
-//! is broken accounting, and the wait ends with the typed, terminal
-//! [`WorkerError::PoolAccountingBroken`]. A mismatch seen once may be a
-//! worker between a queue and its guard, and is only reported; two
-//! unrelated mismatches never confirm each other. A checkout parked on its
-//! own group's permits reconciles only that group, which is all it waits
-//! on; one parked on the pool-wide return signal reconciles every group.
-//! What this cannot detect is a worker that is genuinely checked out and
-//! never comes back; that is held, so it is waited on.
+//! Slot owners span reservation, actual queues, departed exchanges and retirement.
+//! Queue contents are the only availability authority. A report re-observes
+//! congestion without reconstructing hypothetical missing owners from separately
+//! sampled counters.
 //!
 //! What replaced the deadline:
 //!
@@ -31,9 +21,6 @@
 //!   group's counts) and the caller re-probes from the top (fast path, spawn,
 //!   eviction), so a state that changed under it is re-read rather than
 //!   trusted.
-//! - **Reconciliation.** At each report interval the pool's counts are
-//!   reconciled ([`SaturatedWait::reconcile`]); a persistent mismatch ends the
-//!   wait with [`WorkerError::PoolAccountingBroken`].
 //! - **The pool's own lifecycle.** Pool shutdown ends the wait with the typed
 //!   [`WorkerError::PoolShuttingDown`].
 //! - **The caller's.** A cancelled job drops its supervised file task, and
@@ -63,8 +50,6 @@ use crate::api::{PositiveSeconds, WorkerLanguage};
 use crate::store::PoolWait;
 use crate::worker::WorkerTarget;
 use crate::worker::error::WorkerError;
-
-use super::WorkerKey;
 
 /// Told when pool work under this task starts and stops waiting, and for
 /// what: a saturated pool, or host memory. Implemented by the runner, which
@@ -220,39 +205,6 @@ pub(super) struct SaturatedWait {
     started: Instant,
     reports: u32,
     observation: Observation,
-    /// The mismatches the previous report interval found, awaiting
-    /// confirmation.
-    suspected: Vec<UnaccountedGroup>,
-}
-
-/// A group whose live count exceeds what holds its workers.
-#[derive(Debug, Clone)]
-pub(super) struct UnaccountedGroup {
-    pub(super) key: WorkerKey,
-    pub(super) unaccounted: usize,
-    pub(super) total: usize,
-    pub(super) idle: usize,
-    pub(super) away: usize,
-}
-
-impl UnaccountedGroup {
-    /// The same group with the same number of workers nothing holds: what a
-    /// lost worker looks like at two report intervals, and what a worker
-    /// briefly between a queue and its guard does not.
-    fn confirms(&self, earlier: &Self) -> bool {
-        self.key == earlier.key && self.unaccounted == earlier.unaccounted
-    }
-
-    fn into_error(self) -> WorkerError {
-        WorkerError::PoolAccountingBroken {
-            target: self.key.target,
-            lang: self.key.language,
-            unaccounted: self.unaccounted,
-            total: self.total,
-            idle: self.idle,
-            away: self.away,
-        }
-    }
 }
 
 impl SaturatedWait {
@@ -271,34 +223,7 @@ impl SaturatedWait {
             started: Instant::now(),
             reports: 0,
             observation,
-            suspected: Vec::new(),
         }
-    }
-
-    /// After a report interval: act on the pool's reconciliation, `found`
-    /// being every mismatch in the scope this park waits on. A mismatch the
-    /// previous interval also found in the same group ends the wait; one
-    /// seen for the first time is reported and remembered; any suspicion not
-    /// seen again is cleared.
-    pub(super) fn reconcile(&mut self, found: Vec<UnaccountedGroup>) -> Result<(), WorkerError> {
-        let earlier = std::mem::take(&mut self.suspected);
-        for group in found {
-            if earlier.iter().any(|suspect| group.confirms(suspect)) {
-                return Err(group.into_error());
-            }
-            warn!(
-                target = %group.key.target.label(),
-                lang = %group.key.language,
-                unaccounted = group.unaccounted,
-                total = group.total,
-                idle = group.idle,
-                away = group.away,
-                "A worker group counts workers nothing holds; if this persists to the \
-                 next report the wait ends as broken pool accounting"
-            );
-            self.suspected.push(group);
-        }
-        Ok(())
     }
 
     /// Wait for `event`, at most one report interval, unless the pool shuts
@@ -389,6 +314,14 @@ pub(crate) mod tests {
 
     /// An owned child receives the observation on its runtime, including
     /// memory waits, and closes its progress before releasing the publisher.
+    /// Guards: an owned spawned task retains task-local model/memory observation
+    /// and closes its model-load lifetime when cancellation completion is awaited.
+    /// Kind: contract
+    /// Not a type: task-local propagation, channel readiness and actual task abort
+    /// are runtime effects beyond the captured observation's ownership guarantee.
+    /// State: one owned Tokio task, recording observer and readiness channel exercise
+    /// the real scope without a process, model, timer poll or host lease.
+    /// Concurrency: readiness is channel-bound and abort completion is awaited.
     #[tokio::test]
     async fn model_loading_progress_crosses_an_owned_spawn() {
         use crate::store::ModelLoadChange;
@@ -429,155 +362,62 @@ pub(crate) mod tests {
         let observer = weak
             .upgrade()
             .expect("the child owns the observer until it stops");
-        drop(child);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while observer.loads.lock().unwrap().last() != Some(&ModelLoadChange::Ended) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cancelling the child closes its progress");
+        child.abort();
+        assert!(child.await.unwrap_err().is_cancelled());
         assert_eq!(
             observer.loads.lock().unwrap().as_slice(),
             &[ModelLoadChange::Started, ModelLoadChange::Ended]
         );
     }
 
-    #[tokio::test]
-    async fn model_loading_progress_ends_when_its_request_is_cancelled() {
-        use crate::store::ModelLoadChange;
-        let observer = Arc::new(RecordingObserver::default());
-        let (started, ready) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(observing_pool_waits(observer.clone(), async move {
-            let _loading = ObservedModelLoad::begin();
-            started.send(()).unwrap();
-            std::future::pending::<()>().await;
-        }));
-        ready.await.unwrap();
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            observer.loads.lock().unwrap().as_slice(),
-            &[ModelLoadChange::Started, ModelLoadChange::Ended]
-        );
-    }
-
-    /// The observer is told the wait began, and that it ended when the wait
-    /// is dropped, including when the waiting future is cancelled mid-wait.
-    #[tokio::test(flavor = "current_thread")]
-    async fn an_observed_wait_is_reported_and_its_end_is_reported_on_drop() {
+    /// Guards: wait begin, interval re-probe, ready event, shutdown and final
+    /// observer release keep their order without turning a report into a deadline.
+    /// Kind: contract
+    /// Not a type: Actual Tokio readiness and controlled elapsed intervals exercise task-local
+    /// observer callbacks are actual effects after the wait owns its lifecycle.
+    /// State: one controlled runtime, cancellation token and recording observer
+    /// exercise the real wait with declared group observations and no process.
+    /// Concurrency: local paused time and owned futures need no sleep or shared pool.
+    #[tokio::test(start_paused = true)]
+    async fn wait_lifecycle_retains_events_reprobes_and_shutdown() {
         let observer = Arc::new(RecordingObserver::default());
         let (target, lang) = key();
-        let pool_cancel = CancellationToken::new();
+        let cancel = CancellationToken::new();
         observing_pool_waits(observer.clone(), async {
-            let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<60>());
-            let parked = tokio::time::timeout(
-                std::time::Duration::from_millis(20),
-                wait.park(std::future::pending::<()>(), &pool_cancel, || GroupCounts {
-                    total: 1,
-                    idle: 0,
-                }),
-            )
-            .await;
-            assert!(
-                parked.is_err(),
-                "nothing came back, so the wait is still parked"
-            );
+            let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<1>());
             assert_eq!(*observer.events.lock().unwrap(), vec!["waiting"]);
+            for expected in 1..=3 {
+                assert!(matches!(
+                    wait.park(std::future::pending::<()>(), &cancel, || GroupCounts {
+                        total: 4,
+                        idle: 0
+                    })
+                    .await
+                    .unwrap(),
+                    Parked::StillSaturated
+                ));
+                assert_eq!(wait.reports, expected);
+            }
+            assert!(matches!(
+                wait.park(std::future::ready(7), &cancel, || GroupCounts {
+                    total: 4,
+                    idle: 1
+                })
+                .await
+                .unwrap(),
+                Parked::Ready(7)
+            ));
+            cancel.cancel();
+            assert!(matches!(
+                wait.park(std::future::pending::<()>(), &cancel, || GroupCounts {
+                    total: 0,
+                    idle: 0
+                })
+                .await,
+                Err(WorkerError::PoolShuttingDown)
+            ));
         })
         .await;
         assert_eq!(*observer.events.lock().unwrap(), vec!["waiting", "resumed"]);
-    }
-
-    /// The report interval ends one park, not the wait: the caller is told
-    /// to re-probe, and the wait goes on.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn an_elapsed_interval_reports_and_keeps_waiting() {
-        let (target, lang) = key();
-        let pool_cancel = CancellationToken::new();
-        let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<1>());
-        for expected_reports in 1..=3 {
-            let parked = wait
-                .park(std::future::pending::<()>(), &pool_cancel, || GroupCounts {
-                    total: 4,
-                    idle: 0,
-                })
-                .await
-                .expect("the pool is not shutting down");
-            assert!(matches!(parked, Parked::StillSaturated));
-            assert_eq!(wait.reports, expected_reports);
-        }
-        let parked = wait
-            .park(std::future::ready(7), &pool_cancel, || GroupCounts {
-                total: 4,
-                idle: 1,
-            })
-            .await
-            .expect("the event is ready");
-        assert!(matches!(parked, Parked::Ready(7)));
-    }
-
-    /// Pool shutdown is the one thing that ends a wait with an error.
-    #[tokio::test(flavor = "current_thread")]
-    async fn pool_shutdown_ends_the_wait_with_a_typed_error() {
-        let (target, lang) = key();
-        let pool_cancel = CancellationToken::new();
-        pool_cancel.cancel();
-        let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<60>());
-        let error = wait
-            .park(std::future::pending::<()>(), &pool_cancel, || GroupCounts {
-                total: 0,
-                idle: 0,
-            })
-            .await
-            .expect_err("a shutting-down pool ends the wait");
-        assert!(matches!(error, WorkerError::PoolShuttingDown));
-    }
-
-    fn mismatch(task: crate::worker::InferTask, unaccounted: usize) -> UnaccountedGroup {
-        UnaccountedGroup {
-            key: WorkerKey::without_engine_selection(
-                WorkerTarget::infer_task(task),
-                WorkerLanguage::from(crate::api::LanguageCode3::eng()),
-            ),
-            unaccounted,
-            total: unaccounted,
-            idle: 0,
-            away: 0,
-        }
-    }
-
-    /// Two transient mismatches in different groups, or in one group with
-    /// different counts, never confirm each other; the same group with the
-    /// same count at the next interval does.
-    #[test]
-    fn only_the_same_mismatch_twice_confirms_broken_accounting() {
-        use crate::worker::InferTask::{Morphosyntax, Utseg};
-        let (target, lang) = key();
-        let mut wait = SaturatedWait::begin(&target, &lang, PositiveSeconds::literal::<60>());
-        wait.reconcile(vec![mismatch(Morphosyntax, 1)])
-            .expect("first sighting is only reported");
-        wait.reconcile(vec![mismatch(Utseg, 1)])
-            .expect("another group's mismatch does not confirm it");
-        wait.reconcile(vec![mismatch(Utseg, 2)])
-            .expect("a different count in the same group does not confirm it");
-        wait.reconcile(Vec::new())
-            .expect("nothing found clears suspicion");
-        wait.reconcile(vec![mismatch(Utseg, 2)])
-            .expect("a cleared suspicion starts over");
-        let error = wait
-            .reconcile(vec![mismatch(Morphosyntax, 3), mismatch(Utseg, 2)])
-            .expect_err("the same group's same mismatch confirms");
-        assert!(
-            matches!(
-                error,
-                WorkerError::PoolAccountingBroken {
-                    target,
-                    unaccounted: 2,
-                    ..
-                } if target == WorkerTarget::infer_task(Utseg)
-            ),
-            "{error}"
-        );
     }
 }

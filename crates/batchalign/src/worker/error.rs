@@ -205,8 +205,8 @@ pub enum WorkerError {
     /// in one side's serialization.
     ///
     /// **Terminal for this request** -- the worker's stdio stream may be
-    /// desynchronized after a framing error. The pool should discard the
-    /// worker (via `CheckedOutWorker::take()`) rather than returning it.
+    /// desynchronized after a framing error. The pool retires the
+    /// worker through consuming checkout retirement.
     #[error("worker protocol error: {0}")]
     Protocol(String),
 
@@ -423,34 +423,6 @@ pub enum WorkerError {
     #[error("worker pool is shutting down")]
     PoolShuttingDown,
 
-    /// The pool's own accounting no longer describes its workers: a group's
-    /// live count exceeds what its idle queues and its checkout, spawn and
-    /// health-check guards hold, at two consecutive report intervals of a
-    /// saturated wait. A checkout waiting on such a count would wait forever,
-    /// so it ends with this instead. An internal defect, never congestion.
-    ///
-    /// **Terminal** (`System`, not retried): retrying would wait on the same
-    /// count.
-    #[error(
-        "worker pool accounting is broken for {} lang={lang}: {unaccounted} counted \
-         worker(s) are held by nothing (total={total}, idle={idle}, away={away})",
-        .target.label()
-    )]
-    PoolAccountingBroken {
-        /// The group whose count is broken.
-        target: crate::worker::WorkerTarget,
-        /// Its language.
-        lang: crate::api::WorkerLanguage,
-        /// Counted workers nothing holds.
-        unaccounted: usize,
-        /// The group's live count.
-        total: usize,
-        /// Idle workers in its queues.
-        idle: usize,
-        /// Workers its guards account for.
-        away: usize,
-    },
-
     /// The pool retired the shared worker a request was sent to while the
     /// pool keeps serving: its capability report was refused, or it is being
     /// replaced. The request was not refused; its worker went away under it.
@@ -515,8 +487,7 @@ impl WorkerError {
             | Self::UnroutedGpuRequest { .. }
             | Self::PlanMismatch(_)
             | Self::UndeclaredGpuTask(_)
-            | Self::PoolShuttingDown
-            | Self::PoolAccountingBroken { .. } => WorkerAfterFailure::Reusable,
+            | Self::PoolShuttingDown => WorkerAfterFailure::Reusable,
             Self::SpawnFailed(_)
             | Self::Stalled { .. }
             | Self::ReadyParseFailed(_)

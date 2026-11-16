@@ -13,6 +13,139 @@ measurements of another tool or an earlier candidate.
 
 ## Required development process
 
+Registry-adoption review (2026-11-17) carries one lifetime claim and the actual
+probed connection through discovery and pool integration. A repeat scan skips
+an already adopted daemon before another health exchange. The native discovery journey exercises concurrent and repeated scans and uses
+the retained connection for a request. A loopback control observes cancellation,
+readmission and retirement on a foreign reply. Discovery counts actual
+integrations. Candidate CLIARE
+measurement and combined release qualification remain pending. See the
+[adoption graph](../../architecture/runtime/batchalign-workers.md#lifetime-owned-registry-adoption).
+
+Response-budget ownership review (2026-11-17) carries fixed budgets and renewable
+loading windows in distinct private owners. Actual timed effects issue their own
+operation-bound expiration errors. Startup, sequential and shared control paths
+propagate that outcome. Existing wait durations, progress policy, Timeout/Stalled
+categories and legacy infer/batch-infer routes retain their supported behavior.
+The focused review uses compiler exclusions and native transport/timer contracts.
+Candidate CLIARE measurement and combined release qualification remain pending.
+See the [deadline graph](worker-protocol-v2.md#deadline-ownership).
+
+Queue and observation review (2026-11-17) removes independent idle-availability
+permits and repeated accounting reconciliation. Actual owner publication wakes
+registered waiters. Consuming exchange completion binds its real result to
+same-queue return. Unfinished cancellation retires the actual handle and original
+capacity. Invalid native PID targets are rejected before process/group effects.
+Pressure relief now follows twice the current host tier's admission floor.
+Registry metadata preparation retains its classified source and computed fields.
+Focused native and compiler qualification covers these boundaries. The existing
+legacy command and infer/batch-infer routes retain their supported contracts.
+Candidate CLIARE measurement and combined release qualification remain pending.
+See the [queue and observation graphs](../../architecture/runtime/batchalign-workers.md#safeguard-1--idle-eviction-and-an-observable-wait).
+
+Control and text graph review (2026-11-17) binds sequential completion to the
+actual operation and derives wait policy from that operation. A foreign reply
+retains incomplete-flight ownership. Text entry paths now refuse missing and
+extra result populations as worker-protocol failures before application.
+Source refusals and no-work bytes retain their original outcomes. Worker plans
+carry source-derived load and key facts through checkout. The existing CLI
+commands, legacy infer/batch-infer wire pathways and managed-server dispatch
+remain supported. This source review adds no new executable CLIARE measurement.
+See the [control and preparation graphs](../../architecture/runtime/batchalign-workers.md#operation-bound-control-exchanges)
+and [text admission graph](../architecture/type-driven-design.md#collected-text-and-admitted-response-populations).
+
+Owned-invocation review (2026-11-17) moves request/model facts through the
+actual transport's consuming load and submission path. Shared pending work
+retains memory, executor capacity and its cancellation registration after the
+caller leaves. An identical retry rejoins detached work before another grant.
+Sequential terminal admission binds the actual request ID and result task.
+Startup and native fixtures share affirmative transport admission. Focused
+qualification covers external bytes, leases, cancellation, timeout, rejoin and
+uncertain writes. Current-candidate CLIARE, combined release qualification and
+deployment remain pending. See the
+[invocation graph](../../architecture/runtime/batchalign-workers.md#admitted-startup-and-submitted-work).
+
+Lifetime worker-capacity review (2026-11-17) carries the original admitted slot
+through startup, publication, stdio/TCP checkout, health checking and retirement.
+The captured startup task owns its reservation until task cleanup or a
+capacity-owning StartedWorker result. Cancelled startup releases both counts. Health checks consume real idle
+availability, and own-group waiters observe released capacity immediately.
+Global reservations also carry their own refund notification. SpawnOutcome
+retains a closed admission-deferral cause, and each waiter observes its relevant
+event. Focused contracts qualify cancellation, failure, speculative refund,
+wakeup and raw transport outcomes. The retained legacy CLI pathways keep their compatibility contracts.
+Current-candidate CLIARE measurement and release qualification remain pending.
+See the [capacity graph](../../architecture/runtime/batchalign-workers.md#capacity-retained-through-the-worker-lifetime).
+
+Invocation-owned cancellation review (2026-11-17) retains each shared-worker
+request independently. A finishing request releases its own registration, and
+cancellation projects each still-active process once. Stdio and TCP checkout
+producers carry that registration, including fresh retry checkouts. Shared
+worker operations retain it through preparation and execution. The focused
+registration contract and real signal adapter qualify overlap, detach, later
+reuse and process exit. The book records hundred-test graph review as part of
+the development process. Current-candidate CLIARE and release qualification
+remain part of the final candidate review. See the
+[cancellation flow](../architecture/job-state-machine.md#invocation-owned-cancellation-targets).
+
+Producer-owned text preparation review (2026-11-16) covers progress,
+resource admission, output and file-error behavior. Morphotag and Utseg admit
+file reads under the existing adaptive worker grant. Translation publishes each
+source before reading the next, while coreference retains its cross-file batch.
+Command-specific preparation states retain actual options and constrain
+concurrent or batch dispatch. The producer carries the source, completed output
+layout and run sink through consuming read and publication transitions. A failed declared prior read now
+refuses that morphology file with its actual IO error. Gateway correspondence
+admission refuses missing, repeated and foreign responses before publication.
+Focused source-read, scheduler, output and restart contracts qualify these
+boundaries. CLI spellings, wire schemas and retained direct CLI pathways keep
+their existing compatibility contracts. Current-candidate CLIARE measurement
+remains part of final release qualification. See the
+[file preparation graph](../../architecture/runtime/dispatch.md#producer-owned-file-preparation).
+
+Text-worker capability review (2026-11-16) gives each command its own worker
+interface. Segmentation accepts a singular source with its admitted route.
+Focused contracts observe exact source scheduling, carried routes, coreference
+batch membership and output bytes through the normal dispatchers. Constructor
+contracts retain language/model policy and the CLI/request-field refusal
+diagnostic. The removed payload-independence check is enforced by the route
+constructor's language/policy signature. Candidate CLIARE measurement remains
+pending release qualification. See the
+[capability graph](../../architecture/runtime/dispatch.md#worker-capabilities).
+
+Compare's consuming-phase review (2026-11-16) removes optional stage payloads
+and dynamic stage ordering. Reference admission precedes morphology by
+construction. The output owner retains its original execution context through
+required writes and completion, and only that completion releases a consolidated
+metrics row. Focused contracts exercise external reference bytes, filesystem
+selection, both output modes and write failures through `dispatch_compare_job`.
+The compatibility review covers the CLI argument and output schemas.
+Current-candidate CLIARE measurement remains pending release qualification.
+
+Output-layout and target review (2026-11-16) carries each catalog-derived primary or named
+CHAT/CSV pair through its writers. Compare selects its pair before inference.
+Benchmark persistence consumes the output plan, and successful completion
+requires every staged and requested artifact write. The transport projection
+keeps primary-first ordering and derives roles from distinct artifact types.
+Source admission binds pending input observations and the selected layout to
+the filesystem. A mismatch is a planning failure before output publication.
+Audio plans retain naming through attempts, and consuming written receipts
+complete the carried input name. Leaf writers consume their prepared targets.
+Focused filename, CSV, write-failure, native-export and restart contracts
+qualify these boundaries. Existing command spellings and retained direct CLI
+pathways keep their compatibility contracts. Current-candidate CLIARE
+measurement remains part of release qualification. See the
+[output ownership graph](../architecture/server-architecture.md#source-bound-output-layouts).
+
+Preflight ownership review (2026-11-16) includes the file-error surface.
+Metadata failures retain their actual filesystem reason, so denied access is
+reported as `Cannot inspect media file` with that reason. Source-bound
+rejection recording writes setup-attempt and file-status fields
+through the run's admitted sink. Focused filesystem, SQLite and restart
+contracts qualify those effects. Current-candidate release and CLIARE
+measurement belong to the final release qualification recorded below.
+
+
 Job-control review includes admission before the first file: the consuming run
 scope now owns job-slot and host-memory waits as well as worker preparation.
 Cancellation during those waits closes unfinished files without waiting for
@@ -96,6 +229,29 @@ flowchart TD
     disposition -->|"resolved"| ready["Continue release qualification"]
     retain --> ready
 ```
+
+## Model-fixture ownership review, November 16, 2026
+
+The consuming fixture graph uses current lease, dispatch, file-outcome and
+failure operations. It removes arbitrary lifecycle setters, derives file state
+from retained inputs and prevents consumed preparation from running again.
+Restart fixture admission withholds start until the old claim is released.
+Current startup contracts retain their real SQLite boundary. This is an
+internal fixture change with no CLI grammar change. The documented retained
+CLI pathways continue to apply. Candidate-wide CLIARE measurement remains part
+of release qualification.
+
+## Typed planning-request review, November 16, 2026
+
+Dispatch planning consumes a selected option-family request. The request retains
+its workload and borrowed configuration, and executable plans carry completed
+engine, cache, speaker and host-policy decisions forward. Policy fixtures use
+that admission path without manufacturing a job or filesystem. Concrete
+extractor arguments prevent cross-command calls and remove repeated family
+checks. The CLI grammar and retained compatibility pathways use their existing
+contracts. Candidate-wide CLIARE measurement remains part of release
+qualification. Focused compiler, wire-policy and native-flow observations are
+recorded separately from release qualification.
 
 ## Actual-container admission review
 
@@ -203,7 +359,7 @@ remains follow-up unless an observed functional failure requires it.
 | Area | Source status | Qualification still required |
 | --- | --- | --- |
 | FA model preparation and memory waiting | Typed preparation and lease-owning execution are implemented; `preparing_alignment` distinguishes candidate work from final inference, alongside startup/download/wait progress. | Integrated managed execution and visible CLI progress for the final candidate. |
-| Cancellation and file completion | A linear `RunnerClaim` binds generation, snapshot and cancellation. Consuming `RunScope` supervises preparation, worker warmup and file dispatch; children inherit context without dispatch authority. Completion consumes the claim and admits generation, file cleanup and derived job status in one registry mutation. | Model-free HTTP failure/restart/cancel controls cover advancing capability loads and pre-scaling before any file starts. Whole-candidate CLI measurement and real-model qualification remain separate; no grammar or legacy route was removed. |
+| Cancellation and file completion | A linear `AdmittedRun` binds the actual store, generation, snapshot and cancellation. Consuming `RunScope` supervises preparation, worker warmup and file dispatch; children inherit context without dispatch authority. Completion consumes the claim and admits generation, file cleanup and derived job status in one registry mutation. | Model-free HTTP failure/restart/cancel controls cover advancing capability loads and pre-scaling before any file starts. Whole-candidate CLI measurement and real-model qualification remain separate; no grammar or legacy route was removed. |
 | Resource-constrained alignment | Adaptive source-bound partitioning is integrated in full and incremental FA; exact unavailable constraints are retained in evidence schema 11. Cache-first preparation, unique input owners and retained-input fallback prevent repeated work. | Deterministic cache and seven-case partial-output parity controls pass; final candidate command journeys and managed-model qualification remain pending. |
 | UTR search admission | Development source consumes literal preparation into one retained graph survey and its row plan; representation rejection returns that surveyed owner. Execution consumes its plan. The execution work counter can no longer refuse at 64 million operations; preparation/representation work, storage and candidate limits remain. CPU search clears preceding ASR-window counts to show indeterminate recovery. Shared host-memory admission is unfinished; no new CLI switch or compatibility removal is implemented. | Existing correspondence oracles include complete common-pair recovery beyond the former execution cutoff. Qualify prepared-demand admission, cancellable waiting, resource refusals, long-input recovery and visible progress on the final candidate; retain direct-library and legacy CLI routes. |
 | Supplied-window recovery under `--main-bullets keep` / `exact` | Actual missing slots after primary projection and kept-bullet imposition grant one consuming exact-window attempt. Complete output cannot trigger retry preparation or inference, including under gap healing. Accepted primary slots remain untouched. Normal cache identity/resource admission apply; optional `RequireCache` misses preserve partial output and never infer. Full/incremental share the exclusive session. Legacy spellings remain accepted. | Complete-output/no-retry, missing-slot recovery, neighbour, preparation-ownership and cache-only controls; final managed-model recovery and candidate measurement remain separate. |
@@ -331,6 +487,21 @@ constraints, tokenization and isolated projection still run. No command form,
 wire schema, cache identity or legacy pathway changes; this is not a new CLIARE
 measurement or managed-model memory qualification. See
 [loaded preparation facts](adaptive-fa-admission.md#loaded-facts-are-retained-request-facts-are-prepared).
+
+Runner admission now binds the granting store and raw registry claim together.
+Only the resulting `AdmittedRun` can derive execution contexts or consume
+completion, failure and release. A stopped admission can only complete.
+The shared event recorder replaces empty-store policy fixtures. This refines
+internal ownership and keeps the existing current-generation checks at mutable
+registry boundaries. Final-candidate CLI journeys and CLIARE measurement remain
+pending. See the [runner boundary](../architecture/server-architecture.md#runner-boundary).
+
+Input fixture construction now uses complete per-file records and real path-set
+admission. The unused copied I/O-mode field leaves the internal job plan.
+Native writer proofs, explicit clock advancement and the completed backend echo
+journey strengthen local qualification. The actual input-mode variants continue
+to determine file resolution and publication. Current-candidate CLI measurement
+remains pending. See [input fixture ownership](testing.md#complete-per-file-input-fixtures).
 
 Update this table as work lands; do not leave completed or changed behavior
 described as pending, or promote a source implementation to runtime-qualified

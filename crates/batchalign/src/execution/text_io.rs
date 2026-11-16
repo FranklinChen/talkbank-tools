@@ -1,208 +1,11 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+//! Text source admission, consuming preparation and publication.
 
-use crate::planning;
-use crate::recipe_runner::materialize::MaterializedArtifactRole;
-use crate::runner::DispatchHostContext;
-use crate::runner::util::{FileRunTracker, FileStage, set_file_progress};
-use crate::scheduling::FailureCategory;
-use crate::store::{PendingJobFile, RunnerJobSnapshot};
-use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
-
-pub(crate) struct LoadedTextInputs {
-    pub(crate) file_texts: Vec<TextBatchFileInput>,
-    pub(crate) before_texts: HashMap<String, String>,
-}
-
-pub(crate) async fn load_text_inputs(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    load_before_texts: bool,
-) -> LoadedTextInputs {
-    let mut loaded = LoadedTextInputs {
-        file_texts: Vec::with_capacity(job.pending_files.len()),
-        before_texts: HashMap::new(),
-    };
-
-    for file in &job.pending_files {
-        let lifecycle = FileRunTracker::new(host.sink().as_ref(), file.filename().as_ref());
-        lifecycle.stage(FileStage::Reading).await;
-
-        let read_path = resolve_input_path(job, file);
-        match tokio::fs::read_to_string(&read_path).await {
-            Ok(text) => {
-                if load_before_texts
-                    && let Some(before_path) = resolve_before_path(file)
-                    && let Ok(before_text) = tokio::fs::read_to_string(before_path).await
-                {
-                    loaded
-                        .before_texts
-                        .insert(file.filename().to_string(), before_text);
-                }
-                loaded
-                    .file_texts
-                    .push(TextBatchFileInput::new(file.filename().clone(), text));
-            }
-            Err(error) => {
-                lifecycle
-                    .fail(
-                        &format!("Failed to read input: {error}"),
-                        FailureCategory::InputMissing,
-                    )
-                    .await;
-            }
-        }
-    }
-
-    loaded
-}
-
-pub(crate) async fn write_text_results(
-    job: &RunnerJobSnapshot,
-    host: &DispatchHostContext,
-    plan: &planning::JobPlan,
-    results: TextBatchFileResults,
-    missing_artifact_label: &str,
-) {
-    let sink = host.sink().clone();
-    let total_results = results.len() as i64;
-    for (result_idx, file_result) in results.into_iter().enumerate() {
-        let lifecycle = FileRunTracker::new(sink.as_ref(), file_result.filename.as_ref());
-        // The result's own pending file. It used to fall back to file 0, so
-        // in paths mode an unmatched result would have been written to the
-        // first file's output path.
-        let Some(pending) = job
-            .pending_files
-            .iter()
-            .find(|file| *file.filename() == file_result.filename)
-        else {
-            lifecycle
-                .fail(
-                    &format!(
-                        "no pending file named {} for this result",
-                        file_result.filename
-                    ),
-                    crate::scheduling::FailureCategory::System,
-                )
-                .await;
-            continue;
-        };
-        // What the command decided about stamping this file, recorded on the
-        // file's own status so the job detail can report it.
-        let stamp = file_result.stamp;
-        match file_result.result {
-            Ok(output_chat) => {
-                // Located against the document written below; done once
-                // here rather than per artifact, because the answer cannot
-                // differ between a file's artifacts.
-                let crate::morphosyntax::report::FinishedMorphosyntax {
-                    document: finished,
-                    shortfalls,
-                    exclusions,
-                } = match output_chat.finish() {
-                    Ok(finished) => finished,
-                    // A record that cannot name its utterance is an internal
-                    // fault: the file fails rather than reporting a position
-                    // nobody can find, classified as every such fault is.
-                    Err(error) => {
-                        let error = crate::error::ServerError::from(error);
-                        lifecycle
-                            .fail(
-                                &error.to_string(),
-                                crate::runner::util::classify_server_error(&error),
-                            )
-                            .await;
-                        continue;
-                    }
-                };
-                let finished = crate::pipeline::post_validate::ProducedOutput::Admitted(finished);
-                set_file_progress(
-                    sink.as_ref(),
-                    file_result.filename.as_ref(),
-                    FileStage::Writing,
-                    Some(result_idx as i64 + 1),
-                    Some(total_results),
-                )
-                .await;
-                let Some(artifacts) =
-                    planning::artifact_set_for_source(plan, &file_result.filename)
-                else {
-                    lifecycle
-                        .fail(
-                            &format!(
-                                "{missing_artifact_label} job plan missing artifacts for {}",
-                                file_result.filename
-                            ),
-                            FailureCategory::Validation,
-                        )
-                        .await;
-                    continue;
-                };
-                for artifact in &artifacts.files {
-                    if artifact.role != MaterializedArtifactRole::Primary {
-                        continue;
-                    }
-                    let target = crate::recipe_runner::runtime::ChatOutputTarget::new(
-                        &job.filesystem,
-                        pending.location(),
-                        &artifact.display_path,
-                    );
-                    if let Err(error) = crate::recipe_runner::runtime::write_chat_output_artifact_with_provenance_gate(
-                        &target,
-                        &finished,
-                    )
-                    .await
-                    {
-                        lifecycle
-                            .fail(&error.to_string(), FailureCategory::System)
-                            .await;
-                        continue;
-                    }
-                    use crate::pipeline::post_validate::OutputReport;
-                    let diagnostics = match OutputReport::of(&finished, &shortfalls) {
-                        OutputReport::Clean => None,
-                        OutputReport::Diagnosed(draft) => {
-                            let sidecar = job
-                                .filesystem
-                                .staging_dir
-                                .as_path()
-                                .join("diagnostics")
-                                .join(format!("{}.findings.json", artifact.display_path));
-                            Some(draft.record(&sidecar).await)
-                        }
-                    };
-                    lifecycle
-                        .complete_reported(
-                            crate::store::CompletedFileOutput {
-                                filename: artifact.display_path.clone(),
-                                content_type: artifact.content_type,
-                                stamp: stamp.clone(),
-                                exclusions: exclusions.clone(),
-                            },
-                            diagnostics,
-                        )
-                        .await;
-                }
-            }
-            Err(error) => {
-                // The error states its own category. It used to be hardcoded
-                // `ProviderTerminal`, which reported a file refused on
-                // validity grounds as if a provider had given up on it.
-                lifecycle.fail(&error.to_string(), error.category()).await;
-            }
-        }
-    }
-}
-
-pub(crate) fn resolve_input_path(job: &RunnerJobSnapshot, file: &PendingJobFile) -> PathBuf {
-    file.input_path(&job.filesystem.staging_dir)
-        .as_path()
-        .to_owned()
-}
-
-pub(crate) fn resolve_before_path(file: &PendingJobFile) -> Option<PathBuf> {
-    file.before_path().map(|path| path.as_path().to_owned())
-}
+#[cfg(test)]
+mod boundary_tests;
+mod preparation;
+pub(crate) use preparation::{
+    CoreferenceText, PreparedTextFile, PreparedTextJob, SegmentationText, TranslationText,
+};
 
 #[cfg(test)]
 mod reporting_tests {
@@ -210,30 +13,48 @@ mod reporting_tests {
     use crate::api::{FileStatusKind, LanguageSpec, SecondaryMorphologyFailureKind};
     use crate::morphosyntax::report::{MorphosyntaxOutput, SecondaryReport};
     use crate::pipeline::post_validate::PostValidated;
+    use crate::runner::DispatchHostContext;
     use crate::text_batch::TextBatchFileResult;
     use std::sync::Arc;
 
+    enum SecondaryCase {
+        Unavailable,
+        Excluded,
+        ProvenanceIncomplete,
+    }
+
     /// Real planned writeback and store projection, not just serialization of
     /// a report. Fixtures represent producer outcomes; no model is simulated.
+    /// Guards: Secondary unavailability, exclusions and provenance shortfalls survive writeback with the correct terminal file projection.
+    /// Kind: contract
+    /// Not a type: Closed producer cases exclude invalid combinations but cannot prove written CHAT bytes or real store diagnostics.
+    /// State: Temporary CHAT output and an admitted registry run exercise actual writeback and store projection. SQLite and models contribute no effect.
+    /// Concurrency: Each case owns its directory, registry actor and broadcast channel. Its consumed claim completes after all writes finish.
     #[tokio::test]
     async fn secondary_reports_survive_text_writeback_and_file_status() {
         const CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello mundo@s:spa .\n%mor:\tintj|hello L2|xxx .\n%gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n@End\n";
-        for (unavailable, provenance) in [(true, false), (false, false), (false, true)] {
+        for case in [
+            SecondaryCase::Unavailable,
+            SecondaryCase::Excluded,
+            SecondaryCase::ProvenanceIncomplete,
+        ] {
             let temp = tempfile::tempdir().unwrap();
-            let mut job = crate::store::test_support::running_job_fixture();
+            let mut job = crate::store::test_support::queued_morphotag_job_fixture(
+                crate::store::ContentInput {
+                    display: "job-file.cha".into(),
+                    kind: crate::store::InputKind::Chat,
+                },
+            );
             job.dispatch.lang = LanguageSpec::PerFile;
             job.filesystem.staging_dir =
                 batchalign_types::paths::ServerPath::new(temp.path().to_str().unwrap());
-            let snapshot = job
-                .to_runner_snapshot()
-                .expect("a submitted job's inputs are admitted");
+            let job_id = job.identity.job_id.clone();
             tokio::fs::create_dir_all(temp.path().join("input"))
                 .await
                 .unwrap();
             tokio::fs::write(temp.path().join("input/job-file.cha"), CHAT)
                 .await
                 .unwrap();
-            let plan = planning::build_job_plan(&snapshot).unwrap();
             let (tx, _rx) = tokio::sync::broadcast::channel(crate::ws::BROADCAST_CAPACITY);
             let store = Arc::new(crate::store::JobStore::for_tests(
                 crate::config::ServerConfig::default(),
@@ -242,21 +63,21 @@ mod reporting_tests {
                 Arc::new(crate::clock::SystemClock),
             ));
             store.submit(job).await.unwrap();
-            let host = DispatchHostContext::from_store(store.clone(), &snapshot.identity.job_id);
+            let claim = crate::store::test_support::claim_runner(&store, &job_id).await;
+            let snapshot = claim.snapshot();
+            let host = DispatchHostContext::for_run(&claim);
             let address = crate::morphosyntax::report::SpanAddress::for_test(0, 2, 1, "spa");
-            let report = if unavailable {
-                SecondaryReport::for_test(
+            let report = match case {
+                SecondaryCase::Unavailable => SecondaryReport::for_test(
                     vec![(
                         address,
                         SecondaryMorphologyFailureKind::Worker,
                         "model unavailable",
                     )],
                     Vec::new(),
-                )
-            } else if provenance {
-                SecondaryReport::default()
-            } else {
-                SecondaryReport::for_test(Vec::new(), vec![address])
+                ),
+                SecondaryCase::Excluded => SecondaryReport::for_test(Vec::new(), vec![address]),
+                SecondaryCase::ProvenanceIncomplete => SecondaryReport::default(),
             };
             let proof = PostValidated::for_test(CHAT, crate::api::ReleasedCommand::Morphotag);
             let expected = proof.as_str().to_owned();
@@ -267,20 +88,22 @@ mod reporting_tests {
                     secondary: report,
                 },
             );
-            if provenance {
+            if matches!(case, SecondaryCase::ProvenanceIncomplete) {
                 output = output.with_provenance(
                     crate::provenance::MorphologyProvenanceReport::Incomplete(
                         crate::provenance::IncrementalMorphotagStampError::PriorIncomplete,
                     ),
                 );
             }
-            write_text_results(
-                &snapshot,
-                &host,
-                &plan,
-                vec![TextBatchFileResult::ok("job-file.cha", output)],
-                "morphotag",
+            PreparedTextJob::<crate::execution::MorphotagRuntimeOptions>::for_test(
+                (**snapshot).clone(),
+                host,
+                crate::api::NumWorkers(1),
             )
+            .next_file()
+            .await
+            .expect("read prepared source")
+            .complete(vec![TextBatchFileResult::ok("job-file.cha", output)])
             .await;
             assert_eq!(
                 tokio::fs::read_to_string(temp.path().join("output/job-file.cha"))
@@ -292,27 +115,33 @@ mod reporting_tests {
             let entry = &info.file_statuses[0];
             assert!(entry.error.is_none());
             assert_eq!(info.completed_files, 1);
-            if unavailable || provenance {
-                assert_eq!(entry.status, FileStatusKind::Diagnosed);
-                assert!(
-                    entry
-                        .diagnostics
-                        .as_ref()
-                        .unwrap()
-                        .lines()
-                        .iter()
-                        .any(|line| line.contains(if provenance {
-                            "morphology provenance incomplete"
-                        } else {
-                            "secondary morphology incomplete"
-                        }))
-                );
-                assert!(entry.exclusions.is_empty());
-            } else {
-                assert_eq!(entry.status, FileStatusKind::Done);
-                assert!(entry.diagnostics.is_none());
-                assert_eq!(entry.exclusions.len(), 1);
+            match case {
+                SecondaryCase::Unavailable | SecondaryCase::ProvenanceIncomplete => {
+                    assert_eq!(entry.status, FileStatusKind::Diagnosed);
+                    assert!(
+                        entry
+                            .diagnostics
+                            .as_ref()
+                            .unwrap()
+                            .lines()
+                            .iter()
+                            .any(|line| line.contains(
+                                if matches!(case, SecondaryCase::ProvenanceIncomplete) {
+                                    "morphology provenance incomplete"
+                                } else {
+                                    "secondary morphology incomplete"
+                                }
+                            ))
+                    );
+                    assert!(entry.exclusions.is_empty());
+                }
+                SecondaryCase::Excluded => {
+                    assert_eq!(entry.status, FileStatusKind::Done);
+                    assert!(entry.diagnostics.is_none());
+                    assert_eq!(entry.exclusions.len(), 1);
+                }
             }
+            claim.complete().await.expect("complete admitted run");
         }
     }
 }
