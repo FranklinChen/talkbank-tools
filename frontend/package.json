@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "generate:schema": "cd .. && cargo run -q -p batchalign -- openapi --output frontend/openapi.json",
-    "generate:types": "npm run generate:schema && openapi-typesafe openapi.json -o src/generated/api.ts && npm run generate:decoders",
+    "generate:types": "bash ../scripts/generate_dashboard_api_types.sh",
     "check:api": "bash ../scripts/check_dashboard_api_drift.sh",
     "build": "npm run typecheck && vite build",
     "build:deploy": "bash ../scripts/build_react_dashboard.sh",

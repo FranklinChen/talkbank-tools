@@ -185,8 +185,8 @@ batchalign-test-python-dev: batchalign-develop
 	$(MAKE) _batchalign-test-python
 
 batchalign-dev-workflow-test:
-	uv run --no-sync python -m pytest tests/test_python_dev_workflow.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_wheel_build_profile.py -n 0 --maxfail=0
-	uv run --no-sync mypy --strict --explicit-package-bases scripts/check_extension_freshness.py scripts/extension_build_evidence.py scripts/build_python_extension.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_python_dev_workflow.py tests/test_wheel_build_profile.py
+	uv run --no-sync python -m pytest tests/test_python_dev_workflow.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_wheel_build_profile.py tests/test_frontend_workflow.py -n 0 --maxfail=0
+	uv run --no-sync mypy --strict --explicit-package-bases scripts/check_extension_freshness.py scripts/extension_build_evidence.py scripts/build_python_extension.py scripts/frontend_workflow.py tests/test_extension_freshness.py tests/test_extension_build_evidence.py tests/test_build_python_extension.py tests/test_python_dev_workflow.py tests/test_wheel_build_profile.py tests/test_frontend_workflow.py
 
 BATCHALIGN_BUILD_PROFILE ?= release
 
@@ -359,7 +359,7 @@ batchalign-dashboard-schema-check:
 
 batchalign-dashboard-build:
 	@echo "==> Building imported dashboard frontend..."
-	cd frontend && npm ci && npm test && npm run build
+	python3 scripts/frontend_workflow.py check
 
 batchalign-dashboard-e2e:
 	@echo "==> Running dashboard e2e tests (mock server)..."

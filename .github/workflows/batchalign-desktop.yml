@@ -35,20 +35,17 @@ jobs:
             frontend/package-lock.json
             apps/dashboard-desktop/package-lock.json
 
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install frontend deps
-        working-directory: frontend
-        run: npm ci
-
       - name: Install desktop deps
         working-directory: apps/dashboard-desktop
         run: npm ci
-
-      - name: Verify dashboard API drift gate
-        run: bash scripts/check_dashboard_api_drift.sh
 
       - name: Prepare macOS signing certificate (optional)
         if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'

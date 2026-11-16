@@ -7,7 +7,7 @@
   "build": {
     "beforeDevCommand": "npm --prefix ../../frontend run dev -- --host 127.0.0.1 --port 1420",
     "devUrl": "http://127.0.0.1:1420/process",
-    "beforeBuildCommand": "bash ../../scripts/generate_dashboard_api_types.sh && npm --prefix ../../frontend run build",
+    "beforeBuildCommand": "python3 ../../scripts/frontend_workflow.py verify-build",
     "frontendDist": "../../../frontend/dist"
   },
   "app": {

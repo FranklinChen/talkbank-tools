@@ -10,22 +10,13 @@ if [[ -z "$TARGET_DIR" || "$TARGET_DIR" == "/" ]]; then
   exit 2
 fi
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "error: npm not found. Install Node.js + npm first." >&2
-  exit 127
-fi
-
-if [[ "${BATCHALIGN_SKIP_API_SYNC:-0}" != "1" ]]; then
-  "$ROOT/scripts/generate_dashboard_api_types.sh"
+if [[ "${BATCHALIGN_SKIP_API_SYNC:-0}" == "1" ]]; then
+  python3 "$ROOT/scripts/frontend_workflow.py" build-existing
+else
+  python3 "$ROOT/scripts/frontend_workflow.py" build
 fi
 
 cd "$FRONTEND_DIR"
-if [[ ! -d node_modules ]]; then
-  npm ci
-fi
-
-npm run build
-
 mkdir -p "$TARGET_DIR"
 # ${TARGET_DIR:?} aborts if the variable is somehow empty, so the glob can
 # never expand to /* (TARGET_DIR is already validated non-empty above).

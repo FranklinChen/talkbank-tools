@@ -13,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
@@ -212,14 +215,14 @@ jobs:
     # second server binary here made this source-drift check take five minutes.
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend deps
-        working-directory: frontend
-        run: npm ci
       - uses: ./.github/actions/cli-binary
         with:
           path: target/debug
@@ -348,6 +351,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
       - uses: actions/setup-node@v7
         with:
           node-version: "26"

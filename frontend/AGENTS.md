@@ -1,7 +1,7 @@
 # batchalign3 Frontend: Dashboard + Desktop Processing UI
 
 **Status:** Current
-**Last updated:** 2026-11-15 21:03 EST
+**Last updated:** 2026-11-16 07:02 EST
 
 ## Overview
 
@@ -48,6 +48,15 @@ npm run e2e:setup        # Full e2e environment setup (install + browsers)
 npm run test:e2e         # Run e2e tests against mock server (no Batchalign binary needed)
 npm run test:e2e:headed  # Run e2e tests in headed mode (visible browser)
 ```
+
+## Build preparation
+
+Canonical shell, Make and Tauri build entry points delegate to
+`scripts/frontend_workflow.py`. Its final, frozen `Frontend[Stage]` retains
+locked installation, generated API artifacts, source comparison and completed
+bundles. Strict mypy checks these transitions in the development-workflow gate.
+Keep preparation in that owner and preserve the explicit checked-in-artifact
+route that bootstraps the CLI's embedded bundle.
 
 ## E2E Testing
 

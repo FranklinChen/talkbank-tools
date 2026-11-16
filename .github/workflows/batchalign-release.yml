@@ -164,7 +164,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Build dashboard frontend
         shell: bash
-        run: cd frontend && npm ci && npm run build
+        run: make batchalign-dashboard-build
 
       # The bundled batchalign3 CLI binary pulls in prost / tonic, which need
       # protoc at build time. The wheel itself (batchalign-pyo3) does not, so

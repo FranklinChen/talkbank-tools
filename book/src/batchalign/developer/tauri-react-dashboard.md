@@ -112,6 +112,64 @@ flowchart LR
     update --> cache["Query and Zustand reconciliation"]
 ```
 
+## Dependency and artifact preparation
+
+`scripts/frontend_workflow.py` owns locked dependency admission, API generation,
+source comparison, bundling and browser preparation. Shell, Make and Tauri build
+entry points delegate to this owner. Bootstrap uses Python 3.12 or newer and
+Node 26. Node-only CI jobs explicitly select their Python interpreter.
+
+`WorkspaceLease.acquire` holds the checkout's build lock through the complete
+invocation, serializing dependency and generated-asset writers. The admitted
+lease is carried through each project's dependency state. `InstalledNpm.prepare`
+runs `npm ci` and checks both manifests against their
+captured identities. Its private constructor binds the resolved npm executable,
+directory and manifests to that successful installation. Frontend and E2E
+projects each receive an admitted dependency state.
+
+The frozen, final `Frontend[Stage]` restricts operations through explicit self
+types. Strict mypy checks the graph in the development-workflow gate. Fresh
+generation retains the Rust schema and emitted TypeScript paths. Source
+comparison retains its completed result in `Frontend[Verified]`. Building
+admits `dist/index.html` and produces `Frontend[Built]`, which exposes smoke
+execution. Public constructors require an uninhabited argument.
+
+```mermaid
+flowchart TD
+    source["Frontend package and lockfile"] --> lease["WorkspaceLease<br/>exclusive checkout ownership"]
+    lease --> install["InstalledNpm.prepare<br/>npm ci and stable manifests"]
+    install --> ready["Frontend[InstalledNpm]"]
+    ready -->|"generate using Rust schema"| generated["Frontend[Generated]"]
+    generated -->|"compare with source index"| verified["Frontend[Verified]"]
+    ready -->|"admit checked-in artifacts"| existing["Frontend[ApiArtifacts]"]
+    generated -->|"build"| built["Frontend[Built]<br/>dependencies and bundle retained"]
+    verified -->|"build"| built
+    existing -->|"build"| built
+    built --> e2e["Install E2E project from its own lockfile"]
+    e2e --> browser["Prepare selected browser and run Playwright"]
+```
+
+The CLI embeds the frontend bundle, while API generation consumes a Rust
+exporter. Artifact-only builds admit checked-in API artifacts before building
+the CLI. Standalone generation uses `BATCHALIGN_BIN`, or the headless exporter
+with `binary-entry,server` and default features disabled. API drift qualification
+compares the Rust schema, API types and Effect decoders. Tauri performs fresh
+generation, comparison and bundling in one prepared invocation.
+
+`BATCHALIGN_SKIP_API_SYNC=1` remains supported by the publication script through
+existing-artifact admission. The ordinary bundle target also uses checked-in
+artifacts, with Vitest and TypeScript checks. Schema-only checking remains
+independently available.
+
+Cold-checkout qualification reproduced the missing-generator failure and then
+passed all 86 mock browser contracts through the repaired entry point. Strict
+mypy rejects unleased or forged preparation, building before API admission, verification
+before generation and smoke execution before building. A focused POSIX adapter contract observes kernel exclusion and descriptor-close
+release. Windows lock behavior retains separate runtime qualification. The
+release gate runs the same owner, whose unconditional `npm ci` establishes a fresh installation
+for each project. Registry access, tool output, filesystem changes and browser
+behavior retain external qualification.
+
 ## Scoped connections and observation ownership
 
 `ConnectionPlan.prepare` admits server addresses and deduplicates their
@@ -208,7 +266,7 @@ proxies `/jobs`, `/health`, and `/ws` to `localhost:8000`.
 
 ```bash
 cd frontend
-npm ci          # first time only
+npm ci          # Install the locked development dependencies
 npm run dev
 ```
 
@@ -590,68 +648,27 @@ BATCHALIGN_REAL_SERVER_E2E=1 scripts/run_react_dashboard_smoke.sh
 
 ## E2E Testing Entry Points
 
-The dashboard has a unified e2e testing strategy across local development and CI. All paths
-route through the same Playwright test files under `frontend/e2e/tests/`.
+Run the Make commands from the repository root.
 
-### Test Modes
+| Command | Qualification |
+| --- | --- |
+| `make batchalign-dashboard-e2e` | Locked installation, API generation, bundle and mock browser journeys |
+| `make batchalign-dashboard-e2e-real` | The same preparation and mock journeys, plus managed server journeys |
+| `make batchalign-dashboard-build` | Checked-in API artifact admission, Vitest, TypeScript and bundle |
+| `make batchalign-dashboard-api-check` | Fresh generation and source comparison |
 
-| Mode | Entry Point | Use Case | Requirements |
-|------|---|---|---|
-| **Mock server** | `npm run test:e2e` (default) | Fast local iteration, no deps | None (mock server built-in) |
-| **Real server** | `make batchalign-dashboard-e2e-real` | Full integration, real Batchalign binary | Rust binary, Python installation |
-| **CI canonical** | `dashboard-e2e` job in `batchalign-python.yml` | Pre-merge gate | Same as real-server |
-| **Desktop app** | `npm run test:e2e` from `apps/dashboard-desktop/` | Tauri webview integration | Tauri + all deps |
+Select a prepared CLI with `BATCHALIGN_BIN=/path/to/batchalign3`. Generation
+otherwise builds the headless exporter. Real-server CI consumes its workflow's
+CLI and wheel and supplies `BATCHALIGN_PYTHON`. The experimental desktop workflow
+builds bundles through Tauri's shared frontend preparation hook.
 
-### Local Development
+`BATCHALIGN_PLAYWRIGHT_WITH_DEPS=1` installs Chromium's system dependencies.
+`BATCHALIGN_SKIP_BROWSER_INSTALL=1` selects an already installed browser.
+The publication script alone retains `BATCHALIGN_SKIP_API_SYNC=1`.
 
-**Quick smoke test (no build, no binary required):**
-```bash
-cd frontend
-npm ci && npm run test:e2e
-```
-
-**Full integration with real Batchalign (optional, slow):**
-```bash
-make batchalign-dashboard-e2e-real
-```
-
-**Headed mode (watch tests in browser):**
-```bash
-cd frontend
-npm run test:e2e:headed
-```
-
-### CI Workflow
-
-The `dashboard-e2e` job in `.github/workflows/batchalign-python.yml`:
-1. Builds the wheel from the Batchalign Rust/Python stack
-2. Sets `BATCHALIGN_REAL_SERVER_E2E=1` and `BATCHALIGN_PLAYWRIGHT_WITH_DEPS=1`
-3. Runs `bash scripts/run_react_dashboard_smoke.sh` which orchestrates:
-   - API type generation
-   - Frontend build
-   - E2E environment setup (Playwright browsers + dependencies)
-   - Playwright tests against a real `batchalign3` server instance
-
-This job only runs on main and manual workflow_dispatch (not on all PRs due to performance).
-
-### Orchestration Scripts
-
-**`scripts/run_react_dashboard_smoke.sh`**: canonical orchestration script:
-- Generates dashboard API types from Rust OpenAPI spec
-- Builds frontend bundle
-- Sets up Playwright environment
-- Runs tests in mock or real server mode (via `BATCHALIGN_REAL_SERVER_E2E` env var)
-- Used by both local developers and CI
-
-**`scripts/build_react_dashboard.sh`**: deployment script:
-- Generates API types
-- Builds frontend
-- Copies built artifacts to target directory (default: `~/.batchalign3/dashboard`)
-
-**`scripts/check_dashboard_api_drift.sh`**: validation gate:
-- Ensures `openapi.json` and `frontend/src/generated/api.ts` are in sync
-- Fails if generated artifacts are stale
-- Part of both Makefile and CI gates
+For headed iteration after preparation, use
+`npm --prefix frontend/e2e run test:headed`. `frontend/E2E_ENTRY_POINTS.md`
+lists the supported adapters.
 
 ## Data Flow
 

@@ -1224,3 +1224,13 @@ fixed-rate conversion entry points were removed after caller review. This
 review covers the leaf core and its PyO3 consumer. Model/acoustic qualification
 continues through the managed-server journeys above. See the
 [source-bound alignment flow](../architecture/asr-token-pipeline.md#segmentation-admission-travels-with-the-asr-plan).
+
+
+### Frontend preparation contracts
+
+Strict mypy in the development workflow constrains frontend generation to
+installed dependencies and smoke execution to completed bundles. Canonical
+commands perform locked installation through that owner, including on populated
+developer checkouts. Cold qualification exercises the shell entry point and
+external npm, generator and browser behavior. Retain those observations
+separately from compiler rejection of illegal phase operations.
