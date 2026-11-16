@@ -787,7 +787,10 @@ async fn start_session(
     let layout = RuntimeLayout::from_state_dir(runtime_root.path().to_path_buf());
     let cache_dir = runtime_root.path().join("cache");
     let (router, state) = create_app_with_prepared_workers(
-        backend.session_config.clone(),
+        ServerConfig {
+            paths_mode_roots: vec![runtime_root.path().to_path_buf()],
+            ..backend.session_config.clone()
+        },
         layout,
         AppStorageOverrides {
             jobs_dir: None,

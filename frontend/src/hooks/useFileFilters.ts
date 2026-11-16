@@ -40,7 +40,7 @@ const STATUS_ORDER: Record<string, number> = {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useFileFilters(files: FileStatusEntry[]) {
+export function useFileFilters(files: readonly FileStatusEntry[]) {
   const [activeTab, setActiveTab] = useState<FilterTab>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);

@@ -1,5 +1,6 @@
 # Dashboard E2E Test Entry Points
 
+**Last updated:** 2026-11-15 21:10 EST
 **Status:** Current
 **Last updated:** 2026-09-22 17:57 EDT
 
@@ -126,7 +127,8 @@ BATCHALIGN_SKIP_API_SYNC=1 bash scripts/run_react_dashboard_smoke.sh
 **Flow:**
 1. Runs `cargo run -p batchalign -- openapi` to get latest schema
 2. Converts to `frontend/openapi.json`
-3. Uses `openapi-typescript` to generate `frontend/src/generated/api.ts`
+3. Uses `openapi-typesafe` to generate `frontend/src/generated/api.ts`
+4. Compiles the same schema into `frontend/src/generated/decoders.ts` with the checked Effect generator
 
 **Used by:**
 - `run_react_dashboard_smoke.sh`
@@ -307,3 +309,11 @@ Need to validate API sync?
 - **Contributing guide:** `CONTRIBUTING.md` (section on dashboard changes)
 - **Batchalign-specific e2e tests:** `batchalign/tests/cli/test_cli_e2e.py`
 - **Worker LazyProfile e2e:** `scripts/test_lazy_profile_e2e.sh`
+
+## Focused TypeScript and Effect contracts
+
+`cd frontend && npm test` runs Vitest contracts for admitted wire bytes, polling
+policy and scoped socket effects. `npm run typecheck` checks the application,
+contract fixtures and build/generation configuration. The shared dashboard
+build target runs both paths before bundling. Browser journeys retain their
+Playwright entry points above.

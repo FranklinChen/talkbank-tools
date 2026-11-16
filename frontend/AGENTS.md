@@ -1,7 +1,7 @@
 # batchalign3 Frontend: Dashboard + Desktop Processing UI
 
 **Status:** Current
-**Last updated:** 2026-07-25 22:45 EDT
+**Last updated:** 2026-11-15 21:03 EST
 
 ## Overview
 
@@ -30,15 +30,18 @@ In web mode (browser), `/` shows the dashboard.
 | Data Fetching | TanStack React Query |
 | Styling | Tailwind CSS |
 | Build | Vite |
-| API Types | openapi-typescript (auto-generated from Rust server) |
-| Desktop APIs | @tauri-apps/api, @tauri-apps/plugin-dialog, @tauri-apps/plugin-shell |
+| API Types | openapi-typesafe and generated Effect decoders from the Rust server |
+| Effects | Effect scopes for connection ownership and admitted wire observations |
+| Contracts | Vitest and @effect/vitest |
+| Desktop APIs | @tauri-apps/api, @tauri-apps/plugin-dialog |
 
 ## Key Commands
 
 ```bash
 npm run dev              # Dev server (proxies to localhost:8000)
-npm run build            # TypeScript check + Vite build
-npm run generate:schema  # Regenerate OpenAPI types from Rust server
+npm run build            # Application/tooling TypeScript checks + Vite build
+npm test                 # Retained wire, policy and scoped-effect contracts
+npm run generate:types   # Regenerate schema, API types and Effect decoders
 npm run check:api        # Validate API drift
 npm run e2e:install      # Install Playwright deps for frontend/e2e
 npm run e2e:setup        # Full e2e environment setup (install + browsers)
@@ -67,7 +70,7 @@ the code itself:
 See `src/` directly (a hand-maintained tree here rotted; the 2026-07
 audit found it already drifting). Components live under
 `src/components/`, state under `src/state/`, API bindings generated
-into `src/api/`.
+into `src/generated/`.
 
 ## Data Flow
 
@@ -91,8 +94,10 @@ Canonical walkthroughs: `book/src/batchalign/developer/tauri-react-dashboard.md`
 - **Server-qualified keys**: `${server}|${job_id}` keeps retained aggregation
   paths collision-safe even though the released surface is single-server-first
 - **WebSocket resilience**: Independent connections, exponential backoff reconnect
-- **OpenAPI sync**: `npm run generate:schema` keeps TypeScript types in sync with Rust
-- **React Compiler**: Babel plugin for automatic memoization
+- **OpenAPI sync**: `npm run generate:types` keeps TypeScript types in sync with Rust
+- **React Compiler**: `reactCompilerPreset()` through `@rolldown/plugin-babel`
+- **Connection ownership**: fleet discovery and live sockets share one Effect fiber; only scoped acquired readers permit live operations
+- **Wire admission**: private `DashboardUpdate` construction carries decoded payloads and their producing server; progress retains its completed file index
 - **Desktop runtime seam**: Components/hooks consume the smallest possible
   capability hook (`useDesktopEnvironment`, `useDesktopFiles`,
   `useDesktopConfig`, `useDesktopServer`). Keep raw `@tauri-apps/*` imports and

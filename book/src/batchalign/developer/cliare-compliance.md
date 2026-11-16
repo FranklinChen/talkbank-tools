@@ -97,6 +97,21 @@ flowchart TD
     retain --> ready
 ```
 
+## Actual-container admission review
+
+Media preparation now inspects ffprobe's container result before selecting
+passthrough or conversion. A QuickTime recording named `.mp3` enters the
+content-addressed PCM cache before native decoding. The private consuming
+preparation states replace extension-based permission. Unreadable or unknown
+media fails during preparation with the probe diagnostic. CLI spellings and
+the retained direct pathways use the same helper.
+
+A synthetic QuickTime/MP3 contract failed under the previous implementation
+and passes under container admission, covering misleading suffixes, native
+MPEG passthrough, shared cache identity and source preservation. Real managed
+command qualification and decoder results are recorded separately with the
+candidate evidence. CLIARE measurement remains separate release evidence.
+
 ## Stanza 1.15.1 review
 
 The dependency update affects model-derived morphotag content and provenance.
@@ -113,6 +128,17 @@ package-version change can retain earlier Stanza model weights because the
 resource namespace remains 1.15.0, so release evidence must name the actual
 catalog and model files used. This is a dependency and real-model review.
 A new CLIARE measurement has not been performed for this candidate.
+
+## Timestamp dependency review, November 15, 2026
+
+Jiff 1.0 uses `ZonedDateTime` and `to_zoned_datetime` at the existing typed
+time boundaries. `MachineTime` continues to admit offset-bearing instants and
+carry normalized millisecond UTC values through storage and JSON. Local
+cancellation displays and provenance formatting consume those typed instants
+and zones. Qualification includes the timestamp, SQLite, provenance and
+local-day audit contracts, plus an optimized CLI build. The dependency review
+uses the existing CLI grammar and retained compatibility pathways. Current
+CLIARE measurement remains a separate release observation.
 
 ## Retained legacy pathways
 

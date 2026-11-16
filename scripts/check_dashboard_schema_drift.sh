@@ -4,7 +4,7 @@
 # regenerates it and the committed copy goes stale.
 #
 # Why this exists as its own script. The whole check
-# (`check_dashboard_api_drift.sh`) also runs `npx openapi-typescript`, which
+# (`check_dashboard_api_drift.sh`) also runs `npx openapi-typesafe`, which
 # needs the npm-installed frontend, and it was EXEMPT from the pre-push gate
 # for that reason. True of the TypeScript half, irrelevant to this half: the
 # schema reuses a development binary whose freshness Cargo has proved.

@@ -116,7 +116,7 @@ impl MachineTime {
     /// `2026-09-28 12:00:00 EDT`.
     pub fn local_display(self) -> String {
         self.0
-            .to_zoned(TimeZone::system())
+            .to_zoned_datetime(TimeZone::system())
             .strftime("%Y-%m-%d %H:%M:%S %Z")
             .to_string()
     }

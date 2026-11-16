@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { useJobStream, TERMINAL_JOB, type ObservedProgress } from "../../hooks/useJobStream";
+import { useJobStream, type ObservedProgress } from "../../hooks/useJobStream";
 import { useDesktopFiles } from "../../desktop/DesktopContext";
 import { useJobCancellation, type JobCancellation } from "../../hooks/useJobCancellation";
 import { CancellationControl } from "./CancellationControl";
@@ -172,7 +172,7 @@ function ObservedProcessingProgress({ totalFiles, command, outputFolder, onReset
   const desktopFiles = useDesktopFiles();
   const { files: fileStatuses, completedFiles, jobStatus } = progress;
 
-  const isTerminal = TERMINAL_JOB[jobStatus];
+  const isTerminal = progress.state.kind === "terminal";
   const isSuccess = jobStatus === "completed" && completedFiles === totalFiles
     && fileStatuses.size === totalFiles && [...fileStatuses.values()].every(file => file.status === "done");
   const isRunning = !isTerminal;

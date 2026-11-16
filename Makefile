@@ -359,7 +359,7 @@ batchalign-dashboard-schema-check:
 
 batchalign-dashboard-build:
 	@echo "==> Building imported dashboard frontend..."
-	cd frontend && npm ci && npm run build
+	cd frontend && npm ci && npm test && npm run build
 
 batchalign-dashboard-e2e:
 	@echo "==> Running dashboard e2e tests (mock server)..."

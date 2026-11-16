@@ -11,10 +11,13 @@
  */
 import { jobQueryKey, jobsQueryKey, queryClient } from "../query";
 import { useStore } from "../state";
-import type { JobInfo, JobListItem, WSMessage } from "../types";
+import type { JobInfo, JobListItem } from "../types";
+import type { DashboardUpdate } from "../wire";
 
 /** Apply one fleet WebSocket message to the store and React Query cache. */
-export function handleDashboardMessage(server: string, msg: WSMessage) {
+export function handleDashboardMessage(update: DashboardUpdate): undefined {
+  const server = update.server.label;
+  const msg = update.message;
   const { setJobsForServer, updateJob, deleteJob, setHealth } = useStore.getState();
 
   switch (msg.type) {

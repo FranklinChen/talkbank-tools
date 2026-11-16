@@ -241,6 +241,13 @@ Qwen retains the qualified native model together with its geometry, three
 validated time-axis convolution steps, full-chunk token count, persistent model
 bytes, engine identity and allocation basis. `QwenPreparedInputs` carries that
 single loaded owner instead of independently paired native/geometry fields.
+The qualified Transformers 5.23 processor carries audio defaults in its
+`audio_kwargs` class attribute. Admission reads that real chunk geometry and
+compares it with the loaded feature extractor and encoder before retaining the
+positive-valued geometry. The source fingerprint is renewed only after reviewing
+the upstream implementation and exercising native processor and projection
+contracts. A fingerprint mismatch refuses admission before a loaded preparation
+owner can exist.
 Remainder-frame transformation reads the admitted convolution steps; it cannot
 be passed another model. Per-request source segmentation, tokenization, native
 processor count comparison, audio/text binding and virtual projection remain.

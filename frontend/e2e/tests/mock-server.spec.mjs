@@ -6,6 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "@playwright/test";
 import { WebSocketServer } from "ws";
+import * as Schema from "effect/Schema";
+import { HealthResponse, MachineTime } from "../../src/generated/decoders.ts";
+
+// Admit the synthetic health observation once for REST and WebSocket consumers.
+const healthSnapshot = Schema.decodeUnknownSync(HealthResponse)({ status: "ok", version: "test-build" });
+const admitSubmittedAt = Schema.decodeUnknownSync(Schema.Struct({ submittedAt: MachineTime }));
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -99,6 +105,7 @@ function buildFailedJobFileStatuses() {
 }
 
 function makeJob(jobId, status, { completed, total, submittedAt, fileStatuses, error, sourceDir }) {
+  const preparedTime = admitSubmittedAt({ submittedAt });
   const resolvedFileStatuses =
     fileStatuses ??
     [
@@ -142,7 +149,7 @@ function makeJob(jobId, status, { completed, total, submittedAt, fileStatuses, e
     total_files: totalFiles,
     completed_files: completedFiles,
     error_files: errorFiles,
-    submitted_at: submittedAt,
+    submitted_at: preparedTime.submittedAt,
     completed_at:
       status === "completed" || status === "failed" ? "2026-02-25T00:10:00Z" : null,
     duration_s: status === "completed" || status === "failed" ? 2.4 : null,
@@ -470,7 +477,7 @@ async function startHarness(deliverSnapshot = send => send()) {
       JSON.stringify({
         type: "snapshot",
         jobs: Array.from(jobs.values()).map(listItem),
-        health: { status: "ok" },
+        health: healthSnapshot,
       })
     ));
   });
@@ -721,6 +728,13 @@ for (const [name, body] of [
   });
 }
 
+/**
+ * Guards: an explicit read can recover an uncertain lookup without resubmitting work.
+ * Kind: journey
+ * Not a type: independent HTTP refusals and later successful responses arrive after route and cache selection.
+ * State: a real browser and local HTTP adapter observe the retry control and preserved submission count.
+ * Concurrency: each harness owns an ephemeral port and is closed after the browser's route-controlled response.
+ */
 test("job lookup failure remains uncertain and can recover through an explicit read", async ({ page }) => {
   const harness = await startHarness();
   /** @type {"refuse" | "recover"} */
@@ -731,7 +745,7 @@ test("job lookup failure remains uncertain and can recover through an explicit r
     await page.route(url => url.pathname === "/jobs/laterjob", route => lookup === "refuse"
       ? route.fulfill({ status: 503, json: { detail: "Service temporarily unavailable." } })
       : route.fulfill({ json: makeJob("laterjob", "completed", {
-          completed: 1, total: 1, fileStatuses: [makeFileStatus("sample.cha", "done")],
+          completed: 1, total: 1, submittedAt: "2026-02-25T00:05:00Z", fileStatuses: [makeFileStatus("sample.cha", "done")],
         }) }));
     await page.goto(harness.baseUrl + "/dashboard/jobs/laterjob");
     await expect(page.getByRole("alert")).toContainText("Job details could not be loaded");
@@ -898,6 +912,7 @@ async function showRunningDesktopJob(page, harness, observe = () => "running") {
   });
   const job = status => makeJob("canceljob", status, {
     total: 1, completed: status === "completed" ? 1 : 0, sourceDir: "/input",
+    submittedAt: "2026-02-25T00:00:00Z",
     fileStatuses: [makeFileStatus("/input/a.cha", status === "completed" ? "done" : "processing")],
   });
   let submitted = 0;
@@ -2197,6 +2212,13 @@ test("desktop cancellation racing completion preserves the service's actual outc
 });
 
 for (const state of ["interrupted", "writeback_failed", "missing-status"]) {
+  /**
+   * Guards: interrupted, failed writeback and malformed observations never display successful completion.
+   * Kind: journey
+   * Not a type: real HTTP bytes can omit the terminal status after a submission was already accepted.
+   * State: the browser observes actual progress and recovery controls from explicitly varied response bytes.
+   * Concurrency: each case owns its browser page and ephemeral server, with response delivery controlled by routes.
+   */
   test("desktop keeps " + state + " distinct from successful completion", async ({ page }) => {
     const harness = await startHarness();
     try {

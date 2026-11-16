@@ -172,9 +172,10 @@ sequenceDiagram
 5. Files are processed **concurrently**, bounded by `num_workers` via a
    `tokio::sync::Semaphore`. For each file, the server **resolves** the
    audio file by walking the parent directory or using media mappings for
-   matching `.wav`/`.mp3`/`.mp4` files. If the resolved file is MP4 (or
-   another container format), **`ensure_wav`** converts it to WAV via ffmpeg
-   and caches the result at `~/.batchalign3/media_cache/` (see
+   matching `.wav`/`.mp3`/`.mp4` files. **`ensure_wav`** inspects the actual
+   container and converts admitted non-native containers to WAV via ffmpeg,
+   including QuickTime audio named `.mp3`. It caches the result under the
+   platform data directory (see
    [Media Conversion](../reference/media-conversion.md)).
 5b. **Cheap rerun path:** After parsing, the server first checks whether the
    file already has complete reusable `%wor` timing. If main↔`%wor` alignment

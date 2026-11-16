@@ -1,21 +1,25 @@
-/** WebSocket client with auto-reconnect (exponential backoff).
- *
- * Supports connecting to multiple servers simultaneously via
- * `createMultiWS`. Each connection auto-reconnects independently.
- */
+/** Fleet discovery and the single React-owned lifetime for scoped connections. */
 
-import type { WSMessage } from "./types";
+import {
+  ConnectionPlan,
+  runConnections,
+  type MessageHandler,
+  type StatusHandler,
+} from "./liveSync/connections";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
+import { Socket } from "effect/socket";
+import { DashboardServer } from "./wire";
 import {
   controlPlaneHostPort,
   controlPlaneOrigin,
   controlPlaneWsScheme,
 } from "./runtime";
 
-type MessageHandler = (server: string, msg: WSMessage) => void;
-type StatusHandler = (server: string, connected: boolean) => void;
-
-const MIN_DELAY = 1000;
-const MAX_DELAY = 30000;
+const decodeFleet = Schema.decodeUnknownSync(
+  Schema.Array(Schema.Struct({ name: Schema.String, url: Schema.String })),
+);
 
 function normalizeHostPort(raw: string): string | null {
   const trimmed = raw.trim();
@@ -37,7 +41,7 @@ export function getServerList(): string[] {
     .map((s) => normalizeHostPort(s))
     .filter((s): s is string => Boolean(s));
   const primary = controlPlaneHostPort();
-  const all = [primary, ...extra.filter((s) => s !== primary)];
+  const all = [...new Set([primary, ...extra])];
   return all;
 }
 
@@ -45,7 +49,7 @@ export function getServerList(): string[] {
  * Discover fleet servers from `GET /fleet` on the connected server.
  * Falls back to `getServerList()` if the endpoint is unavailable.
  */
-export async function discoverFleet(): Promise<string[]> {
+async function discoverFleet(signal: AbortSignal): Promise<string[]> {
   const params = new URLSearchParams(window.location.search);
   if (params.get("servers")) {
     // Explicit servers in URL, don't override with fleet discovery
@@ -53,9 +57,9 @@ export async function discoverFleet(): Promise<string[]> {
   }
 
   try {
-    const resp = await fetch(`${controlPlaneOrigin()}/fleet`);
+    const resp = await fetch(`${controlPlaneOrigin()}/fleet`, { signal });
     if (!resp.ok) return getServerList();
-    const fleet: Array<{ name: string; url: string }> = await resp.json();
+    const fleet = decodeFleet(await resp.json());
     if (!fleet.length) return getServerList();
 
     // Extract host:port from each fleet URL, deduplicate with current control-plane host.
@@ -63,7 +67,7 @@ export async function discoverFleet(): Promise<string[]> {
     const fleetHosts = fleet
       .map((s) => normalizeHostPort(s.url))
       .filter((s): s is string => Boolean(s));
-    const unique = [primary, ...fleetHosts.filter((h) => h !== primary)];
+    const unique = [...new Set([primary, ...fleetHosts])];
     return unique;
   } catch {
     return getServerList();
@@ -72,83 +76,29 @@ export async function discoverFleet(): Promise<string[]> {
 
 /** Short hostname label (e.g. "<host>" from "<host>:8000"). */
 export function serverLabel(hostPort: string): string {
-  return hostPort.split(":")[0].split(".")[0];
+  return DashboardServer.prepare(hostPort, "ws:").label;
 }
 
-function createSingleWS(
-  hostPort: string,
-  label: string,
+/** Discovery, ready publication and connection cleanup share one interruptible fiber. */
+export function startFleetSync(
+  onServers: (servers: string[]) => void,
   onMessage: MessageHandler,
-  onStatus: StatusHandler
+  onStatus: StatusHandler,
 ): { close: () => void } {
-  let ws: WebSocket | null = null;
-  let delay = MIN_DELAY;
-  let closed = false;
-  let pingInterval: ReturnType<typeof setInterval> | null = null;
-
-  function connect() {
-    if (closed) return;
-
-    const proto = controlPlaneWsScheme();
-    ws = new WebSocket(`${proto}//${hostPort}/ws`);
-
-    ws.onopen = () => {
-      delay = MIN_DELAY;
-      onStatus(label, true);
-      pingInterval = setInterval(() => {
-        if (ws?.readyState === WebSocket.OPEN) ws.send("ping");
-      }, 30000);
-    };
-
-    ws.onmessage = (ev) => {
-      if (ev.data === "pong") return;
-      try {
-        const msg: WSMessage = JSON.parse(ev.data);
-        onMessage(label, msg);
-      } catch {
-        /* ignore malformed messages */
-      }
-    };
-
-    ws.onclose = () => {
-      if (pingInterval) clearInterval(pingInterval);
-      pingInterval = null;
-      onStatus(label, false);
-      if (!closed) {
-        setTimeout(connect, delay);
-        delay = Math.min(delay * 2, MAX_DELAY);
-      }
-    };
-
-    ws.onerror = () => {
-      ws?.close();
-    };
-  }
-
-  connect();
-
-  return {
-    close() {
-      closed = true;
-      if (pingInterval) clearInterval(pingInterval);
-      ws?.close();
-    },
-  };
-}
-
-/** Open one WebSocket per server in the list. */
-export function createMultiWS(
-  servers: string[],
-  onMessage: MessageHandler,
-  onStatus: StatusHandler
-): { close: () => void } {
-  const connections = servers.map((hp) =>
-    createSingleWS(hp, serverLabel(hp), onMessage, onStatus)
+  const program = Effect.tryPromise((signal) => discoverFleet(signal)).pipe(
+    Effect.flatMap((servers) =>
+      Effect.gen(function* () {
+        const plan = ConnectionPlan.prepare(servers, controlPlaneWsScheme());
+        yield* Effect.sync(() => onServers(servers));
+        yield* runConnections(plan, onMessage, onStatus);
+      }),
+    ),
+    Effect.provide(Socket.layerWebSocketConstructorGlobal),
   );
-
+  const fiber = Effect.runFork(program);
   return {
-    close() {
-      for (const c of connections) c.close();
+    close: () => {
+      Effect.runFork(Fiber.interrupt(fiber));
     },
   };
 }

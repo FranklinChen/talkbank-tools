@@ -89,7 +89,7 @@ function parseWorkerKey(raw: string): ParsedWorkerKey | null {
 
 /** Aggregate parsed worker keys into profile summaries. */
 function buildProfileSummaries(
-  workerKeys: string[]
+  workerKeys: readonly string[]
 ): Map<string, ProfileSummary> {
   const map = new Map<string, ProfileSummary>();
 

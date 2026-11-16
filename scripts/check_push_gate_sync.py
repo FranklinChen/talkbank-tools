@@ -103,7 +103,7 @@ EXEMPT: dict[str, Exemption] = {
     #
     # Drift checks against generated artifacts that need the built binary or the
     # npm-installed frontend, and run in their own jobs with that setup.
-    # NARROWED 2026-08-27. Only the `npx openapi-typescript` half needs npm.
+    # NARROWED 2026-08-27. Only the `npx openapi-typesafe` half needs npm.
     # The `openapi.json` half reuses the current development binary and is in
     # the hook as
     # `batchalign-dashboard-schema-check`; a stale openapi.json reached main

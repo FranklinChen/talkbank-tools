@@ -69,6 +69,14 @@ def binding(host: LoadedWordFa, samples: int) -> FaPreparationBindingV2:
 def test_loaded_qwen_projects_its_native_components_without_a_duration_cutoff(
     loaded_qwen: LoadedWordFa, native_qwen: LoadedQwenFaHost
 ) -> None:
+    """Guards: Native Qwen preparation measures request growth and preserves the loaded model.
+    Kind: contract.
+    Not a type: The real tiny CNN and attention implementations determine workspace bytes, training mode and parameter mutation.
+    State: The shared native fixture constructs a tiny real Qwen model and
+        processor. Actual upstream operators and tokenizer bytes are the oracle.
+    Concurrency: Function-scoped fixtures and monkeypatch restoration isolate
+        foreign model metadata and loader changes within each pytest process.
+    """
     model = native_qwen.aligner.model
     implementations = tuple(
         module.config._attn_implementation
@@ -106,6 +114,14 @@ def test_loaded_qwen_projects_its_native_components_without_a_duration_cutoff(
 def test_prepared_qwen_cannot_claim_another_model(
     native_qwen: LoadedQwenFaHost, loaded_qwen: LoadedWordFa, changed: dict[str, object]
 ) -> None:
+    """Guards: Preparation refuses serialized bindings naming another backend or engine.
+    Kind: contract.
+    Not a type: External request JSON can name a different backend or model despite validated field types.
+    State: The shared native fixture constructs a tiny real Qwen model and
+        processor. Actual upstream operators and tokenizer bytes are the oracle.
+    Concurrency: Function-scoped fixtures and monkeypatch restoration isolate
+        foreign model metadata and loader changes within each pytest process.
+    """
     from batchalign.inference.fa_qwen_resources import QwenPreparedInputs
     from batchalign.inference.fa_virtual_resources import FaResourceProjectionError
 
@@ -119,6 +135,14 @@ def test_prepared_qwen_cannot_claim_another_model(
 def test_prepared_qwen_shapes_match_the_actual_processor(
     native_qwen: LoadedQwenFaHost, loaded_qwen: LoadedWordFa
 ) -> None:
+    """Guards: Prepared token IDs, frame padding and segmentation agree with native processor outputs.
+    Kind: contract.
+    Not a type: The upstream processor computes concrete token IDs, feature dimensions and word segmentation from audio bytes.
+    State: The shared native fixture constructs a tiny real Qwen model and
+        processor. Actual upstream operators and tokenizer bytes are the oracle.
+    Concurrency: Function-scoped fixtures and monkeypatch restoration isolate
+        foreign model metadata and loader changes within each pytest process.
+    """
     from batchalign.inference.fa_qwen_resources import QwenPreparedInputs
 
     prepared = QwenPreparedInputs.admit(
@@ -140,6 +164,14 @@ def test_prepared_qwen_shapes_match_the_actual_processor(
 def test_fixed_chunk_geometry_refusal_is_retained_for_the_loaded_epoch(
     native_qwen: LoadedQwenFaHost, loaded_qwen: LoadedWordFa
 ) -> None:
+    """Guards: A refused loaded epoch retains its geometry refusal across later producer mutation.
+    Kind: contract.
+    Not a type: The foreign processor exposes mutable chunk metadata, so its restored value cannot retroactively validate an admitted epoch.
+    State: The shared native fixture constructs a tiny real Qwen model and
+        processor. Actual upstream operators and tokenizer bytes are the oracle.
+    Concurrency: Function-scoped fixtures and monkeypatch restoration isolate
+        foreign model metadata and loader changes within each pytest process.
+    """
     from batchalign.inference.fa_qwen_resources import qwen_request_preparer
     from batchalign.worker._types_v2 import FaProjectionUnavailableV2, FaRefusedV2
 

@@ -438,6 +438,25 @@ whose insta snapshots (L2 included) change with the model:
 cargo test -p batchalign --features ml-golden --test ml_golden -- --test-threads=1 ml_golden::morphotag::golden
 ```
 
+## Qualifying dependency updates
+
+Keep the exact lockfiles, interpreter identity and source revision with the
+qualification receipts. A successful install establishes resolution. Run the
+compiler and existing boundary suites against the installed graph, then build
+the optimized CLI and the producer-admitted Python extension. Transformers
+updates require actual generation, attention-timestamp and native Qwen
+preparation contracts, followed by managed audio jobs. Rust timestamp-library
+updates require timestamp wire, SQLite, local-zone and provenance contracts.
+
+The three alignment goldens acquire `LiveServerSession` and borrow it through
+`LiveServerJobClient::from_session`. This constructor accepts only a managed
+session. Its factory configures the owned staging directory as the session's
+allowed paths root before returning the live capability. Their
+real audio, model results and serialized tier policies remain runtime contracts.
+Select the qualification interpreter and an owned Stanza resource directory
+explicitly, as described below. Release and platform evidence remain separate
+from these local results.
+
 ## Stanza qualification through managed sessions
 
 A Stanza update compares the same BA3 source and native extension in two

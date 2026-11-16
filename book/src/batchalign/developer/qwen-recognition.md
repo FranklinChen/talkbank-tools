@@ -6,6 +6,21 @@ or changing the request language to satisfy a model's language vocabulary.
 For CLI options and supported command scope, see
 [Language Code Resolution](../reference/language-code-resolution.md#taiwanese-transcription-nan).
 
+## Media admission before recognition
+
+The Rust runner prepares provider media through `ensure_wav` before handing
+Qwen a path. Actual container inspection produces either a native source or a
+conversion source. QuickTime containers containing MP3 audio require PCM
+conversion even when named `.mp3`. Qwen's `librosa.load` then receives the
+published WAV, using its existing mono/resampling behavior. A genuine MPEG
+audio source retains its path.
+
+The source name used for CHAT media references remains associated with the
+original recording. Cache identity uses the complete source bytes and PCM
+recipe. Byte-identical recordings reuse the conversion across names. The
+preparation graph covers admission, cache ownership and failure behavior.
+[Preparation state graph](../reference/media-conversion.md#formats)
+
 ## Ownership and loading
 
 The implementation still lives under `inference/languages/cantonese/` for

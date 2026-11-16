@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-11-03 23:37 EST
+**Last updated:** 2026-11-16 05:30 EST
 
 ## Overview
 
@@ -9,8 +9,9 @@ Batchalign commands that process audio (`align`, `transcribe`, `opensmile`,
 `avqi`, `benchmark`) must resolve a media file for each input. Depending on the
 command, Rust then either prepares typed PCM artifacts for worker-protocol V2
 execution or passes through a normalized media path to a provider-specific
-engine. Container formats that downstream audio libraries cannot read,
-primarily **MP4**: must first be converted to WAV via ffmpeg.
+engine. Rust inspects the actual container with ffprobe before selecting native
+decoding or cached PCM conversion. A filename suffix does not establish the
+container. QuickTime audio named `.mp3`, for example, requires conversion.
 
 This conversion is automatic, cached, and transparent to the user.
 
@@ -93,19 +94,43 @@ acceptance runs; runtime freshness and end-to-end evidence remain separate.
 
 ## Formats
 
-| Extension | Can `soundfile` read? | Conversion needed? |
-|-----------|:---------------------:|:------------------:|
-| `.wav`    | Yes | No  |
-| `.mp3`    | Yes | No  |
-| `.flac`   | Yes | No  |
-| `.ogg`    | Yes | No  |
-| `.mp4`    | **No** | **Yes** |
-| `.m4a`    | **No** | **Yes** |
-| `.webm`   | **No** | **Yes** |
-| `.wma`    | **No** | **Yes** |
+| Observed container | Preparation |
+| --- | --- |
+| MPEG audio, WAVE, FLAC, Ogg | Retain the source path for native decoding |
+| ISO media, including QuickTime, MP4 and M4A | Convert to cached PCM WAV |
+| ADTS AAC, Matroska/WebM, ASF/WMA | Convert to cached PCM WAV |
+| Unknown container, no audio stream, unreadable source | Refuse during admission |
 
-The canonical list of forced-conversion extensions is defined in
-`crates/batchalign/src/ensure_wav.rs::FORCED_CONVERSION`.
+`MediaProbe::container` admits ffprobe's demuxer through the closed
+`MediaContainer` enum. `MediaPreparation::inspect` consumes the source path
+and returns a private `NativeContainerSource` or `ConversionSource` bound to
+that observation. Only the native state exposes passthrough. Only the
+conversion state exposes the PCM-cache operation. Adding a container requires
+an explicit preparation decision in the exhaustive match.
+
+Admission establishes the observed container. The downstream decoder and
+conversion damage checks establish decode integrity. External writers can
+change a source file after observation.
+
+```mermaid
+flowchart TD
+    source["Source path"] --> probe["MediaProbe::container"]
+    probe -->|"MPEG audio, WAVE, FLAC, Ogg"| native["NativeContainerSource"]
+    probe -->|"ISO media, ADTS, Matroska, ASF"| convert["ConversionSource"]
+    probe -->|"unreadable, unknown, no audio"| error["ProbeError"]
+    native -->|"consume into_path"| decoder["Native audio decoder"]
+    convert -->|"consume convert"| identity["Full content digest and PCM recipe"]
+    identity -->|"published cache hit"| decoder
+    identity -->|"cache miss"| locked["LockedCacheSlot"]
+    locked -->|"strict conversion succeeds"| produced["ProducedCacheSlot"]
+    produced -->|"consume commit under lock"| published["Published PCM WAV"]
+    published --> decoder
+```
+
+The cache remains shared by byte-identical sources under different names.
+Native media retains its original path even when its suffix suggests a
+container requiring conversion. Format inspection reads the header. Duration measurement remains a separate
+operation and performs packet walking where required.
 
 ## Align Pipeline End-to-End
 
@@ -144,8 +169,8 @@ batchalign3 [--server http://<your-server>:8001] align input/ output/ --lang eng
   │  │       or local media_mappings / explicit --media-dir             │
   │  │                                                                   │
   │  │  3. MEDIA CONVERSION (ensure_wav, NeedsAudio only) ◄── THIS STEP │
-  │  │     .wav/.mp3/.flac/.ogg → pass through unchanged                │
-  │  │     .mp4/.m4a/.webm/.wma → ffmpeg convert to WAV, cache result   │
+  │  │     probe actual container; suffix does not grant passthrough    │
+  │  │     native container → source; other admitted container → WAV    │
   │  │       fingerprint: full-file BLAKE3 + versioned recipe    │
   │  │       cache dir: platform data_dir/batchalign3/media_cache/      │
   │  │       file lock: per-fingerprint .lock prevents concurrent ffmpeg │
@@ -198,8 +223,10 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
 
 ### Algorithm
 
-1. **Check extension**: if `.wav`/`.mp3`/`.flac`/`.ogg`, return unchanged.
-2. **Check ffmpeg**: if not on PATH, return a clear error with install hint.
+1. **Admit container**: ffprobe inspects the source and constructs the native
+   or conversion state. Missing, malformed or unsupported media is refused.
+2. **Consume preparation**: native sources return their own path; conversion
+   sources enter the cache operation below. A cache miss requires ffmpeg.
 3. **Fingerprint**: stream every source byte through BLAKE3 and retain its full
    digest in the `whole-pcm16-mono16k-strict-v3` recipe namespace. This reads
    the complete file with bounded memory; same-size edits in the middle of a
@@ -246,8 +273,8 @@ batchalign3 cache clear --yes
 
 ### Where ensure_wav Is Called
 
-`ensure_wav` is called in four dispatch paths, always **after** media
-resolution and **before** the audio path is passed to Python workers:
+`ensure_wav` runs after media resolution and before native audio loading.
+Its consumers include the following paths:
 
 | Dispatch Path | File | Purpose |
 |---------------|------|---------|
@@ -255,6 +282,7 @@ resolution and **before** the audio path is passed to Python workers:
 | Transcribe | `runner/dispatch/transcribe_pipeline.rs` | Before ASR inference |
 | Benchmark | `runner/dispatch/benchmark_pipeline.rs:process_one_benchmark_file` | Before Rust benchmark orchestration dispatches ASR |
 | Media analysis | `runner/dispatch/media_analysis_v2.rs` | Before openSMILE/AVQI prepared-audio execution |
+| Speaker identity | `runner/dispatch/speaker_identity_pipeline.rs` | Before speaker audio preparation |
 
 ### Error Handling
 
@@ -394,11 +422,12 @@ A walk demuxes the whole file without decoding it. Measured on a 2-hour,
 115 MB, 128 kbit/s MP3 on an NFS volume with its pages already cached: ffprobe
 alone takes 0.36 s; in-process, including reading ffprobe's JSON (about 11 MB
 for 2.5 hours), 2.6 s in a debug build. An uncached file adds one sequential
-read of the file. The pipeline probes each file ONCE: `fa_pipeline` measures
+read of the file. The duration pipeline measures each file once: `fa_pipeline` measures
 `audio_path` and hands the same `AudioDuration` to the UTR pass
 (`UtrPassContext::audio_duration`) and to FA (`AudioContext::audio_duration`);
 only a failed first probe is retried, by `AudioContext::recording`. There is
-no cross-job probe cache.
+no cross-job probe cache. Container preparation performs its own header-only
+probe before this duration measurement.
 
 ### Consumers
 
@@ -513,10 +542,11 @@ Total: **16,739 MP4 files** across all volumes.
 
 ## Dependencies
 
-- **ffmpeg** must be on PATH for mp4/m4a/webm/wma conversion. Without it,
-  those formats fail with a clear error. WAV/MP3/FLAC/OGG work without
-  ffmpeg.
-- **ffprobe** (bundled with ffmpeg) establishes every recording's duration
+- **ffmpeg** must be available for containers requiring PCM conversion. A
+  missing encoder fails the conversion with an install hint. Native containers
+  retain their source path without invoking ffmpeg.
+- **ffprobe** (bundled with ffmpeg) is required for actual-container admission
+  before native passthrough or conversion. It also establishes recording duration
   (see [Recording Duration](#recording-duration-mediaprobe)). `align` cannot
   bound its windows without it and fails the file with a host error when it
   is missing; the transcribe path falls back to a named decode-budget ceiling.

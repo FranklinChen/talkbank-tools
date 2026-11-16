@@ -1338,7 +1338,7 @@ async fn run_status(db: &Path) -> Result<()> {
         println!("needs-fix outstanding: {needs_fix_count}");
     }
 
-    let streak = compute_streak(&mut conn, &jiff::Zoned::now()).await?;
+    let streak = compute_streak(&mut conn, &jiff::ZonedDateTime::now()).await?;
     println!("Streak: {streak} day(s)");
     println!();
 
@@ -1377,7 +1377,7 @@ async fn run_status(db: &Path) -> Result<()> {
 async fn run_streak(db: &Path) -> Result<()> {
     let mut conn = open_catalog(db).await?;
     apply_migrations(&mut conn).await?;
-    let streak = compute_streak(&mut conn, &jiff::Zoned::now()).await?;
+    let streak = compute_streak(&mut conn, &jiff::ZonedDateTime::now()).await?;
     println!("{streak}");
     Ok(())
 }
@@ -1476,7 +1476,7 @@ fn read_review_time(text: &str) -> Result<MachineTime> {
 ///
 /// `today` is injected, zone included, so tests pin both the day and the
 /// zone: an evening EDT vet (00:39 UTC the next day) counts on its EDT day.
-async fn compute_streak(conn: &mut SqliteConnection, today: &jiff::Zoned) -> Result<u32> {
+async fn compute_streak(conn: &mut SqliteConnection, today: &jiff::ZonedDateTime) -> Result<u32> {
     let rows: Vec<String> =
         sqlx::query_scalar("SELECT reviewed_at FROM sections WHERE reviewed_at IS NOT NULL")
             .fetch_all(&mut *conn)
@@ -1485,7 +1485,7 @@ async fn compute_streak(conn: &mut SqliteConnection, today: &jiff::Zoned) -> Res
     let mut days = BTreeSet::new();
     for reviewed_at in rows {
         let at = read_review_time(&reviewed_at)?;
-        days.insert(at.timestamp().to_zoned(zone.clone()).date());
+        days.insert(at.timestamp().to_zoned_datetime(zone.clone()).date());
     }
 
     let today = today.date();
@@ -1620,7 +1620,7 @@ mod tests {
     use sqlx::Executor;
 
     /// The local day in New York at noon on `day`, as `today`.
-    fn new_york_noon(year: i16, month: i8, day: i8) -> jiff::Zoned {
+    fn new_york_noon(year: i16, month: i8, day: i8) -> jiff::ZonedDateTime {
         jiff::civil::date(year, month, day)
             .at(12, 0, 0, 0)
             .in_tz("America/New_York")

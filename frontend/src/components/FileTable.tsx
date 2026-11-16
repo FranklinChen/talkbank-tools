@@ -51,8 +51,8 @@ function splitPath(filename: string): [string, string] {
 
 /** Group files by directory, sorted alphabetically within each group. */
 function groupByDirectory(
-  files: FileStatusEntry[],
-): Array<{ dir: string; files: FileStatusEntry[] }> {
+  files: readonly FileStatusEntry[],
+): Array<{ dir: string; files: readonly FileStatusEntry[] }> {
   const map = new Map<string, FileStatusEntry[]>();
   for (const f of files) {
     const [dir] = splitPath(f.filename);
@@ -77,7 +77,7 @@ function groupByDirectory(
     }));
 }
 
-function DirStats({ files }: { files: FileStatusEntry[] }) {
+function DirStats({ files }: { files: readonly FileStatusEntry[] }) {
   const done = files.filter((f) => f.status === "done").length;
   const diagnosed = files.filter((f) => f.status === "diagnosed").length;
   const errs = files.filter((f) => f.status === "error").length;
@@ -106,7 +106,7 @@ function DirStats({ files }: { files: FileStatusEntry[] }) {
   );
 }
 
-export function FileTable({ files }: { files: FileStatusEntry[] }) {
+export function FileTable({ files }: { files: readonly FileStatusEntry[] }) {
   const [expandedErr, setExpandedErr] = useState<string | null>(null);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
   const [sortCol, setSortCol] = useState<SortCol>("file");
@@ -194,7 +194,7 @@ function DirGroup({
   setExpandedErr,
 }: {
   dir: string;
-  files: FileStatusEntry[];
+  files: readonly FileStatusEntry[];
   showDirHeader: boolean;
   isCollapsed: boolean;
   onToggle: () => void;

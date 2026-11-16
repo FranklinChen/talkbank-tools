@@ -14,5 +14,5 @@
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src", "e2e/job-wait.ts"]
+  "include": ["src", "tests", "e2e/job-wait.ts"]
 }

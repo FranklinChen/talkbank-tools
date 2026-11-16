@@ -5,6 +5,12 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- Audio preparation now inspects the actual container before selecting native
+  decoding or PCM conversion. QuickTime audio containing MP3 now converts
+  correctly even when its filename ends in `.mp3`. Byte-identical recordings
+  share the existing conversion cache across filenames. Private consuming
+  preparation states replace filename-based passthrough permission.
+
 - Whisper lexical alignment now carries its completed traceback into row-entry
   projection and transfers the resulting frame vector directly to Python.
   Traceback uses a closed move type and stores only interior cells. Removed

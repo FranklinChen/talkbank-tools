@@ -1,6 +1,7 @@
 //! Content-fingerprinted WAV conversion cache.
 //!
-//! Converts non-WAV media (e.g. mp4) to WAV via ffmpeg and caches the result
+//! Inspects actual containers and converts media requiring native-decoder
+//! preparation to WAV via ffmpeg. It caches the result
 //! in `~/.batchalign3/media_cache/` keyed by a complete source-content digest. This
 //! avoids writing converted files next to originals (which may be on read-only
 //! NFS/SMB mounts) and deduplicates across paths that point to the same content.
@@ -18,9 +19,9 @@
 //!
 //! # Formats requiring conversion
 //!
-//! Only container formats that `libsndfile` (via `soundfile` in Python) cannot
-//! read need conversion. Currently: `.mp4`, `.m4a`, `.webm`, `.wma`.
-//! WAV, MP3, FLAC, OGG are handled natively by `soundfile`.
+//! ffprobe admits the actual audio container before selecting a path. Native
+//! MPEG audio, WAVE, FLAC and Ogg retain their source path. ISO media, ADTS,
+//! Matroska and ASF use the PCM cache regardless of their filename suffix.
 
 use std::path::{Path, PathBuf};
 
@@ -28,14 +29,46 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::chat_ops::fa::coordinates::FaWindow;
+use crate::media::probe::{MediaContainer, MediaProbe, ProbeError};
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Extensions that `soundfile` (libsndfile) cannot read and must be converted.
-const FORCED_CONVERSION: &[&str] = &["mp4", "m4a", "webm", "wma"];
+/// A source whose observed container admits one preparation operation.
+/// Private payload constructors bind that observation to its own source path.
+enum MediaPreparation {
+    Native(NativeContainerSource),
+    Convert(ConversionSource),
+}
+
+/// Only native-container admission can produce a source for passthrough.
+struct NativeContainerSource(PathBuf);
+
+/// Only conversion admission can produce a source for the PCM cache.
+struct ConversionSource(PathBuf);
+
+impl MediaPreparation {
+    async fn inspect(source: PathBuf) -> Result<Self, ProbeError> {
+        match MediaProbe::new(&source).container().await? {
+            MediaContainer::MpegAudio
+            | MediaContainer::Wav
+            | MediaContainer::Flac
+            | MediaContainer::Ogg => Ok(Self::Native(NativeContainerSource(source))),
+            MediaContainer::Adts
+            | MediaContainer::IsoMedia
+            | MediaContainer::Matroska
+            | MediaContainer::Asf => Ok(Self::Convert(ConversionSource(source))),
+        }
+    }
+}
+
+impl NativeContainerSource {
+    fn into_path(self) -> PathBuf {
+        self.0
+    }
+}
 
 /// Default cache directory name under the app data dir.
 const CACHE_SUBDIR: &str = "media_cache";
@@ -47,6 +80,10 @@ const CACHE_SUBDIR: &str = "media_cache";
 #[derive(Debug, Error)]
 /// Errors from [`ensure_wav`].
 pub enum EnsureWavError {
+    /// Actual container admission failed before selecting a decoder path.
+    #[error(transparent)]
+    Probe(#[from] ProbeError),
+
     /// The transcode itself failed: ffmpeg missing, refused, or unspawnable.
     ///
     /// ONE variant, not the three this enum used to restate. Nothing in the
@@ -147,67 +184,70 @@ impl ProducedCacheSlot {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Return a path to a WAV version of `source_path`.
+/// Prepare media for the native audio decoder using its observed container.
 ///
-/// - If `source_path` is already `.wav` / `.mp3` / `.flac` / `.ogg` (formats
-///   that `soundfile` handles natively), return it unchanged.
-/// - If a cached conversion exists (by content fingerprint), return that.
-/// - Otherwise convert via ffmpeg, cache the result, and return the cache path.
-///
-/// `cache_dir` overrides the default cache location (for testing).
+/// Native audio containers retain their source path. Other admitted containers
+/// use the existing content-addressed PCM WAV cache. Filename suffixes do not
+/// grant passthrough, and unreadable media is refused during admission.
+/// `cache_dir` overrides the default cache location for an owned runtime or test.
 pub async fn ensure_wav(
     source_path: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<PathBuf, EnsureWavError> {
-    if !needs_conversion(source_path) {
-        return Ok(source_path.to_path_buf());
+    match MediaPreparation::inspect(source_path.to_path_buf()).await? {
+        MediaPreparation::Native(source) => Ok(source.into_path()),
+        MediaPreparation::Convert(source) => source.convert(cache_dir).await,
     }
+}
 
-    // Move all blocking I/O (fingerprint, file lock, ffmpeg subprocess,
-    // rename) onto a dedicated thread so we don't starve the tokio executor.
-    let source_path = source_path.to_path_buf();
-    let cache_dir = cache_dir.map(Path::to_path_buf);
+impl ConversionSource {
+    async fn convert(self, cache_dir: Option<&Path>) -> Result<PathBuf, EnsureWavError> {
+        // Move all blocking I/O (fingerprint, file lock, ffmpeg subprocess,
+        // rename) onto a dedicated thread so we don't starve the tokio executor.
+        let source_path = self.0;
+        let cache_dir = cache_dir.map(Path::to_path_buf);
 
-    crate::blocking::spawn_in_span(move || -> Result<PathBuf, EnsureWavError> {
-        let effective_cache_dir = match cache_dir {
-            Some(p) => p,
-            None => default_cache_dir(),
-        };
-        std::fs::create_dir_all(&effective_cache_dir)?;
+        crate::blocking::spawn_in_span(move || -> Result<PathBuf, EnsureWavError> {
+            let effective_cache_dir = match cache_dir {
+                Some(p) => p,
+                None => default_cache_dir(),
+            };
+            std::fs::create_dir_all(&effective_cache_dir)?;
 
-        let fp = media_fingerprint(&source_path)?;
-        let cached_wav = effective_cache_dir.join(format!("{fp}.wav"));
+            let fp = media_fingerprint(&source_path)?;
+            let cached_wav = effective_cache_dir.join(format!("{fp}.wav"));
 
-        // Fast path: already converted
-        if cached_wav.exists() {
-            debug!(
-                "Media cache hit: {} -> {}",
+            // Fast path: already converted
+            if cached_wav.exists() {
+                debug!(
+                    "Media cache hit: {} -> {}",
+                    source_path.display(),
+                    cached_wav.display()
+                );
+                return Ok(cached_wav);
+            }
+
+            // Convert under a per-fingerprint exclusive lock, held until the result
+            // is published, which `LockedCacheSlot` is what guarantees.
+            let slot = match LockedCacheSlot::acquire(&effective_cache_dir, &fp)? {
+                CacheSlot::AlreadyPublished(path) => return Ok(path),
+                CacheSlot::Ours(slot) => slot,
+            };
+
+            info!(
+                "Converting {} -> {}",
                 source_path.display(),
                 cached_wav.display()
             );
-            return Ok(cached_wav);
-        }
 
-        // Convert under a per-fingerprint exclusive lock, held until the result
-        // is published, which `LockedCacheSlot` is what guarantees.
-        let slot = match LockedCacheSlot::acquire(&effective_cache_dir, &fp)? {
-            CacheSlot::AlreadyPublished(path) => return Ok(path),
-            CacheSlot::Ours(slot) => slot,
-        };
-
-        info!(
-            "Converting {} -> {}",
-            source_path.display(),
-            cached_wav.display()
-        );
-
-        // The status check, the partial-file cleanup and the stderr reading all
-        // live in `produce`; this call site keeps only what is its own.
-        let produced = slot.produce(Transcode::whole(&source_path, PcmEncoding::S16LeWav))?;
-        Ok(produced.commit()?)
-    })
-    .await
-    .map_err(std::io::Error::other)?
+            // The status check, the partial-file cleanup and the stderr reading all
+            // live in `produce`; this call site keeps only what is its own.
+            let produced = slot.produce(Transcode::whole(&source_path, PcmEncoding::S16LeWav))?;
+            Ok(produced.commit()?)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
 }
 
 /// Extract a time-windowed audio segment to a cached WAV file.
@@ -328,15 +368,6 @@ pub fn cache_stats(cache_dir: Option<&Path>) -> (PathBuf, u64, usize) {
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Check whether the file extension requires ffmpeg conversion.
-pub fn needs_conversion(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    FORCED_CONVERSION.contains(&ext.as_str())
-}
-
 /// Complete source identity, namespaced by the whole-file conversion recipe.
 ///
 /// A sampled fingerprint cannot attest content: equal-sized files may differ
@@ -379,43 +410,6 @@ fn default_cache_dir_from(
 mod tests {
     use super::*;
     use crate::media::tools::MediaTool;
-
-    #[test]
-    fn wav_needs_no_conversion() {
-        assert!(!needs_conversion(Path::new("audio.wav")));
-        assert!(!needs_conversion(Path::new("audio.WAV")));
-        assert!(!needs_conversion(Path::new("/path/to/audio.mp3")));
-        assert!(!needs_conversion(Path::new("audio.flac")));
-        assert!(!needs_conversion(Path::new("audio.ogg")));
-    }
-
-    #[test]
-    fn mp4_needs_conversion() {
-        assert!(needs_conversion(Path::new("video.mp4")));
-        assert!(needs_conversion(Path::new("video.MP4")));
-        assert!(needs_conversion(Path::new("/path/to/video.mp4")));
-    }
-
-    #[test]
-    fn m4a_needs_conversion() {
-        assert!(needs_conversion(Path::new("audio.m4a")));
-    }
-
-    #[test]
-    fn webm_needs_conversion() {
-        assert!(needs_conversion(Path::new("video.webm")));
-    }
-
-    #[test]
-    fn wma_needs_conversion() {
-        assert!(needs_conversion(Path::new("audio.wma")));
-    }
-
-    #[test]
-    fn no_extension_needs_no_conversion() {
-        assert!(!needs_conversion(Path::new("noext")));
-        assert!(!needs_conversion(Path::new("/path/to/noext")));
-    }
 
     #[test]
     fn fingerprint_deterministic() {
@@ -518,144 +512,104 @@ mod tests {
             Err(EnsureWavError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
     }
 
+    /// Guards: Actual containers select native passthrough or one shared PCM conversion,
+    /// and cache accounting and clearing observe only the published artifact.
+    /// Kind: contract.
+    /// Not a type: External container bytes and the real ffprobe/ffmpeg adapters
+    /// determine whether a file can enter the admitted conversion path.
+    /// State: One generated QuickTime/MP3 recording, renamed aliases and a
+    /// remuxed native MPEG control and real content-addressed WAV cache exercise
+    /// format detection, publication, accounting and clearing.
+    /// Concurrency: A private temporary directory isolates files and cache entries;
+    /// the production cache-slot owner serializes publication for identical content.
     #[tokio::test]
-    async fn ensure_wav_passthrough_for_wav() {
-        let result = ensure_wav(Path::new("/some/path/audio.wav"), None)
-            .await
-            .unwrap();
-        assert_eq!(result, Path::new("/some/path/audio.wav"));
-    }
-
-    #[tokio::test]
-    async fn ensure_wav_passthrough_for_mp3() {
-        let result = ensure_wav(Path::new("/some/path/audio.mp3"), None)
-            .await
-            .unwrap();
-        assert_eq!(result, Path::new("/some/path/audio.mp3"));
-    }
-
-    #[tokio::test]
-    async fn ensure_wav_passthrough_for_flac() {
-        let result = ensure_wav(Path::new("/some/path/audio.flac"), None)
-            .await
-            .unwrap();
-        assert_eq!(result, Path::new("/some/path/audio.flac"));
-    }
-
-    #[tokio::test]
-    async fn ensure_wav_converts_mp4() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("cache");
-
-        // Create a minimal valid mp4 via ffmpeg (short silent audio)
-        let mp4_path = dir.path().join("test.mp4");
-        let ffmpeg_out = MediaTool::Ffmpeg
+    async fn container_admission_converts_quicktime_under_native_suffixes() {
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let source = dir.path().join("recording.mov");
+        let encoded = MediaTool::Ffmpeg
             .async_command()
             .args([
                 "-y",
                 "-f",
                 "lavfi",
                 "-i",
-                "anullsrc=r=16000:cl=mono",
+                "sine=frequency=440:sample_rate=44100",
                 "-t",
-                "0.1",
-                mp4_path.to_string_lossy().as_ref(),
+                "0.25",
+                "-c:a",
+                "libmp3lame",
+                "-f",
+                "mov",
             ])
+            .arg(&source)
             .output()
-            .await;
-        if ffmpeg_out.is_err() || !ffmpeg_out.unwrap().status.success() {
-            eprintln!("skipping: could not generate test mp4");
-            return;
-        }
-
-        // First call should convert
-        let wav_path = ensure_wav(&mp4_path, Some(&cache_dir)).await.unwrap();
+            .await
+            .expect("encode QuickTime fixture");
         assert!(
-            wav_path.extension().is_some_and(|e| e == "wav"),
-            "should return a .wav path"
+            encoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&encoded.stderr)
         );
-        assert!(wav_path.exists(), "converted wav should exist on disk");
+        let original = std::fs::read(&source).expect("read encoded source");
+        let cache = dir.path().join("cache");
+        let mut published = std::collections::BTreeSet::new();
+        for name in [
+            "recording.m4a",
+            "recording.mp4",
+            "recording.mp3",
+            "recording.wav",
+            "recording",
+        ] {
+            let alias = dir.path().join(name);
+            std::fs::write(&alias, &original).expect("write identical source alias");
+            let prepared = ensure_wav(&alias, Some(&cache))
+                .await
+                .expect("prepare actual container");
+            assert!(
+                prepared.starts_with(&cache),
+                "container requires decoded WAV for {name}"
+            );
+            assert_eq!(
+                &std::fs::read(&prepared).expect("read PCM WAV")[..4],
+                b"RIFF"
+            );
+            assert_eq!(
+                std::fs::read(&alias).expect("source remains readable"),
+                original
+            );
+            published.insert(prepared);
+        }
+        assert_eq!(published.len(), 1, "identical bytes share one conversion");
+
+        // The opposite mismatch must also follow bytes: native MP3 inside a
+        // filename normally associated with ISO media retains its own path.
+        let native = dir.path().join("native.m4a");
+        let remuxed = MediaTool::Ffmpeg
+            .async_command()
+            .args(["-y", "-i"])
+            .arg(&source)
+            .args(["-c:a", "copy", "-f", "mp3"])
+            .arg(&native)
+            .output()
+            .await
+            .expect("remux native MPEG control");
         assert!(
-            wav_path.starts_with(&cache_dir),
-            "wav should be in cache dir"
+            remuxed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&remuxed.stderr)
+        );
+        assert_eq!(
+            ensure_wav(&native, Some(&cache))
+                .await
+                .expect("admit native MPEG container"),
+            native
         );
 
-        // Second call should hit cache
-        let wav_path2 = ensure_wav(&mp4_path, Some(&cache_dir)).await.unwrap();
-        assert_eq!(wav_path, wav_path2, "cache should return same path");
-    }
-
-    #[tokio::test]
-    async fn ensure_wav_converts_m4a() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("cache");
-
-        let m4a_path = dir.path().join("test.m4a");
-        let ffmpeg_out = MediaTool::Ffmpeg
-            .async_command()
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=16000:cl=mono",
-                "-t",
-                "0.1",
-                m4a_path.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await;
-        if ffmpeg_out.is_err() || !ffmpeg_out.unwrap().status.success() {
-            eprintln!("skipping: could not generate test m4a");
-            return;
-        }
-
-        let wav_path = ensure_wav(&m4a_path, Some(&cache_dir)).await.unwrap();
-        assert!(wav_path.extension().is_some_and(|e| e == "wav"));
-        assert!(wav_path.exists());
-    }
-
-    #[tokio::test]
-    async fn ensure_wav_cache_stats_and_clear() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache_dir = dir.path().join("cache");
-
-        // Empty cache
-        let (_, size, count) = cache_stats(Some(&cache_dir));
-        assert_eq!(size, 0);
-        assert_eq!(count, 0);
-
-        // Generate and convert an mp4
-        let mp4_path = dir.path().join("test.mp4");
-        let ffmpeg_out = MediaTool::Ffmpeg
-            .async_command()
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=16000:cl=mono",
-                "-t",
-                "0.1",
-                mp4_path.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await;
-        if ffmpeg_out.is_err() || !ffmpeg_out.unwrap().status.success() {
-            return;
-        }
-
-        let _ = ensure_wav(&mp4_path, Some(&cache_dir)).await.unwrap();
-
-        let (_, size, count) = cache_stats(Some(&cache_dir));
-        assert!(size > 0, "cache should have nonzero size");
-        assert_eq!(count, 1, "cache should have one file");
-
-        // Clear
-        let freed = clear_cache(Some(&cache_dir)).unwrap();
-        assert!(freed > 0);
-        let (_, size, count) = cache_stats(Some(&cache_dir));
-        assert_eq!(size, 0);
-        assert_eq!(count, 0);
+        let (_, size, count) = cache_stats(Some(&cache));
+        assert!(size > 0, "published WAV has bytes");
+        assert_eq!(count, 1, "aliases share one published artifact");
+        assert_eq!(clear_cache(Some(&cache)).expect("clear owned cache"), size);
+        let (_, size, count) = cache_stats(Some(&cache));
+        assert_eq!((size, count), (0, 0));
     }
 }

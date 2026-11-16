@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -49,7 +50,7 @@ if TYPE_CHECKING:
     from batchalign.worker._loads import FaPreparer
 
 
-_QUALIFIED_GRAPH = "98620120cdcf1ab25e1bf3dbe81eb86c319c0176a2f0f82a03816972496294f6"
+_QUALIFIED_GRAPH = "b2699a0c10ffec72da4f3756c25614ec7171be1db0586841085aa89e6eb491ad"
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -144,10 +145,10 @@ class _QwenGeometry(BaseModel):
     def read(cls, native: _NativeQwen) -> _QwenGeometry:
         feature = native.processor.feature_extractor
         encoder = native.model.model.audio_tower
-        # Transformers attaches these native processor defaults at runtime.
-        defaults = native.processor.valid_processor_kwargs._defaults["audio_kwargs"]  # type: ignore[attr-defined]
+        # Native processor defaults are class attributes in Transformers 5.23.
+        defaults: Mapping[str, object] = native.processor.audio_kwargs
         if (
-            defaults["n_window"] != encoder.n_window
+            defaults.get("n_window") != encoder.n_window
             or feature.n_window != encoder.n_window
         ):
             raise FaResourceProjectionError(

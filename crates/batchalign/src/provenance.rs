@@ -446,7 +446,7 @@ impl ProvenanceComment {
     pub fn format(&self) -> String {
         // The writing host's local time with its offset, whole seconds:
         // the form these stamps have always had in the corpora.
-        let timestamp = jiff::Zoned::now()
+        let timestamp = jiff::ZonedDateTime::now()
             .strftime("%Y-%m-%dT%H:%M:%S%:z")
             .to_string();
         StampCodec::write(

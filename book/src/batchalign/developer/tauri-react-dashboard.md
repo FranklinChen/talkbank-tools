@@ -1,7 +1,7 @@
 # Tauri + React Dashboard
 
 **Status:** Current
-**Last updated:** 2026-11-15
+**Last updated:** 2026-11-15 21:03 EST
 
 ## Overview
 
@@ -71,16 +71,116 @@ flowchart TD
     progress -->|"Tauri IPC"| reveal
 ```
 
-## Compiler and API generator compatibility
+## Compiler, generated contracts and build configuration
 
-`openapi-typescript` 7.13.0 declares TypeScript 5.x as its compiler peer.
-The frontend selects TypeScript 5.9.3 within that supported major. Its CLI
-typecheck and OpenAPI generation share the compiler dependency. TypeScript 7's
-package entry point lacks the compiler factory API this generator calls.
+TypeScript 7 checks application code, contract fixtures, Vite configuration,
+Vitest configuration and the decoder generator. `npm run typecheck` checks both
+`tsconfig.json` and `tsconfig.tools.json`. `npm run build` runs those checks
+before bundling. Unsupported plugin options therefore fail at compilation.
 
-Qualify compiler upgrades through API regeneration, generated-source drift
-checking, the dashboard build and managed-server end-to-end checks. These
-exercise the generated types and their consumers across the complete toolchain.
+Vite 8's React plugin uses Oxc for JSX and refresh. React Compiler runs through
+`@rolldown/plugin-babel` with `reactCompilerPreset()` and Babel 8. The preset
+filters files eligible for React compilation. Verify the integration against
+production transformed output, where compiled components import the React
+compiler runtime and access their memoization caches.
+
+`openapi-typesafe` generates `src/generated/api.ts`. The checked decoder script
+compiles the same Rust-produced OpenAPI 3.1 document into Effect schemas in
+`src/generated/decoders.ts`. Both generated artifacts belong to API drift
+checking. The importer refuses unsupported schema constraints. Descriptions,
+titles and examples stay in the OpenAPI document, while the browser carries
+constraints and reference identities. Decoders retain uninspected JSON
+extensions while UI types expose the declared fields.
+
+Regenerate through `scripts/generate_dashboard_api_types.sh` or
+`npm run generate:types`. Exact versions of the release-candidate generator
+and Effect are recorded in package.json and the lockfile. Effect's socket
+module and Vitest adapter have evolving APIs, so upgrades qualify the complete
+transport and test graph together.
+
+```mermaid
+flowchart LR
+    rust["Rust API types"] --> openapi["OpenAPI document"]
+    openapi --> types["openapi-typesafe types"]
+    openapi --> schemas["Effect runtime decoders"]
+    http["HTTP response bytes"] --> schemas
+    schemas --> record["Admitted job and file observations"]
+    record --> progress["ObservedProgress and retained file index"]
+    frame["WebSocket frame and prepared server"] --> envelope["Envelope and payload admission"]
+    schemas --> envelope
+    envelope --> update["DashboardUpdate with server provenance"]
+    update --> cache["Query and Zustand reconciliation"]
+```
+
+## Scoped connections and observation ownership
+
+`ConnectionPlan.prepare` admits server addresses and deduplicates their
+canonical WebSocket URLs. Fleet discovery, server-list publication and socket
+work share one React-owned Effect fiber. Unmount interrupts the discovery
+request, connection acquisition, active reads, heartbeat or retry delay.
+
+Effect's socket reader acquisition waits for an actual open event.
+`OpenedConnection` retains that reader and its scoped writer before permitting
+message handling and heartbeats. An opened connection resets the existing
+one-second retry delay, and failed acquisitions back off to thirty seconds.
+Effect's socket adapter applies its ten-second handshake timeout. Each attempt
+finishes its scope cleanup before the next attempt starts.
+
+```mermaid
+stateDiagram-v2
+    state Active {
+        [*] --> Discovering
+        Discovering --> Prepared: admit and deduplicate addresses
+        Prepared --> Connecting: acquire scoped reader
+        Connecting --> Opened: retain open reader and writer
+        Connecting --> Backoff: acquisition fails
+        Opened --> Backoff: close failed connection scope
+        Backoff --> Connecting: retry delay completes
+    }
+    Active --> Closed: owner interrupts scope
+    Closed --> [*]
+```
+
+A `DashboardUpdate` has a private constructor and carries both decoded payload
+and producing `DashboardServer`. Reconciliation accepts that receipt, so an
+arbitrary message object cannot enter through the checked consumer API. The
+WebSocket envelope is declared beside the decoder, and its nested job, file
+and health payloads use the generated schemas. Malformed frames are diagnosed
+without publishing replacement data. Closed adapters retain Effect's inert
+late-error listener to handle a browser abort event.
+
+Progress HTTP admission checks the declared payload, requested job identity,
+nonnegative completion count and unique filenames. `ObservedProgress` carries
+the completed file index and classified status into the view. Presentation
+reads those facts. One exhaustive classifier gives active and terminal
+statuses distinct payload types, including interrupted and failed-writeback
+outcomes, and is shared by production progress and polling fixtures.
+
+Private constructors and scoped requirements constrain admission and resource
+use. TypeScript permits aliases, so runtime scope finalization enforces cleanup
+when callers interrupt work. React Query owns HTTP caching and request retry
+policy. The connection program owns socket reconnection and heartbeat work.
+
+## Vitest contracts and browser journeys
+
+Run `npm test` in frontend for the retained wire, policy and scoped-effect
+contracts. `@effect/vitest` supplies a fresh scope and test clock. The shared
+socket fixture enters through Effect's production constructor service and
+provides separate connecting, opened and observed-closed peer capabilities.
+Readiness uses a queue, and lifecycle checks advance the test clock.
+`tests/type-contracts.ts` is checked by TypeScript and establishes rejected
+admission constructions without executing runtime tests.
+
+Review each retained test under the typestate rubric before extending it.
+Record Guards, Kind, Not a type, State and Concurrency. Runtime contracts cover
+remote bytes, real effects and semantic choices remaining after type design.
+The old pure Playwright polling module now runs under Vitest, and its redundant
+active-state matrix was removed after sharing the typed classifier.
+
+The shared `make batchalign-dashboard-build` target runs Vitest, static checks
+and the production build for local and hosted consumers. Playwright continues
+to exercise assembled browser journeys and native-adapter doubles. Packaged
+Tauri qualification covers the actual native application and IPC boundary.
 
 ## Web Dashboard Development
 
@@ -349,27 +449,11 @@ string order is time order. Its six callers (two in `src/state.ts`, four in
 display-formatted time, or one with a different offset or precision, would
 type-check and sort wrongly without complaint.
 
-The fix is a branded type, and it cannot be written by hand. openapi-typescript
-(7.13.0) turns the `MachineTime` schema (`type: string`, `format: date-time`)
-into `MachineTime: string`, so every generated field that references
-`components["schemas"]["MachineTime"]` is a plain `string`. A hand-declared
-brand would need a cast at every read, which asserts the invariant instead of
-carrying it.
-
-The change belongs in the generator. The CLI that
-`scripts/generate_dashboard_api_types.sh` runs
-(`npx openapi-typescript openapi.json -o src/generated/api.ts`) has no
-transform option. The library's Node API does: `openapiTS(source, options)`
-accepts `transform: (schemaObject, { path }) => ts.TypeNode | undefined`.
-Replace that one step with a small Node script that calls `openapiTS` with a
-`transform` returning `string & { readonly __brand: "MachineTime" }` for the
-schema at `#/components/schemas/MachineTime` (and `undefined` everywhere
-else), then writes the result with the exported `astToString`. Every field
-that references the schema then carries the brand, and
-`compareTimesNewestFirst(a: MachineTime, b: MachineTime)` refuses any other
-string at compile time. `scripts/check_dashboard_api_drift.sh` reruns the
-generator script, so the drift gate follows the change with no edit of its
-own.
+The generated Effect decoder currently admits this schema as a string. A future
+change should put the exact UTC/precision constraint in the producing schema
+and derive a branded decoder result from that constraint. The comparison API
+can then require that admitted time type. The decoder generator and the static
+OpenAPI generator must carry the same contract into their respective consumers.
 
 ## Dashboard Component Map
 

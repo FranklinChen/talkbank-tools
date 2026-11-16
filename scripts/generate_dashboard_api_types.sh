@@ -14,6 +14,7 @@ fi
 cp "$ROOT/openapi.json" "$ROOT/frontend/openapi.json"
 
 cd "$ROOT/frontend"
-npx openapi-typescript openapi.json -o src/generated/api.ts
+npx --no-install openapi-typesafe openapi.json -o src/generated/api.ts
+npm run generate:decoders
 
 echo "Regenerated dashboard API schema and TypeScript types."

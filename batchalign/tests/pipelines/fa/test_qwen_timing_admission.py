@@ -174,6 +174,15 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
     monkeypatch: pytest.MonkeyPatch,
     native_qwen: QwenFaHost,
 ) -> None:
+    """Guards: Worker capability reports carry the admitted Qwen cache revision.
+    Kind: wire.
+    Not a type: The shared JSON fixture specifies legacy and current wire
+        spellings, while the real loader and registry determine the emitted report.
+    State: A tiny native Qwen model exercises loaded-host admission; a private
+        registry records the lifecycle without downloading model weights.
+    Concurrency: Monkeypatch owns and restores this process's global registry
+        and model resolver. Other pytest workers have separate interpreters.
+    """
     from batchalign.inference import qwen_forced_alignment
     from batchalign.worker._handlers import _reported_engine
     from batchalign.worker._loads import FA_LOAD
