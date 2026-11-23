@@ -10,12 +10,7 @@
 # by this scope and still fail the audit at any depth.
 [advisories]
 unmaintained = "workspace"
-ignore = [
-    # rsa Marvin Attack timing side-channel (RUSTSEC-2023-0071). No patched
-    # release upstream; only ever reachable transitively and not exploitable in
-    # our usage. Kept defensively in case it re-enters the dependency tree.
-    "RUSTSEC-2023-0071",
-]
+ignore = []
 
 [licenses]
 allow = [
