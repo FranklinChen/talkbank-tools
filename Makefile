@@ -267,6 +267,10 @@ _batchalign-test-python:
 	@echo "==> Checking the extension Python will import is current..."
 	bash scripts/check_extension_freshness.sh
 	@$(MAKE) batchalign-stubtest
+	@$(MAKE) batchalign-python-suite
+
+.PHONY: batchalign-python-suite
+batchalign-python-suite:
 	@echo "==> Running imported Batchalign Python tests..."
 	uv run --no-sync python -m pytest $(BATCHALIGN_PYTEST_ARGS)
 

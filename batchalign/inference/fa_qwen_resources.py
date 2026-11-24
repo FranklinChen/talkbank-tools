@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from batchalign.worker._loads import FaPreparer
 
 
-_QUALIFIED_GRAPH = "b2699a0c10ffec72da4f3756c25614ec7171be1db0586841085aa89e6eb491ad"
+_QUALIFIED_GRAPH = "304c26a2bc035927780dd0cf0e485c8a8f50432be5f01d6bcdf69cd0d38d2a27"
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -145,14 +145,15 @@ class _QwenGeometry(BaseModel):
     def read(cls, native: _NativeQwen) -> _QwenGeometry:
         feature = native.processor.feature_extractor
         encoder = native.model.model.audio_tower
-        # Native processor defaults are class attributes in Transformers 5.23.
+        # Transformers 5.24 passes full audio to the feature extractor.
         defaults: Mapping[str, object] = native.processor.audio_kwargs
         if (
-            defaults.get("n_window") != encoder.n_window
+            defaults.get("truncation") is not False
+            or defaults.get("n_window") != encoder.n_window
             or feature.n_window != encoder.n_window
         ):
             raise FaResourceProjectionError(
-                "Qwen processor chunk geometry disagrees with the loaded encoder"
+                "Qwen projection requires untruncated audio and matching processor and encoder chunk geometry"
             )
         geometry = cls(
             sample_rate=feature.sampling_rate,

@@ -1198,6 +1198,11 @@ flowchart TD
     env -- no --> exempt["Exempt area:<br/>listed in EXEMPT, so only CI checks it"]
 ```
 
+The release gate and hosted wheel job both call `make batchalign-python-suite`.
+Locally it runs after the editable extension is built and verified. Hosted CI
+runs it against the packaged wheel. This exercises model-source admission
+against the versions in the lockfile on both platforms.
+
 ### The runner is not the development machine
 
 The Linux runners (`ubuntu-latest`) have about 16 GB of RAM, no model

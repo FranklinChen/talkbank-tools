@@ -18,6 +18,7 @@ make batchalign-dev-workflow-test
 # extension (its tests fail rather than skip without one), exactly as the
 # batchalign-worker-integration CI job builds it.
 make batchalign-develop
+make _batchalign-test-python
 make batchalign-test-worker-integration
 make batchalign-ipc-schema-check
 # Reuse the exact binary whose currency the preceding target established.

@@ -79,10 +79,6 @@ EXEMPT: dict[str, Exemption] = {
     "batchalign-typecheck-python": HookExemption(
         "its prerequisite builds the wheel; the mypy half runs in the gate"
     ),
-    "batchalign-stubtest": HookExemption(
-        "imports the built extension; runs in batchalign-test-python and the "
-        "wheel-installed CI job"
-    ),
     "batchalign-test-python": HookExemption("needs a built wheel"),
     "batchalign-python-prepare": HookExemption("builds the wheel these depend on"),
     "batchalign-build-wheel": RecipeInvariantExemption(
@@ -227,11 +223,6 @@ def is_verifier(command: str) -> bool:
 #: Raw verifier commands a push-triggered workflow may run, by exact text,
 #: each with the reason it is not a make target the gate reaches.
 RAW_VERIFIERS: dict[str, HookExemption] = {
-    "uv run --no-sync python -m pytest batchalign --disable-pytest-warnings "
-    "-k 'not test_whisper_fa_pipeline'": HookExemption(
-        "the Python suite against the CI wheel; locally batchalign-test-python, "
-        "which needs a built wheel"
-    ),
     "uv run --no-sync pytest --cov=batchalign --cov-report=lcov:lcov-python.info "
     "batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'": (
         HookExemption("coverage measurement of the same Python suite")

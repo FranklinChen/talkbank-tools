@@ -179,7 +179,7 @@ def test_model_free_echo_worker_serves_the_launch_it_received(
     launch: EchoLaunch,
 ) -> None:
     """Guards: Python enters the requested serving loop, emits ready and health,
-        and shuts down without importing model stacks.
+        and drains the health reply at EOF without importing model stacks.
     Kind: contract
     Not a type: The independently implemented Python process can import an
         unexpected model or enter the wrong loop despite admitted argv.
@@ -190,7 +190,7 @@ def test_model_free_echo_worker_serves_the_launch_it_received(
     """
     result = subprocess.run(
         [sys.executable, "-c", _ECHO_PROGRAM, *launch.arguments()],
-        input='{"op":"health"}\n{"op":"shutdown"}\n',
+        input='{"op":"health"}\n',
         capture_output=True,
         text=True,
         timeout=60,
@@ -199,9 +199,8 @@ def test_model_free_echo_worker_serves_the_launch_it_received(
     assert result.returncode == 0, result.stderr
     assert "echo startup imported" not in result.stderr
     assert f"serving={launch.serving.value} threads=3" in result.stderr
-    ready, health, shutdown = (json.loads(line) for line in result.stdout.splitlines())
+    ready, health = (json.loads(line) for line in result.stdout.splitlines())
     assert ready["ready"] is True
     assert health["op"] == "health"
     assert health["response"]["status"] == "ok"
     assert health["response"]["command"] == launch.target.label
-    assert shutdown == {"op": "shutdown"}

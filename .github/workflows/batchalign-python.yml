@@ -113,7 +113,7 @@ jobs:
           uv pip install --no-deps dist/*.whl
       - name: Run tests
         run: |
-          uv run --no-sync python -m pytest batchalign --disable-pytest-warnings -k 'not test_whisper_fa_pipeline'
+          make batchalign-python-suite
           make batchalign-dev-workflow-test
 
   smoke-test:
