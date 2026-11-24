@@ -7,11 +7,11 @@
 use crate::cache::UtteranceCache;
 use crate::worker::pool::WorkerPool;
 
-pub(crate) mod morphosyntax;
-pub(crate) mod plan;
-pub(crate) mod post_validate;
-pub(crate) mod text_infer;
-pub(crate) mod transcribe;
+pub mod morphosyntax;
+pub mod plan;
+pub mod post_validate;
+pub mod text_infer;
+pub mod transcribe;
 
 /// Shared services used by pipeline helpers.
 ///
@@ -31,7 +31,7 @@ pub(crate) mod transcribe;
 /// boundaries. Callers that need a parser create one locally via
 /// `TreeSitterParser::new()`.
 #[derive(Clone, Copy)]
-pub(crate) struct PipelineServices<'a> {
+pub struct PipelineServices<'a> {
     /// Worker pool for inference.
     pub pool: &'a WorkerPool,
     /// Shared utterance cache.
@@ -40,7 +40,7 @@ pub(crate) struct PipelineServices<'a> {
 
 impl<'a> PipelineServices<'a> {
     /// Create services.
-    pub fn new(pool: &'a WorkerPool, cache: &'a UtteranceCache) -> Self {
+    pub const fn new(pool: &'a WorkerPool, cache: &'a UtteranceCache) -> Self {
         Self { pool, cache }
     }
 }

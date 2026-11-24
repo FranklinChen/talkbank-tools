@@ -98,6 +98,7 @@ pub fn prepare_monologue_words_with_snapshot(
 
 /// Stages 5-5b for every monologue: long-turn and pause splitting into
 /// chunks, in monologue order.
+#[must_use]
 pub fn chunk_monologues(
     monologues: Vec<MonologueWords>,
     lang: &str,
@@ -220,7 +221,7 @@ impl ClosingMark {
     }
 
     /// The end this mark states.
-    fn into_end(self) -> UtteranceEnd {
+    const fn into_end(self) -> UtteranceEnd {
         match self {
             Self::Terminator(terminator) => UtteranceEnd::Observed(terminator),
             Self::Unwritable(mark) => {

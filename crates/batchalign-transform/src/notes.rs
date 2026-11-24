@@ -45,7 +45,8 @@ pub enum NoteCommand {
 
 impl NoteCommand {
     /// The name the note's text starts with.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Morphotag => "morphotag",
             Self::Align => "align",

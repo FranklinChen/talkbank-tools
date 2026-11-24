@@ -4,7 +4,7 @@
 //! narrow to contain the utterance's words, for example, a 22-word
 //! sentence stamped as a 380 ms span (~58 words per second, impossible
 //! for human speech): the FA pipeline cannot align the words against
-//! the bullet's audio range. Wave2Vec rejects the group with "targets
+//! the bullet's audio range. `Wave2Vec` rejects the group with "targets
 //! length is too long for CTC" because there are far more word labels
 //! than encoder frames, and the Whisper FA fallback path produces
 //! degenerate token-level timings (zero-duration words, words past the
@@ -14,7 +14,7 @@
 //!
 //! This pre-pass detects under-budgeted bullets and expands them into
 //! the trailing inter-utterance gap before the grouping step runs.
-//! Once the audio window is wide enough, Wave2Vec succeeds, the Whisper
+//! Once the audio window is wide enough, `Wave2Vec` succeeds, the Whisper
 //! fallback never fires, and the per-word timings are sane. After FA
 //! finishes, `update_utterance_bullet` will overwrite the rescued
 //! bullet with the FA word span, so the rescue is self-healing as long
@@ -64,7 +64,7 @@ const TIGHT_BULLET_THRESHOLD_MS_PER_WORD: f64 = 250.0;
 
 /// When the tight-bullet trigger fires, expand the bullet so that there
 /// is at least this many milliseconds of audio per word. 350 ms/word is
-/// comfortable for normal-pace English narrative and gives Wave2Vec
+/// comfortable for normal-pace English narrative and gives `Wave2Vec`
 /// enough headroom to align the closing words without collapse, while
 /// staying well short of overrunning the next utterance.
 const TIGHT_BULLET_TARGET_MS_PER_WORD: u64 = 350;
@@ -99,7 +99,7 @@ enum RescueTrigger {
 }
 
 impl RescueTrigger {
-    fn as_decision_tag(self) -> &'static str {
+    const fn as_decision_tag(self) -> &'static str {
         match self {
             Self::Catastrophic => "catastrophic_density",
             Self::Tight => "tight_per_word_budget",
@@ -130,9 +130,10 @@ fn classify_bullet(word_count: usize, start_ms: u64, end_ms: u64) -> Option<Resc
         // float avoids surprise rounding at boundary cases.
         SpeechRate::Plausible(_) => {
             let ms_per_word = duration_ms as f64 / word_count as f64;
-            match ms_per_word < TIGHT_BULLET_THRESHOLD_MS_PER_WORD {
-                true => Some(RescueTrigger::Tight),
-                false => None,
+            if ms_per_word < TIGHT_BULLET_THRESHOLD_MS_PER_WORD {
+                Some(RescueTrigger::Tight)
+            } else {
+                None
             }
         }
     }
@@ -329,7 +330,7 @@ struct RescueObservation {
 /// Word counting uses `super::count_alignable_main_words` so the rescue's
 /// density threshold operates on the same word population FA will receive
 /// downstream. This is one of the four sites listed in `AGENTS.md`'s
-/// "ReplacedWord Extraction/Injection Policy" table that must stay in sync;
+/// "`ReplacedWord` Extraction/Injection Policy" table that must stay in sync;
 /// do not duplicate the counting logic here.
 fn collect_rescue_candidates(
     chat_file: &ChatFile,

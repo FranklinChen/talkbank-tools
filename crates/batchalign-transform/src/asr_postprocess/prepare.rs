@@ -167,11 +167,11 @@ pub(super) fn extract_timed_words(elements: &[AsrElement]) -> Vec<AsrWord> {
     words
 }
 
-/// Strip MOR_PUNCT separators from the boundaries of each word token, and
+/// Strip `MOR_PUNCT` separators from the boundaries of each word token, and
 /// drop words that become empty after stripping.
 ///
-/// ENDING_PUNCT (`.` `?` `!` etc.) is **not** stripped, retokenize needs
-/// them for sentence boundary detection. Only MOR_PUNCT (comma, tag `„`,
+/// `ENDING_PUNCT` (`.` `?` `!` etc.) is **not** stripped, retokenize needs
+/// them for sentence boundary detection. Only `MOR_PUNCT` (comma, tag `„`,
 /// vocative `‡`) and RTL separators (`،` `؛`) are removed.
 ///
 /// Case is preserved: uppercase tokens from the ASR provider (pronoun
@@ -180,12 +180,12 @@ pub(super) fn extract_timed_words(elements: &[AsrElement]) -> Vec<AsrWord> {
 /// case-insensitive comparison (disfluency lookup, retrace detection)
 /// lowercase at comparison time.
 fn strip_separator_words(words: Vec<AsrWord>) -> Vec<AsrWord> {
-    /// MOR_PUNCT separators (comma, tag, vocative) plus the Arabic /
+    /// `MOR_PUNCT` separators (comma, tag, vocative) plus the Arabic /
     /// RTL comma (U+060C) and semicolon (U+061B). Hardcoded as chars
     /// rather than string slices because `trim_matches` takes
     /// `FnMut(char) -> bool`; see [`super::MOR_PUNCT`] for the string-
     /// slice equivalent used elsewhere.
-    fn is_strippable(c: char) -> bool {
+    const fn is_strippable(c: char) -> bool {
         matches!(
             c,
             ',' | talkbank_model::chars::TAG_MARKER
@@ -414,9 +414,10 @@ fn should_split_cantonese_chars(text: &str) -> bool {
 /// Whether `ch` is a CJK unified ideograph (base block, extensions A through
 /// E, and both compatibility blocks).
 ///
-/// The one owner of this range set; FunASR unit admission in batchalign-pyo3
+/// The one owner of this range set; `FunASR` unit admission in batchalign-pyo3
 /// uses it to split display text one Han character per unit.
-pub fn is_cjk_ideograph(ch: char) -> bool {
+#[must_use]
+pub const fn is_cjk_ideograph(ch: char) -> bool {
     matches!(
         ch as u32,
         0x3400..=0x4DBF
@@ -436,7 +437,7 @@ pub fn is_cjk_ideograph(ch: char) -> bool {
 ///
 /// Also the token-boundary test for `ordinal_por`, so an ordinal is only
 /// protected when the tokenizer would really end the token after it.
-pub(super) fn normalized_split_separator(ch: char) -> Option<Option<&'static str>> {
+pub(super) const fn normalized_split_separator(ch: char) -> Option<Option<&'static str>> {
     match ch {
         '.' => Some(Some(".")),
         '?' | '？' | '؟' => Some(Some("?")),

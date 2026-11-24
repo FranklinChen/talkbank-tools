@@ -220,6 +220,7 @@ impl WorkerEngineReports {
     }
 
     /// Whether the worker advertised `task`.
+    #[must_use]
     pub fn supports(&self, task: InferTask) -> bool {
         self.0.contains_key(&task)
     }
@@ -278,7 +279,8 @@ impl FaCacheNamespace {
 
     /// The reported engine name, byte for byte. The cache reads it through
     /// `CacheNamespace`; evidence envelopes and provenance record it.
-    pub fn name(&self) -> &ReportedEngineName {
+    #[must_use]
+    pub const fn name(&self) -> &ReportedEngineName {
         &self.0
     }
 

@@ -2,16 +2,16 @@
 
 mod coref;
 mod kernel;
-pub(crate) mod morphotag;
-pub(crate) mod native_media;
-pub(crate) mod text_io;
+pub mod morphotag;
+pub mod native_media;
+pub mod text_io;
 mod translate;
 mod utseg;
 mod worker_gateway;
 
-pub(crate) use coref::dispatch_coref_job;
-pub(crate) use kernel::dispatch_compare_job;
-pub(crate) use morphotag::dispatch_morphotag_job;
-pub(crate) use translate::dispatch_translate_job;
-pub(crate) use utseg::dispatch_utseg_job;
-pub(crate) use worker_gateway::{MorphotagRuntimeOptions, PooledWorkerGateway};
+pub use coref::dispatch_coref_job;
+pub use kernel::dispatch_compare_job;
+pub use morphotag::dispatch_morphotag_job;
+pub use translate::dispatch_translate_job;
+pub use utseg::dispatch_utseg_job;
+pub use worker_gateway::{MorphotagRuntimeOptions, PooledWorkerGateway};

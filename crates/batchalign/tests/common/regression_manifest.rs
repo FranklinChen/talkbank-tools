@@ -191,7 +191,7 @@ pub struct FixtureSourceMetadata {
     /// (inclusive, matches the `--lines` flag of `trim_chat_audio.py`).
     #[serde(default)]
     pub trimmed_utterance_range: Option<[usize; 2]>,
-    /// Audio offset in ms (audio_start_ms - padding) used at trim time.
+    /// Audio offset in ms (`audio_start_ms` - padding) used at trim time.
     #[serde(default)]
     pub trimmed_audio_offset_ms: Option<u64>,
 }
@@ -205,7 +205,7 @@ pub struct FixtureSourceMetadata {
 pub struct BugDescription {
     /// One-paragraph plain-English summary.
     pub summary: String,
-    /// Stable identifier for the bug class. Free-form snake_case.
+    /// Stable identifier for the bug class. Free-form `snake_case`.
     pub class: String,
     /// 0-based main-tier index of the utterance the bug affects.
     pub affected_main_tier_index: MainTierIndex,
@@ -352,7 +352,7 @@ pub enum FixtureAssertion {
 impl FixtureAssertion {
     /// Index of the main-tier utterance this assertion targets, if it targets
     /// one specific utterance.
-    pub fn main_tier_index(&self) -> Option<MainTierIndex> {
+    pub const fn main_tier_index(&self) -> Option<MainTierIndex> {
         match self {
             Self::NoZeroDurationWorWords { main_tier_index } => Some(*main_tier_index),
             Self::MinWorWordDurationMs {

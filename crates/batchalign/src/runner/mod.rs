@@ -2,7 +2,7 @@
 //!
 //! Each job runs as a `tokio::spawn` task. It acquires a semaphore permit,
 //! then processes files concurrently (bounded by `compute_job_workers`) via
-//! the WorkerPool.
+//! the `WorkerPool`.
 //!
 //! ## Sub-module layout
 //!
@@ -31,7 +31,6 @@ pub(crate) use dispatch::{
 };
 mod execution;
 mod job_scope;
-pub(crate) use job_scope::current_file_span;
 mod policy;
 mod preflight;
 mod routing;

@@ -31,7 +31,7 @@ use crate::transcribe::TranscribeCachePolicies;
 /// A two-pass choice carries its tuning through initial and fallback recovery;
 /// dispatch cannot represent that choice while dropping its configuration.
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ResolvedUtrStrategy {
+pub enum ResolvedUtrStrategy {
     Global,
     TwoPass(crate::chat_ops::fa::TwoPassConfig),
 }
@@ -48,14 +48,14 @@ impl ResolvedUtrStrategy {
 
 /// Extracted parameters for the FA dispatch path.
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) struct FaDispatchParams {
+pub struct FaDispatchParams {
     pub fa_params: FaParams,
     pub utr_engine: Option<UtrEngine>,
     pub utr_strategy: ResolvedUtrStrategy,
 }
 
 /// Extract FA dispatch parameters from selected alignment options.
-pub(crate) fn extract_fa_dispatch_params(
+pub fn extract_fa_dispatch_params(
     align: &AlignOptions,
     cache_policy: CachePolicy,
 ) -> FaDispatchParams {
@@ -91,7 +91,7 @@ pub(crate) fn extract_fa_dispatch_params(
 
 /// Extracted parameters for the transcribe dispatch path.
 #[derive(Debug, PartialEq)]
-pub(crate) struct TranscribeDispatchParams {
+pub struct TranscribeDispatchParams {
     pub auto_speakers: bool,
     pub asr_engine: AsrEngineName,
     pub speaker_engine: Option<crate::options::SpeakerEngineName>,
@@ -101,7 +101,7 @@ pub(crate) struct TranscribeDispatchParams {
     pub merge_abbrev: MergeAbbrevPolicy,
     pub cache_policies: TranscribeCachePolicies,
     /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for utseg when no language-specific TalkBank BERT
+    /// fallback for utseg when no language-specific `TalkBank` BERT
     /// utseg model is configured. Surfaced as
     /// `--utseg-fallback-stanza` on the transcribe / transcribe-s CLI.
     pub utseg_fallback: crate::params::UtsegFallbackPolicy,
@@ -118,7 +118,7 @@ pub(crate) struct TranscribeDispatchParams {
 
 /// Extract parameters from the selected transcription option family.
 ///
-pub(crate) fn extract_transcribe_dispatch_params(
+pub fn extract_transcribe_dispatch_params(
     t: &TranscribeOptions,
     cache_policies: TranscribeCachePolicies,
 ) -> TranscribeDispatchParams {
@@ -142,7 +142,7 @@ pub(crate) fn extract_transcribe_dispatch_params(
 
 /// Extracted parameters for the benchmark dispatch path.
 #[derive(Debug, PartialEq)]
-pub(crate) struct BenchmarkDispatchParams {
+pub struct BenchmarkDispatchParams {
     pub asr_engine: AsrEngineName,
     pub wor_tier: WorTierPolicy,
     pub cache_policy: CachePolicy,
@@ -153,7 +153,7 @@ pub(crate) struct BenchmarkDispatchParams {
 }
 
 /// Extract parameters from selected benchmark options.
-pub(crate) fn extract_benchmark_dispatch_params(
+pub fn extract_benchmark_dispatch_params(
     b: &BenchmarkOptions,
     cache_policy: CachePolicy,
 ) -> BenchmarkDispatchParams {
@@ -171,12 +171,12 @@ pub(crate) fn extract_benchmark_dispatch_params(
 
 /// Extracted parameters for the opensmile dispatch path.
 #[derive(Debug, PartialEq)]
-pub(crate) struct OpensmileDispatchParams {
+pub struct OpensmileDispatchParams {
     pub feature_set: String,
 }
 
 /// Extract parameters from selected openSMILE options.
-pub(crate) fn extract_opensmile_dispatch_params(o: &OpensmileOptions) -> OpensmileDispatchParams {
+pub fn extract_opensmile_dispatch_params(o: &OpensmileOptions) -> OpensmileDispatchParams {
     OpensmileDispatchParams {
         feature_set: o.feature_set.clone(),
     }
@@ -255,7 +255,7 @@ mod tests {
     }
     /// Guards: The requested existing-word and end-overlap choices reach the alignment bundle.
     /// Kind: policy
-    /// Not a type: The selected family cannot establish preservation of the supplied RebuildFromEvidence and default end-overlap values in their distinct runtime policy slots.
+    /// Not a type: The selected family cannot establish preservation of the supplied `RebuildFromEvidence` and default end-overlap values in their distinct runtime policy slots.
     /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
     /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]
@@ -279,9 +279,9 @@ mod tests {
             crate::chat_ops::fa::DEFAULT_END_OVERLAP_POLICY
         );
     }
-    /// Guards: KeepGiven reaches the main-bullet projection policy.
+    /// Guards: `KeepGiven` reaches the main-bullet projection policy.
     /// Kind: policy
-    /// Not a type: The family proof cannot establish that the requested KeepGiven value reaches the main-bullet slot rather than another boundary policy.
+    /// Not a type: The family proof cannot establish that the requested `KeepGiven` value reaches the main-bullet slot rather than another boundary policy.
     /// State: Pure concrete option values exercise policy translation. No database, filesystem, host observation or worker execution is used.
     /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
     #[test]

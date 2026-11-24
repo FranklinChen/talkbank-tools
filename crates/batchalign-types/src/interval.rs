@@ -29,6 +29,7 @@ pub enum IntervalBound {
 
 impl IntervalBound {
     /// The bound's name, for messages.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Start => "start",
@@ -125,6 +126,7 @@ pub enum UntimedCause {
 
 impl UntimedCause {
     /// The cause's wire/log name.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ProviderReportedNoTiming => "provider reported no timing",
@@ -260,7 +262,7 @@ impl AdmittedInterval {
 
     /// Admit a pair of bounds given in (possibly fractional) milliseconds.
     ///
-    /// FunASR's shape: a `[start_ms, end_ms]` pair of JSON numbers, which may
+    /// `FunASR`'s shape: a `[start_ms, end_ms]` pair of JSON numbers, which may
     /// arrive fractional. The rounding happens HERE, with the range check, so
     /// the bridge that reads the pair has no reason to keep a cast of its own.
     /// That cast is exactly what survived at one provider after the others had
@@ -299,22 +301,26 @@ impl AdmittedInterval {
     }
 
     /// The admitted start, in whole milliseconds.
+    #[must_use]
     pub const fn start_ms(self) -> i64 {
         self.start_ms
     }
 
     /// The admitted end, in whole milliseconds.
+    #[must_use]
     pub const fn end_ms(self) -> i64 {
         self.end_ms
     }
 
     /// The admitted start as an unsigned millisecond count: the same value
     /// as [`Self::start_ms`], which admission proved non-negative.
+    #[must_use]
     pub const fn start_millis(self) -> u64 {
         self.start_ms.unsigned_abs()
     }
 
     /// The admitted end as an unsigned millisecond count.
+    #[must_use]
     pub const fn end_millis(self) -> u64 {
         self.end_ms.unsigned_abs()
     }
@@ -349,6 +355,7 @@ impl AdmittedInterval {
     ///
     /// A zero-width interval is a legal admission but locates nothing, so
     /// callers that need a span to point at audio treat it as untimed.
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.start_ms == self.end_ms
     }
@@ -359,6 +366,7 @@ impl AdmittedInterval {
     /// Infallible: both bounds are proven non-negative at admission, so
     /// `unsigned_abs` is the value itself, and every `u64` millisecond count
     /// is a valid position.
+    #[must_use]
     pub fn as_positions(self) -> (AudioPositionSeconds, AudioPositionSeconds) {
         (
             AudioPositionSeconds::from_millis(self.start_millis()),

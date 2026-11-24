@@ -1169,7 +1169,7 @@ async fn multi_file_job_uses_parallel_workers() {
 // Capability gate: real worker (not test-echo)
 // ---------------------------------------------------------------------------
 
-/// Verify that create_test_app succeeds with a real Python worker whose import
+/// Verify that `create_test_app` succeeds with a real Python worker whose import
 /// probes (commands) are broader than its loaded infer tasks. Before the fix,
 /// this would crash with "worker capability gate failed".
 #[tokio::test]

@@ -24,7 +24,7 @@ pub(crate) struct TranscribeCachePolicies {
 }
 
 impl TranscribeCachePolicies {
-    pub(crate) fn uniform(policy: crate::params::CachePolicy) -> Self {
+    pub(crate) const fn uniform(policy: crate::params::CachePolicy) -> Self {
         Self {
             rev_asr: policy,
             speaker: policy,
@@ -116,16 +116,16 @@ pub(crate) enum NonRevAsrBackend {
 pub(crate) enum AsrWorkerMode {
     /// Local Whisper via worker protocol V2 prepared-audio requests.
     LocalWhisperV2,
-    /// HuggingFace Whisper fine-tune via V2 prepared-audio requests.
+    /// `HuggingFace` Whisper fine-tune via V2 prepared-audio requests.
     /// Shares the Local Whisper request wire shape; the only difference
     /// is at worker load time, where the pool key ``whisper_hub`` makes
-    /// the worker load the fine-tune instead of the stock OpenAI model.
+    /// the worker load the fine-tune instead of the stock `OpenAI` model.
     WhisperHubV2,
     /// Tencent ASR via worker protocol V2 provider-media requests.
     HkTencentV2,
     /// Aliyun ASR via worker protocol V2 provider-media requests.
     HkAliyunV2,
-    /// FunAudio ASR via worker protocol V2 provider-media requests.
+    /// `FunAudio` ASR via worker protocol V2 provider-media requests.
     HkFunaudioV2,
     /// Qwen3-ASR via worker protocol V2 provider-media requests.
     HkQwenV2,
@@ -139,7 +139,7 @@ impl AsrWorkerMode {
     /// builder uses. A second copy next to the cache could disagree, and a
     /// namespace derived from a backend the run did not use is precisely the
     /// stale-reuse this pinning exists to prevent.
-    pub(crate) fn as_v2_backend(self) -> AsrBackendV2 {
+    pub(crate) const fn as_v2_backend(self) -> AsrBackendV2 {
         match self {
             Self::LocalWhisperV2 => AsrBackendV2::LocalWhisper,
             Self::WhisperHubV2 => AsrBackendV2::WhisperHub,
@@ -157,7 +157,7 @@ impl AsrWorkerMode {
     /// decode budget at all: a prepared-audio request derives its budget from
     /// the attachment it built, so measuring for it would be a wasted walk of
     /// the file. Exhaustive, so a new mode must say which it is.
-    pub(crate) fn reads_provider_media(self) -> bool {
+    pub(crate) const fn reads_provider_media(self) -> bool {
         match self {
             Self::LocalWhisperV2 | Self::WhisperHubV2 => false,
             Self::HkTencentV2 | Self::HkAliyunV2 | Self::HkFunaudioV2 | Self::HkQwenV2 => true,
@@ -166,7 +166,7 @@ impl AsrWorkerMode {
 
     /// Stable engine name written into transcript provenance, checked as
     /// stamp-safe text at compile time.
-    fn provenance_name(self) -> crate::api::StampSafeText {
+    const fn provenance_name(self) -> crate::api::StampSafeText {
         use crate::api::StampSafeText;
         match self {
             Self::LocalWhisperV2 => const { StampSafeText::from_static("whisper") },
@@ -200,7 +200,7 @@ impl AsrBackend {
     /// That absence is the whole point. The previous string form ended in
     /// `_ => LocalWhisperV2`, which silently mapped the two accepted-but-
     /// unimplemented names (`whisperx`, `whisper_oai`) onto stock local
-    /// Whisper. Nothing in this workspace implements WhisperX or the OpenAI
+    /// Whisper. Nothing in this workspace implements `WhisperX` or the `OpenAI`
     /// Whisper API, so those jobs ran an engine nobody asked for and recorded
     /// "whisper" in provenance. They are now a typed refusal instead.
     pub(crate) fn try_from_engine(
@@ -244,7 +244,7 @@ impl AsrBackend {
             .filter(|engine| Self::try_from_engine(engine).is_ok())
     }
 
-    pub(crate) fn as_non_rev(self) -> Option<NonRevAsrBackend> {
+    pub(crate) const fn as_non_rev(self) -> Option<NonRevAsrBackend> {
         match self {
             Self::RustRevAi => None,
             Self::RustWhisperRs => Some(NonRevAsrBackend::RustWhisperRs),
@@ -253,7 +253,7 @@ impl AsrBackend {
     }
 
     /// Stable engine name written into transcript provenance and warnings.
-    pub(crate) fn provenance_name(self) -> crate::api::StampSafeText {
+    pub(crate) const fn provenance_name(self) -> crate::api::StampSafeText {
         use crate::api::StampSafeText;
         match self {
             Self::RustRevAi => const { StampSafeText::from_static("rev") },
@@ -265,8 +265,8 @@ impl AsrBackend {
     /// The checkpoint this backend reads from its override key, admitted as
     /// stamp-safe text because provenance records it byte for byte.
     ///
-    /// Only FunAudio reads one: `funaudio` spans materially different models
-    /// (SenseVoice by default, Paraformer when selected). The match is
+    /// Only `FunAudio` reads one: `funaudio` spans materially different models
+    /// (`SenseVoice` by default, Paraformer when selected). The match is
     /// exhaustive, so a new worker mode must decide. Called where options are
     /// parsed (submission validation) and where the transcribe plan is
     /// admitted, so a checkpoint provenance could not record is refused before
@@ -328,7 +328,7 @@ pub(crate) struct AsrIdentity {
 
 impl AsrIdentity {
     /// Identity of a replayed legacy projection, which records no checkpoint.
-    pub(crate) fn of_replay(producer: super::replay::LegacyProjectedAsrProducer) -> Self {
+    pub(crate) const fn of_replay(producer: super::replay::LegacyProjectedAsrProducer) -> Self {
         Self {
             engine: producer.provenance_name(),
             model: None,
@@ -349,7 +349,7 @@ impl AsrIdentity {
     }
 
     /// Engine name recorded as `asr=`.
-    pub(crate) fn engine(&self) -> &crate::api::StampSafeText {
+    pub(crate) const fn engine(&self) -> &crate::api::StampSafeText {
         &self.engine
     }
 
@@ -451,13 +451,14 @@ impl SpeakerSeparation {
         diarize: bool,
         engine: Option<crate::types::engines::SpeakerEngineName>,
     ) -> Self {
-        match diarize {
-            true => Self::Dedicated(
+        if diarize {
+            Self::Dedicated(
                 engine
                     .unwrap_or(crate::types::engines::SpeakerEngineName::PyannoteAi)
                     .worker_backend(),
-            ),
-            false => Self::RecognizerOnly,
+            )
+        } else {
+            Self::RecognizerOnly
         }
     }
 }
@@ -537,7 +538,7 @@ impl Recognizer {
         }
     }
 
-    fn backend_separation(backend: AsrBackend) -> RecognizerSeparation {
+    const fn backend_separation(backend: AsrBackend) -> RecognizerSeparation {
         match backend {
             AsrBackend::Worker(mode) if mode.as_v2_backend().separates_speakers() => {
                 RecognizerSeparation::Separates
@@ -662,12 +663,12 @@ impl SpeakerPlan {
     }
 
     /// How many speakers the run expects.
-    pub(crate) fn count(self) -> SpeakerCount {
+    pub(crate) const fn count(self) -> SpeakerCount {
         self.count
     }
 
     /// The dedicated speaker engine, when one runs after recognition.
-    pub(crate) fn dedicated(self) -> Option<SpeakerBackendV2> {
+    pub(crate) const fn dedicated(self) -> Option<SpeakerBackendV2> {
         match self.separation {
             SpeakerSeparation::Dedicated(backend) => Some(backend),
             SpeakerSeparation::RecognizerOnly => None,
@@ -675,7 +676,7 @@ impl SpeakerPlan {
     }
 
     /// What a worker-hosted recognizer is told about speakers.
-    pub(crate) fn recognizer_diarization(self) -> ProviderDiarizationV2 {
+    pub(crate) const fn recognizer_diarization(self) -> ProviderDiarizationV2 {
         self.recognizer_diarization
     }
 }
@@ -692,7 +693,7 @@ pub(crate) enum SingleAsrLanguage {
 
 impl SingleAsrLanguage {
     /// The requested language, when one was requested rather than detected.
-    pub(crate) fn requested(&self) -> Option<&LanguageCode3> {
+    pub(crate) const fn requested(&self) -> Option<&LanguageCode3> {
         match self {
             Self::One(code) => Some(code),
             Self::Detect => None,
@@ -860,7 +861,7 @@ impl TranscribeAsrPlan {
     }
 
     /// What the ASR stage runs.
-    pub(crate) fn inference(&self) -> AsrInference<'_> {
+    pub(crate) const fn inference(&self) -> AsrInference<'_> {
         match &self.0 {
             AsrPlanKind::RevAi { language } => AsrInference::RevAi { language },
             AsrPlanKind::NonRev { backend, language } => AsrInference::NonRev {
@@ -878,7 +879,7 @@ impl TranscribeAsrPlan {
         }
     }
 
-    pub(crate) fn backend(&self) -> AsrBackend {
+    pub(crate) const fn backend(&self) -> AsrBackend {
         match &self.0 {
             AsrPlanKind::RevAi { .. } => AsrBackend::RustRevAi,
             AsrPlanKind::NonRev {
@@ -1009,11 +1010,11 @@ impl<P: TranscribePlan> AdmittedTranscribePlan<P> {
         Ok(Self { asr, segmentation })
     }
 
-    pub(crate) fn asr(&self) -> &P {
+    pub(crate) const fn asr(&self) -> &P {
         &self.asr
     }
 
-    pub(crate) fn with_utseg(&self) -> bool {
+    pub(crate) const fn with_utseg(&self) -> bool {
         !matches!(self.segmentation, SegmentationAdmission::Disabled)
     }
 

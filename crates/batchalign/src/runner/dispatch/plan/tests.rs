@@ -184,9 +184,9 @@ fn transcribe_plan_reads_runtime_flags_and_speaker_override() {
         crate::params::MergeAbbrevPolicy::Merge
     );
 }
-/// Guards: The transcribe_s request retains Rev and the default dedicated Precision-2 speaker backend.
+/// Guards: The `transcribe_s` request retains Rev and the default dedicated Precision-2 speaker backend.
 /// Kind: policy
-/// Not a type: A selected transcription family cannot establish the default speaker backend, segmentation choice and cache policies assigned to the transcribe_s command.
+/// Not a type: A selected transcription family cannot establish the default speaker backend, segmentation choice and cache policies assigned to the `transcribe_s` command.
 /// State: Pure admitted option values and a declared host policy need no database, filesystem or worker execution.
 /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
 #[test]
@@ -243,7 +243,7 @@ fn transcribe_s_plan_defaults_to_pyannote_ai_precision_2() {
 /// run must PROPAGATE the refusal. `.ok()?` used to turn it into `None`,
 /// which routing answered with a `warn!` and a bare return: the job was
 /// dropped with no file failed and no error recorded.
-/// Guards: A WhisperX request exposes its named unimplemented-engine refusal before execution.
+/// Guards: A `WhisperX` request exposes its named unimplemented-engine refusal before execution.
 /// Kind: policy
 /// Not a type: The family proof admits a transcription option shape and cannot establish which recognized engine names have an implementation in this build.
 /// State: Pure admitted option values and a declared host policy need no database, filesystem or worker execution.
@@ -604,9 +604,9 @@ fn benchmark_plan_refuses_anything_but_one_language() {
         ));
     }
 }
-/// Guards: The supplied ComParE feature set reaches openSMILE with the retained host policy.
+/// Guards: The supplied `ComParE` feature set reaches openSMILE with the retained host policy.
 /// Kind: policy
-/// Not a type: Selected media options cannot establish preservation of the ComParE string or the resource plan chosen under an explicit host policy.
+/// Not a type: Selected media options cannot establish preservation of the `ComParE` string or the resource plan chosen under an explicit host policy.
 /// State: Pure admitted option values and a declared host policy need no database, filesystem or worker execution.
 /// Concurrency: Each case owns its request and policy values. There is no shared cache, environment mutation or asynchronous worker task.
 #[test]

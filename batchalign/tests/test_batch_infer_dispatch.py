@@ -222,7 +222,12 @@ class TestCapabilitiesAdvertisement:
     def test_capabilities_uses_injected_revai_key_without_config_read(
         self, monkeypatch
     ) -> None:
-        """ASR capability should come from the injected bootstrap key, not config discovery."""
+        """Guards: An admitted Rev.AI credential advertises ASR without guessing a loaded model.
+        Kind: contract
+        Not a type: The capabilities adapter can attempt an ambient configuration read despite carrying the key.
+        State: An explicit fake key and failing legacy reader with Whisper deliberately absent.
+        Concurrency: The fixture restores worker state and each patched import and config entry point.
+        """
         import batchalign.config as legacy_config
         from batchalign.worker._handlers import _capabilities
         from batchalign.worker._types import WorkerBootstrapRuntime
@@ -246,7 +251,6 @@ class TestCapabilitiesAdvertisement:
             _state.test_echo = False
             _state.ready = False
             _state.bootstrap = WorkerBootstrapRuntime(
-                task=None,
                 lang="eng",
                 num_speakers=1,
                 revai_api_key="from-rust",

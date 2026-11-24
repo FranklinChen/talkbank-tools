@@ -43,7 +43,8 @@ pub enum DecisionModule {
 
 impl DecisionModule {
     /// Stable label for tracing and structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Fa => "fa",
             Self::Utr => "utr",
@@ -363,7 +364,8 @@ pub enum UnusableAnchors {
 
 impl UnusableAnchors {
     /// Stable wire and prose label.
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoReliableAnchors => "no_reliable_anchors",
             Self::AnchorsRefused => "anchors_refused",
@@ -431,7 +433,8 @@ impl std::fmt::Display for RefusedWindow {
 
 impl FaStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::GapFilled => "gap_filled",
             Self::BoundaryAveraged => "boundary_averaged",
@@ -479,7 +482,8 @@ pub enum UtrStrategy {
 
 impl UtrStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::ZeroDurationSkipped => "zero_duration_skipped",
             Self::ProjectionExhausted => "projection_exhausted",
@@ -535,7 +539,8 @@ pub enum MonotonicityStrategy {
 
 impl MonotonicityStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::EndClampedCoverageOnly => "end_clamped_coverage_only",
             Self::EndClampedBoundaryFromWords => "end_clamped_boundary_from_words",
@@ -567,7 +572,8 @@ pub enum MorphosyntaxStrategy {
 
 impl MorphosyntaxStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NotApplicable => "not_applicable",
             Self::MisalignmentBug => "misalignment_bug",
@@ -590,7 +596,8 @@ pub enum UtsegStrategy {
 
 impl UtsegStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NotApplicable => "not_applicable",
             Self::MisalignmentBug => "misalignment_bug",
@@ -601,15 +608,16 @@ impl UtsegStrategy {
 /// Coreference-injection strategies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorefStrategy {
-    /// Worker returned a sentence_idx that doesn't map to a valid line.
+    /// Worker returned a `sentence_idx` that doesn't map to a valid line.
     SentenceIndexOutOfBounds,
-    /// `%xcoref` tier construction failed (NonEmptyString, etc.).
+    /// `%xcoref` tier construction failed (`NonEmptyString`, etc.).
     InjectionFailed,
 }
 
 impl CorefStrategy {
     /// Stable wire/tracing label for structured evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::SentenceIndexOutOfBounds => "sentence_index_out_of_bounds",
             Self::InjectionFailed => "injection_failed",
@@ -640,7 +648,8 @@ pub enum DecisionStrategy {
 
 impl DecisionStrategy {
     /// The pipeline module this strategy belongs to.
-    pub fn module(&self) -> DecisionModule {
+    #[must_use]
+    pub const fn module(&self) -> DecisionModule {
         match self {
             Self::Fa(_) => DecisionModule::Fa,
             Self::Utr(_) => DecisionModule::Utr,
@@ -652,7 +661,8 @@ impl DecisionStrategy {
     }
 
     /// Stable label for structured tracing and persisted decision evidence.
-    pub fn strategy_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn strategy_name(&self) -> &'static str {
         match self {
             Self::Fa(s) => s.as_str(),
             Self::Utr(s) => s.as_str(),
@@ -682,12 +692,14 @@ pub struct LineIdx(usize);
 
 impl LineIdx {
     /// Wraps a 0-based index into `ChatFile.lines`.
-    pub fn new(index: usize) -> Self {
+    #[must_use]
+    pub const fn new(index: usize) -> Self {
         Self(index)
     }
 
     /// The wrapped index.
-    pub fn raw(self) -> usize {
+    #[must_use]
+    pub const fn raw(self) -> usize {
         self.0
     }
 }
@@ -717,6 +729,7 @@ pub struct DecisionRecord {
 
 impl DecisionRecord {
     /// Format a stable human-readable evidence summary.
+    #[must_use]
     pub fn evidence_summary(&self) -> String {
         format!(
             "{}:{} {}",
@@ -761,6 +774,7 @@ impl DecisionRecord {
     /// ```ignore
     /// decisions.push(DecisionRecord::new_and_trace(...));
     /// ```
+    #[must_use]
     pub fn new_and_trace(
         line_idx: usize,
         speaker: String,

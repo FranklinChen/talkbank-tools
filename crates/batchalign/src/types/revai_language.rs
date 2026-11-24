@@ -261,7 +261,7 @@ impl RevLanguage {
     }
 
     /// Detection.
-    pub(crate) fn detect() -> Self {
+    pub(crate) const fn detect() -> Self {
         Self(RevLanguageKind::Detect)
     }
 
@@ -273,7 +273,7 @@ impl RevLanguage {
     }
 
     /// The `language` value submitted to Rev.AI.
-    pub(crate) fn provider_code(&self) -> &'static str {
+    pub(crate) const fn provider_code(&self) -> &'static str {
         match &self.0 {
             RevLanguageKind::One { supported, .. } => supported.0.rev_code,
             RevLanguageKind::Detect => "auto",
@@ -286,7 +286,7 @@ impl RevLanguage {
     /// The multilingual model takes neither: the live API refuses both
     /// `speakers_count` and `skip_postprocessing` for `en/es` with HTTP 400,
     /// measured on 2026-09-16.
-    pub(crate) fn options(&self) -> RevOptionSupport {
+    pub(crate) const fn options(&self) -> RevOptionSupport {
         match &self.0 {
             RevLanguageKind::One { supported, .. } => supported.0.options,
             RevLanguageKind::Detect | RevLanguageKind::EnglishSpanish(_) => {
@@ -341,12 +341,13 @@ impl RevLanguage {
             | (RevLanguageKind::EnglishSpanish(_), TranscriptLanguage::One(_))
             | (RevLanguageKind::Detect, TranscriptLanguage::Pair(_)) => false,
         };
-        match consistent {
-            true => Ok(()),
-            false => Err(InconsistentResolution {
+        if consistent {
+            Ok(())
+        } else {
+            Err(InconsistentResolution {
                 requested: self.request(),
                 stored: stored.clone(),
-            }),
+            })
         }
     }
 }

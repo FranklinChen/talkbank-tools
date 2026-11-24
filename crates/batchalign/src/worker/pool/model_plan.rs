@@ -94,7 +94,7 @@ pub struct GpuModelPlan {
 /// model, pyannoteAI (a hosted API) builds nothing. A request on the route
 /// must ask for exactly this model ([`RouteEngines::named_by`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlannedSpeaker {
+pub enum PlannedSpeaker {
     /// Speaker diarization on this backend.
     Diarization(SpeakerBackendV2),
     /// Speaker embedding on this model (`speaker-identify`).
@@ -145,7 +145,7 @@ impl PlannedWorkerAsr {
         }
     }
 
-    fn engine(&self) -> AsrEngineName {
+    const fn engine(&self) -> AsrEngineName {
         asr_backend_engine(self.mode.as_v2_backend())
     }
 }
@@ -214,6 +214,7 @@ impl GpuModelPlan {
     /// stock Whisper ASR with no extras. Production plans come only from
     /// family dispatch plans.
     #[doc(hidden)]
+    #[must_use]
     pub fn local_whisper_for_test() -> Self {
         Self::transcription(
             Some(AsrBackend::Worker(AsrWorkerMode::LocalWhisperV2)),
@@ -298,7 +299,7 @@ pub enum GpuTask {
 }
 
 impl GpuTask {
-    fn infer_task(self) -> InferTask {
+    const fn infer_task(self) -> InferTask {
         match self {
             Self::Asr => InferTask::Asr,
             Self::Fa | Self::FaFallback => InferTask::Fa,
@@ -309,7 +310,7 @@ impl GpuTask {
     /// The primary GPU task an infer task is, or `None` for a task another
     /// profile serves. A test holds this to `WorkerProfile::for_task`, the
     /// owner of which tasks the GPU profile hosts.
-    pub(crate) fn of(task: InferTask) -> Option<Self> {
+    pub(crate) const fn of(task: InferTask) -> Option<Self> {
         match task {
             InferTask::Asr => Some(Self::Asr),
             InferTask::Fa => Some(Self::Fa),
@@ -381,14 +382,14 @@ impl RouteEngines {
 ///
 /// Minted only by [`super::WorkerPool::gpu_route`].
 #[derive(Debug, Clone)]
-pub(crate) struct GpuRoute {
+pub struct GpuRoute {
     key: WorkerKey,
     task: GpuTask,
     expected: RouteEngines,
 }
 
 impl GpuRoute {
-    pub(super) fn key(&self) -> &WorkerKey {
+    pub(super) const fn key(&self) -> &WorkerKey {
         &self.key
     }
     /// The worker that serves `task` of `plan` in `language` under `mode`.

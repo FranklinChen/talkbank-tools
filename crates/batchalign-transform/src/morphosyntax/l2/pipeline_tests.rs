@@ -32,7 +32,7 @@ use crate::morphosyntax::{
 
 /// Parse fixture rows (`ID FORM LEMMA UPOS FEATS HEAD DEPREL`) into a
 /// sentence. Rows are whitespace-separated; `_` marks an absent value.
-pub(crate) fn ud_sentence(rows: &str) -> UdSentence {
+pub fn ud_sentence(rows: &str) -> UdSentence {
     let words = rows
         .lines()
         .map(str::trim)

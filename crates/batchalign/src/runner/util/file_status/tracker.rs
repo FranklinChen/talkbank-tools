@@ -16,7 +16,7 @@ use super::{FileStage, RunnerEventSink};
 /// Progress fields are never persisted to SQLite; they are purely for
 /// live display in the CLI/TUI/React dashboard. The one free helper left:
 /// progress carries no time, so a caller holding the sink cannot misdate it.
-pub(crate) async fn set_file_progress(
+pub async fn set_file_progress(
     sink: &dyn RunnerEventSink,
     filename: &str,
     stage: FileStage,
@@ -42,7 +42,7 @@ pub(crate) async fn set_file_progress(
 /// loops that could fall out of their last attempt into one are a typestate
 /// now (`FileAttempts`), whose every exit records the file's state.
 #[derive(Debug)]
-pub(crate) enum FileTaskOutcome {
+pub enum FileTaskOutcome {
     /// The task itself recorded success or terminal failure for the file; the
     /// token is the proof, made only by the call that recorded it.
     TerminalStateRecorded(TerminalRecorded),
@@ -62,13 +62,13 @@ pub(crate) enum FileTaskOutcome {
 /// exactly that mistake. Batch paths that record many files and report no
 /// per-file outcome simply drop it: there, recording is the whole effect.
 #[derive(Debug)]
-pub(crate) struct TerminalRecorded(());
+pub struct TerminalRecorded(());
 
 impl TerminalRecorded {
     /// A token for a supervision test whose task records nothing: the test is
     /// of the supervisor, not of recording.
     #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
+    pub(crate) const fn for_tests() -> Self {
         Self(())
     }
 }
@@ -95,7 +95,7 @@ impl From<TerminalRecorded> for FileTaskOutcome {
 /// - move between human-readable stages
 /// - restart the attempt after retryable failures
 /// - finish as success, retry, or terminal error
-pub(crate) struct FileRunTracker<'a> {
+pub struct FileRunTracker<'a> {
     sink: &'a dyn RunnerEventSink,
     filename: &'a str,
 }
@@ -313,7 +313,7 @@ impl<'a> FileRunTracker<'a> {
 
 /// A progress update from an orchestrator to the dispatch layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProgressUpdate {
+pub struct ProgressUpdate {
     /// Typed lifecycle/progress label.
     pub label: FileStage,
     /// Current progress counter (optional).
@@ -324,7 +324,7 @@ pub(crate) struct ProgressUpdate {
 
 impl ProgressUpdate {
     /// Construct a typed progress update for the shared file-status channel.
-    pub(crate) fn new(label: FileStage, current: Option<i64>, total: Option<i64>) -> Self {
+    pub(crate) const fn new(label: FileStage, current: Option<i64>, total: Option<i64>) -> Self {
         Self {
             label,
             current,
@@ -334,4 +334,4 @@ impl ProgressUpdate {
 }
 
 /// Sender half for progress updates. Orchestrators hold this.
-pub(crate) type ProgressSender = tokio::sync::mpsc::UnboundedSender<ProgressUpdate>;
+pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<ProgressUpdate>;

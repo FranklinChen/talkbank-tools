@@ -1,14 +1,14 @@
 //! Rust helpers for Hong Kong ASR provider projection.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "9. HK/Cantonese ASR Bridges" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "9. HK/Cantonese ASR Bridges" for:
 //! - Python callers: `batchalign/inference/languages/cantonese/`, `batchalign/worker/_asr_v2.py`
-//! - Design: Projects provider-specific output into common MonologueAsrResultV2 shapes.
+//! - Design: Projects provider-specific output into common `MonologueAsrResultV2` shapes.
 //!
 //! The HK/Tencent/FunAudio Python adapters must still talk to Python-only SDKs
 //! and model objects, but the shared result shaping should live in Rust. This
 //! module owns:
 //!
-//! - FunASR entry points (segment admission lives in the
+//! - `FunASR` entry points (segment admission lives in the
 //!   [`funasr_projection`] child module, which builds these private shapes)
 //! - Tencent result-detail projection into monologues and timed words
 //! - Aliyun sentence-result projection and its per-character fallback
@@ -20,7 +20,7 @@
 //! # What this module deliberately does NOT do
 //!
 //! It does not normalize Cantonese. Until 2026-09-16 it did, per token for
-//! Tencent and Aliyun and per joined segment for FunASR, which made
+//! Tencent and Aliyun and per joined segment for `FunASR`, which made
 //! normalization depend on which engine ran (Qwen and Whisper never reached
 //! this module) and put a second owner on a transformation that is not
 //! idempotent. Surfaces now leave here exactly as the provider wrote them, and
@@ -84,7 +84,7 @@ enum ProviderSpeakerAttribution {
         label: String,
     },
     /// The provider named no speaker. Either it does not separate speakers at
-    /// all (Aliyun, FunASR), or it sent no `SpeakerId` for this segment.
+    /// all (Aliyun, `FunASR`), or it sent no `SpeakerId` for this segment.
     Undiarized,
 }
 
@@ -131,7 +131,7 @@ struct HkAsrElement {
 
 impl HkAsrElement {
     /// Build one text element from an admitted timing.
-    fn text(value: String, timing: WordTiming) -> Self {
+    const fn text(value: String, timing: WordTiming) -> Self {
         Self {
             interval: timing.interval(),
             value,
@@ -504,15 +504,12 @@ fn extract_tencent_segments(
     Ok(segments)
 }
 
-/// Project raw FunASR output into monologues and timed words.
+/// Project raw `FunASR` output into monologues and timed words.
 ///
 /// Python passes the model output after only shallow parsing; Rust admits each
 /// segment in [`funasr_projection`] and projects it into the shared shape.
 #[pyfunction]
-pub(crate) fn funaudio_segments_to_asr(
-    py: Python<'_>,
-    segments: &Bound<'_, PyAny>,
-) -> PyResult<String> {
+pub fn funaudio_segments_to_asr(py: Python<'_>, segments: &Bound<'_, PyAny>) -> PyResult<String> {
     let value = py_to_json_value(segments)?;
 
     py.detach(move || {
@@ -547,7 +544,7 @@ pub(crate) fn funaudio_segments_to_asr(
 /// Python keeps only the transport/SDK responsibilities. Rust owns the field
 /// admission, the timing math, and projection into the shared worker shape.
 #[pyfunction]
-pub(crate) fn tencent_result_detail_to_asr(
+pub fn tencent_result_detail_to_asr(
     py: Python<'_>,
     result_detail: &Bound<'_, PyAny>,
 ) -> PyResult<String> {
@@ -566,7 +563,7 @@ pub(crate) fn tencent_result_detail_to_asr(
 /// payload parsing. Rust owns the sentence fallback tokenization plus the
 /// shared monologue/timed-word projection shape.
 #[pyfunction]
-pub(crate) fn aliyun_sentences_to_asr(
+pub fn aliyun_sentences_to_asr(
     py: Python<'_>,
     sentences: &Bound<'_, PyAny>,
     lang: &str,

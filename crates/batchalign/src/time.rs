@@ -110,16 +110,19 @@ impl FileMs {
     /// this space and need no transition. Points DERIVED from an engine report
     /// must come through
     /// [`crate::chat_ops::fa::coordinates::FaWindow::to_file`] instead.
+    #[must_use]
     pub const fn new(ms: u64) -> Self {
         Self(ms)
     }
 
     /// The underlying millisecond count, for serialization into a bullet.
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
 
     /// How far this point lies after `earlier`, saturating at zero.
+    #[must_use]
     pub const fn since(self, earlier: Self) -> Ms {
         Ms(self.0.saturating_sub(earlier.0))
     }
@@ -144,6 +147,7 @@ pub struct WindowMs(u64);
 impl WindowMs {
     /// A time as reported by an alignment engine, relative to the window it was
     /// given.
+    #[must_use]
     pub const fn reported(ms: u64) -> Self {
         Self(ms)
     }

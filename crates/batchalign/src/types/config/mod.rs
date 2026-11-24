@@ -1,8 +1,8 @@
 //! Server configuration: mirrors `batchalign/serve/config.py`.
 //!
 //! Deserializes from the runtime-owned `server.yaml` under the resolved state
-//! directory using yaml_serde.
-//! No OmegaConf interpolation needed, plain YAML is sufficient.
+//! directory using `yaml_serde`.
+//! No `OmegaConf` interpolation needed, plain YAML is sufficient.
 //!
 //! # Sub-modules
 //!

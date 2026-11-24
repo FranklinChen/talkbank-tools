@@ -108,10 +108,11 @@ pub(crate) enum PeerLocality {
 
 impl PeerLocality {
     /// The locality of a connection's peer.
-    pub(crate) fn of(peer: std::net::SocketAddr) -> Self {
-        match peer.ip().to_canonical().is_loopback() {
-            true => Self::Loopback,
-            false => Self::Remote,
+    pub(crate) const fn of(peer: std::net::SocketAddr) -> Self {
+        if peer.ip().to_canonical().is_loopback() {
+            Self::Loopback
+        } else {
+            Self::Remote
         }
     }
 }
@@ -241,6 +242,7 @@ impl OwnServer {
     }
 
     /// The base URL of this server, from its own record.
+    #[must_use]
     pub fn url(&self) -> String {
         format!("http://{}", self.address)
     }
@@ -248,6 +250,7 @@ impl OwnServer {
     /// Whether `url` is a loopback URL for this server's port: a URL the
     /// user typed that names this account's own server. Requests are then
     /// sent to [`Self::url`], never to the typed host.
+    #[must_use]
     pub fn is_named_by(&self, url: &str) -> bool {
         let Ok(parsed) = reqwest::Url::parse(url) else {
             return false;
@@ -264,6 +267,7 @@ impl OwnServer {
 
     /// The [`HEADER`] value for one request, with a nonce this server
     /// issued.
+    #[must_use]
     pub fn sign(&self, nonce: &str, request: &RequestBinding<'_>) -> String {
         format!(
             "{nonce}.{}",

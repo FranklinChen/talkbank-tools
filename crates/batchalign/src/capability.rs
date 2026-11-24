@@ -47,7 +47,7 @@ use crate::worker::InferTask;
 ///
 /// Read from any admitted report, loaded or not, because support does not
 /// depend on a model having been loaded.
-pub(crate) fn command_supported(
+pub fn command_supported(
     plan: &CapabilityPlan,
     reports: &WorkerEngineReports,
 ) -> Result<(), EngineIdentityUnavailable> {
@@ -106,7 +106,7 @@ fn derive_command_capabilities(reports: &WorkerEngineReports) -> Vec<ReleasedCom
 /// in a command list that disagrees with the tasks, and there is exactly one
 /// copy for the server's state, the direct host and `/health` to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkerCapabilitySnapshot {
+pub struct WorkerCapabilitySnapshot {
     commands: Vec<ReleasedCommand>,
     infer_tasks: Vec<InferTask>,
 }

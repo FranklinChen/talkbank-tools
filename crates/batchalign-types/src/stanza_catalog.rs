@@ -55,6 +55,7 @@ impl StanzaProcessor {
     ];
 
     /// The name the worker reports and Stanza's own processor name.
+    #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Tokenize => "tokenize",
@@ -100,6 +101,7 @@ impl StanzaRequirement {
     ];
 
     /// The processors a catalog entry must ship.
+    #[must_use]
     pub const fn processors(self) -> &'static [StanzaProcessor] {
         match self {
             Self::Morphosyntax => &[
@@ -118,6 +120,7 @@ impl StanzaRequirement {
     }
 
     /// The name the worker reads the set under.
+    #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Morphosyntax => "morphosyntax",
@@ -127,6 +130,7 @@ impl StanzaRequirement {
     }
 
     /// What the requirement serves, for a refusal message.
+    #[must_use]
     pub const fn purpose(self) -> &'static str {
         match self {
             Self::Morphosyntax => "morphology",
@@ -136,6 +140,7 @@ impl StanzaRequirement {
     }
 
     /// The processors, comma-separated, for a refusal message.
+    #[must_use]
     pub fn processor_list(self) -> String {
         self.processors()
             .iter()
@@ -179,6 +184,7 @@ impl From<StanzaReportReason> for String {
 
 impl StanzaReportReason {
     /// The statement.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

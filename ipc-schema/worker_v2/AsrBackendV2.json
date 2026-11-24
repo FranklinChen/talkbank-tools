@@ -9,7 +9,7 @@
       "const": "local_whisper"
     },
     {
-      "description": "HuggingFace Whisper community fine-tune, resolved per-language.\nThe same worker-side ``WhisperASRHandle`` hosts the model; this\nenum variant exists so the control-plane pool key and the worker\nbootstrap can select the fine-tune loader over the stock loader.",
+      "description": "`HuggingFace` Whisper community fine-tune, resolved per-language.\nThe same worker-side ``WhisperASRHandle`` hosts the model; this\nenum variant exists so the control-plane pool key and the worker\nbootstrap can select the fine-tune loader over the stock loader.",
       "type": "string",
       "const": "whisper_hub"
     },
@@ -24,7 +24,7 @@
       "const": "hk_aliyun"
     },
     {
-      "description": "FunASR Cantonese provider.",
+      "description": "`FunASR` Cantonese provider.",
       "type": "string",
       "const": "hk_funaudio"
     },

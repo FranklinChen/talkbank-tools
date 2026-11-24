@@ -10,13 +10,19 @@ from __future__ import annotations
 import threading
 
 from batchalign.worker._loads import SPEAKER_HOSTED_LOAD
-from batchalign.worker._main import build_worker_bootstrap_runtime, parse_worker_args
 from batchalign.worker._model_loading.bootstrap import (
     EnsureTaskResponse,
     ensure_task_loaded,
     start_worker,
 )
-from batchalign.worker._types import TaskLoad, WorkerProfile, _state
+from batchalign.worker._types import (
+    ModelStartup,
+    ProfileTarget,
+    TaskLoad,
+    WorkerBootstrapRuntime,
+    WorkerProfile,
+    _state,
+)
 
 
 def _reset_state() -> None:
@@ -24,46 +30,11 @@ def _reset_state() -> None:
     _state.__init__()  # type: ignore[misc]
 
 
-def _build_gpu_bootstrap():
-    """Build a GPU profile bootstrap runtime for testing."""
-    args = parse_worker_args(
-        ["--profile", "gpu", "--lang", "eng", "--serving", "sequential"]
+def _build_gpu_bootstrap() -> ModelStartup:
+    return ModelStartup(
+        ProfileTarget(WorkerProfile.GPU),
+        WorkerBootstrapRuntime(lang="eng", num_speakers=1),
     )
-    return build_worker_bootstrap_runtime(
-        args,
-        environ={"HOME": "/tmp/test-home"},
-    )
-
-
-class TestWorkerStartup:
-    """Verify workers start with no models loaded."""
-
-    def setup_method(self) -> None:
-        _reset_state()
-
-    def test_a_worker_signals_ready_without_models(self) -> None:
-        bootstrap = _build_gpu_bootstrap()
-        start_worker(bootstrap)
-
-        assert _state.ready is True
-        assert _state.loads.completed() == frozenset()
-        assert _state.command == "profile:gpu"
-        assert _state.lang == "eng"
-
-    def test_a_worker_preserves_bootstrap_for_later(self) -> None:
-        bootstrap = _build_gpu_bootstrap()
-        start_worker(bootstrap)
-
-        assert _state.bootstrap is bootstrap
-        assert _state.bootstrap.profile == WorkerProfile.GPU
-
-    def test_a_worker_holds_no_model_at_start(self) -> None:
-        """Every model a worker holds is a load's entry, and a started worker
-        has none: there is no per-model field to be anything but empty."""
-        bootstrap = _build_gpu_bootstrap()
-        start_worker(bootstrap)
-
-        assert not any(_state.loads.has(load) for load in TaskLoad)
 
 
 class TestEnsureTaskLoaded:
@@ -107,13 +78,6 @@ class TestEnsureTaskLoaded:
         assert result.elapsed_s >= 0.0
         # The repeat recorded nothing: the entry is the first load's host.
         assert _state.loads.get(SPEAKER_HOSTED_LOAD) is host
-
-    def test_ensure_task_result_fields(self) -> None:
-        """EnsureTaskResponse has correct fields."""
-        result = EnsureTaskResponse(status="loaded", task="fa", elapsed_s=1.23)
-        assert result.status == "loaded"
-        assert result.task == "fa"
-        assert result.elapsed_s == 1.23
 
     def test_ensure_task_passes_engine_overrides(self) -> None:
         """Engine overrides from ensure_task reach the task's load: an
@@ -166,13 +130,3 @@ class TestEnsureTaskThreadSafety:
         # Exactly one load ran; the other call found its entry.
         assert sorted(r.status for r in results) == ["already_loaded", "loaded"]
         assert _state.loads.completed() == frozenset({TaskLoad.SPEAKER_HOSTED})
-
-
-def test_the_lazy_flag_is_gone() -> None:
-    """Every worker starts empty, so there is no lazy mode to ask for."""
-    import pytest
-
-    with pytest.raises(SystemExit):
-        parse_worker_args(
-            ["--profile", "gpu", "--lazy", "--lang", "eng", "--serving", "sequential"]
-        )

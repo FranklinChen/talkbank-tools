@@ -1,6 +1,6 @@
 //! Rust-owned worker-protocol V2 ASR executor control plane.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "2. ASR Execution V2" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "2. ASR Execution V2" for:
 //! - Python caller: `batchalign/worker/_asr_v2.py::execute_asr_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
@@ -380,7 +380,7 @@ fn run_asr(
 /// built (`LoadedLocalAsr` or `LoadedProviderAsr` on the Python side): its
 /// `backend`, `runner` and `model_identity` are read from it.
 #[pyfunction]
-pub(crate) fn execute_asr_request_v2(
+pub fn execute_asr_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     loaded: &Bound<'_, PyAny>,

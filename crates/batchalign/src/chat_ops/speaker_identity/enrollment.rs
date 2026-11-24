@@ -177,13 +177,13 @@ impl EnrollmentSpec {
 
     /// The enrolled voice's name.
     #[must_use]
-    pub fn label(&self) -> &EnrolledLabel {
+    pub const fn label(&self) -> &EnrolledLabel {
         &self.label
     }
 
     /// The stretch of recording it was enrolled from.
     #[must_use]
-    pub fn window(&self) -> MediaWindow {
+    pub const fn window(&self) -> MediaWindow {
         self.window
     }
 

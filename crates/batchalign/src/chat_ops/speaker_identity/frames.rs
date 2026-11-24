@@ -113,7 +113,7 @@ pub enum NotAPreparedDecode {
 impl PreparedPcm {
     /// Describe one prepared decode, refusing a rate or length that indexes
     /// nothing.
-    pub fn new(sample_rate_hz: u32, frame_count: u64) -> Result<Self, NotAPreparedDecode> {
+    pub const fn new(sample_rate_hz: u32, frame_count: u64) -> Result<Self, NotAPreparedDecode> {
         if sample_rate_hz == 0 {
             return Err(NotAPreparedDecode::ZeroSampleRate);
         }

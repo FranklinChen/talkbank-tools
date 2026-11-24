@@ -1,6 +1,6 @@
-//! OpenAPI schema generation for the Rust control-plane server.
+//! `OpenAPI` schema generation for the Rust control-plane server.
 //!
-//! Provides [`utoipa`]-based OpenAPI 3.0 schema definitions for all REST
+//! Provides [`utoipa`]-based `OpenAPI` 3.0 schema definitions for all REST
 //! endpoints. The schema is built from route `#[utoipa::path]` annotations
 //! across the `routes` module and shared response types defined here.
 //!
@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use utoipa::OpenApi;
 
-/// Standard error response body, matching FastAPI's `HTTPException` format.
+/// Standard error response body, matching `FastAPI`'s `HTTPException` format.
 ///
 /// All non-2xx responses from the server use this shape so that clients
 /// can parse errors uniformly. The one exception is
@@ -85,7 +85,7 @@ pub struct StatusMessageResponse {
         (name = "media", description = "Media bank and file discovery endpoints"),
     )
 )]
-/// Utoipa-generated OpenAPI 3.0 document for the batchalign3 server API.
+/// Utoipa-generated `OpenAPI` 3.0 document for the batchalign3 server API.
 pub struct ApiDoc;
 
 fn canonicalize_json(value: &mut Value) {
@@ -107,14 +107,14 @@ fn canonicalize_json(value: &mut Value) {
     }
 }
 
-/// Render the OpenAPI schema as pretty JSON.
+/// Render the `OpenAPI` schema as pretty JSON.
 pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     let mut value = serde_json::to_value(ApiDoc::openapi())?;
     canonicalize_json(&mut value);
     serde_json::to_string_pretty(&value)
 }
 
-/// Write the OpenAPI schema to a path, creating parent directories as needed.
+/// Write the `OpenAPI` schema to a path, creating parent directories as needed.
 pub fn write_openapi_json(path: &Path) -> std::io::Result<()> {
     let json = openapi_json_pretty().map_err(std::io::Error::other)?;
     if let Some(parent) = path.parent() {
@@ -123,7 +123,7 @@ pub fn write_openapi_json(path: &Path) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
-/// Check whether a path contains the current canonical OpenAPI schema.
+/// Check whether a path contains the current canonical `OpenAPI` schema.
 pub fn check_openapi_json(path: &Path) -> std::io::Result<()> {
     let generated = openapi_json_pretty().map_err(std::io::Error::other)?;
     let existing = std::fs::read_to_string(path).map_err(|err| {

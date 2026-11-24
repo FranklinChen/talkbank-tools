@@ -26,7 +26,7 @@ pub fn router() -> Router<Arc<AppState>> {
 /// Retrieve all algorithm traces for a completed job.
 ///
 /// Returns 200 with `JobTraces` if traces are available, 204 if the job
-/// exists but no traces were collected (debug_traces was off or job hasn't
+/// exists but no traces were collected (`debug_traces` was off or job hasn't
 /// completed), or 404 if the job is unknown.
 async fn get_job_traces(
     State(state): State<Arc<AppState>>,

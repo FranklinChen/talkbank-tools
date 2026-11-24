@@ -108,6 +108,7 @@ pub trait SelectableEngine: EngineBackend + Sized {
     /// Provided, because with a complete table there is one answer. Three
     /// hand-written bodies preceded this, two of which did the same two lookups
     /// in opposite orders.
+    #[must_use]
     fn resolve_variant(name: &str) -> Option<Self> {
         Self::accepted_names()
             .iter()
@@ -272,7 +273,7 @@ pub struct UnknownEngineName {
 /// recognizes. This one parses, round-trips through the wire format, appears
 /// in `--help`, and has no runtime behind it: `whisperx` and `whisper_oai`
 /// are the standing cases, since nothing in this workspace implements either
-/// WhisperX or the OpenAI Whisper API.
+/// `WhisperX` or the `OpenAI` Whisper API.
 ///
 /// It exists because backend selection used to end in a catch-all arm that
 /// mapped every unhandled name to stock local Whisper, so a job asking for
@@ -377,14 +378,9 @@ impl UtrEngine {
     /// caller wanting to store the name (an `EngineId` on a per-word provenance
     /// value) had to allocate a `String` to escape a borrow that never needed to
     /// exist.
+    #[must_use]
     pub fn as_wire_name(&self) -> &'static str {
         self.wire_name()
-    }
-
-    /// Whether the current engine can reuse the worker-side segment strategy
-    /// for partial-window UTR.
-    pub fn supports_partial_windows(&self) -> bool {
-        !self.is_rust_owned()
     }
 
     /// The canonical selection name, readable in `const` context so
@@ -445,11 +441,11 @@ impl<'de> Deserialize<'de> for UtrEngine {
 /// row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FaEngineName {
-    /// MMS Wave2Vec forced alignment.
+    /// MMS `Wave2Vec` forced alignment.
     Wave2Vec,
     /// Whisper token-timestamp forced alignment.
     Whisper,
-    /// Wav2Vec Cantonese forced alignment (HK).
+    /// `Wav2Vec` Cantonese forced alignment (HK).
     Wav2vecCanto,
     /// Qwen3 forced alignment: the standalone form of the aligner the
     /// Qwen3-ASR engine already loads for its own word timestamps
@@ -492,6 +488,7 @@ pub enum LanguageSupport {
 
 impl LanguageSupport {
     /// Whether one ISO-639-3 code is covered.
+    #[must_use]
     pub fn covers(self, code: &str) -> bool {
         match self {
             Self::Any => true,
@@ -506,6 +503,7 @@ impl LanguageSupport {
     ///
     /// `const` so the fallback-target check below can run at compile time
     /// rather than as a test nobody would write.
+    #[must_use]
     pub const fn is_language_general(self) -> bool {
         matches!(self, Self::Any)
     }
@@ -543,6 +541,7 @@ pub enum FaFallbackPolicy {
 
 impl FaFallbackPolicy {
     /// The engine a failed group retries on, when the policy retries at all.
+    #[must_use]
     pub const fn retry_target(self) -> Option<FaEngineName> {
         match self {
             Self::RetryGroupOn(target) => Some(target),
@@ -560,11 +559,13 @@ pub struct FaAggregationTarget(std::num::NonZeroU64);
 impl FaAggregationTarget {
     /// A positive preference for joining neighbouring utterances, never a
     /// loaded-model constraint or permission to refuse one utterance.
+    #[must_use]
     pub const fn from_milliseconds(milliseconds: std::num::NonZeroU64) -> Self {
         Self(milliseconds)
     }
 
     /// The preference's duration, in milliseconds.
+    #[must_use]
     pub const fn milliseconds(self) -> u64 {
         self.0.get()
     }
@@ -676,7 +677,7 @@ pub struct FaEngineSpec {
 /// additionally need optional tokenizer packages, so neither list guesses.
 const FA_QWEN3_LANGUAGES: &[&str] = &["yue", "zho", "cmn", "eng"];
 
-/// The MMS Wave2Vec aligner.
+/// The MMS `Wave2Vec` aligner.
 const WAVE2VEC_FA_SPEC: FaEngineSpec = FaEngineSpec {
     engine: FaEngineName::Wave2Vec,
     wire_name: "wav2vec_fa",
@@ -712,7 +713,7 @@ const WHISPER_FA_SPEC: FaEngineSpec = FaEngineSpec {
     worker_backend: FaBackendV2::Whisper,
 };
 
-/// The Cantonese Wave2Vec aligner.
+/// The Cantonese `Wave2Vec` aligner.
 const WAV2VEC_CANTO_FA_SPEC: FaEngineSpec = FaEngineSpec {
     engine: FaEngineName::Wav2vecCanto,
     wire_name: "cantonese_fa",
@@ -1048,6 +1049,7 @@ impl FaEngineName {
     /// route. The forward direction is [`FaEngineSpec::worker_backend`]; the
     /// two are pinned as a bijection by
     /// `fa_engine_and_worker_backend_are_a_bijection`.
+    #[must_use]
     pub const fn from_worker_backend(backend: FaBackendV2) -> Self {
         match backend {
             FaBackendV2::Whisper => Self::Whisper,
@@ -1058,27 +1060,32 @@ impl FaEngineName {
     }
 
     /// What this engine reports about a word's extent.
-    pub fn timing_resolution(&self) -> FaTimingResolution {
+    #[must_use]
+    pub const fn timing_resolution(&self) -> FaTimingResolution {
         self.spec().timing_resolution
     }
 
     /// Preference for joining utterances, independent of request feasibility.
-    pub fn aggregation_target(&self) -> FaAggregationTarget {
+    #[must_use]
+    pub const fn aggregation_target(&self) -> FaAggregationTarget {
         self.spec().aggregation_target
     }
 
     /// Which languages this engine can be asked for.
-    pub fn language_support(&self) -> LanguageSupport {
+    #[must_use]
+    pub const fn language_support(&self) -> LanguageSupport {
         self.spec().language_support
     }
 
     /// What happens to a group this engine failed on.
-    pub fn fallback_policy(&self) -> FaFallbackPolicy {
+    #[must_use]
+    pub const fn fallback_policy(&self) -> FaFallbackPolicy {
         self.spec().fallback
     }
 
     /// The backend token this engine travels to the worker as.
-    pub fn worker_backend(&self) -> FaBackendV2 {
+    #[must_use]
+    pub const fn worker_backend(&self) -> FaBackendV2 {
         self.spec().worker_backend
     }
 }
@@ -1133,7 +1140,8 @@ impl FaEngineName {
     /// function exists any more, and the party that has to agree is
     /// `resolve_fa_engine` in
     /// `batchalign/worker/_model_loading/forced_alignment.py`.
-    pub fn dispatch_override_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn dispatch_override_name(&self) -> &'static str {
         self.spec().dispatch_override_name
     }
 
@@ -1154,6 +1162,7 @@ impl FaEngineName {
     /// caller wanting to store the name (an `EngineId` on a per-word provenance
     /// value) had to allocate a `String` to escape a borrow that never needed to
     /// exist.
+    #[must_use]
     pub fn as_wire_name(&self) -> &'static str {
         self.wire_name()
     }
@@ -1164,7 +1173,8 @@ impl FaEngineName {
     /// reservation (``tier.gpu_startup_mb``: 6 GB Small / 3 GB Medium /
     /// 16 GB Large+Fleet). See
     /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
-    pub fn resident_memory_mb(&self) -> u64 {
+    #[must_use]
+    pub const fn resident_memory_mb(&self) -> u64 {
         self.spec().resident_memory_mb
     }
 }
@@ -1242,14 +1252,14 @@ pub enum AsrEngineName {
     RevAi,
     /// Local Whisper worker backend.
     Whisper,
-    /// HuggingFace Whisper fine-tune backend. Loads community fine-tunes
-    /// by model_id (resolved per-language, with an explicit override in
+    /// `HuggingFace` Whisper fine-tune backend. Loads community fine-tunes
+    /// by `model_id` (resolved per-language, with an explicit override in
     /// ``engine_overrides.model_id``). See
     /// ``book/src/batchalign/reference/whisper-hub-asr.md``.
     WhisperHub,
-    /// WhisperX worker backend.
+    /// `WhisperX` worker backend.
     WhisperX,
-    /// OpenAI Whisper API backend.
+    /// `OpenAI` Whisper API backend.
     WhisperOai,
     /// Rust-native Whisper backend (whisper.cpp via whisper-rs), run
     /// in-process instead of through the Python worker. Rust-owned; the
@@ -1262,7 +1272,7 @@ pub enum AsrEngineName {
     HkTencent,
     /// Aliyun ASR (HK/Cantonese).
     HkAliyun,
-    /// FunAudio ASR (HK/Cantonese).
+    /// `FunAudio` ASR (HK/Cantonese).
     HkFunaudio,
     /// Qwen3-ASR (Alibaba, HK/Cantonese). Local model loaded via the
     /// ``qwen-asr`` Python package. Open-weight Cantonese-capable ASR;
@@ -1298,6 +1308,7 @@ impl AsrEngineName {
     /// rather than restating its spelling: `DEFAULT_ASR_SELECTION_NAME` was
     /// the literal `"rev"` written beside `AsrEngineName::RevAi`, and nothing
     /// tied the two together.
+    #[must_use]
     pub const fn wire_name_const(&self) -> &'static str {
         match self {
             Self::RevAi => "rev",
@@ -1353,7 +1364,8 @@ impl AsrEngineName {
     ///
     /// `execute_v2` reaches this through `EngineSelection` rather than keeping
     /// its own copy, so there is no second table to keep in step.
-    pub fn dispatch_override_name(&self) -> Option<&'static str> {
+    #[must_use]
+    pub const fn dispatch_override_name(&self) -> Option<&'static str> {
         match self {
             Self::Whisper => Some("whisper"),
             Self::WhisperHub => Some("whisper_hub"),
@@ -1384,6 +1396,7 @@ impl AsrEngineName {
     /// caller wanting to store the name (an `EngineId` on a per-word provenance
     /// value) had to allocate a `String` to escape a borrow that never needed to
     /// exist.
+    #[must_use]
     pub fn as_wire_name(&self) -> &'static str {
         self.wire_name()
     }
@@ -1394,7 +1407,8 @@ impl AsrEngineName {
     /// GPU-profile reservation (``tier.gpu_startup_mb``: 6 GB Small /
     /// 3 GB Medium / 16 GB Large+Fleet). See
     /// [`super::super::worker::pool::memory_gate::engine_aware_startup_reservation_mb`].
-    pub fn resident_memory_mb(&self) -> u64 {
+    #[must_use]
+    pub const fn resident_memory_mb(&self) -> u64 {
         match self {
             // Whisper-large-v3 (and its WhisperHub fine-tunes): ~3 GB
             // model + tokenizer + Python runtime. WhisperX is included
@@ -1430,7 +1444,8 @@ impl AsrEngineName {
     }
 
     /// Whether this engine is the Rust-owned Rev.AI path.
-    pub fn is_revai(&self) -> bool {
+    #[must_use]
+    pub const fn is_revai(&self) -> bool {
         matches!(self, Self::RevAi)
     }
 }
@@ -1468,7 +1483,7 @@ pub enum TranslateEngineName {
     /// outbound reachability to ``translate.google.com``, unsuitable
     /// behind the Great Firewall without a VPN.
     Google,
-    /// Local Meta SeamlessM4T model, loaded from HuggingFace and run
+    /// Local Meta `SeamlessM4T` model, loaded from `HuggingFace` and run
     /// in-process in the Python worker. No outbound network at
     /// inference time. Retained for back-compat with BA2 callers;
     /// short-CJK quality is poor, prefer ``Nllb`` or ``Tencent`` for
@@ -1526,6 +1541,7 @@ impl TranslateEngineName {
     ///
     /// The two are pinned as a bijection by
     /// `translate_engine_and_worker_backend_are_a_bijection`.
+    #[must_use]
     pub const fn worker_backend(&self) -> TranslateBackendV2 {
         match self {
             Self::Google => TranslateBackendV2::Google,
@@ -1537,6 +1553,7 @@ impl TranslateEngineName {
     }
 
     /// The engine a V2 translate request selected.
+    #[must_use]
     pub const fn from_worker_backend(backend: TranslateBackendV2) -> Self {
         match backend {
             TranslateBackendV2::Google => Self::Google,
@@ -1552,6 +1569,7 @@ impl TranslateEngineName {
     /// Identical to ``wire_name``: translate has no legacy alias
     /// divergence between dispatch and wire today. Provided for
     /// shape-parity with ``AsrEngineName`` and ``FaEngineName``.
+    #[must_use]
     pub fn dispatch_override_name(&self) -> &'static str {
         // Identical to the wire name, which its previous doc admitted; a third
         // copy of one five-string table is three places to mistype it.
@@ -1575,6 +1593,7 @@ impl TranslateEngineName {
     /// caller wanting to store the name (an `EngineId` on a per-word provenance
     /// value) had to allocate a `String` to escape a borrow that never needed to
     /// exist.
+    #[must_use]
     pub fn as_wire_name(&self) -> &'static str {
         self.wire_name()
     }
@@ -1590,7 +1609,8 @@ impl TranslateEngineName {
     /// safety mechanism. Unrelated to a model's *on-disk* size, which the
     /// Python progress events report as measured download growth
     /// (``batchalign/worker/_download_liveness.py``).
-    pub fn resident_memory_mb(&self) -> u64 {
+    #[must_use]
+    pub const fn resident_memory_mb(&self) -> u64 {
         match self {
             // googletrans + Tencent TMT + Aliyun MT are all thin
             // HTTP-client engines with no local model loaded, same
@@ -1606,8 +1626,8 @@ impl TranslateEngineName {
 
 /// Resident memory estimate for any worker that runs a thin HTTP-client
 /// engine with no local model loaded, googletrans for translate, and
-/// the cloud ASR engines (Rev.AI, WhisperOai, HkTencent, HkAliyun,
-/// HkFunaudio). Baseline Python + worker scaffolding only.
+/// the cloud ASR engines (Rev.AI, `WhisperOai`, `HkTencent`, `HkAliyun`,
+/// `HkFunaudio`). Baseline Python + worker scaffolding only.
 pub(crate) const HTTP_CLIENT_BASELINE_RSS_MB: u64 = 200;
 
 /// Resident memory estimate for a worker running the local
@@ -1625,7 +1645,7 @@ pub(crate) const NLLB_200_DISTILLED_1_3B_RSS_MB: u64 = 5_500;
 /// weights + tokenizer + Python runtime + margin.
 pub(crate) const WHISPER_LARGE_V3_RSS_MB: u64 = 3_500;
 
-/// Resident memory estimate for a worker running an MMS / Wave2Vec
+/// Resident memory estimate for a worker running an MMS / `Wave2Vec`
 /// forced-alignment model (including the Cantonese variant): ~1.2 GB
 /// torchaudio weights + runtime margin.
 pub(crate) const WAVE2VEC_FA_RSS_MB: u64 = 1_800;
@@ -1669,7 +1689,7 @@ impl SpeakerEngineName {
     /// The worker-protocol backend this engine runs as. The one lowering, so
     /// the standalone `diarize` plan and the transcribe speaker plan cannot
     /// name different backends for one engine.
-    pub(crate) fn worker_backend(self) -> crate::types::worker_v2::SpeakerBackendV2 {
+    pub(crate) const fn worker_backend(self) -> crate::types::worker_v2::SpeakerBackendV2 {
         use crate::types::worker_v2::SpeakerBackendV2;
         match self {
             Self::PyannoteAi => SpeakerBackendV2::PyannoteAi,
@@ -1800,6 +1820,7 @@ pub struct EngineOverrides {
 
 impl EngineOverrides {
     /// Return `true` when no overrides are set.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.utr.is_none()
             && self.asr.is_none()
@@ -1816,6 +1837,7 @@ impl EngineOverrides {
     /// [`Self::to_dispatch_json_string`] instead.
     ///
     /// Returns empty string when no overrides are set.
+    #[must_use]
     pub fn to_json_string(&self) -> String {
         if self.is_empty() {
             String::new()
@@ -1828,18 +1850,19 @@ impl EngineOverrides {
     /// Python engine loaders accept (`dispatch_override_name()`), NOT the
     /// persistence wire names (`wire_name()`).
     ///
-    /// The two schemes differ for every FA engine ("wav2vec_fa" /
-    /// "whisper_fa" / "cantonese_fa" persisted vs "wave2vec" /
-    /// "whisper" / "wav2vec_canto" dispatched). Sending a persistence
+    /// The two schemes differ for every FA engine ("`wav2vec_fa`" /
+    /// "`whisper_fa`" / "`cantonese_fa`" persisted vs "wave2vec" /
+    /// "whisper" / "`wav2vec_canto`" dispatched). Sending a persistence
     /// name kills the worker at bootstrap: `resolve_fa_engine` raises
     /// before the ready signal, which failed four consecutive align
     /// jobs on a fleet host on 2026-06-11.
     ///
-    /// Cloud-only ASR engines with no local worker (Rev.AI, WhisperX,
-    /// WhisperOai) have no dispatch name and are omitted. Extras
+    /// Cloud-only ASR engines with no local worker (Rev.AI, `WhisperX`,
+    /// `WhisperOai`) have no dispatch name and are omitted. Extras
     /// round-trip verbatim, exactly as in [`Self::to_json_string`]
     /// (the 2026-05-27 `qwen_model` lesson).
     ///
+    #[must_use]
     pub fn dispatch_overrides(&self) -> std::collections::BTreeMap<String, String> {
         let mut map = std::collections::BTreeMap::new();
         if let Some(ref asr) = self.asr
@@ -1875,6 +1898,7 @@ impl EngineOverrides {
     /// boundary.
     ///
     /// Returns an empty string when no overrides are set.
+    #[must_use]
     pub fn to_dispatch_json_string(&self) -> String {
         let map = self.dispatch_overrides();
         if map.is_empty() {
@@ -2366,26 +2390,26 @@ mod tests {
 
 /// The name a user reaches for when they want Mandarin/Cantonese Paraformer.
 ///
-/// Not an [`AsrEngineName`] variant: Paraformer is the FunAudio engine loading
+/// Not an [`AsrEngineName`] variant: Paraformer is the `FunAudio` engine loading
 /// a particular checkpoint, so promoting it to its own backend would duplicate
 /// the funaudio dispatch path for no gain. It is a selection name instead.
 pub const PARAFORMER_SELECTION_NAME: &str = "paraformer";
 
-/// The FunASR checkpoint that makes FunAudio behave as Paraformer.
+/// The `FunASR` checkpoint that makes `FunAudio` behave as Paraformer.
 ///
-/// This is the checkpoint the FunASR ecosystem publishes under the Paraformer
+/// This is the checkpoint the `FunASR` ecosystem publishes under the Paraformer
 /// name for Chinese, so `--asr-engine paraformer` and a hand-written
 /// `funaudio_model=paraformer-zh` load exactly the same model.
 pub const PARAFORMER_CHECKPOINT: &str = "paraformer-zh";
 
-/// The override key FunAudio reads its checkpoint from.
+/// The override key `FunAudio` reads its checkpoint from.
 pub const FUNAUDIO_MODEL_OVERRIDE_KEY: &str = "funaudio_model";
 
 /// A selection that implies nothing beyond its engine.
 const NO_IMPLIED_OVERRIDES: &[(&str, &str)] = &[];
 
-/// What selecting `paraformer` implies: the FunASR checkpoint that makes the
-/// FunAudio engine behave as Paraformer.
+/// What selecting `paraformer` implies: the `FunASR` checkpoint that makes the
+/// `FunAudio` engine behave as Paraformer.
 const PARAFORMER_IMPLIED_OVERRIDES: &[(&str, &str)] =
     &[(FUNAUDIO_MODEL_OVERRIDE_KEY, PARAFORMER_CHECKPOINT)];
 
@@ -2407,7 +2431,8 @@ impl AsrSelection {
     /// `parse("whisperx")` and friends, which meant a wire-name change would
     /// have turned four working flags into silent no-ops with nothing to catch
     /// it; taking the variant makes that a compile error instead.
-    pub fn from_engine(engine: AsrEngineName) -> Self {
+    #[must_use]
+    pub const fn from_engine(engine: AsrEngineName) -> Self {
         Self {
             engine,
             implied_overrides: NO_IMPLIED_OVERRIDES,
@@ -2436,13 +2461,15 @@ impl AsrSelection {
     }
 
     /// The backend this selection runs on.
+    #[must_use]
     pub fn engine(&self) -> AsrEngineName {
         self.engine.clone()
     }
 
     /// Overrides the NAME implies, which an explicit `--engine-overrides` wins
     /// over: the user's typed JSON is more specific than the name's default.
-    pub fn implied_overrides(&self) -> &'static [(&'static str, &'static str)] {
+    #[must_use]
+    pub const fn implied_overrides(&self) -> &'static [(&'static str, &'static str)] {
         self.implied_overrides
     }
 
@@ -2633,7 +2660,7 @@ mod selectable_engine_tests {
         assert_category_is_coherent::<SpeakerEngineName>();
     }
 
-    /// `nemo` was a speaker engine with no installable runtime (no NeMo
+    /// `nemo` was a speaker engine with no installable runtime (no `NeMo`
     /// package was ever a dependency) and has been removed. A stored job or
     /// override map that still names it must fail to load with the named
     /// unknown-engine error, never resolve to one of the remaining engines,

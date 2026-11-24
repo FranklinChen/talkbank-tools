@@ -397,32 +397,38 @@ impl TcpWorkerHandle {
     }
 
     /// The PID of the worker process (from registry).
-    pub fn pid(&self) -> WorkerPid {
+    #[must_use]
+    pub const fn pid(&self) -> WorkerPid {
         self.info.pid
     }
 
     /// The profile label this worker handles.
-    pub fn profile_label(&self) -> &'static str {
+    #[must_use]
+    pub const fn profile_label(&self) -> &'static str {
         self.info.profile.label()
     }
 
     /// The language this worker handles.
+    #[must_use]
     pub fn lang(&self) -> &str {
         self.info.lang.as_worker_arg()
     }
 
     /// The transport this worker uses.
-    pub fn transport(&self) -> &'static str {
+    #[must_use]
+    pub const fn transport(&self) -> &'static str {
         "tcp"
     }
 
     /// Duration since the last request was dispatched.
+    #[must_use]
     pub fn idle_duration(&self) -> Duration {
         self.last_activity.elapsed()
     }
 
     /// The TCP connection info.
-    pub fn info(&self) -> &TcpWorkerInfo {
+    #[must_use]
+    pub const fn info(&self) -> &TcpWorkerInfo {
         &self.info
     }
 }

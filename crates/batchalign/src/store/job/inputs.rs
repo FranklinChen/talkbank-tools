@@ -15,23 +15,22 @@ pub enum InputKind {
 
 impl InputKind {
     /// Whether it is a transcript: the database's `has_chat` column.
-    pub(crate) fn is_chat(self) -> bool {
+    pub(crate) const fn is_chat(self) -> bool {
         matches!(self, Self::Chat)
     }
 
     /// The kind the database's `has_chat` column records.
-    pub(crate) fn from_is_chat(chat: bool) -> Self {
-        match chat {
-            true => Self::Chat,
-            false => Self::Media,
-        }
+    pub(crate) const fn from_is_chat(chat: bool) -> Self {
+        if chat { Self::Chat } else { Self::Media }
     }
 
     /// The kind of a submitted source, by its name.
+    #[must_use]
     pub fn of_source_name(name: &str) -> Self {
-        match crate::types::request::is_chat_source_name(name) {
-            true => Self::Chat,
-            false => Self::Media,
+        if crate::types::request::is_chat_source_name(name) {
+            Self::Chat
+        } else {
+            Self::Media
         }
     }
 }
@@ -189,6 +188,7 @@ pub enum JobInputs {
 
 impl JobInputs {
     /// How many files the job has.
+    #[must_use]
     pub fn len(&self) -> usize {
         match self {
             Self::Paths { files, .. } => files.len(),
@@ -197,6 +197,7 @@ impl JobInputs {
     }
 
     /// Whether the job has no files.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -233,6 +234,7 @@ impl JobInputs {
     /// Where a job-level output named `name` (one file for the whole job,
     /// such as a consolidated `compare.csv`) is written: beside the first
     /// file's admitted output in paths mode, else in the staged output.
+    #[must_use]
     pub fn job_level_output(&self, staging_dir: &ServerPath, name: &str) -> std::path::PathBuf {
         match self {
             Self::Paths { files, .. } => match &files[..] {
@@ -272,6 +274,7 @@ pub struct RecordedInputs {
 
 impl RecordedInputs {
     /// The files, in file order.
+    #[must_use]
     pub fn files(&self) -> &[RecordedPathsInput] {
         &self.files
     }
@@ -324,7 +327,7 @@ pub enum StoredInputs {
 
 impl StoredInputs {
     /// The inputs borrowed as stored.
-    pub(crate) fn as_ref(&self) -> StoredInputsRef<'_> {
+    pub(crate) const fn as_ref(&self) -> StoredInputsRef<'_> {
         match self {
             Self::Admitted(inputs) => StoredInputsRef::Admitted(inputs),
             Self::Recorded(recorded) => StoredInputsRef::Recorded(recorded),
@@ -349,7 +352,7 @@ impl<'a> StoredInputsRef<'a> {
     }
 
     /// The inputs a runner may use, when this process admitted them.
-    pub(crate) fn admitted(self) -> Option<&'a JobInputs> {
+    pub(crate) const fn admitted(self) -> Option<&'a JobInputs> {
         match self {
             Self::Admitted(inputs) => Some(inputs),
             Self::Recorded(_) => None,
@@ -453,9 +456,10 @@ fn before_column<'a>(befores: impl Iterator<Item = Option<&'a ClientPath>>) -> V
     let befores: Vec<Option<String>> = befores
         .map(|before| before.map(|path| path.as_str().to_owned()))
         .collect();
-    match befores.iter().any(Option::is_some) {
-        true => befores,
-        false => Vec::new(),
+    if befores.iter().any(Option::is_some) {
+        befores
+    } else {
+        Vec::new()
     }
 }
 
@@ -491,17 +495,14 @@ impl InputColumns {
             before_paths,
         } = self;
         let lengths_agree = has_chat.len() == filenames.len()
-            && match paths_mode {
-                true => {
-                    source_paths.len() == filenames.len()
-                        && output_paths.len() == filenames.len()
-                        && (before_paths.is_empty() || before_paths.len() == filenames.len())
-                }
+            && if paths_mode {
+                source_paths.len() == filenames.len()
+                    && output_paths.len() == filenames.len()
+                    && (before_paths.is_empty() || before_paths.len() == filenames.len())
+            } else {
                 // A content-mode job names no server path: a row that does
                 // is refused, never read with its paths silently dropped.
-                false => {
-                    source_paths.is_empty() && output_paths.is_empty() && before_paths.is_empty()
-                }
+                source_paths.is_empty() && output_paths.is_empty() && before_paths.is_empty()
             };
         if !lengths_agree {
             return Err(InputColumnsRefusal {
@@ -516,8 +517,8 @@ impl InputColumns {
             .into_iter()
             .zip(has_chat)
             .map(|(name, chat)| (DisplayPath::from(name), InputKind::from_is_chat(chat)));
-        Ok(match paths_mode {
-            true => StoredInputs::Recorded(RecordedInputs {
+        Ok(if paths_mode {
+            StoredInputs::Recorded(RecordedInputs {
                 files: named
                     .zip(source_paths.into_iter().zip(output_paths))
                     // An empty column is no file with a prior.
@@ -538,12 +539,13 @@ impl InputColumns {
                     )
                     .collect(),
                 source_dir,
-            }),
-            false => StoredInputs::Admitted(JobInputs::Content(
+            })
+        } else {
+            StoredInputs::Admitted(JobInputs::Content(
                 named
                     .map(|(display, kind)| ContentInput { display, kind })
                     .collect(),
-            )),
+            ))
         })
     }
 }

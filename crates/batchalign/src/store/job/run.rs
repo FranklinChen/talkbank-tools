@@ -17,7 +17,7 @@ impl RunGeneration {
     pub(in crate::store) const FIRST: Self = Self(0);
 
     /// The next generation (used by restart).
-    pub(crate) fn next(self) -> Self {
+    pub(crate) const fn next(self) -> Self {
         Self(self.0 + 1)
     }
 }
@@ -44,7 +44,7 @@ pub(in crate::store) struct RunBinding {
 
 impl RunBinding {
     /// The job this run belongs to.
-    pub(crate) fn job_id(&self) -> &JobId {
+    pub(crate) const fn job_id(&self) -> &JobId {
         &self.job_id
     }
 
@@ -57,7 +57,7 @@ impl RunBinding {
 
     /// The binding of a test job's first run, which has no claim to bind to.
     #[cfg(test)]
-    pub(crate) fn first_run_of(job_id: JobId) -> Self {
+    pub(crate) const fn first_run_of(job_id: JobId) -> Self {
         Self {
             job_id,
             generation: RunGeneration::FIRST,
@@ -133,12 +133,12 @@ impl RunnerClaim {
     }
 
     /// Immutable dispatch input bound to the claimed generation.
-    pub(crate) fn snapshot(&self) -> &std::sync::Arc<RunnerJobSnapshot> {
+    pub(crate) const fn snapshot(&self) -> &std::sync::Arc<RunnerJobSnapshot> {
         &self.snapshot
     }
 
     /// The identity every write of this run carries.
-    pub(crate) fn binding(&self) -> &RunBinding {
+    pub(crate) const fn binding(&self) -> &RunBinding {
         &self.run
     }
 }

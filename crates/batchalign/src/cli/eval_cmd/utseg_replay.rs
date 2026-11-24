@@ -142,7 +142,7 @@ pub struct UtsegReproductionDifference {
 
 impl UtsegReproductionDifference {
     /// Record one difference between two compared documents.
-    pub(crate) fn new(
+    pub(crate) const fn new(
         recomputed_lines: usize,
         retained_lines: usize,
         first_difference: FirstDifference,
@@ -806,7 +806,7 @@ impl BoundPredictions {
     }
 
     /// How many requests were bound.
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.0.len()
     }
 }
@@ -1063,6 +1063,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Guards: Replay applies distinct admission rules to segmentation input and rebuilt output.
+    /// Kind: transcript
+    /// Not a type: A retained CHAT can have a timing or header defect allowed on only one side.
+    /// State: Two malformed CHAT bodies enter real replay gates.
+    /// Concurrency: All source observations stay in memory.
     #[test]
     fn replay_distinguishes_partition_input_from_generated_header_failure() {
         let partition = crate::utseg::UtsegDocumentRefusal::from(
@@ -1085,6 +1090,11 @@ mod tests {
     const INPUT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
 @ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\thello there how are you .\n@End\n";
 
+    /// Guards: Parser faults from artifact or reconstruction report a runtime exit with origin and diagnostic.
+    /// Kind: contract
+    /// Not a type: A parser can report internal codes at either severity and must retain the origin.
+    /// State: Synthetic findings and a real parsed fixture exercise the conversion to CLI errors.
+    /// Concurrency: Every control owns its own diagnostics.
     #[test]
     fn internal_parser_failure_on_either_replay_side_is_a_runtime_error() {
         let artifact = ReplayArtifact {
@@ -1124,10 +1134,7 @@ mod tests {
                 assert!(error.to_string().contains("parser carrier mismatch"));
             }
         }
-    }
 
-    #[test]
-    fn internal_rebuild_parser_failure_is_not_an_artifact_error() {
         for severity in [
             talkbank_model::Severity::Error,
             talkbank_model::Severity::Warning,
@@ -1213,6 +1220,11 @@ mod tests {
         (dir, report)
     }
 
+    /// Guards: Replay reproduces a saved split transcript with exact source and output counts.
+    /// Kind: journey
+    /// Not a type: Input and retained output artifacts can disagree despite well-formed versioned evidence.
+    /// State: A private directory holds a generated split and matching evidence.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn reapplied_evidence_reproduces_the_document_the_run_wrote() {
         let split = vec![0, 0, 1, 1, 1];
@@ -1242,6 +1254,11 @@ mod tests {
         );
     }
 
+    /// Guards: A different segmentation decision produces a rendered mismatch report.
+    /// Kind: journey
+    /// Not a type: Two valid assignment arrays can describe a different split of the same transcript.
+    /// State: A saved split output and conflicting evidence enter the actual replay command.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn different_boundaries_are_reported_as_a_difference_not_a_failure() {
         let retained = retained_output(vec![0, 0, 1, 1, 1]);
@@ -1260,6 +1277,11 @@ mod tests {
         );
     }
 
+    /// Guards: Replay refuses an older schema and names the unsupported version.
+    /// Kind: wire
+    /// Not a type: External evidence can contain a well-formed but unsupported version envelope.
+    /// State: A current serialized fixture is deliberately encoded as version two.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn evidence_from_an_older_schema_is_refused_by_name() {
         let retained = retained_output(vec![0, 0, 1, 1, 1]);
@@ -1283,6 +1305,11 @@ mod tests {
         );
     }
 
+    /// Guards: Replay refuses a prediction that cannot bind to the ordered request words.
+    /// Kind: wire
+    /// Not a type: Real arrays can disagree in cardinality despite valid individual values and serialization.
+    /// State: A versioned artifact with an incompatible assignment count and retained CHAT.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn evidence_whose_prediction_does_not_fit_its_request_is_refused_by_position() {
         let retained = retained_output(vec![0, 0, 1, 1, 1]);
@@ -1298,6 +1325,11 @@ mod tests {
         );
     }
 
+    /// Guards: Replay sets aside its own retained provenance while checking comment ownership.
+    /// Kind: journey
+    /// Not a type: Actual retained comments may match the command's ownership mark or only resemble it.
+    /// State: Real evidence and CHAT files include a recognized stamp and refusal controls.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn a_stamp_on_the_retained_output_is_set_aside_not_compared() {
         let split = vec![0, 0, 1, 1, 1];
@@ -1352,6 +1384,11 @@ mod tests {
     /// header, or every timed utterance's dependent tiers. Compared, they made
     /// the command answer "the retained evidence did not reproduce" and point
     /// at a line, which blames segmentation for an argument.
+    /// Guards: Replay refuses options for media naming or word tiers absent from evidence.
+    /// Kind: policy
+    /// Not a type: Command inputs can request rebuild properties the retained evidence cannot independently establish.
+    /// State: Synthetic trace and CHAT exercise actual compatibility refusals and rendered actions.
+    /// Concurrency: Every replay owns its temporary artifacts.
     #[test]
     fn a_rebuild_property_the_evidence_cannot_check_is_refused_not_compared() {
         let with_media = parse_fixture(&INPUT.replace("*CHI:", "@Media:\tclip, audio\n*CHI:"));

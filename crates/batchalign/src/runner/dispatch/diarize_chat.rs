@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use talkbank_model::model::{ChatFileLines, Header, Line};
+use talkbank_model::model::{ChatFileLines, Line};
 use talkbank_model::validation::ValidChatFile;
 use talkbank_model::{SpeakerCode, Utterance};
 use talkbank_transform::rediarize::{DiarizationTimeline, DiarizationTurn, TimeSpanMs};
@@ -43,7 +43,7 @@ pub(super) enum DiarizeChatRefusal {
 }
 
 impl DiarizeChatRefusal {
-    pub(super) fn category(&self) -> FailureCategory {
+    pub(super) const fn category(&self) -> FailureCategory {
         match self {
             Self::UndeclaredParticipant { .. } | Self::UnmappedTrack(_) => {
                 FailureCategory::Validation
@@ -238,16 +238,8 @@ impl<'source> MappedDiarizeSource<'source> {
                     losses.join("; ")
                 },
             );
-            let position = crate::provenance::insert_pos_after_constant_headers(&output);
-            output.lines.insert(
-                position,
-                Line::header(
-                    talkbank_model::Location::Unlocated,
-                    Header::Comment {
-                        content: talkbank_model::model::CommentContent::try_from_text(text)?,
-                    },
-                ),
-            );
+            let content = talkbank_model::model::CommentContent::try_from_text(text)?;
+            crate::provenance::CommentSlot::in_preamble(&mut output).insert(content);
         }
         Ok(PostValidated::gate_owned(output, ReleasedCommand::Diarize)?)
     }
@@ -286,6 +278,11 @@ mod tests {
         }
     }
 
+    /// Guards: Mapped native turns preserve CHAT headers and all three measured speaker runs.
+    /// Kind: transcript
+    /// Not a type: Real source words and timed speaker segments can interleave in a way that requires splitting and writeback.
+    /// State: Valid timed CHAT and three actual typed turn observations, plus output snapshot.
+    /// Concurrency: The original admitted document is borrowed immutably.
     #[test]
     fn declared_mapping_preserves_facts_and_all_measured_returning_speaker_runs() {
         let input = admitted(SOURCE);
@@ -341,6 +338,11 @@ mod tests {
         insta::assert_snapshot!("mapped_diarize_returning_speaker", output.as_str());
     }
 
+    /// Guards: An unknown participant and missing or partial word timing refuse before acquiring inference eligibility.
+    /// Kind: transcript
+    /// Not a type: Independent CHAT and mapping input can lack the named role or needed word-level support.
+    /// State: Three input variations admitted through actual retained source validation.
+    /// Concurrency: Each candidate borrows an immutable admitted transcript.
     #[test]
     fn undeclared_participants_and_missing_or_partial_word_timing_refuse_before_inference() {
         let input = admitted(SOURCE);
@@ -372,6 +374,11 @@ mod tests {
         ));
     }
 
+    /// Guards: Tied overlap, uncovered words and unmapped tracks never obtain CHAT write permission.
+    /// Kind: policy
+    /// Not a type: Real acoustic intervals can overlap or leave holes even after their individual timing is valid.
+    /// State: An admitted CHAT fixture and distinct synthetic turn populations.
+    /// Concurrency: Each applied mapping owns its own attempt and returns a refusal.
     #[test]
     fn acoustic_gaps_ties_and_unmapped_tracks_never_acquire_write_permission() {
         let input = admitted(SOURCE);
@@ -404,6 +411,11 @@ mod tests {
         ));
     }
 
+    /// Guards: Mapped CHAT reports invalidated analysis and preserves the contributor comment.
+    /// Kind: transcript
+    /// Not a type: A successful change can still omit required loss reporting or delete unrelated CHAT tiers.
+    /// State: Actual source CHAT with a dependent analysis tier and a contributor comment.
+    /// Concurrency: The generated output consumes the admitted mapping.
     #[test]
     fn analysis_loss_is_reported_without_discarding_contributor_comments() {
         let input = admitted(&SOURCE.replace("%com:", "%mor:\tn|one n|two n|three .\n%com:"));
@@ -422,6 +434,11 @@ mod tests {
         );
     }
 
+    /// Guards: A speaker boundary inside an annotated group refuses to split the source group.
+    /// Kind: transcript
+    /// Not a type: Typed spans can still cross a semantic grouping in the particular input document.
+    /// State: An admitted grouped CHAT utterance and two typed turns that split inside it.
+    /// Concurrency: The immutable source and projected result belong only to this case.
     #[test]
     fn a_speaker_boundary_inside_an_annotated_group_refuses_instead_of_guessing() {
         let input =

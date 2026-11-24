@@ -19,7 +19,7 @@
       "$ref": "#/$defs/WorkerArtifactIdV2"
     },
     "retokenize": {
-      "description": "Whether Stanza/PyCantonese should re-tokenize the input.\n\nWhen `true`, CJK word segmentation is applied before POS tagging:\n- Cantonese (`yue`): PyCantonese `segment()` groups characters into words\n- Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text\n\nDefaults to `false` for backward compatibility with workers that do not\nyet understand this field.",
+      "description": "Whether Stanza/PyCantonese should re-tokenize the input.\n\nWhen `true`, CJK word segmentation is applied before POS tagging:\n- Cantonese (`yue`): `PyCantonese` `segment()` groups characters into words\n- Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text\n\nDefaults to `false` for backward compatibility with workers that do not\nyet understand this field.",
       "type": "boolean",
       "default": false
     }

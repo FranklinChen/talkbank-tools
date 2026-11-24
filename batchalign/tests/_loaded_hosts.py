@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from batchalign.inference._speaker_model_evidence import SpeakerLoadedModelGraph
 from batchalign.tests._asr_model_pins import loaded_identity
 from batchalign.worker._loads import (
     ASR_LOAD,
@@ -45,6 +46,13 @@ from batchalign.worker._types_v2 import (
     ForcedAlignmentRequestV2,
     SpeakerBackendV2,
     SpeakerEmbeddingBackendV2,
+)
+
+# One immutable local-graph observation for the typed worker doubles.
+TEST_LOCAL_SPEAKER_GRAPH = SpeakerLoadedModelGraph(
+    pipeline_config_sha256="1" * 64,
+    segmentation_sha256="2" * 64,
+    embedding_sha256="3" * 64,
 )
 
 

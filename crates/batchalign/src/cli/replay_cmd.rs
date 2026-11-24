@@ -11,7 +11,7 @@ use crate::cli::args::ReplayArgs;
 use crate::cli::error::CliError;
 use crate::cli::python::resolve_python_executable;
 use crate::types::worker_v2::ExecuteRequestV2;
-use crate::worker::handle::{WorkerHandle, WorkerLaunch, WorkerRuntimeConfig};
+use crate::worker::handle::{WorkerLaunch, WorkerRuntimeConfig};
 
 /// Parsed dump file structure.
 #[derive(Debug, serde::Deserialize)]
@@ -107,26 +107,18 @@ pub async fn run(args: &ReplayArgs) -> Result<(), CliError> {
         server_config.worker_startup_stall(),
     );
     // What a server's pool would give this load: the host's admission of its
-    // memory lease, and the load's own stall window, not the startup one.
-    let preparation = crate::worker::pool::LoadPreparation {
-        admission: crate::worker::pool::LoadAdmission::new(
-            host.memory_coordinator(),
-            crate::worker::pool::ModelHosting::Models,
-            std::sync::Arc::new(crate::host_memory::NoIdleWorkers),
-        ),
-        stall: server_config.ensure_task_stall(),
-    };
-    // A one-off replay owns no pool: there is nothing idle to retire.
-    let mut worker = WorkerHandle::spawn(
-        config,
-        std::sync::Arc::new(crate::host_memory::NoIdleWorkers),
-    )
-    .await
-    .map_err(|e| CliError::InvalidArgument(format!("Cannot start the worker: {e}")))?;
+    // memory lease, and the load's own stall window, not the startup one. A
+    // one-off replay owns no pool, so nothing idle is retired.
+    let preparation = crate::worker::pool::LoadPreparation::standalone(
+        host.memory_coordinator(),
+        crate::worker::pool::ModelHosting::Models,
+        server_config.ensure_task_stall(),
+    );
+    let mut worker = crate::worker::pool::StandaloneWorker::spawn(config, preparation)
+        .await
+        .map_err(|e| CliError::InvalidArgument(format!("Cannot start the worker: {e}")))?;
     eprintln!("Sending original request...");
-    let outcome = async {
-        crate::worker::pool::dispatch_prepared!(crate::worker::pool::DispatchPreparation::begin(&request)?, ready => worker.execute_v2(ready, &preparation))
-    }.await;
+    let outcome = worker.execute(&request).await;
     if let Err(error) = worker.shutdown().await {
         eprintln!("(worker shutdown: {error})");
     }

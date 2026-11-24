@@ -1,4 +1,4 @@
-//! ReplacedWord extraction/injection cursor accounting and compound-filler underscore-splitting tests.
+//! `ReplacedWord` extraction/injection cursor accounting and compound-filler underscore-splitting tests.
 
 #![allow(unused_imports, dead_code)]
 

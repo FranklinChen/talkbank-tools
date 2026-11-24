@@ -44,17 +44,20 @@ pub struct AnalysisUnavailable {
 
 impl AnalysisUnavailable {
     /// Truthful source language whose required analysis was declined.
-    pub fn language(&self) -> &LanguageCode3 {
+    #[must_use]
+    pub const fn language(&self) -> &LanguageCode3 {
         &self.language
     }
 
     /// Distinguishes the file-level policy from outstanding utterance work.
-    pub fn requirement(&self) -> AnalysisLanguageRequirement {
+    #[must_use]
+    pub const fn requirement(&self) -> AnalysisLanguageRequirement {
         self.requirement
     }
 
     /// Capability admission's typed reason, without parsing diagnostic prose.
-    pub fn reason(&self) -> &AnalysisUnavailableReason {
+    #[must_use]
+    pub const fn reason(&self) -> &AnalysisUnavailableReason {
         &self.reason
     }
 
@@ -144,6 +147,11 @@ mod tests {
     /// RED FIRST: `kaz` was refused as a primary language by a static list
     /// that never named it, although the catalog ships every processor
     /// morphotag loads.
+    /// Guards: Both primary and effective-utterance roles accept the admitted Kazakh processors.
+    /// Kind: policy
+    /// Not a type: The external catalog contents determine whether each role has sufficient processing support.
+    /// State: A fixed registry double declares Kazakh with the requisite processors.
+    /// Concurrency: Pure catalog lookup with no writers.
     #[test]
     fn a_registry_with_kazakh_processors_admits_kazakh() {
         let registry = registry();
@@ -152,6 +160,11 @@ mod tests {
         }
     }
 
+    /// Guards: A missing catalog entry reports the same exact reason for both morphology language roles.
+    /// Kind: policy
+    /// Not a type: The declared language may be absent from the catalog that applies to this operation.
+    /// State: A hypothetical Quechua request and a catalog double without its entry.
+    /// Concurrency: Pure catalog lookup with no writers.
     #[test]
     fn a_language_with_no_catalog_entry_is_refused_as_not_in_the_catalog() {
         let registry = registry();
@@ -163,6 +176,11 @@ mod tests {
         }
     }
 
+    /// Guards: A catalog language missing the lemmatizer reports a processor gap for both roles.
+    /// Kind: policy
+    /// Not a type: Presence of a language entry does not establish the independently reported processor population.
+    /// State: A Telugu registry entry without lemmatization supplies the precise deficit.
+    /// Concurrency: Pure catalog lookup with no writers.
     #[test]
     fn an_entry_without_a_morphotag_processor_is_refused_for_its_processors() {
         let registry = registry();
@@ -183,6 +201,11 @@ mod tests {
     /// no static list to fall back on. The refusal carries the reason the
     /// registry is missing, so a failed worker report is not mistaken for a
     /// catalog without the language.
+    /// Guards: Registry failure preserves the reported worker cause and refuses both language roles.
+    /// Kind: wire
+    /// Not a type: The worker can fail to produce a registry and carry a distinct external error message.
+    /// State: A typed failed registry receipt models the worker report and its reason without importing it.
+    /// Concurrency: Immutable error reused for both admissions.
     #[test]
     fn without_an_admitted_registry_nothing_is_admitted_and_the_reason_is_kept() {
         let unavailable = StanzaRegistryUnavailable::ReportFailed {
@@ -208,6 +231,11 @@ mod tests {
 
     /// An utterance language is admitted from the file's proof: a refusal is
     /// a gap by construction.
+    /// Guards: A sibling language refusal retains the target language and catalog gap.
+    /// Kind: policy
+    /// Not a type: An admitted primary may share a catalog that lacks a requested utterance language.
+    /// State: Kazakh admission paired with an unsupported sibling in the same registry double.
+    /// Concurrency: The test holds one immutable registry snapshot.
     #[test]
     fn a_sibling_refusal_is_a_gap() {
         let file = AnalysisUnavailable::admit(

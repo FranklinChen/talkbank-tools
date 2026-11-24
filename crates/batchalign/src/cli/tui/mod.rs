@@ -67,6 +67,7 @@ pub struct TuiRuntime {
 
 impl TuiProgress {
     /// Create a new sender/runtime pair for one job TUI session.
+    #[must_use]
     pub fn new(total_files: u64, command: &str) -> (Self, TuiRuntime) {
         let (updates, receiver) = unbounded_channel();
         (

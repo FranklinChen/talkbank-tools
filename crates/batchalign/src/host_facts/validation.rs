@@ -212,20 +212,36 @@ impl fmt::Display for ConfigError {
     }
 }
 
-/// Result bundle from one [`validate`] call.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The findings of one [`validate`] call: advisory warnings, which either
+/// outcome may carry, and the startup verdict.
+///
+/// There is deliberately no `Default`, because a default verdict would
+/// silently mean "admitted".
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigValidation {
-    /// Non-fatal findings; surface but do not block startup.
+    /// Non-fatal findings; surface but do not block startup. May be empty.
     pub warnings: Vec<ConfigWarning>,
-    /// Fatal findings; refuse startup. Empty in the common case.
-    pub errors: Vec<ConfigError>,
+    /// Whether startup may proceed.
+    pub verdict: StartupVerdict,
 }
 
-impl ConfigValidation {
-    /// Whether validation found at least one fatal finding.
-    pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
-    }
+/// Startup is either admitted or refused, and a refusal carries the finding
+/// that caused it.
+///
+/// A closed pair rather than an error list plus a `has_errors` query: a
+/// caller deciding whether to boot must match on it, so "forgot to check for
+/// errors and started anyway" does not compile, and an empty refusal cannot
+/// be built.
+///
+/// `Refused` carries exactly one [`ConfigError`] because [`validate`] has
+/// exactly one fatal rule. A second fatal rule changes this payload, and the
+/// compiler then walks every consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupVerdict {
+    /// Startup may proceed.
+    Admitted,
+    /// Startup must not proceed, for this reason.
+    Refused(ConfigError),
 }
 
 /// Inspect operator overrides in `cfg` against detected `facts` and
@@ -235,9 +251,11 @@ impl ConfigValidation {
 /// `ConfigValidation`. No I/O, no time-dependence, no logging. Callers
 /// are responsible for converting findings to `tracing` lines or
 /// startup errors.
+#[must_use]
 pub fn validate(cfg: &ServerConfig, facts: &HostFacts) -> ConfigValidation {
     let mut warnings = Vec::new();
-    let mut errors = Vec::new();
+    // Admitted unless the one fatal rule below refuses.
+    let mut verdict = StartupVerdict::Admitted;
 
     if let Some(configured) = cfg.gpu_thread_pool_size
         && configured > 1
@@ -266,11 +284,12 @@ pub fn validate(cfg: &ServerConfig, facts: &HostFacts) -> ConfigValidation {
         let tier = crate::types::runtime::MemoryTier::from_total_mb(facts.ram_total_mb);
         let per_job_peak_mb = worst_case_per_job_peak_ram_mb(&tier);
         if u64::from(configured) * per_job_peak_mb > facts.ram_total_mb {
-            errors.push(ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
-                configured,
-                ram_total_mb: facts.ram_total_mb,
-                per_job_peak_mb,
-            });
+            verdict =
+                StartupVerdict::Refused(ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+                    configured,
+                    ram_total_mb: facts.ram_total_mb,
+                    per_job_peak_mb,
+                });
         }
     }
 
@@ -297,572 +316,179 @@ pub fn validate(cfg: &ServerConfig, facts: &HostFacts) -> ConfigValidation {
         });
     }
 
-    ConfigValidation { warnings, errors }
+    ConfigValidation { warnings, verdict }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host_facts::test_helpers::{apple_silicon_64gb, linux_cuda_24gb};
+    // Test concurrency pure-validate: None. `validate` and the `Display` impls are pure functions of in-memory values, so these tests share no resource and can run in any order or in parallel.
 
-    /// RED -> GREEN: `gpu_thread_pool_size: Some(4)` on Apple Silicon
-    /// (non-functional GPU) must produce one
-    /// `GpuThreadPoolSizeAboveOneOnCpu` warning carrying the
-    /// configured and recommended values.
+    /// Guards: Operator overrides above one on a non-functional GPU warn; matching, functional-GPU and deferred values stay silent.
+    /// Kind: policy
+    /// Not a type: Each override value is individually valid in `ServerConfig`; only its combination with external host facts is contradictory, so the admitted `Option<u32>` and detected GPU class remain a policy matrix.
+    /// State: None. Two declared in-memory host shapes and four explicit `Option<u32>` values; no daemon starts.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn warns_when_gpu_thread_pool_size_above_one_on_apple_silicon() {
-        let cfg = ServerConfig {
-            gpu_thread_pool_size: Some(4),
+    fn gpu_thread_pool_size_warning_policy_matrix() {
+        let cfg = |gpu_thread_pool_size| ServerConfig {
+            gpu_thread_pool_size,
             ..Default::default()
         };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert_eq!(
-            result.warnings,
-            vec![ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
-                configured: 4,
-                recommended: 1,
-            }],
-        );
-        assert!(result.errors.is_empty());
-    }
-
-    /// `gpu_thread_pool_size: Some(1)` on Apple Silicon: the operator
-    /// matches the recommendation; no warning fires.
-    #[test]
-    fn silent_when_gpu_thread_pool_size_matches_recommendation_on_cpu() {
-        let cfg = ServerConfig {
-            gpu_thread_pool_size: Some(1),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `gpu_thread_pool_size: Some(4)` on a CUDA host (functional
-    /// GPU): recommended value is also 4, so no contradiction fires.
-    #[test]
-    fn silent_when_gpu_thread_pool_size_above_one_on_cuda() {
-        let cfg = ServerConfig {
-            gpu_thread_pool_size: Some(4),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &linux_cuda_24gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `gpu_thread_pool_size: None` (default, no operator override)
-    /// never fires the warning, even on a CPU-only host. The whole
-    /// point of the warning is to flag *operator overrides* that
-    /// contradict facts; the recommendation is by construction
-    /// consistent with the facts.
-    #[test]
-    fn silent_when_gpu_thread_pool_size_is_none_on_cpu() {
-        let cfg = ServerConfig {
-            gpu_thread_pool_size: None,
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
+        let cases: Vec<(&str, ServerConfig, HostFacts, Vec<ConfigWarning>)> = vec![
+            (
+                "above one on apple",
+                cfg(Some(4)),
+                apple_silicon_64gb(),
+                vec![ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
+                    configured: 4,
+                    recommended: 1,
+                }],
+            ),
+            (
+                "matches recommendation on cpu",
+                cfg(Some(1)),
+                apple_silicon_64gb(),
+                vec![],
+            ),
+            ("above one on cuda", cfg(Some(4)), linux_cuda_24gb(), vec![]),
+            ("deferred on cpu", cfg(None), apple_silicon_64gb(), vec![]),
+        ];
+        for (label, cfg, facts, expected) in cases {
+            let result = validate(&cfg, &facts);
+            assert_eq!(result.warnings, expected, "{label} warnings");
+            assert!(
+                result.verdict == StartupVerdict::Admitted,
+                "{label} must not refuse startup"
+            );
+        }
     }
 
     // -----------------------------------------------------------------
     // MaxConcurrentJobsAboveRamBudget
     // -----------------------------------------------------------------
 
-    /// Apple Silicon at 64 GB RAM has a recommendation around 4
-    /// concurrent jobs (clamp(ram_total / 6GB, 2, 32) = 10, then
-    /// further clamped by `auto_max_concurrent_jobs` formula). An
-    /// operator setting `max_concurrent_jobs = 99` is well above any
-    /// reasonable budget; the warning must fire.
+    /// Guards: Only an explicit `max_concurrent_jobs` above the host-derived recommendation warns; equal, below and deferred values stay silent.
+    /// Kind: policy
+    /// Not a type: `Option<u32>` already distinguishes deferred from explicit overrides, but "explicit and over budget" is a semantic comparison with external RAM and CPU facts, not a state a type can forbid.
+    /// State: None. One declared in-memory 64 GB host and four `max_concurrent_jobs` override states; no job is admitted.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn warns_when_max_concurrent_jobs_exceeds_recommendation() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(99),
-            ..Default::default()
-        };
+    fn max_concurrent_jobs_warning_policy_matrix() {
         let facts = apple_silicon_64gb();
         let recommended = super::recommend_max_concurrent_jobs(&facts);
-        let result = validate(&cfg, &facts);
-        assert_eq!(
-            result.warnings,
-            vec![ConfigWarning::MaxConcurrentJobsAboveRamBudget {
-                configured: 99,
-                recommended,
-            }],
-        );
-    }
-
-    /// Operator at exactly the recommendation: silent (boundary
-    /// condition; `>` not `>=`).
-    #[test]
-    fn silent_when_max_concurrent_jobs_equals_recommendation() {
-        let facts = apple_silicon_64gb();
-        let recommended = super::recommend_max_concurrent_jobs(&facts);
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(recommended),
+        let cfg = |max_concurrent_jobs| ServerConfig {
+            max_concurrent_jobs,
             ..Default::default()
         };
-        let result = validate(&cfg, &facts);
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// Conservative-vs-recommendation is intentionally silent, the
-    /// operator knows their host better than `recommend()` does, and
-    /// silence is the right ergonomics for "intentionally cautious."
-    #[test]
-    fn silent_when_max_concurrent_jobs_below_recommendation() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(1),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `None` (no operator override) never fires; the recommendation
-    /// is by construction consistent with the facts.
-    #[test]
-    fn silent_when_max_concurrent_jobs_is_none() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: None,
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn max_concurrent_jobs_warning_display_includes_both_values() {
-        let warning = ConfigWarning::MaxConcurrentJobsAboveRamBudget {
-            configured: 99,
-            recommended: 4,
-        };
-        let rendered = format!("{warning}");
-        assert!(
-            rendered.contains("max_concurrent_jobs=99"),
-            "rendered: {rendered}"
-        );
-        assert!(
-            rendered.contains("recommendation of 4"),
-            "rendered: {rendered}"
-        );
+        let cases: Vec<(&str, ServerConfig, Vec<ConfigWarning>)> = vec![
+            (
+                "above recommendation",
+                cfg(Some(99)),
+                vec![ConfigWarning::MaxConcurrentJobsAboveRamBudget {
+                    configured: 99,
+                    recommended,
+                }],
+            ),
+            ("equals recommendation", cfg(Some(recommended)), vec![]),
+            ("below recommendation", cfg(Some(1)), vec![]),
+            ("deferred", cfg(None), vec![]),
+        ];
+        for (label, cfg, expected) in cases {
+            let result = validate(&cfg, &facts);
+            assert_eq!(result.warnings, expected, "{label} warnings");
+        }
     }
 
     // -----------------------------------------------------------------
     // MaxTotalWorkersAboveRamBudget
     // -----------------------------------------------------------------
 
+    /// Guards: Only an explicit `max_total_workers` above the RAM-derived recommendation warns; equal, below and deferred values stay silent.
+    /// Kind: policy
+    /// Not a type: `Option<u32>` distinguishes deferral, but "explicit and over budget" remains a semantic comparison with external RAM facts, so the four admitted override states stay a policy matrix.
+    /// State: None. One declared in-memory 64 GB host and four `max_total_workers` override states; no worker process starts.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn warns_when_max_total_workers_exceeds_recommendation() {
-        let cfg = ServerConfig {
-            max_total_workers: Some(64),
-            ..Default::default()
-        };
+    fn max_total_workers_warning_policy_matrix() {
         let facts = apple_silicon_64gb();
         let recommended = super::recommend_max_total_workers(&facts);
-        let result = validate(&cfg, &facts);
-        assert_eq!(
-            result.warnings,
-            vec![ConfigWarning::MaxTotalWorkersAboveRamBudget {
-                configured: 64,
-                recommended,
-            }],
-        );
-    }
-
-    #[test]
-    fn silent_when_max_total_workers_equals_recommendation() {
-        let facts = apple_silicon_64gb();
-        let recommended = super::recommend_max_total_workers(&facts);
-        let cfg = ServerConfig {
-            max_total_workers: Some(recommended),
+        let cfg = |max_total_workers| ServerConfig {
+            max_total_workers,
             ..Default::default()
         };
-        let result = validate(&cfg, &facts);
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn silent_when_max_total_workers_below_recommendation() {
-        let cfg = ServerConfig {
-            max_total_workers: Some(2),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn silent_when_max_total_workers_is_none() {
-        let cfg = ServerConfig {
-            max_total_workers: None,
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn max_total_workers_warning_display_includes_both_values() {
-        let warning = ConfigWarning::MaxTotalWorkersAboveRamBudget {
-            configured: 64,
-            recommended: 10,
-        };
-        let rendered = format!("{warning}");
-        assert!(
-            rendered.contains("max_total_workers=64"),
-            "rendered: {rendered}"
-        );
-        assert!(
-            rendered.contains("recommendation of 10"),
-            "rendered: {rendered}"
-        );
-    }
-
-    /// Display formatting must mention both values so the operator
-    /// can act without consulting external docs.
-    #[test]
-    fn warning_display_includes_configured_and_recommended_values() {
-        let warning = ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
-            configured: 4,
-            recommended: 1,
-        };
-        let rendered = format!("{warning}");
-        assert!(
-            rendered.contains("gpu_thread_pool_size=4"),
-            "rendered: {rendered}"
-        );
-        assert!(
-            rendered.contains("recommended value is 1"),
-            "rendered: {rendered}"
-        );
+        let cases: Vec<(&str, ServerConfig, Vec<ConfigWarning>)> = vec![
+            (
+                "above recommendation",
+                cfg(Some(64)),
+                vec![ConfigWarning::MaxTotalWorkersAboveRamBudget {
+                    configured: 64,
+                    recommended,
+                }],
+            ),
+            ("equals recommendation", cfg(Some(recommended)), vec![]),
+            ("below recommendation", cfg(Some(2)), vec![]),
+            ("deferred", cfg(None), vec![]),
+        ];
+        for (label, cfg, expected) in cases {
+            let result = validate(&cfg, &facts);
+            assert_eq!(result.warnings, expected, "{label} warnings");
+        }
     }
 
     // -----------------------------------------------------------------
     // ForceCpuFalseOnNonFunctionalGpu
     // -----------------------------------------------------------------
 
+    /// Guards: Only explicit `force_cpu = false` on a host whose inferred value is `true` warns; matching and deferred values stay silent.
+    /// Kind: policy
+    /// Not a type: `Option<bool>` admits all three operator states; the contradiction depends on an external GPU fact and the deliberate choice that `true` on CUDA is a legitimate testing affordance.
+    /// State: None. Two declared in-memory host shapes and three explicit `Option<bool>` values; no worker is dispatched.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn warns_when_force_cpu_false_on_apple_silicon() {
-        let cfg = ServerConfig {
-            force_cpu: Some(false),
+    fn force_cpu_warning_policy_matrix() {
+        let cfg = |force_cpu| ServerConfig {
+            force_cpu,
             ..Default::default()
         };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert_eq!(result.warnings.len(), 1);
-        assert!(matches!(
-            result.warnings[0],
-            ConfigWarning::ForceCpuFalseOnNonFunctionalGpu { .. }
-        ));
-    }
-
-    /// `Some(false)` on a functional CUDA host: the recommendation
-    /// agrees (false), so no contradiction.
-    #[test]
-    fn silent_when_force_cpu_false_on_cuda() {
-        let cfg = ServerConfig {
-            force_cpu: Some(false),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &linux_cuda_24gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `Some(true)` on Apple Silicon: matches the recommendation;
-    /// silent.
-    #[test]
-    fn silent_when_force_cpu_true_on_apple_silicon() {
-        let cfg = ServerConfig {
-            force_cpu: Some(true),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `Some(true)` on CUDA: operator asserts CPU even though GPU
-    /// is functional. Legitimate testing affordance, silent. The
-    /// symmetric "operator over-conservative" case from the design
-    /// doc.
-    #[test]
-    fn silent_when_force_cpu_true_on_cuda_legitimate_testing_use() {
-        let cfg = ServerConfig {
-            force_cpu: Some(true),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &linux_cuda_24gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    /// `None` defers to recommendation; never contradicts.
-    #[test]
-    fn silent_when_force_cpu_is_none() {
-        let cfg = ServerConfig {
-            force_cpu: None,
-            ..Default::default()
-        };
-        let result = validate(&cfg, &apple_silicon_64gb());
-        assert!(
-            result.warnings.is_empty(),
-            "warnings: {:?}",
-            result.warnings
-        );
-    }
-
-    #[test]
-    fn force_cpu_warning_display_includes_gpu_summary() {
-        let warning = ConfigWarning::ForceCpuFalseOnNonFunctionalGpu {
-            gpu: GpuPresence::AppleMps {
-                functional_for_batchalign: false,
-                reason_excluded: None,
-            },
-        };
-        let rendered = format!("{warning}");
-        assert!(rendered.contains("force_cpu=false"), "rendered: {rendered}");
-        assert!(rendered.contains("AppleMps"), "rendered: {rendered}");
+        let cases: Vec<(&str, ServerConfig, HostFacts, Vec<ConfigWarning>)> = vec![
+            (
+                "false on apple",
+                cfg(Some(false)),
+                apple_silicon_64gb(),
+                vec![ConfigWarning::ForceCpuFalseOnNonFunctionalGpu {
+                    gpu: apple_silicon_64gb().gpu,
+                }],
+            ),
+            ("false on cuda", cfg(Some(false)), linux_cuda_24gb(), vec![]),
+            (
+                "true on apple",
+                cfg(Some(true)),
+                apple_silicon_64gb(),
+                vec![],
+            ),
+            (
+                "true on cuda is a testing affordance",
+                cfg(Some(true)),
+                linux_cuda_24gb(),
+                vec![],
+            ),
+            ("deferred", cfg(None), apple_silicon_64gb(), vec![]),
+        ];
+        for (label, cfg, facts, expected) in cases {
+            let result = validate(&cfg, &facts);
+            assert_eq!(result.warnings, expected, "{label} warnings");
+        }
     }
 
     // -----------------------------------------------------------------
     // Multi-variant composition
     // -----------------------------------------------------------------
 
-    /// An operator who sets several overrides above their respective
-    /// recommendations gets one warning per knob. The validator runs
-    /// each rule independently: there's no implicit shadowing or
-    /// short-circuit. Order is the order the rules execute in
-    /// [`validate`]; if a future refactor reorders them, this test
-    /// will catch it (so the assertion uses set-membership rather
-    /// than exact slice equality where order isn't load-bearing).
-    #[test]
-    fn multiple_above_recommendation_overrides_each_fire_independently() {
-        let cfg = ServerConfig {
-            gpu_thread_pool_size: Some(8),
-            max_concurrent_jobs: Some(99),
-            max_total_workers: Some(64),
-            ..Default::default()
-        };
-        let facts = apple_silicon_64gb();
-        let result = validate(&cfg, &facts);
-
-        assert_eq!(
-            result.warnings.len(),
-            3,
-            "expected three independent warnings; got: {:?}",
-            result.warnings
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| matches!(w, ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu { .. })),
-            "missing GpuThreadPoolSizeAboveOneOnCpu in {:?}",
-            result.warnings
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| matches!(w, ConfigWarning::MaxConcurrentJobsAboveRamBudget { .. })),
-            "missing MaxConcurrentJobsAboveRamBudget in {:?}",
-            result.warnings
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| matches!(w, ConfigWarning::MaxTotalWorkersAboveRamBudget { .. })),
-            "missing MaxTotalWorkersAboveRamBudget in {:?}",
-            result.warnings
-        );
-        // `max_concurrent_jobs: 99` on a 64 GB host also trips the
-        // deterministic-OOM error (99 × 16 GB peak = 1584 GB).
-        // Compositionally: the same configured value can fire BOTH
-        // a warning (above the host-tier recommendation) and an
-        // error (would OOM): they're independent rules over the
-        // same input.
-        assert!(
-            result.errors.iter().any(|e| matches!(
-                e,
-                ConfigError::MaxConcurrentJobsWouldDeterministicallyOom { .. }
-            )),
-            "missing MaxConcurrentJobsWouldDeterministicallyOom in {:?}",
-            result.errors
-        );
-    }
-
-    /// A clean ServerConfig::default() against a real-shape host
-    /// produces zero warnings and zero errors. This is the contract
-    /// that lets `ServerConfig::default()` deploy on any host without
-    /// pre-startup churn: recommendations match the absence of
-    /// overrides by construction.
-    #[test]
-    fn default_config_against_any_host_produces_no_findings() {
-        let cfg = ServerConfig::default();
-        for facts in [apple_silicon_64gb(), linux_cuda_24gb()] {
-            let result = validate(&cfg, &facts);
-            assert!(
-                result.warnings.is_empty(),
-                "default config produced warnings on {:?}: {:?}",
-                facts.os,
-                result.warnings
-            );
-            assert!(!result.has_errors());
-        }
-    }
-
     // -----------------------------------------------------------------
     // MaxConcurrentJobsWouldDeterministicallyOom (the first ConfigError)
     // -----------------------------------------------------------------
-
-    /// Apple Silicon at 64 GB RAM. Worst-case per-job peak = 16 GB.
-    /// `4 * 16 = 64` exactly equals ram_total, fits. `5 * 16 = 80`
-    /// exceeds; that's the OOM error.
-    #[test]
-    fn errors_when_max_concurrent_jobs_times_peak_exceeds_ram() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(5),
-            ..Default::default()
-        };
-        let facts = apple_silicon_64gb();
-        let result = validate(&cfg, &facts);
-        assert!(result.has_errors(), "warnings: {:?}", result.warnings);
-        assert!(matches!(
-            result.errors[0],
-            ConfigError::MaxConcurrentJobsWouldDeterministicallyOom { .. }
-        ));
-    }
-
-    /// Exact-fit (`configured * peak == ram_total`) is allowed; the
-    /// check is strict greater-than. Pins the boundary explicitly so
-    /// a future formula tweak that flips strictness is caught.
-    #[test]
-    fn silent_when_max_concurrent_jobs_times_peak_exactly_fits_ram() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(4), // 4 * 16 GB = 64 GB exactly
-            ..Default::default()
-        };
-        let facts = apple_silicon_64gb();
-        let result = validate(&cfg, &facts);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    }
-
-    /// `None` (no operator override) never triggers the OOM error.
-    /// The recommendation is by construction safe; this is the
-    /// "remove the override and the daemon will boot" escape
-    /// hatch named in the error message.
-    #[test]
-    fn silent_when_max_concurrent_jobs_is_none_even_on_constrained_host() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: None,
-            ..Default::default()
-        };
-        let facts = apple_silicon_64gb();
-        let result = validate(&cfg, &facts);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    }
-
-    /// On a CUDA host with 128 GB RAM, even configured = 8
-    /// (matching recommendation) fits: 8 × 16 = 128 = ram_total.
-    /// The error stays silent for the recommendation.
-    #[test]
-    fn silent_when_recommendation_value_fits() {
-        let facts = linux_cuda_24gb(); // 128 GB RAM in the fixture
-        let recommended = super::recommend_max_concurrent_jobs(&facts);
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(recommended),
-            ..Default::default()
-        };
-        let result = validate(&cfg, &facts);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    }
-
-    /// Display message must include all three carrier values plus
-    /// the actionable remediation (drop the field or reduce it).
-    #[test]
-    fn oom_error_display_includes_configured_ram_and_peak() {
-        let err = ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
-            configured: 8,
-            ram_total_mb: 32_000,
-            per_job_peak_mb: 16_000,
-        };
-        let rendered = format!("{err}");
-        assert!(
-            rendered.contains("max_concurrent_jobs=8"),
-            "rendered: {rendered}"
-        );
-        assert!(rendered.contains("32000"), "rendered: {rendered}");
-        assert!(rendered.contains("16000"), "rendered: {rendered}");
-        assert!(
-            rendered.contains("Drop `max_concurrent_jobs`"),
-            "rendered: {rendered}"
-        );
-    }
-
-    /// `ConfigValidation::has_errors()` reflects the new variant.
-    /// Empty validation still reports no errors.
-    #[test]
-    fn has_errors_distinguishes_empty_from_populated() {
-        let empty = ConfigValidation::default();
-        assert!(!empty.has_errors());
-
-        let populated = ConfigValidation {
-            warnings: Vec::new(),
-            errors: vec![ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
-                configured: 8,
-                ram_total_mb: 32_000,
-                per_job_peak_mb: 16_000,
-            }],
-        };
-        assert!(populated.has_errors());
-    }
 
     // ---------------------------------------------------------------
     // 16 GB laptop / GHA-runner UX contract.
@@ -891,73 +517,240 @@ mod tests {
 
     use super::super::test_helpers::laptop_16gb;
 
+    /// Guards: A 16 GB laptop accepts the default and an explicitly conservative job count but still refuses genuine oversubscription.
+    /// Kind: boundary
+    /// Not a type: Laptop RAM and operator job count are independently admitted values; only their product against the external tier peak is unsafe, so neither `Option<u32>` nor the facts type can forbid the bad combination.
+    /// State: None. One declared in-memory laptop fixture and three override states; no daemon starts.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn laptop_16gb_with_default_config_accepts_startup() {
-        let cfg = ServerConfig::default();
-        let facts = laptop_16gb();
-        let result = validate(&cfg, &facts);
-        assert!(
-            result.errors.is_empty(),
-            "default startup on a 16 GB laptop must not be refused; \
-             the host-facts gate has to be capability-aware so a \
-             non-GPU install isn't blocked by hypothetical GPU peak. \
-             errors: {:?}",
-            result.errors
-        );
-    }
-
-    #[test]
-    fn laptop_16gb_with_explicit_max_concurrent_one_accepts_startup() {
-        let cfg = ServerConfig {
-            max_concurrent_jobs: Some(1),
+    fn laptop_16gb_startup_policy_matrix() {
+        let cfg = |max_concurrent_jobs| ServerConfig {
+            max_concurrent_jobs,
             ..Default::default()
         };
         let facts = laptop_16gb();
-        let result = validate(&cfg, &facts);
-        assert!(
-            result.errors.is_empty(),
-            "max_concurrent_jobs=1 on a 16 GB laptop must be accepted \
-             - the runtime gates are responsible for refusing actual \
-             OOM via observation, not the boot gate. errors: {:?}",
-            result.errors
-        );
+        let cases: Vec<(&str, ServerConfig, bool)> = vec![
+            ("default", ServerConfig::default(), false),
+            ("explicit one", cfg(Some(1)), false),
+            ("oversubscribed eight", cfg(Some(8)), true),
+        ];
+        for (label, cfg, expect_error) in cases {
+            let result = validate(&cfg, &facts);
+            assert_eq!(
+                matches!(result.verdict, StartupVerdict::Refused(_)),
+                expect_error,
+                "{label} startup verdict"
+            );
+        }
     }
 
+    // -----------------------------------------------------------------
+    // Composition, the fatal boundary, and the operator-facing words
+    // -----------------------------------------------------------------
+
+    /// The refusal inside a verdict, for tables that judge only the fatal
+    /// rule and leave the warning rules to their own matrices.
+    fn refusal(validation: &ConfigValidation) -> Option<&ConfigError> {
+        match &validation.verdict {
+            StartupVerdict::Admitted => None,
+            StartupVerdict::Refused(error) => Some(error),
+        }
+    }
+
+    /// Guards: Every rule runs independently and in rule order: one config tripping three warning rules and the fatal rule yields exactly those three warnings plus the refusal, and the default config is an empty admission on every fixture host.
+    /// Kind: policy
+    /// Not a type: The rules read disjoint `ServerConfig` fields, but whether one finding suppresses or reorders another is a behavioural choice inside `validate`, observable only by running a combination.
+    /// State: None. Three declared in-memory host fixtures; no daemon starts.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn laptop_16gb_with_oversubscribed_max_concurrent_jobs_still_refuses() {
-        // Legitimate over-subscription: even with a generous worst-case,
-        // 8 jobs cannot fit on a 16 GB laptop. The gate must still catch
-        // this: relaxing the laptop case must not turn off the gate
-        // entirely.
+    fn rules_compose_independently_and_default_is_clean() {
+        let facts = apple_silicon_64gb();
         let cfg = ServerConfig {
-            max_concurrent_jobs: Some(8),
+            gpu_thread_pool_size: Some(8),
+            max_concurrent_jobs: Some(99),
+            max_total_workers: Some(64),
             ..Default::default()
         };
-        let facts = laptop_16gb();
-        let result = validate(&cfg, &facts);
-        assert!(
-            result.has_errors(),
-            "max_concurrent_jobs=8 on a 16 GB laptop is genuinely \
-             unsafe and must still be refused"
+        // 99 jobs is above the warning budget and, at a 16,000 MB worst-case
+        // peak, also far beyond the 65,536 MB of RAM: one value trips a
+        // warning rule and the fatal rule at once.
+        assert_eq!(
+            validate(&cfg, &facts),
+            ConfigValidation {
+                verdict: StartupVerdict::Refused(
+                    ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+                        configured: 99,
+                        ram_total_mb: 65_536,
+                        per_job_peak_mb: 16_000,
+                    }
+                ),
+                warnings: vec![
+                    ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
+                        configured: 8,
+                        recommended: 1,
+                    },
+                    ConfigWarning::MaxConcurrentJobsAboveRamBudget {
+                        configured: 99,
+                        recommended: super::recommend_max_concurrent_jobs(&facts),
+                    },
+                    ConfigWarning::MaxTotalWorkersAboveRamBudget {
+                        configured: 64,
+                        recommended: super::recommend_max_total_workers(&facts),
+                    },
+                ],
+            }
         );
+
+        for (label, facts) in [
+            ("apple silicon", apple_silicon_64gb()),
+            ("cuda", linux_cuda_24gb()),
+            ("16 gb laptop", laptop_16gb()),
+        ] {
+            assert_eq!(
+                validate(&ServerConfig::default(), &facts),
+                ConfigValidation {
+                    warnings: vec![],
+                    verdict: StartupVerdict::Admitted,
+                },
+                "default config on {label}"
+            );
+        }
     }
 
+    /// Guards: The fatal rule refuses exactly when configured jobs times the worst-case peak strictly exceeds detected RAM (an exact fit is admitted, one megabyte short is refused), and the refusal carries the configured value, the RAM and the peak it used; deferral and the recommended value are admitted.
+    /// Kind: measurement
+    /// Not a type: `Option<u32>` admits the override and the closed error variant carries its values, but the strict u64 product comparison against external RAM and the tier peak is arithmetic no type pins.
+    /// State: None. Three declared in-memory host shapes (two derived from the 64 GB fixture by RAM alone) and five override states; no daemon starts.
+    /// Concurrency: [pure-validate]
     #[test]
-    fn deterministically_oom_error_message_suggests_sequential_workaround() {
-        // Operator UX: when the gate refuses startup for resource
-        // reasons, the error must name the `--sequential` flag as the
-        // recovery path. A user who hits this error needs to be told
-        // they can still run a single job locally without the daemon's
-        // memory gate.
-        let err = ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
-            configured: 8,
-            ram_total_mb: 32_000,
-            per_job_peak_mb: 16_000,
+    fn max_concurrent_jobs_oom_boundary_matrix() {
+        let cfg = |max_concurrent_jobs| ServerConfig {
+            max_concurrent_jobs,
+            ..Default::default()
         };
-        let rendered = format!("{err}");
-        assert!(
-            rendered.contains("--sequential"),
-            "resource-refusal error must point at --sequential. rendered: {rendered}"
-        );
+        let with_ram = |ram_total_mb| HostFacts {
+            ram_total_mb,
+            ..apple_silicon_64gb()
+        };
+        let oom =
+            |configured, ram_total_mb| ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+                configured,
+                ram_total_mb,
+                per_job_peak_mb: 16_000,
+            };
+        let cuda = linux_cuda_24gb();
+        let recommended = super::recommend_max_concurrent_jobs(&cuda);
+        let cases: Vec<(&str, ServerConfig, HostFacts, Option<ConfigError>)> = vec![
+            (
+                "four jobs exactly fill 64,000 MB",
+                cfg(Some(4)),
+                with_ram(64_000),
+                None,
+            ),
+            (
+                "four jobs on 63,999 MB are one short",
+                cfg(Some(4)),
+                with_ram(63_999),
+                Some(oom(4, 63_999)),
+            ),
+            (
+                "five jobs on 65,536 MB",
+                cfg(Some(5)),
+                apple_silicon_64gb(),
+                Some(oom(5, 65_536)),
+            ),
+            ("deferred", cfg(None), apple_silicon_64gb(), None),
+            ("recommended value", cfg(Some(recommended)), cuda, None),
+        ];
+        for (label, cfg, facts, expected) in cases {
+            let verdict = validate(&cfg, &facts);
+            assert_eq!(refusal(&verdict), expected.as_ref(), "{label}");
+        }
+    }
+
+    /// Guards: Every warning and error variant renders a sentence naming the configured value, the detected fact or recommendation it contradicts, and the remedy, including the `--sequential` route out of a refused startup.
+    /// Kind: transcript
+    /// Not a type: Each variant carries its values as typed fields, but whether the rendered sentence actually names them and the remedy is free text for a human operator; only the rendered words can be checked.
+    /// State: None. One value of each variant built in memory.
+    /// Concurrency: [pure-validate]
+    #[test]
+    fn every_finding_renders_its_values_and_remedy() {
+        let cases: Vec<(&str, String, &[&str])> = vec![
+            (
+                "gpu thread pool",
+                ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
+                    configured: 4,
+                    recommended: 1,
+                }
+                .to_string(),
+                &[
+                    "gpu_thread_pool_size=4",
+                    "recommended value is 1",
+                    "`gpu_thread_pool_size: 1`",
+                ],
+            ),
+            (
+                "concurrent jobs",
+                ConfigWarning::MaxConcurrentJobsAboveRamBudget {
+                    configured: 12,
+                    recommended: 4,
+                }
+                .to_string(),
+                &[
+                    "max_concurrent_jobs=12",
+                    "recommendation of 4",
+                    "`max_concurrent_jobs: 4`",
+                ],
+            ),
+            (
+                "total workers",
+                ConfigWarning::MaxTotalWorkersAboveRamBudget {
+                    configured: 64,
+                    recommended: 10,
+                }
+                .to_string(),
+                &[
+                    "max_total_workers=64",
+                    "recommendation of 10",
+                    "`max_total_workers: 10`",
+                ],
+            ),
+            (
+                "force cpu",
+                ConfigWarning::ForceCpuFalseOnNonFunctionalGpu {
+                    gpu: GpuPresence::AppleMps {
+                        functional_for_batchalign: false,
+                        reason_excluded: None,
+                    },
+                }
+                .to_string(),
+                &["force_cpu=false", "AppleMps", "`force_cpu: true`"],
+            ),
+            (
+                "deterministic oom",
+                ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+                    configured: 8,
+                    ram_total_mb: 32_000,
+                    per_job_peak_mb: 16_000,
+                }
+                .to_string(),
+                &[
+                    "max_concurrent_jobs=8",
+                    "32000",
+                    "16000",
+                    "= 128000 MB",
+                    "Drop `max_concurrent_jobs`",
+                    "--sequential",
+                ],
+            ),
+        ];
+        for (label, rendered, required) in cases {
+            for needle in required {
+                assert!(
+                    rendered.contains(needle),
+                    "{label} must mention {needle:?}: {rendered}"
+                );
+            }
+        }
     }
 }

@@ -1,10 +1,10 @@
-//! A whole-file request owns its response, recording bound and route.
+//! A whole-file request owns its response and route; the recording bound
+//! is read once by the pass and handed in.
 
 use super::*;
 
 pub(super) struct FullRecognition<'a> {
     conversion: UtrTokenConversion,
-    recording: Recording,
     context: UtrPassContext<'a>,
     route: UtrFullRoute,
 }
@@ -17,34 +17,24 @@ struct BoundedRequest<'a> {
 }
 
 impl<'a> BoundedRequest<'a> {
-    async fn admit(
-        context: UtrPassContext<'a>,
-        route: UtrFullRoute,
-    ) -> Result<Self, crate::error::ServerError> {
-        let recording = context.recording().await?;
-        let window =
-            FaWindow::within(&recording, FileMs::new(0), recording.duration()).map_err(|why| {
-                crate::error::ServerError::RecordingDuration(
-                    crate::error::RecordingDurationError::WholeFileWindow(why),
-                )
-            })?;
-        Ok(Self {
+    const fn admit(context: UtrPassContext<'a>, recording: Recording, route: UtrFullRoute) -> Self {
+        Self {
             context,
             route,
             recording,
-            window,
-        })
+            window: recording.whole_window(),
+        }
     }
 
     async fn recognize(self) -> Result<FullRecognition<'a>, crate::error::ServerError> {
         let context = self.context;
         let key = crate::chat_ops::fa::utr_asr_cache_key(
-            context.audio_identity,
-            context.engine,
+            context.audio.audio_identity,
+            context.recognizer.engine(),
             context.lang,
         );
         let response = match lookup_utr_asr_cache(
-            context.services.pipeline.cache,
+            context.services.recording_cache,
             &key,
             &utr_cache_eligibility(context),
             context.cache_policy.response(),
@@ -58,18 +48,14 @@ impl<'a> BoundedRequest<'a> {
             UtrAsrCacheLookup::Miss(miss) => {
                 info!(
                     context.filename,
-                    engine = context.engine.as_wire_name(),
+                    engine = context.recognizer.engine().as_wire_name(),
                     "UTR ASR cache miss, running inference"
                 );
-                let budget = context
-                    .audio_duration
-                    .map(|duration| DecodeBudgetSeconds::for_duration_ms(duration.length().0));
-                match miss.infer(context.audio_path, budget, context).await {
-                    Ok(inferred) => {
-                        inferred
-                            .commit(context.services.pipeline.cache, &key, context.filename)
-                            .await
-                    }
+                let budget = Some(DecodeBudgetSeconds::for_duration_ms(
+                    self.recording.duration().get(),
+                ));
+                match miss.infer_whole(budget, context).await {
+                    Ok(inferred) => inferred.commit(&key, context.filename).await,
                     Err(error) => {
                         warn!(context.filename, error = %error, "UTR ASR inference failed");
                         return Err(error);
@@ -80,12 +66,11 @@ impl<'a> BoundedRequest<'a> {
         let conversion = asr_response_to_utr_tokens(
             response,
             self.window,
-            &EngineId::new(context.engine.as_wire_name()),
+            &EngineId::new(context.recognizer.engine().as_wire_name()),
         );
         conversion.warn_if_lossy(&context);
         Ok(FullRecognition {
             conversion,
-            recording: self.recording,
             context,
             route: self.route,
         })
@@ -95,16 +80,12 @@ impl<'a> BoundedRequest<'a> {
 impl<'a> FullRecognition<'a> {
     pub(super) async fn run(
         context: UtrPassContext<'a>,
+        recording: Recording,
         route: UtrFullRoute,
     ) -> Result<Self, crate::error::ServerError> {
-        BoundedRequest::admit(context, route)
-            .await?
+        BoundedRequest::admit(context, recording, route)
             .recognize()
             .await
-    }
-
-    pub(super) fn recording(&self) -> Recording {
-        self.recording
     }
 
     pub(super) fn into_parts(self) -> (UtrTokenConversion, UtrPassContext<'a>, UtrFullRoute) {

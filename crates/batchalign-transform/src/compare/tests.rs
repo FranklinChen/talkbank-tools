@@ -880,10 +880,10 @@ fn compare_uses_mor_pos_for_xsmor_output() {
 }
 
 /// BA2 attributes the gold-side form's POS to every Match and
-/// ExtraReference, not the main-side form's (compare.py:540-550, via
+/// `ExtraReference`, not the main-side form's (compare.py:540-550, via
 /// `_get_pos(gold_form)`). When the two transcripts have a %mor disagreement
 /// on the same matched word, which is the entire point of running
-/// `compare`: the xsmor tier and pos_counts must reflect the gold-standard
+/// `compare`: the xsmor tier and `pos_counts` must reflect the gold-standard
 /// POS so the reviewer can see the gold tag the transcriber missed.
 #[test]
 fn compare_attributes_gold_pos_to_matches() {

@@ -29,7 +29,7 @@ use crate::types::worker_v2::{SpeakerBackendV2, SpeakerSegmentV2};
 /// artifacts at each pipeline stage for offline replay and test fixture
 /// generation. When constructed without a path, all methods are zero-cost
 /// no-ops.
-pub(crate) struct DebugDumper {
+pub struct DebugDumper {
     dir: Option<PathBuf>,
 }
 
@@ -44,7 +44,7 @@ impl SerializedArtifact {
         serde_json::to_vec_pretty(value).map(Self)
     }
 
-    fn text(value: String) -> Self {
+    const fn text(value: String) -> Self {
         Self(value.into_bytes())
     }
 
@@ -60,7 +60,7 @@ impl SerializedArtifact {
 
 /// Observable result of requesting a same-job speaker-turn dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SpeakerTurnsDumpOutcome {
+pub enum SpeakerTurnsDumpOutcome {
     /// Debug artifact collection was not requested for this run.
     Disabled,
     /// The canonical turns artifact was durably written at this path.
@@ -69,7 +69,7 @@ pub(crate) enum SpeakerTurnsDumpOutcome {
 
 /// Failures while retaining the exact diarization turns used by transcribe.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SpeakerTurnsDumpError {
+pub enum SpeakerTurnsDumpError {
     /// The configured debug directory could not be created.
     #[error("failed to create speaker-turn artifact directory {}: {source}", path.display())]
     CreateDirectory {
@@ -95,7 +95,7 @@ pub(crate) enum SpeakerTurnsDumpError {
 
 /// Observable result of requesting a durable forced-alignment evidence dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FaEvidenceDumpOutcome {
+pub enum FaEvidenceDumpOutcome {
     /// Debug artifact collection was not requested for this run.
     Disabled,
     /// The versioned evidence artifact was durably written at this path.
@@ -104,7 +104,7 @@ pub(crate) enum FaEvidenceDumpOutcome {
 
 /// Failures while retaining forced-alignment timing evidence.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum FaEvidenceDumpError {
+pub enum FaEvidenceDumpError {
     /// The configured debug directory could not be created.
     #[error("failed to create FA evidence directory {}: {source}", path.display())]
     CreateDirectory {
@@ -130,14 +130,14 @@ pub(crate) enum FaEvidenceDumpError {
 
 /// Observable result of requesting a durable Rev causal-evidence dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RevEvidenceDumpOutcome {
+pub enum RevEvidenceDumpOutcome {
     Disabled,
     Written(PathBuf),
 }
 
 /// Failures while retaining the Rev request/cache/projection identity.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RevEvidenceDumpError {
+pub enum RevEvidenceDumpError {
     #[error("failed to create Rev evidence directory {}: {source}", path.display())]
     CreateDirectory {
         path: PathBuf,
@@ -156,14 +156,14 @@ pub(crate) enum RevEvidenceDumpError {
 
 /// Observable result of requesting a durable speaker causal-evidence dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SpeakerEvidenceDumpOutcome {
+pub enum SpeakerEvidenceDumpOutcome {
     Disabled,
     Written(PathBuf),
 }
 
 /// Failures while retaining the speaker request/cache/projection identity.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SpeakerEvidenceDumpError {
+pub enum SpeakerEvidenceDumpError {
     #[error("failed to create speaker evidence directory {}: {source}", path.display())]
     CreateDirectory {
         path: PathBuf,
@@ -183,7 +183,7 @@ pub(crate) enum SpeakerEvidenceDumpError {
 /// Per-group FA dump data for offline replay.
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct FaGroupDumpData {
+pub struct FaGroupDumpData {
     /// Audio window start in milliseconds.
     pub audio_start_ms: DurationMs,
     /// Audio window end in milliseconds.
@@ -197,7 +197,7 @@ pub(crate) struct FaGroupDumpData {
 /// A start/end timing pair in milliseconds.
 #[allow(dead_code)]
 #[derive(Serialize, Deserialize)]
-pub(crate) struct TimingPair {
+pub struct TimingPair {
     /// Word start time in milliseconds.
     pub start_ms: i64,
     /// Word end time in milliseconds.
@@ -214,12 +214,12 @@ impl DebugDumper {
 
     /// Create a disabled dumper (all methods are no-ops).
     #[cfg(test)]
-    pub(crate) fn disabled() -> Self {
+    pub(crate) const fn disabled() -> Self {
         Self { dir: None }
     }
 
     /// Whether dumping is enabled.
-    pub(crate) fn is_enabled(&self) -> bool {
+    pub(crate) const fn is_enabled(&self) -> bool {
         self.dir.is_some()
     }
 
@@ -534,7 +534,7 @@ impl DebugDumper {
     pub(crate) fn dump_speaker_evidence(
         &self,
         filename: &str,
-        trace: &SpeakerEvidenceTrace,
+        trace: &SpeakerEvidenceTrace<'_>,
     ) -> Result<SpeakerEvidenceDumpOutcome, SpeakerEvidenceDumpError> {
         self.dump_speaker_artifact(filename, "speaker_evidence", trace)
     }
@@ -743,20 +743,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn disabled_speaker_turns_dump_reports_disabled_without_writing() {
-        let dumper = DebugDumper::disabled();
-        let outcome = dumper
-            .dump_speaker_turns(
-                "sample.wav",
-                SpeakerBackendV2::PyannoteAi,
-                &[speaker_segment("SPEAKER_00", 10, 20)],
-            )
-            .expect("disabled dumping is not an error");
-
-        assert_eq!(outcome, SpeakerTurnsDumpOutcome::Disabled);
-    }
-
+    /// Guards: Speaker turns JSON retains backend provenance and canonical PAR tracks.
+    /// Kind: wire
+    /// Not a type: Serialized turn fields and track numbering are observable by external consumers.
+    /// State: Private debug directory receives the actual speaker turns writer's JSON.
+    /// Concurrency: Private directory and synchronous write completion.
     #[test]
     fn speaker_turns_dump_writes_backend_provenance_and_canonical_tracks() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -786,6 +777,11 @@ mod tests {
         assert_eq!(value["turns"][1]["track"], "PAR1");
     }
 
+    /// Guards: Rev debug evidence is durable, replay-linked and collision-resistant for distinct identities.
+    /// Kind: wire
+    /// Not a type: Names and bytes published by the real writer can diverge from receipt data.
+    /// State: Private debug directory exercises the actual durable writer with typed replay evidence.
+    /// Concurrency: Private directory and serial file observations.
     #[tokio::test]
     async fn rev_evidence_dump_is_durable_joined_and_collision_resistant() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -837,6 +833,11 @@ mod tests {
         assert_eq!(value["raw_evidence_key"], request.cache_key().as_str());
     }
 
+    /// Guards: FA debug evidence preserves the schema, timing decisions and previous speaker context.
+    /// Kind: wire
+    /// Not a type: The external evidence encoding can drop fields even when Rust carries them.
+    /// State: Private debug directory receives the actual FA evidence sidecar.
+    /// Concurrency: Private directory and synchronous file observation.
     #[test]
     fn fa_evidence_dump_is_durable_and_versioned() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -909,6 +910,11 @@ mod tests {
         assert_eq!(value["timing_decisions"][0]["previous_speaker"], "PAR1");
     }
 
+    /// Guards: Two FA audio paths with the same basename write distinct existing sidecars.
+    /// Kind: contract
+    /// Not a type: Path-derived names can collide on disk regardless of distinct in-memory input identities.
+    /// State: Private debug directory observes two real atomic publications.
+    /// Concurrency: Private directory and serial writes.
     #[test]
     fn fa_evidence_paths_do_not_collide_for_equal_basenames() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -946,6 +952,11 @@ mod tests {
         assert!(second.exists());
     }
 
+    /// Guards: The FA writer replaces a destination symlink without writing through it.
+    /// Kind: contract
+    /// Not a type: Filesystem links and rename effects cannot be certified by the path value alone.
+    /// State: Private debug directory contains a symlink and a distinct target with sentinel bytes.
+    /// Concurrency: Private directory and synchronous reads after publication.
     #[cfg(unix)]
     #[test]
     fn fa_evidence_dump_replaces_a_destination_symlink_without_following_it() {
@@ -991,6 +1002,11 @@ mod tests {
         );
     }
 
+    /// Guards: Disabled debug dumping takes no write path and reports disabled for speaker turns.
+    /// Kind: contract
+    /// Not a type: The optional enable decision affects several real diagnostic entry points and their reports.
+    /// State: Uses a disabled sink and synthetic data with no destination or filesystem dependency.
+    /// Concurrency: none
     #[test]
     fn disabled_dumper_is_noop() {
         let dumper = DebugDumper::disabled();
@@ -1019,8 +1035,23 @@ mod tests {
                 })],
             },
         );
+
+        let outcome = dumper
+            .dump_speaker_turns(
+                "sample.wav",
+                SpeakerBackendV2::PyannoteAi,
+                &[speaker_segment("SPEAKER_00", 10, 20)],
+            )
+            .expect("disabled dumping is not an error");
+
+        assert_eq!(outcome, SpeakerTurnsDumpOutcome::Disabled);
     }
 
+    /// Guards: Enabled debug dumping writes expected stage files and preserves typed token and FA timing contents.
+    /// Kind: wire
+    /// Not a type: Artifact path spelling and payload encoding can diverge at the actual writer.
+    /// State: Private debug directory receives real CHAT, JSON and FA stage writes.
+    /// Concurrency: Private directory and serial synchronous writes.
     #[test]
     fn enabled_dumper_writes_expected_files() {
         let dir = tempfile::tempdir().expect("tempdir");

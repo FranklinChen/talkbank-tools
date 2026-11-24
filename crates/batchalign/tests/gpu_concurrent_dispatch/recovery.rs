@@ -4,6 +4,11 @@ use super::*;
 use batchalign::worker::pool::WorkerTransport;
 use std::sync::Arc;
 
+/// Guards: After worker EOF, concurrent callers complete through a single live replacement.
+/// Kind: journey
+/// Not a type: Only the process and its pipe can reveal when the reader observes an actual child exit.
+/// State: This test signals the pool-owned stdio child and verifies both process identities leave the OS.
+/// Concurrency: Four callers race for replacement after the initial dispatch observes the crash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn next_dispatches_replace_a_dead_shared_worker_once() {
     let python = super::worker_python();
@@ -23,11 +28,13 @@ async fn next_dispatches_replace_a_dead_shared_worker_once() {
         .expect("this pool owns a shared stdio worker")
         .pid;
 
-    // SAFETY: this PID belongs to the live child just spawned by this pool.
-    assert_eq!(
-        unsafe { libc::kill(original_pid.0 as libc::pid_t, libc::SIGKILL) },
-        0
-    );
+    // This PID belongs to the live child just spawned by this pool.
+    let original = i32::try_from(original_pid.0).expect("a Unix PID fits pid_t");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(original),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .expect("signal the shared worker");
 
     // A request racing the reader's discovery of EOF may fail. It must not
     // poison every later request with the same dead OnceCell occupant.

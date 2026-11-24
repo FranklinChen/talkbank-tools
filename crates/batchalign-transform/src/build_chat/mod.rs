@@ -119,6 +119,7 @@ pub struct BuiltChat {
 
 impl BuiltChat {
     /// The file alone, the synthesized ends deliberately set aside.
+    #[must_use]
     pub fn into_file(self) -> ChatFile {
         self.file
     }

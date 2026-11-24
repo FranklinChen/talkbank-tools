@@ -33,7 +33,7 @@ tokio::task_local! {
 }
 
 /// Where a file task is being spawned from.
-pub(crate) enum SpawnScope {
+pub enum SpawnScope {
     /// Inside a runner attempt: the task inherits the job's scope.
     Job(RunContext),
     /// Outside any runner. Only tests of the supervision layer spawn here; in
@@ -69,7 +69,7 @@ impl SpawnScope {
 /// language's extra workers after its first probe: the file goes on to its
 /// own dispatch while they come up. Nothing joins it; it ends with its work
 /// or with the job's cancellation.
-pub(crate) fn spawn_background(work: impl Future<Output = ()> + Send + 'static) {
+pub fn spawn_background(work: impl Future<Output = ()> + Send + 'static) {
     use tracing::Instrument;
 
     let span = tracing::Span::current();
@@ -99,17 +99,10 @@ pub(crate) fn spawn_background(work: impl Future<Output = ()> + Send + 'static) 
     }
 }
 
-/// The span for a file's work spawned from the current task: the one entry
-/// every per-file spawn uses (the supervised file tasks, and the morphotag and
-/// utseg fan-outs, which run on their own `JoinSet`).
-pub(crate) fn current_file_span(filename: &DisplayPath, role: &'static str) -> tracing::Span {
-    RunContext::current().file_span(filename, role)
-}
-
 /// Shared cancellation context. Children inherit it, but cannot dispatch or
 /// finalize the run: only `RunScope` owns that claim.
 #[derive(Clone)]
-pub(crate) struct RunContext {
+pub struct RunContext {
     job_id: JobId,
     cancel_token: CancellationToken,
 }

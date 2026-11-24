@@ -24,7 +24,7 @@
 //! read on 2026-09-15, and 2026-09-16 for the boundary models. The native
 //! Whisper weights are pinned by the `lfs.oid` of their blob, which IS its
 //! SHA-256, so no model cache has to be inspected to know what the file should
-//! be. ModelScope models are pinned by TAG: its public API exposes no commit
+//! be. `ModelScope` models are pinned by TAG: its public API exposes no commit
 //! behind a tag (checked the same day: the tag and branch endpoints do not
 //! exist and the revisions endpoint returns names and timestamps only), and
 //! [`RequestedRevisionV2::Tag`] records that honestly rather than inventing a
@@ -48,7 +48,7 @@ use crate::types::worker_v2::{
 
 mod tencent;
 
-pub(crate) use tencent::{TENCENT_ENGINE_INI_KEY, TencentEngineUnavailable};
+pub use tencent::{TENCENT_ENGINE_INI_KEY, TencentEngineUnavailable};
 pub use tencent::{TencentEngine, TencentEngineRefusal, TencentEngineSetting};
 
 // ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ enum ManifestRevision {
     ProviderParameter(&'static str),
 }
 
-/// Stock OpenAI Whisper, which `load_whisper_asr` loads for every language it
+/// Stock `OpenAI` Whisper, which `load_whisper_asr` loads for every language it
 /// is not given a fine-tune for.
 const WHISPER_LARGE_V3: ManifestEntry = ManifestEntry {
     id: "openai/whisper-large-v3",
@@ -98,30 +98,30 @@ const WHISPER_HUB_DEFAULTS: &[(&str, ManifestEntry)] = &[(
     },
 )];
 
-/// FunASR SenseVoice, the default FunAudio checkpoint.
+/// `FunASR` `SenseVoice`, the default `FunAudio` checkpoint.
 const SENSEVOICE: ManifestEntry = ManifestEntry {
     id: "FunAudioLLM/SenseVoiceSmall",
     revision: ManifestRevision::Commit("3847d57b6bdf2dd8875cb1508d2af43d80a16bf7"),
 };
 
-/// The voice-activity model SenseVoice loads. Resolved through FunASR's
+/// The voice-activity model `SenseVoice` loads. Resolved through `FunASR`'s
 /// Hugging Face name map (`fsmn-vad` there means `funasr/fsmn-vad`), because
-/// the SenseVoice branch passes `hub="hf"`.
+/// the `SenseVoice` branch passes `hub="hf"`.
 const SENSEVOICE_VAD: ManifestEntry = ManifestEntry {
     id: "funasr/fsmn-vad",
     revision: ManifestRevision::Commit("df20e6b30c653645fa4ff125cacfcabd1020a669"),
 };
 
-/// FunASR Paraformer. The Paraformer branch does NOT pass `hub`, so FunASR's
-/// default ModelScope map applies and `paraformer-zh` resolves to the SeaCo
+/// `FunASR` Paraformer. The Paraformer branch does NOT pass `hub`, so `FunASR`'s
+/// default `ModelScope` map applies and `paraformer-zh` resolves to the `SeaCo`
 /// Paraformer repository, not the similarly named `speech_paraformer-large-vad-punc`.
 const PARAFORMER: ManifestEntry = ManifestEntry {
     id: "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
     revision: ManifestRevision::Tag("v2.0.4"),
 };
 
-/// Paraformer's voice-activity model, on ModelScope (a DIFFERENT repository
-/// from the Hugging Face `funasr/fsmn-vad` SenseVoice loads).
+/// Paraformer's voice-activity model, on `ModelScope` (a DIFFERENT repository
+/// from the Hugging Face `funasr/fsmn-vad` `SenseVoice` loads).
 const PARAFORMER_VAD: ManifestEntry = ManifestEntry {
     id: "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
     revision: ManifestRevision::Tag("v2.0.4"),
@@ -191,7 +191,7 @@ const REV_PROVIDER: ManifestEntry = ManifestEntry {
 /// One key carrying one serialized composition, rather than a key per model
 /// and per role: the worker parses the same typed shape Rust sent, so a new
 /// auxiliary model needs no new key and no second parser.
-pub(crate) const PINNED_ASR_MODELS_KEY: &str = "asr_pinned_models";
+pub const PINNED_ASR_MODELS_KEY: &str = "asr_pinned_models";
 
 /// The worker-hosted ASR backend one engine name loads, or `None` when the
 /// engine has no Python worker at all.
@@ -201,7 +201,7 @@ pub(crate) const PINNED_ASR_MODELS_KEY: &str = "asr_pinned_models";
 /// native Whisper) and the two accepted-but-unimplemented names have no worker
 /// backend: `EngineSelection` already drops them before a spawn, and their
 /// identities are built by their own code paths.
-pub(crate) fn worker_backend_for_engine(engine: &AsrEngineName) -> Option<AsrBackendV2> {
+pub const fn worker_backend_for_engine(engine: &AsrEngineName) -> Option<AsrBackendV2> {
     match engine {
         AsrEngineName::Whisper => Some(AsrBackendV2::LocalWhisper),
         AsrEngineName::WhisperHub => Some(AsrBackendV2::WhisperHub),
@@ -220,7 +220,7 @@ pub(crate) fn worker_backend_for_engine(engine: &AsrEngineName) -> Option<AsrBac
 // The utterance-boundary models
 // ---------------------------------------------------------------------------
 
-/// The TalkBank utterance-boundary model each language loads.
+/// The `TalkBank` utterance-boundary model each language loads.
 ///
 /// The owner of this table, moved here from `_RESOLVER["utterance"]` in
 /// `batchalign/models/resolve.py` for the reason [`WHISPER_HUB_DEFAULTS`]
@@ -271,7 +271,7 @@ const UTSEG_BOUNDARY_MODELS: &[(&str, ManifestEntry)] = &[
 ///
 /// One model rather than a composition: the boundary model loads alone, so
 /// there is no role to name and nothing for a composition enum to close over.
-pub(crate) const PINNED_UTSEG_MODEL_KEY: &str = "utseg_pinned_model";
+pub const PINNED_UTSEG_MODEL_KEY: &str = "utseg_pinned_model";
 
 /// The boundary model this build pins for one language.
 ///
@@ -279,7 +279,7 @@ pub(crate) const PINNED_UTSEG_MODEL_KEY: &str = "utseg_pinned_model";
 /// a fact about the language rather than a failure: `utseg_route` turns it into
 /// either the Stanza fallback or a typed refusal. `Some(Err(..))` is a defect in
 /// THIS file, surfaced the same way every other malformed manifest entry is.
-pub(crate) fn utseg_boundary_model(
+pub fn utseg_boundary_model(
     lang: &LanguageCode3,
 ) -> Option<Result<RequestedModelV2, ModelPlanError>> {
     UTSEG_BOUNDARY_MODELS
@@ -294,7 +294,7 @@ pub(crate) fn utseg_boundary_model(
 
 /// Why an ASR model plan could not be resolved.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ModelPlanError {
+pub enum ModelPlanError {
     /// A manifest entry's own text is not admissible. A defect in this file.
     #[error("ASR manifest entry for {id} is malformed: {detail}")]
     MalformedManifestEntry {
@@ -438,14 +438,14 @@ fn floating(key: &'static str, id: &str) -> Result<RequestedModelV2, ModelPlanEr
 /// names the same engine and its tier. Carrying the product beside the models
 /// means nothing downstream parses it back out of the request's wire text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PinnedAsrPlan {
+pub struct PinnedAsrPlan {
     models: AsrRequestedModelsV2,
     billed: crate::error::BilledProduct,
 }
 
 impl PinnedAsrPlan {
     /// A plan billed by account alone.
-    fn unbilled(models: AsrRequestedModelsV2) -> Self {
+    const fn unbilled(models: AsrRequestedModelsV2) -> Self {
         Self {
             models,
             billed: crate::error::BilledProduct::NotNamed,
@@ -454,17 +454,17 @@ impl PinnedAsrPlan {
 
     /// A plan billed by account alone, for tests of what consumes one.
     #[cfg(test)]
-    pub(crate) fn for_test(models: AsrRequestedModelsV2) -> Self {
+    pub(crate) const fn for_test(models: AsrRequestedModelsV2) -> Self {
         Self::unbilled(models)
     }
 
     /// The models the request pins.
-    pub(crate) fn models(&self) -> &AsrRequestedModelsV2 {
+    pub(crate) const fn models(&self) -> &AsrRequestedModelsV2 {
         &self.models
     }
 
     /// The product the request is billed as.
-    pub(crate) fn billed(&self) -> &crate::error::BilledProduct {
+    pub(crate) const fn billed(&self) -> &crate::error::BilledProduct {
         &self.billed
     }
 
@@ -481,7 +481,7 @@ impl PinnedAsrPlan {
 /// `tencent` is the account's Tencent engine choice, read once by the server
 /// that owns the worker runtime ([`crate::worker::handle::WorkerRuntimeConfig`]);
 /// only a Tencent plan reads it.
-pub(crate) fn resolve_asr_models(
+pub fn resolve_asr_models(
     backend: AsrBackendV2,
     lang: Option<&LanguageCode3>,
     extras: &std::collections::BTreeMap<String, String>,
@@ -539,7 +539,7 @@ pub(crate) fn resolve_asr_models(
 /// UTR-specific knobs in `EngineOverrides.extras` today. Deriving the namespace
 /// from the same plan the run executes is the point; resolving it with extras
 /// the run ignores would key rows under a composition that never ran.
-pub(crate) fn utr_pinned_models(
+pub fn utr_pinned_models(
     engine: &crate::options::UtrEngine,
     lang: &LanguageCode3,
     tencent: &TencentEngineSetting,
@@ -566,7 +566,7 @@ pub(crate) fn utr_pinned_models(
 /// drift is invisible to us; recording that absence is honest, whereas echoing
 /// the request parameter back as though it had been observed would claim a
 /// confirmation nobody made.
-pub(crate) fn rev_loaded_identity() -> AsrModelIdentityV2 {
+pub const fn rev_loaded_identity() -> AsrModelIdentityV2 {
     AsrModelIdentityV2::Rev {
         provider: LoadedModelV2 {
             id: const { ModelIdV2::from_static(REV_PROVIDER_ID) },
@@ -613,7 +613,7 @@ fn whisper_hub_model(
     }
 }
 
-/// The FunAudio composition, which depends on the checkpoint selected.
+/// The `FunAudio` composition, which depends on the checkpoint selected.
 fn funaudio_models(
     extras: &std::collections::BTreeMap<String, String>,
 ) -> Result<AsrRequestedModelsV2, ModelPlanError> {
@@ -689,14 +689,14 @@ mod native_whisper {
     /// its hf-hub call needs and passes this to `.revision(...)`. The coordinates
     /// live with the fetch and the revision lives here, so every pinned revision in
     /// this build has exactly one home.
-    pub(crate) const NATIVE_WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+    pub const NATIVE_WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
     /// The models the Rust-owned native Whisper path loads.
     ///
     /// Separate from [`resolve_asr_models`] because whisper.cpp is not a worker
     /// backend: it has no [`AsrBackendV2`] variant, and its weights are a file
     /// rather than a repository.
-    pub(crate) fn native_whisper_identity(
+    pub fn native_whisper_identity(
         model_path: &std::path::Path,
         source: crate::whisper_native::WhisperModelSource,
     ) -> Result<AsrModelIdentityV2, ModelPlanError> {
@@ -778,7 +778,7 @@ mod native_whisper {
 }
 
 #[cfg(feature = "whisper-rs-backend")]
-pub(crate) use native_whisper::{NATIVE_WHISPER_REVISION, native_whisper_identity};
+pub use native_whisper::{NATIVE_WHISPER_REVISION, native_whisper_identity};
 
 #[cfg(test)]
 mod tests {
@@ -924,7 +924,7 @@ mod tests {
 
     /// The account's engine is what Tencent is asked for, whatever the
     /// language, provided the engine recognizes it: Cantonese and Mandarin
-    /// both go to `16k_zh_en_2.0` on the PolyU account. Until 2026-11-05 the
+    /// both go to `16k_zh_en_2.0` on the `PolyU` account. Until 2026-11-05 the
     /// name was built from the language, so Cantonese went to `16k_yue`
     /// whatever the account had bought.
     #[test]
@@ -1005,8 +1005,8 @@ mod tests {
         );
     }
 
-    /// FunAudio's composition follows its checkpoint: the default is
-    /// SenseVoice with its VAD, and `paraformer-zh` is Paraformer with the VAD
+    /// `FunAudio`'s composition follows its checkpoint: the default is
+    /// `SenseVoice` with its VAD, and `paraformer-zh` is Paraformer with the VAD
     /// and punctuation models it additionally loads.
     #[test]
     fn the_funaudio_checkpoint_decides_the_composition() {
@@ -1034,9 +1034,9 @@ mod tests {
         assert!(paraformer.is_fully_pinned());
     }
 
-    /// The two FunASR VAD models are DIFFERENT repositories: SenseVoice loads
-    /// the Hugging Face one, Paraformer the ModelScope one, because only the
-    /// SenseVoice branch passes `hub="hf"`. Pinning both to one id would load
+    /// The two `FunASR` VAD models are DIFFERENT repositories: `SenseVoice` loads
+    /// the Hugging Face one, Paraformer the `ModelScope` one, because only the
+    /// `SenseVoice` branch passes `hub="hf"`. Pinning both to one id would load
     /// the wrong weights for one of them.
     #[test]
     fn the_two_funasr_vad_models_are_not_the_same_repository() {

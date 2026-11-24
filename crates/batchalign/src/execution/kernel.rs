@@ -14,6 +14,7 @@ mod comparison;
 mod outputs;
 use crate::scheduling::{FailureCategory, WorkUnitKind};
 use crate::store::RunnerJobSnapshot;
+pub(super) use comparison::CompareMorphologySubmission;
 use comparison::PreparedComparison;
 use outputs::{ConsolidatedCompareMetricsRow, format_consolidated_csv};
 
@@ -91,7 +92,7 @@ async fn run_compare(
 }
 
 /// Runner-owned dispatch entrypoint for the first migrated command family.
-pub(crate) async fn dispatch_compare_job(
+pub async fn dispatch_compare_job(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     gateway: &dyn CompareMorphology,
@@ -178,11 +179,10 @@ mod tests {
     impl CompareMorphology for FakeGateway {
         async fn morphotag_for_compare(
             &self,
-            chat_text: &str,
-            _mwt: &MwtDict,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
+            submission: CompareMorphologySubmission<'_>,
         ) -> Result<crate::pipeline::post_validate::PostValidated, crate::error::ServerError>
         {
+            let (chat_text, _, _) = submission.into_parts();
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // A GATED proof over the double's own text, which is what the real
             // gateway returns: the production implementation runs the gate, so

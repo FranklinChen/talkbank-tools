@@ -93,7 +93,7 @@ enum ExecutionTarget {
 impl ExecutionTarget {
     /// How the submission would travel: by path on a shared filesystem, or
     /// as content to another host.
-    fn transport(&self) -> ServerTransport {
+    const fn transport(&self) -> ServerTransport {
         match self {
             Self::ExplicitServer { transport, .. } => *transport,
             Self::RunningLocalServer { .. }
@@ -414,7 +414,7 @@ mod tests {
     use crate::cli::dispatch::{DispatchRequest, dispatch};
 
     /// A synthetic recordings directory and an isolated state directory with
-    /// auto_daemon off, so no route can start the test binary as a daemon.
+    /// `auto_daemon` off, so no route can start the test binary as a daemon.
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let root = tempfile::tempdir().unwrap();
         let recordings = root.path().join("recordings");
@@ -580,7 +580,7 @@ mod tests {
         assert!(state_dir_untouched(&state));
     }
 
-    /// With no running server and auto_daemon on, the plan says the daemon
+    /// With no running server and `auto_daemon` on, the plan says the daemon
     /// would be started, and starts nothing.
     #[tokio::test]
     async fn a_dry_run_names_the_daemon_it_would_start_without_starting_it() {

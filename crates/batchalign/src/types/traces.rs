@@ -32,7 +32,7 @@ pub struct JobTraces {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct FileTraces {
-    /// Original filename (e.g. "01DM_18.cha").
+    /// Original filename (e.g. "`01DM_18.cha`").
     pub filename: crate::api::DisplayPath,
     /// DP alignment traces (one per alignment call: FA, retokenize, WER).
     pub dp_alignments: Vec<DpAlignmentTrace>,
@@ -52,13 +52,13 @@ pub struct FileTraces {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct DpAlignmentTrace {
-    /// What triggered this alignment (e.g. "fa_whisper", "retokenize", "wer").
+    /// What triggered this alignment (e.g. "`fa_whisper`", "retokenize", "wer").
     pub context: String,
     /// Payload sequence (left side).
     pub payload: Vec<String>,
     /// Reference sequence (top side).
     pub reference: Vec<String>,
-    /// Match mode used ("exact" or "case_insensitive").
+    /// Match mode used ("exact" or "`case_insensitive`").
     pub match_mode: String,
     /// Number of prefix elements stripped before DP.
     pub prefix_stripped: usize,
@@ -76,7 +76,7 @@ pub struct DpAlignmentTrace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct AlignStepTrace {
-    /// Action taken: "match", "substitution", "extra_payload", "extra_reference".
+    /// Action taken: "match", "substitution", "`extra_payload`", "`extra_reference`".
     pub action: String,
     /// Row index in the cost matrix.
     pub i: usize,
@@ -88,13 +88,13 @@ pub struct AlignStepTrace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct AlignResultTrace {
-    /// "match", "extra_payload", or "extra_reference".
+    /// "match", "`extra_payload`", or "`extra_reference`".
     pub kind: String,
     /// The string key.
     pub key: String,
-    /// Index into payload (present for match and extra_payload).
+    /// Index into payload (present for match and `extra_payload`).
     pub payload_idx: Option<usize>,
-    /// Index into reference (present for match and extra_reference).
+    /// Index into reference (present for match and `extra_reference`).
     pub reference_idx: Option<usize>,
 }
 
@@ -1146,7 +1146,8 @@ impl RemovalEffectTrace {
     /// The boundary the removed timing conflicted with: for a clamp the
     /// bound the words were cut to, for a strip the start or end the
     /// utterance could not be ordered against.
-    pub fn boundary_ms(&self) -> u64 {
+    #[must_use]
+    pub const fn boundary_ms(&self) -> u64 {
         match self {
             Self::StartRegressionStripped {
                 preceding_start_ms, ..
@@ -1342,6 +1343,7 @@ impl FaTimingDecisionTrace {
     /// An exhaustive match with every non-removing variant named, rather
     /// than a catch-all: a future effect that CAN remove a measurement must
     /// then fail to compile here instead of silently reporting none.
+    #[must_use]
     pub fn word_timing_removal(&self) -> Option<LocatedWordTimingRemoval> {
         match self {
             Self::EndClampedCoverageOnly { .. } | Self::EndClampedBoundaryFromWords { .. } => None,
@@ -1997,6 +1999,7 @@ pub struct TimingTrace {
 impl TimingTrace {
     /// Preserve all timing evidence that survives in `WordTiming` before CHAT
     /// serialization lowers it to two integers.
+    #[must_use]
     pub fn from_word_timing(timing: &crate::chat_ops::fa::WordTiming) -> Self {
         Self {
             start_ms: timing.start_ms as i64,

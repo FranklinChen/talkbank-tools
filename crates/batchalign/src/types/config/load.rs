@@ -32,7 +32,7 @@ pub fn load_config_from_layout(
     Ok(config)
 }
 
-/// Load ServerConfig from a YAML file. Falls back to defaults if the file
+/// Load `ServerConfig` from a YAML file. Falls back to defaults if the file
 /// doesn't exist.
 pub fn load_config(path: Option<&Path>) -> Result<ServerConfig, ConfigError> {
     let layout = RuntimeLayout::from_env();

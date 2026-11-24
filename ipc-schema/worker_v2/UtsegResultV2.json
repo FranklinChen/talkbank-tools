@@ -43,7 +43,7 @@
       ]
     },
     "UtsegBoundaryActionV2": {
-      "description": "Closed label vocabulary emitted by the TalkBank utterance-boundary model.\n\nNames describe model semantics instead of exposing classifier label indices,\nwhose numeric ordering is an implementation detail of the Python model.",
+      "description": "Closed label vocabulary emitted by the `TalkBank` utterance-boundary model.\n\nNames describe model semantics instead of exposing classifier label indices,\nwhose numeric ordering is an implementation detail of the Python model.",
       "oneOf": [
         {
           "description": "Ordinary lexical word with no punctuation or onset label.",
@@ -86,7 +86,7 @@
           "$ref": "#/$defs/UtsegAdjacencyPolicyRevisionV2"
         },
         "model_id": {
-          "description": "HuggingFace model identifier the control plane pinned.",
+          "description": "`HuggingFace` model identifier the control plane pinned.",
           "type": "string"
         },
         "model_revision": {

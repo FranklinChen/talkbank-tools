@@ -1,6 +1,6 @@
 //! Blocking Rev.AI HTTP client.
 //!
-//! The shared client stays blocking on purpose. The PyO3 binding can release
+//! The shared client stays blocking on purpose. The `PyO3` binding can release
 //! the Python GIL around an entire request, and the Rust server can move upload
 //! work onto `spawn_blocking` threads. That keeps the client simple while still
 //! fitting both host runtimes cleanly.
@@ -188,7 +188,7 @@ enum UploadRetryBackoff {
 }
 
 impl UploadRetryBackoff {
-    fn delay_before(self, attempt: u32) -> Option<Duration> {
+    const fn delay_before(self, attempt: u32) -> Option<Duration> {
         if attempt == 0 {
             return None;
         }
@@ -365,7 +365,7 @@ impl RevAiError {
     /// Exhaustive on purpose: a new variant must state its own verdict rather
     /// than inherit a catch-all, because the verdict decides both whether the
     /// control plane retries and what the operator is told went wrong.
-    pub fn disposition(&self) -> RevAiDisposition {
+    pub const fn disposition(&self) -> RevAiDisposition {
         match self {
             // The socket, not the request: a reset, a hang-up mid-body, a DNS
             // blip. Nothing about the submission changes by trying again.
@@ -402,7 +402,7 @@ impl RevAiError {
 /// and a status code of their own. Each arm's payload can only be built here,
 /// so a [`TerminalFailure`] in hand is proof the table called it terminal.
 #[derive(Debug)]
-pub(crate) enum ClassifiedFailure {
+pub enum ClassifiedFailure {
     Transient(TransientFailure),
     Terminal(TerminalFailure),
     AccountRefused(AccountRefusal),
@@ -410,15 +410,15 @@ pub(crate) enum ClassifiedFailure {
 
 /// A failure the table judged transient: the same request may succeed later.
 #[derive(Debug)]
-pub(crate) struct TransientFailure(RevAiError);
+pub struct TransientFailure(RevAiError);
 
 /// A failure the table judged terminal: repeating the request cannot help.
 #[derive(Debug)]
-pub(crate) struct TerminalFailure(RevAiError);
+pub struct TerminalFailure(RevAiError);
 
 /// Rev.AI refusing the account itself.
 #[derive(Debug)]
-pub(crate) struct AccountRefusal(RevAiError);
+pub struct AccountRefusal(RevAiError);
 
 impl TransientFailure {
     /// The failure itself, once the verdict has been acted on.
@@ -449,7 +449,7 @@ impl std::fmt::Display for TransientFailure {
 
 impl RevAiError {
     /// Sort this failure by its verdict, consuming it.
-    pub(crate) fn classify(self) -> ClassifiedFailure {
+    pub(crate) const fn classify(self) -> ClassifiedFailure {
         match self.disposition() {
             RevAiDisposition::Transient => ClassifiedFailure::Transient(TransientFailure(self)),
             RevAiDisposition::Terminal => ClassifiedFailure::Terminal(TerminalFailure(self)),

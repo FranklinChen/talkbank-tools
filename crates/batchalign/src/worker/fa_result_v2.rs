@@ -28,7 +28,7 @@ use crate::types::worker_v2::{
 ///
 /// # The one place engine exception text is read
 ///
-/// The engine raises a plain PyTorch `RuntimeError`/`ValueError` with no class
+/// The engine raises a plain `PyTorch` `RuntimeError`/`ValueError` with no class
 /// or code that names the constraint, and the worker protocol forwards only
 /// its text under `RuntimeFailure`. So the constraint is recognised by the
 /// engine's own words, HERE, where the response is read, and nowhere else:
@@ -41,7 +41,7 @@ pub enum FaEngineConstraint {
     /// The targets contain the CTC blank index.
     CtcBlankIndexInTargets,
     /// The window is shorter than the feature extractor's receptive field
-    /// (Wave2Vec MMS_FA's seventh conv layer, kernel 2, sees one sample).
+    /// (`Wave2Vec` `MMS_FA`'s seventh conv layer, kernel 2, sees one sample).
     InputShorterThanKernel,
     /// Input exceeds the context read from the loaded model.
     ModelAudioContextExceeded,
@@ -74,6 +74,7 @@ impl FaEngineConstraint {
     ///
     /// Unchanged from the strings those records have always carried, so a
     /// reader of older evidence and newer evidence sees one vocabulary.
+    #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
             Self::InputShorterThanKernel => {
@@ -137,6 +138,7 @@ pub enum FaFailureClass {
 
 impl FaWorkerFailure {
     /// Classify one worker-reported failure by its protocol code.
+    #[must_use]
     pub fn classify(failure: ExecuteFailureRead) -> Self {
         let class = match failure.code() {
             ProtocolErrorCodeV2::RuntimeFailure => {
@@ -163,7 +165,7 @@ impl FaWorkerFailure {
         }
     }
 
-    pub(crate) fn from_preparation(cause: FaPreparationRefusalV2) -> Self {
+    pub(crate) const fn from_preparation(cause: FaPreparationRefusalV2) -> Self {
         let class = match &cause {
             FaPreparationRefusalV2::InsufficientInput { unit, .. } => {
                 FaFailureClass::EngineConstraint(match unit {
@@ -191,11 +193,13 @@ impl FaWorkerFailure {
     }
 
     /// What the failure means for the request.
-    pub fn class(&self) -> FaFailureClass {
+    #[must_use]
+    pub const fn class(&self) -> FaFailureClass {
         self.class
     }
 
     /// Preserve the producing category through the final file-error boundary.
+    #[must_use]
     pub fn into_server_error(self, context: std::fmt::Arguments<'_>) -> crate::error::ServerError {
         match self.failure {
             FaFailureReport::Execution(report) => report.in_context(context).into_server_error(

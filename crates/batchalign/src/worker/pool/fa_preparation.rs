@@ -40,7 +40,7 @@ pub struct BoundFaPreparation {
 /// Preparation plus the same physical feasibility policy execution uses.
 /// Every outcome still lacks an execution lease.
 #[derive(Debug)]
-pub(crate) enum FaProbeCompletion {
+pub enum FaProbeCompletion {
     ModelFree(BoundFaPreparation),
     Feasible(PhysicallyFeasibleFaPreparation),
     Limited(PhysicallyLimitedFaPreparation),
@@ -48,7 +48,7 @@ pub(crate) enum FaProbeCompletion {
 }
 
 #[derive(Debug)]
-pub(crate) struct PhysicallyFeasibleFaPreparation {
+pub struct PhysicallyFeasibleFaPreparation {
     preparation: BoundFaPreparation,
     _feasibility: HostFeasibleFaDemand,
 }
@@ -63,7 +63,7 @@ impl PhysicallyFeasibleFaPreparation {
 /// fits: a smaller cut may fit. Only [`FaCapacityRefusal::RequestTooLarge`]
 /// makes one; a model that never fits refuses the probe instead.
 #[derive(Debug)]
-pub(crate) struct PhysicallyLimitedFaPreparation {
+pub struct PhysicallyLimitedFaPreparation {
     preparation: BoundFaPreparation,
     refusal: FaCapacityNumbers,
 }
@@ -86,6 +86,7 @@ impl BoundFaPreparation {
 
     /// Advance only when ready to request an execution lease. Planning never
     /// substitutes its capacity observation for that lease-owning transition.
+    #[must_use]
     pub fn into_ready(self) -> ReadyRequest {
         let memory = self.plan.memory.clone();
         let request = self.candidate.wire(
@@ -117,16 +118,16 @@ enum RequestMemory {
 }
 
 impl ReadyRequest {
-    pub(super) fn load(&self) -> &super::TaskLoad {
+    pub(super) const fn load(&self) -> &super::TaskLoad {
         &self.load
     }
 
-    pub(super) fn request(&self) -> &ExecuteRequestV2 {
+    pub(super) const fn request(&self) -> &ExecuteRequestV2 {
         &self.request
     }
 
     /// Only a bound preparation reply can supply FA memory evidence.
-    pub(super) fn fa_memory(&self) -> Option<&FaRequestMemoryV2> {
+    pub(super) const fn fa_memory(&self) -> Option<&FaRequestMemoryV2> {
         match &self.memory {
             RequestMemory::ForcedAlignment(memory) => Some(memory),
             RequestMemory::Ordinary | RequestMemory::MetadataOnly => None,
@@ -138,14 +139,14 @@ impl DispatchPreparation {
     /// Inspect routing/loading identity without exposing an execution constructor.
     /// The preparation query names the same task, backend and artifacts as its
     /// candidate; only the phase and RPC id differ.
-    pub(super) fn request(&self) -> &ExecuteRequestV2 {
+    pub(super) const fn request(&self) -> &ExecuteRequestV2 {
         match self {
             Self::Ready(ready) => ready.request(),
             Self::ForcedAlignment(exchange) => &exchange.query,
         }
     }
 
-    pub(super) fn load(&self) -> &super::TaskLoad {
+    pub(super) const fn load(&self) -> &super::TaskLoad {
         match self {
             Self::Ready(ready) => ready.load(),
             Self::ForcedAlignment(exchange) => &exchange.candidate.load,
@@ -238,6 +239,7 @@ impl FaCandidate {
 
 impl FaPreparationExchange {
     /// A metadata-only request may run under the already-held model lease.
+    #[must_use]
     pub fn query(&self) -> ReadyRequest {
         ReadyRequest {
             request: self.query.clone(),
@@ -363,7 +365,7 @@ impl super::WorkerPool {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use crate::api::{NonNegativeSeconds, ReportedEngineName};
     use crate::types::worker_v2::{
@@ -449,7 +451,7 @@ pub(crate) mod tests {
         ));
     }
 
-    pub(crate) fn prepared_request(memory: FaRequestMemoryV2) -> ReadyRequest {
+    pub fn prepared_request(memory: FaRequestMemoryV2) -> ReadyRequest {
         let pending = exchange(&candidate());
         let prepared = plan(&pending, memory);
         let response = reply(&pending, prepared);

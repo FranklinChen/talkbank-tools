@@ -90,7 +90,7 @@ use crate::types::worker_v2::UnitProgressV2;
 /// and gets a new request id, and the ledger must treat that as the same unit
 /// of work. See the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct BatchChunkIndex(pub(crate) u32);
+pub struct BatchChunkIndex(pub(crate) u32);
 
 /// One report on the progress channel.
 ///
@@ -102,7 +102,7 @@ pub(crate) struct BatchChunkIndex(pub(crate) u32);
 /// job-level aggregate, one level smaller, and it is why this is an enum rather
 /// than a single message type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProgressReport {
+pub enum ProgressReport {
     /// This (source, group) will process exactly this many utterances.
     GroupTotal {
         /// Which input file.
@@ -125,7 +125,7 @@ pub(crate) enum ProgressReport {
 /// input provenance, typed with our own `DisplayPath` rather than a bare
 /// string.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BackendProgress {
+pub struct BackendProgress {
     /// Which input file this work came from.
     pub(crate) source_id: DisplayPath,
     /// The homogeneous batch group, i.e. the language the backend is running.
@@ -196,7 +196,7 @@ struct ChunkProgress {
 /// shared: every mutation arrives as a `BackendProgress` on a channel, so
 /// there is no lock here by construction.
 #[derive(Debug, Default)]
-pub(crate) struct BatchProgressLedger {
+pub struct BatchProgressLedger {
     /// Declared work per (source, group): the authoritative denominator.
     declared: BTreeMap<GroupKey, UtteranceCount>,
     /// Latest completion report per chunk: the numerator.
@@ -280,7 +280,7 @@ impl BatchProgressLedger {
 /// the same primitive type next to each other is exactly the seam where
 /// completed and total get swapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceProgress {
+pub struct SourceProgress {
     /// The input file these counts belong to.
     pub(crate) source_id: DisplayPath,
     /// Utterances finished across all of this file's chunks.

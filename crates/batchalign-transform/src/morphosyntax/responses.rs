@@ -53,21 +53,24 @@ impl TryFrom<UdResponse> for AdmittedUdResponse {
 
 impl AdmittedUdResponse {
     /// An explicit absence of model analysis, not completed morphology.
-    pub fn empty() -> Self {
+    #[must_use]
+    pub const fn empty() -> Self {
         Self {
             analysis: UdAnalysis::Empty,
         }
     }
 
     /// The worker's failure for this one item, with its reason.
-    pub fn worker_failed(reason: String) -> Self {
+    #[must_use]
+    pub const fn worker_failed(reason: String) -> Self {
         Self {
             analysis: UdAnalysis::WorkerFailed(reason),
         }
     }
 
     /// What the worker answered.
-    pub fn analysis(&self) -> &UdAnalysis {
+    #[must_use]
+    pub const fn analysis(&self) -> &UdAnalysis {
         &self.analysis
     }
 }
@@ -141,11 +144,13 @@ impl MatchedMorphosyntaxResponses {
     }
 
     /// Submitted items, for downstream planning such as secondary-language work.
+    #[must_use]
     pub fn items(&self) -> &[CollectedUtterance] {
         &self.items
     }
 
     /// Entire admitted analyses in worker-contract order, borrowed immutably.
+    #[must_use]
     pub fn responses(&self) -> &[AdmittedUdResponse] {
         &self.responses
     }
@@ -159,7 +164,7 @@ impl MatchedMorphosyntaxResponses {
     }
 }
 
-fn check_response_count(expected: usize, actual: usize) -> Result<(), ResponseCountMismatch> {
+const fn check_response_count(expected: usize, actual: usize) -> Result<(), ResponseCountMismatch> {
     if expected != actual {
         return Err(ResponseCountMismatch { expected, actual });
     }

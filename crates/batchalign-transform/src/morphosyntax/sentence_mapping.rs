@@ -41,22 +41,26 @@ pub struct MappedTokens {
 
 impl MappedTokens {
     /// The items and relations, for injection.
+    #[must_use]
     pub fn into_parts(self) -> (Vec<Mor>, Vec<GrammaticalRelation>) {
         (self.mors, self.gras)
     }
 
     /// The items and relations, and which items each token produced.
+    #[must_use]
     pub fn into_indexed(self) -> (Vec<Mor>, Vec<GrammaticalRelation>, TokenItems) {
         (self.mors, self.gras, self.items)
     }
 
     /// The items, in order.
+    #[must_use]
     pub fn mors(&self) -> &[Mor] {
         &self.mors
     }
 
     /// Which items each token produced.
-    pub fn items(&self) -> &TokenItems {
+    #[must_use]
+    pub const fn items(&self) -> &TokenItems {
         &self.items
     }
 }
@@ -72,6 +76,7 @@ pub struct TokenItems {
 impl TokenItems {
     /// The range of item positions one token produced; `None` for a token
     /// of another walk that lies past this one's end.
+    #[must_use]
     pub fn items_of(&self, token: UdTokenIndex) -> Option<Range<usize>> {
         self.ranges.get(token.as_usize()).cloned()
     }
@@ -79,6 +84,7 @@ impl TokenItems {
     /// The item a syntactic word of `tokens` (the walk this was mapped from)
     /// is written in: its token's one item, or its own item when each word
     /// is one.
+    #[must_use]
     pub fn item_of_word(&self, tokens: &UdTokens<'_>, id: UdWordId) -> Option<usize> {
         let (token, offset) = tokens.locate(id)?;
         let items = self.items_of(token)?;
@@ -103,7 +109,7 @@ impl SentenceItems {
         self.provenance.push(provenance);
     }
 
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.mors.len()
     }
 }
@@ -121,9 +127,10 @@ pub fn map_tokens(
         let start = items.len();
         match (layout, token.ud()) {
             (ItemLayout::PerToken, AlignedUd::Word(word)) => {
-                let item = match is_it {
-                    true => try_handle_italian_single_override(word, ctx)?,
-                    false => None,
+                let item = if is_it {
+                    try_handle_italian_single_override(word, ctx)?
+                } else {
+                    None
                 };
                 items.push(match item {
                     Some(item) => item,
@@ -131,9 +138,10 @@ pub fn map_tokens(
                 });
             }
             (ItemLayout::PerToken, AlignedUd::Mwt { components, .. }) => {
-                let item = match is_it {
-                    true => try_handle_italian_range_override(token, ctx)?,
-                    false => None,
+                let item = if is_it {
+                    try_handle_italian_range_override(token, ctx)?
+                } else {
+                    None
                 };
                 items.push(match item {
                     Some(item) => item,
@@ -260,6 +268,7 @@ fn build_gra_and_validate(items: &SentenceItems) -> Result<Vec<GrammaticalRelati
 }
 
 /// Return whether a UD word is a CHAT utterance terminator.
+#[must_use]
 pub fn is_terminator_punct(ud: &UdWord) -> bool {
     if !matches!(ud.id, UdId::Single(_)) {
         return false;

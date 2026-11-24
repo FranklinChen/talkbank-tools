@@ -41,7 +41,7 @@ impl TokenObservation {
         (self.units.get() == 1).then_some(self.interval)
     }
 
-    fn envelope(self) -> ObservedWordTiming {
+    const fn envelope(self) -> ObservedWordTiming {
         self.interval
     }
 }
@@ -125,7 +125,7 @@ enum MeasuredEdges {
 }
 
 impl MeasuredEdges {
-    fn of_token(timing: ObservedWordTiming) -> Self {
+    const fn of_token(timing: ObservedWordTiming) -> Self {
         Self::TokenHull {
             latest_start_ms: timing.start_ms,
             earliest_end_ms: timing.end_ms,
@@ -150,7 +150,7 @@ impl MeasuredEdges {
     /// A lower bound on where an unmarked successor can begin: the bullet's
     /// end, or the start of the latest proved token (every word of this
     /// utterance ends after that token begins).
-    fn after_end_ms(self) -> u64 {
+    const fn after_end_ms(self) -> u64 {
         match self {
             Self::Bullet(bullet) => bullet.end_ms,
             Self::TokenHull {
@@ -163,7 +163,7 @@ impl MeasuredEdges {
     /// measurement gives one: a bullet's start. A token hull gives none,
     /// since an unproved first word may precede it. Carried through
     /// unmeasured turns, whose own starts can be no earlier.
-    fn at_start_ms(self) -> Option<u64> {
+    const fn at_start_ms(self) -> Option<u64> {
         match self {
             Self::Bullet(bullet) => Some(bullet.start_ms),
             Self::TokenHull { .. } => None,
@@ -173,7 +173,7 @@ impl MeasuredEdges {
     /// An upper bound on where an unmarked predecessor can end: the bullet's
     /// start, or the end of the earliest proved token (every word of this
     /// utterance begins before that token ends).
-    fn before_start_ms(self) -> u64 {
+    const fn before_start_ms(self) -> u64 {
         match self {
             Self::Bullet(bullet) => bullet.start_ms,
             Self::TokenHull {
@@ -185,19 +185,20 @@ impl MeasuredEdges {
 
 impl AdmittedUtrWordMatch {
     /// Inspect the underlying addressed correspondence without creating proof.
-    pub fn matched(&self) -> &UtrWordMatch {
+    #[must_use]
+    pub const fn matched(&self) -> &UtrWordMatch {
         &self.matched
     }
 
     /// How many lexical units the matched provider token holds.
-    pub(super) fn token_units(&self) -> std::num::NonZeroUsize {
+    pub(super) const fn token_units(&self) -> std::num::NonZeroUsize {
         self.token_units
     }
 
     /// The provider token interval bound into this proof (a segment's whole
     /// interval for a multi-unit token). A search bound, and a word anchor's
     /// interval only when the token is exactly one transcript word.
-    pub(super) fn token_timing(&self) -> ObservedWordTiming {
+    pub(super) const fn token_timing(&self) -> ObservedWordTiming {
         self.timing
     }
 
@@ -471,7 +472,7 @@ impl<'source> UtrLexicalStream<'source> {
         self.words.iter().map(|word| word.text.to_owned()).collect()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.words.is_empty()
     }
 

@@ -153,7 +153,7 @@ impl UtrCandidate {
 }
 
 impl UtrObservation {
-    pub(crate) fn result(&self) -> &UtrResult {
+    pub(crate) const fn result(&self) -> &UtrResult {
         &self.result
     }
 
@@ -161,7 +161,7 @@ impl UtrObservation {
         self.result.anchors.clone()
     }
 
-    pub(crate) fn tokens(&self) -> &PreparedUtrTokens {
+    pub(crate) const fn tokens(&self) -> &PreparedUtrTokens {
         &self.tokens
     }
 
@@ -228,6 +228,7 @@ pub use two_pass::{
 /// counts to detect and avoid the wider-window regression on non-English files.
 /// The managed runner instead uses its explicitly resolved strategy; this helper
 /// does not define that runner's default or change the global order model.
+#[must_use]
 pub fn select_strategy(
     chat_file: &ChatFile,
     grouping_context: Option<GroupingContext>,
@@ -344,6 +345,7 @@ pub enum GlobalUtrParticipation {
 /// This is the offline replay seam used by evaluation tools. It runs the same
 /// planner production UTR consumes, but it returns the plan without applying
 /// any bullet projection.
+#[must_use]
 pub fn observe_global_utr_alignment(
     chat_file: &ChatFile,
     asr_tokens: &PreparedUtrTokens,
@@ -464,7 +466,7 @@ struct FollowingStarts {
 }
 
 impl FollowingStarts {
-    fn under(self, order: UtrOrderModel) -> Option<u64> {
+    const fn under(self, order: UtrOrderModel) -> Option<u64> {
         match order {
             UtrOrderModel::Interleaved => self.same_speaker,
             UtrOrderModel::Monotonic => self.document,
@@ -948,7 +950,7 @@ impl UtrUtteranceInfo {
     /// Whether this is a marked overlap recovery may handle on its own: speech
     /// with a `+<` linker or a bottom CA overlap. An utterance not in the
     /// recording never is, whatever it is marked with.
-    pub(super) fn is_marked_overlap(&self) -> bool {
+    pub(super) const fn is_marked_overlap(&self) -> bool {
         match self.presence {
             RecordingPresence::NotInRecording(_) => false,
             RecordingPresence::InRecording => self.has_lazy_overlap || self.has_ca_overlap,
@@ -1128,7 +1130,7 @@ struct ContestedTokens(std::collections::BTreeSet<UtrAsrTokenOrdinal>);
 
 impl ContestedTokens {
     /// No token is contested: the first planning pass.
-    fn none() -> Self {
+    const fn none() -> Self {
         Self(std::collections::BTreeSet::new())
     }
 
@@ -1675,6 +1677,7 @@ fn lexical_relation(chat_text: &str, asr_text: &str) -> UtrLexicalRelation {
 ///
 /// The versioned identity includes the selected ASR provider. Legacy keys
 /// lacked provider provenance and are deliberately not replayed.
+#[must_use]
 pub fn utr_asr_cache_key(
     audio_identity: &super::AudioIdentity,
     engine: &crate::options::UtrEngine,
@@ -1692,6 +1695,7 @@ pub fn utr_asr_cache_key(
 ///
 /// Includes the selected ASR provider and window. Legacy provider-agnostic
 /// keys cannot safely establish which backend produced their response.
+#[must_use]
 pub fn utr_asr_segment_cache_key(
     audio_identity: &super::AudioIdentity,
     engine: &crate::options::UtrEngine,
@@ -1740,7 +1744,7 @@ enum Padding {
 
 impl RunBoundary {
     /// Classify a neighbour search's answer, naming the fallback's meaning.
-    fn from_neighbour(found: Option<u64>, file_edge: u64) -> Self {
+    const fn from_neighbour(found: Option<u64>, file_edge: u64) -> Self {
         match found {
             Some(ms) => Self::TimedNeighbour(ms),
             None => Self::FileEdge(file_edge),

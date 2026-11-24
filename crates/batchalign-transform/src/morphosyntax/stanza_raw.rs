@@ -86,6 +86,7 @@ impl std::fmt::Display for StanzaWordDiagnostic {
 /// Scans each word dict for known issues: missing required fields, null values,
 /// `<pad>` sentinels, and type mismatches. Returns a list of diagnostics, one
 /// per problem found. An empty list means the output looks structurally valid.
+#[must_use]
 pub fn diagnose_parse_failure(raw_sentences: &[serde_json::Value]) -> Vec<StanzaWordDiagnostic> {
     let required_string_fields = ["text", "lemma", "upos", "deprel"];
     let mut diagnostics = Vec::new();

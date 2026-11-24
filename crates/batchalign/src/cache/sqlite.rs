@@ -65,6 +65,7 @@ impl SqliteBackend {
     }
 
     /// Path to the database file (for diagnostics).
+    #[must_use]
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
@@ -336,8 +337,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Guards: An explicit cache root wins and the platform fallback appends the application directory.
+    /// Kind: policy
+    /// Not a type: Path selection and the directory component are operator facing policy values.
+    /// State: Supplied paths exercise the pure resolver without touching any directory.
+    /// Concurrency: none
     #[test]
-    fn default_cache_dir_prefers_explicit_override() {
+    fn default_cache_dir_uses_platform_cache_when_no_override() {
         let resolved = default_cache_dir_from(
             Some(PathBuf::from("/tmp/analysis-cache")),
             Some(PathBuf::from("/tmp/platform-cache")),
@@ -345,10 +351,7 @@ mod tests {
         .expect("override should resolve");
 
         assert_eq!(resolved, PathBuf::from("/tmp/analysis-cache"));
-    }
 
-    #[test]
-    fn default_cache_dir_uses_platform_cache_when_no_override() {
         let resolved = default_cache_dir_from(None, Some(PathBuf::from("/tmp/platform-cache")))
             .expect("platform cache should resolve");
 
@@ -363,118 +366,74 @@ mod tests {
         (backend, dir)
     }
 
-    #[tokio::test]
-    async fn test_put_and_get() {
-        let (backend, _dir) = test_backend().await;
-        let data = serde_json::json!({"mor": "n|dog", "gra": "1|0|ROOT"});
-
-        backend
-            .put("key1", "morphosyntax_v4", "stanza-1.9", "3.0.0", &data)
-            .await
-            .unwrap();
-
-        let result = backend
-            .get("key1", "morphosyntax_v4", "stanza-1.9")
-            .await
-            .unwrap();
-        assert_eq!(result, Some(data));
-    }
-
-    #[tokio::test]
-    async fn test_get_miss_not_found() {
-        let (backend, _dir) = test_backend().await;
-        let result = backend
-            .get("missing", "morphosyntax_v4", "stanza-1.9")
-            .await
-            .unwrap();
-        assert_eq!(result, None);
-    }
-
-    #[tokio::test]
-    async fn test_get_miss_version_mismatch() {
-        let (backend, _dir) = test_backend().await;
-        let data = serde_json::json!({"mor": "n|dog"});
-
-        backend
-            .put("key1", "morphosyntax_v4", "stanza-1.8", "3.0.0", &data)
-            .await
-            .unwrap();
-
-        let result = backend
-            .get("key1", "morphosyntax_v4", "stanza-1.9")
-            .await
-            .unwrap();
-        assert_eq!(result, None);
-    }
-
+    /// Guards: An absent or foreign-version key misses and replacing a row returns the new JSON.
+    /// Kind: contract
+    /// Not a type: Real SQLite query predicates and conflict handling can change while signatures remain stable.
+    /// State: One private SQLite instance witnesses absence, write, foreign lookup and replacement.
+    /// Concurrency: Private temporary directory with awaited statements.
     #[tokio::test]
     async fn test_put_replaces_existing() {
         let (backend, _dir) = test_backend().await;
-        let data1 = serde_json::json!({"mor": "n|dog"});
-        let data2 = serde_json::json!({"mor": "n|cat"});
+        let task = "morphosyntax_v4";
+        let version = "stanza-1.9";
+        assert_eq!(backend.get("key1", task, version).await.unwrap(), None);
 
+        let original = serde_json::json!({"mor": "n|dog", "gra": "1|0|ROOT"});
         backend
-            .put("key1", "task", "v1", "3.0.0", &data1)
+            .put("key1", task, version, "3.0.0", &original)
             .await
             .unwrap();
+        assert_eq!(
+            backend.get("key1", task, version).await.unwrap(),
+            Some(original)
+        );
+        assert_eq!(backend.get("key1", task, "stanza-1.8").await.unwrap(), None);
+
+        let replacement = serde_json::json!({"mor": "n|cat"});
         backend
-            .put("key1", "task", "v1", "3.0.0", &data2)
+            .put("key1", task, version, "3.0.0", &replacement)
             .await
             .unwrap();
-
-        let result = backend.get("key1", "task", "v1").await.unwrap();
-        assert_eq!(result, Some(data2));
+        assert_eq!(
+            backend.get("key1", task, version).await.unwrap(),
+            Some(replacement)
+        );
     }
 
+    /// Guards: A batch write preserves every payload and the batch read excludes missing or foreign-version rows.
+    /// Kind: contract
+    /// Not a type: Stored SQLite result cardinality and payload-to-key association depend on actual SQL.
+    /// State: One private SQLite instance holds ten batch entries and one older row.
+    /// Concurrency: Private temporary directory with awaited statements.
     #[tokio::test]
     async fn test_get_batch() {
         let (backend, _dir) = test_backend().await;
-
-        for i in 0..5 {
-            let data = serde_json::json!({"idx": i});
-            backend
-                .put(&format!("key{i}"), "task", "v1", "3.0.0", &data)
-                .await
-                .unwrap();
-        }
-
-        // Also put one with wrong version.
+        let entries: Vec<_> = (0..10)
+            .map(|i| (format!("key{i}"), serde_json::json!({"idx": i})))
+            .collect();
+        backend
+            .put_batch(&entries, "task", "v1", "3.0.0")
+            .await
+            .unwrap();
         backend
             .put("key_old", "task", "v0", "2.0.0", &serde_json::json!({}))
             .await
             .unwrap();
 
-        let keys: Vec<String> = (0..5).map(|i| format!("key{i}")).collect();
-        let mut all_keys = keys.clone();
-        all_keys.push("key_old".to_string());
-        all_keys.push("nonexistent".to_string());
-
-        let results = backend.get_batch(&all_keys, "task", "v1").await.unwrap();
-        assert_eq!(results.len(), 5);
-        for i in 0..5 {
-            let key = format!("key{i}");
-            assert_eq!(results[&key], serde_json::json!({"idx": i}));
+        let mut keys: Vec<_> = entries.iter().map(|(key, _)| key.clone()).collect();
+        keys.extend(["key_old".to_owned(), "nonexistent".to_owned()]);
+        let results = backend.get_batch(&keys, "task", "v1").await.unwrap();
+        assert_eq!(results.len(), entries.len());
+        for (key, value) in entries {
+            assert_eq!(results[&key], value);
         }
     }
 
-    #[tokio::test]
-    async fn test_put_batch() {
-        let (backend, _dir) = test_backend().await;
-
-        let entries: Vec<(String, serde_json::Value)> = (0..10)
-            .map(|i| (format!("key{i}"), serde_json::json!({"i": i})))
-            .collect();
-
-        backend
-            .put_batch(&entries, "task", "v1", "3.0.0")
-            .await
-            .unwrap();
-
-        let keys: Vec<String> = (0..10).map(|i| format!("key{i}")).collect();
-        let results = backend.get_batch(&keys, "task", "v1").await.unwrap();
-        assert_eq!(results.len(), 10);
-    }
-
+    /// Guards: Batch delete removes only requested addresses and reports their exact count.
+    /// Kind: contract
+    /// Not a type: The predicate and number of affected rows are properties of the database effect.
+    /// State: Private SQLite contains five known rows and observes exact survivors.
+    /// Concurrency: Private temporary directory and serial statements.
     #[tokio::test]
     async fn test_delete_batch() {
         let (backend, _dir) = test_backend().await;
@@ -500,6 +459,11 @@ mod tests {
         assert!(results.contains_key("key4"));
     }
 
+    /// Guards: SQLite stats group live rows by task and include nonzero storage size.
+    /// Kind: contract
+    /// Not a type: Filesystem size and SQL aggregation are observations of a materialized cache.
+    /// State: Private on-disk database stores fixture entries under two task names.
+    /// Concurrency: Private temporary directory and awaited statements.
     #[tokio::test]
     async fn test_stats() {
         let (backend, _dir) = test_backend().await;
@@ -536,6 +500,11 @@ mod tests {
         assert!(stats.size_bytes > 0);
     }
 
+    /// Guards: Empty SQLite read and delete batches succeed with zero cardinality.
+    /// Kind: contract
+    /// Not a type: Real SQL adapters must route empty inputs without emitting a malformed query.
+    /// State: Private SQLite supplies the real adapter for empty key slices.
+    /// Concurrency: Private temporary directory and awaited statements.
     #[tokio::test]
     async fn test_empty_batch_operations() {
         let (backend, _dir) = test_backend().await;
@@ -549,6 +518,11 @@ mod tests {
         assert_eq!(deleted, 0);
     }
 
+    /// Guards: Large SQLite lookups return every requested row across query chunks.
+    /// Kind: contract
+    /// Not a type: The actual SQL parameter limit and chunk assembly are implementation-dependent cardinality behaviors.
+    /// State: Private SQLite stores a thousand rows to cross the adapter's query chunks.
+    /// Concurrency: Private temporary directory and awaited batch operations.
     #[tokio::test]
     async fn test_large_batch_chunking() {
         let (backend, _dir) = test_backend().await;
@@ -568,6 +542,11 @@ mod tests {
         assert_eq!(results.len(), 1000);
     }
 
+    /// Guards: One task cannot see or replace the payload for another task sharing its key.
+    /// Kind: contract
+    /// Not a type: Actual SQLite composite keys and predicates enforce on-disk isolation between task names.
+    /// State: Private SQLite holds equal keys for distinct task namespaces.
+    /// Concurrency: Private temporary directory and serial statements.
     #[tokio::test]
     async fn test_cross_task_isolation() {
         let (backend, _dir) = test_backend().await;

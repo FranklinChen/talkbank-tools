@@ -350,7 +350,7 @@
           ]
         },
         {
-          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "description": "`FunASR` Paraformer, with its voice-activity and punctuation models.",
           "type": "object",
           "properties": {
             "asr": {
@@ -378,11 +378,11 @@
           ]
         },
         {
-          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "description": "`FunASR` `SenseVoice`, with its voice-activity model.",
           "type": "object",
           "properties": {
             "asr": {
-              "description": "The SenseVoice checkpoint that ran.",
+              "description": "The `SenseVoice` checkpoint that ran.",
               "$ref": "#/$defs/LoadedModelV2"
             },
             "engine": {
@@ -731,7 +731,7 @@
               "const": "mms_cpu"
             },
             "torch_version": {
-              "description": "PyTorch that performed the virtual projection.",
+              "description": "`PyTorch` that performed the virtual projection.",
               "type": "string"
             },
             "torchaudio_revision": {
@@ -755,7 +755,7 @@
               "const": "whisper"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -783,7 +783,7 @@
               "const": "qwen"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -810,12 +810,12 @@
           "const": "whisper"
         },
         {
-          "description": "MMS Wave2Vec forced alignment.",
+          "description": "MMS `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wave2vec"
         },
         {
-          "description": "Cantonese Wave2Vec forced alignment.",
+          "description": "Cantonese `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wav2vec_canto"
         },
@@ -1447,7 +1447,7 @@
           ]
         },
         {
-          "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+          "description": "The runtime exposes no revision at all. True of every `ModelScope` loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
           "type": "object",
           "properties": {
             "kind": {
@@ -1643,8 +1643,13 @@
       "format": "uint32",
       "minimum": 0
     },
+    "Sha256Digest": {
+      "description": "A validated lowercase SHA-256 digest.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "SpeakerAttributionV2": {
-      "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
+      "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, `FunASR`, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
       "oneOf": [
         {
           "description": "The provider named a speaker; this is its own label for them.",
@@ -1816,6 +1821,17 @@
               "type": "string",
               "const": "pyannote"
             },
+            "loaded_graph": {
+              "description": "Graph evidence reported by the local loader. Older replies may omit it.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpeakerLoadedModelGraphV2"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "segments": {
               "description": "Ordered speaker segments.",
               "type": "array",
@@ -1829,6 +1845,29 @@
             "segments"
           ]
         }
+      ]
+    },
+    "SpeakerLoadedModelGraphV2": {
+      "description": "Content evidence from the local speaker model loader's verified graph.",
+      "type": "object",
+      "properties": {
+        "embedding_sha256": {
+          "description": "Exact embedding artifact admitted by the loader.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "pipeline_config_sha256": {
+          "description": "Exact bytes of the loaded pipeline configuration before local path rewriting.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "segmentation_sha256": {
+          "description": "Exact segmentation artifact admitted by the loader.",
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "pipeline_config_sha256",
+        "segmentation_sha256",
+        "embedding_sha256"
       ]
     },
     "SpeakerProviderJobIdV2": {
@@ -2275,7 +2314,7 @@
       ]
     },
     "UtsegBoundaryActionV2": {
-      "description": "Closed label vocabulary emitted by the TalkBank utterance-boundary model.\n\nNames describe model semantics instead of exposing classifier label indices,\nwhose numeric ordering is an implementation detail of the Python model.",
+      "description": "Closed label vocabulary emitted by the `TalkBank` utterance-boundary model.\n\nNames describe model semantics instead of exposing classifier label indices,\nwhose numeric ordering is an implementation detail of the Python model.",
       "oneOf": [
         {
           "description": "Ordinary lexical word with no punctuation or onset label.",
@@ -2318,7 +2357,7 @@
           "$ref": "#/$defs/UtsegAdjacencyPolicyRevisionV2"
         },
         "model_id": {
-          "description": "HuggingFace model identifier the control plane pinned.",
+          "description": "`HuggingFace` model identifier the control plane pinned.",
           "type": "string"
         },
         "model_revision": {
@@ -2593,7 +2632,7 @@
       ]
     },
     "WhisperChunkSpanV2": {
-      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative position in the\naudio, which its type proves.\n\nA bound is absent when the model predicted no timestamp for it: the\nHuggingFace pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
+      "description": "One raw Whisper chunk as a producer emitted it: its words, and whichever\nbounds the model reported.\n\nRaw on purpose: a chunk may overlap its neighbour or arrive inverted, and\nneither producer (the Python worker, the in-process whisper.cpp backend)\nrepairs that. The consumer does, once, through `MonotoneChunkSpans` in\n`batchalign::worker::chunk_spans`; the only invariant the wire carries is\nthat a bound, when present, is a finite non-negative position in the\naudio, which its type proves.\n\nA bound is absent when the model predicted no timestamp for it: the\n`HuggingFace` pipeline reports `(start, None)` for a chunk cut off\nmid-word, and `(None, None)` for a whole transcript when timestamps were\nsuppressed. A missing bound is an absence of TIMING, never of words, and\nthe words travel untimed exactly as a Tencent or Aliyun word with a\nmissing offset does. Between 536f29c8 and this change such a chunk was\ndropped, which emptied every Cantonese Whisper transcript.",
       "type": "object",
       "properties": {
         "end_s": {

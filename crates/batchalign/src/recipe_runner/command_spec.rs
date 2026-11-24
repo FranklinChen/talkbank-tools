@@ -14,7 +14,7 @@ use super::recipe::Recipe;
 
 /// High-level command family in the replacement architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandFamily {
+pub enum CommandFamily {
     /// Main transcript plus reference transcript projection.
     ReferenceProjection,
     /// Audio-first sequential recipes such as transcribe and align.
@@ -31,7 +31,7 @@ pub(crate) enum CommandFamily {
 
 /// High-level scheduling shape the command expects from the shared kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SchedulingPolicy {
+pub enum SchedulingPolicy {
     /// One audio/media file at a time, with bounded per-job parallelism.
     PerFileAudio,
     /// Many text files pooled into one or more shared infer batches.
@@ -46,7 +46,7 @@ pub(crate) enum SchedulingPolicy {
 
 /// How the command expects model state to be shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelSharingPolicy {
+pub enum ModelSharingPolicy {
     /// No ML model or inference worker participates.
     NoModels,
     /// Reuse warm workers and shared model state whenever possible.
@@ -57,7 +57,7 @@ pub(crate) enum ModelSharingPolicy {
 
 /// Whether the command benefits from cross-file or internal batching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BatchingPolicy {
+pub enum BatchingPolicy {
     /// No profitable batching beyond ordinary per-file execution.
     None,
     /// Pool many files together into shared worker requests.
@@ -70,7 +70,7 @@ pub(crate) enum BatchingPolicy {
 
 /// How much per-command parallelism the shared kernel should expose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParallelismPolicy {
+pub enum ParallelismPolicy {
     /// Bound file-level concurrency and let the kernel auto-tune worker counts.
     BoundedFileWorkers,
     /// Keep one command-level dispatch at a time per job.
@@ -81,7 +81,7 @@ pub(crate) enum ParallelismPolicy {
 
 /// How one command should behave on constrained-memory hosts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConstrainedHostPolicy {
+pub enum ConstrainedHostPolicy {
     /// Allow the host to clamp execution to one worker and rely on lazy startup
     /// rather than speculative resident state.
     SequentialFallback,
@@ -91,7 +91,7 @@ pub(crate) enum ConstrainedHostPolicy {
 
 /// Dominant resource lane for the command's hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResourceLane {
+pub enum ResourceLane {
     /// GPU-backed workloads where device memory is the main bottleneck.
     GpuHeavy,
     /// CPU-bound workloads that still reuse warm model workers.
@@ -212,7 +212,7 @@ impl CommandFamily {
 
 /// Which planner shape owns source discovery for a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlannerKind {
+pub enum PlannerKind {
     /// Plain CHAT inputs with optional `--before`.
     TextInputs,
     /// Plain audio inputs.
@@ -227,7 +227,7 @@ pub(crate) enum PlannerKind {
 
 /// Whether a released command is owned directly by one recipe or by recipe composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CapabilitySurface {
+pub enum CapabilitySurface {
     /// One recipe owns the released command.
     RecipeOwned,
     /// The released command is defined by composing other recipes.
@@ -241,7 +241,7 @@ pub(crate) enum CapabilitySurface {
 /// operations own no inference task. Neither case can manufacture evidence
 /// about a different worker's loaded models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CapabilityPlan {
+pub enum CapabilityPlan {
     /// Worker-backed execution; possession of the payload permits deriving a
     /// worker key. Native execution has no such payload.
     Inference(InferenceRequirement),
@@ -251,7 +251,7 @@ pub(crate) enum CapabilityPlan {
 
 /// A native operation supported by the Rust execution host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeMediaCapability {
+pub enum NativeMediaCapability {
     /// Checked WAV/MP3 encoding and no-clobber publication.
     AudioExport,
 }
@@ -261,7 +261,7 @@ pub(crate) enum NativeMediaCapability {
 /// Its fields are private: worker consumers cannot invent a task for a native
 /// command. Both targeting and engine selection consume this same requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct InferenceRequirement {
+pub struct InferenceRequirement {
     task: InferTask,
     surface: CapabilitySurface,
 }
@@ -291,7 +291,7 @@ impl CapabilityPlan {
 
 /// How one released command is surfaced relative to the worker infer-task layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandCapabilityKind {
+pub enum CommandCapabilityKind {
     /// Available natively, with no inference capability to probe.
     NativeMedia,
     /// Command is advertised directly from one infer task.
@@ -302,7 +302,7 @@ pub(crate) enum CommandCapabilityKind {
 
 /// Which server-side runtime path currently owns one released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunnerDispatchKind {
+pub enum RunnerDispatchKind {
     /// Checked native audio export, not worker protocol inference.
     NativeAudioExport,
     /// Text-only commands pooled through the batched infer path.
@@ -329,7 +329,7 @@ pub(crate) enum RunnerDispatchKind {
 /// `MediaInput` command is a separate question, answered at
 /// `JobSubmission::validate_source_kinds`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandIoProfile {
+pub enum CommandIoProfile {
     /// CHAT in, CHAT out. No recording is opened anywhere.
     Text,
     /// CHAT in; the execution host resolves each transcript's recording
@@ -361,7 +361,7 @@ pub(crate) enum CommandIoProfile {
 /// be. Stating them here means a new entry cannot compile until each question
 /// has an answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CatalogEntry {
+pub struct CatalogEntry {
     /// Stable released command identity.
     pub command: ReleasedCommand,
     /// High-level family for contributor understanding.

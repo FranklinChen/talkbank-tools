@@ -111,7 +111,7 @@ pub(in crate::compare) struct UtteranceIndex<S: Side> {
 
 impl<S: Side> UtteranceIndex<S> {
     /// The position, for the public output records that carry a bare index.
-    pub(in crate::compare) fn raw(self) -> usize {
+    pub(in crate::compare) const fn raw(self) -> usize {
         self.raw
     }
 }
@@ -199,6 +199,7 @@ impl LanguageBucket {
 
     /// The key segment used in metrics CSV rows, in CHAT's own spelling:
     /// `eng`, `eng+spa`, `eng&spa`, or `unresolved`.
+    #[must_use]
     pub fn csv_key(&self) -> String {
         match self {
             Self::Language(code) => code.as_str().to_string(),
@@ -210,7 +211,7 @@ impl LanguageBucket {
 
     /// Variant order for [`Ord`]: single languages, mixes, ambiguities, then
     /// unresolved.
-    fn rank(&self) -> u8 {
+    const fn rank(&self) -> u8 {
         match self {
             Self::Language(_) => 0,
             Self::Mixed(_) => 1,
@@ -271,10 +272,13 @@ impl LanguageAgreement {
             (Unresolved, _) | (_, Unresolved) | (Ambiguous(_), _) | (_, Ambiguous(_)) => {
                 Self::Indeterminate
             }
-            (Language(_), Language(_)) | (Mixed(_), Mixed(_)) => match left == right {
-                true => Self::Same,
-                false => Self::Different,
-            },
+            (Language(_), Language(_)) | (Mixed(_), Mixed(_)) => {
+                if left == right {
+                    Self::Same
+                } else {
+                    Self::Different
+                }
+            }
             (Language(_), Mixed(_)) | (Mixed(_), Language(_)) => Self::Different,
         }
     }
@@ -288,7 +292,7 @@ pub(in crate::compare) struct SidedLanguage<S: Side> {
 }
 
 impl<S: Side> SidedLanguage<S> {
-    fn new(bucket: LanguageBucket) -> Self {
+    const fn new(bucket: LanguageBucket) -> Self {
         Self {
             bucket,
             side: PhantomData,
@@ -324,15 +328,15 @@ pub(in crate::compare) struct LanguagedWord<S: Side> {
 }
 
 impl<S: Side> LanguagedWord<S> {
-    pub(in crate::compare) fn extracted(&self) -> &ExtractedWord {
+    pub(in crate::compare) const fn extracted(&self) -> &ExtractedWord {
         &self.word
     }
 
-    pub(in crate::compare) fn utterance(&self) -> UtteranceIndex<S> {
+    pub(in crate::compare) const fn utterance(&self) -> UtteranceIndex<S> {
         self.utterance
     }
 
-    pub(in crate::compare) fn language(&self) -> &WordLanguage<S> {
+    pub(in crate::compare) const fn language(&self) -> &WordLanguage<S> {
         &self.language
     }
 }
@@ -348,15 +352,15 @@ pub(in crate::compare) struct LanguagedUtterance<S: Side> {
 }
 
 impl<S: Side> LanguagedUtterance<S> {
-    pub(in crate::compare) fn speaker(&self) -> &SpeakerCode {
+    pub(in crate::compare) const fn speaker(&self) -> &SpeakerCode {
         &self.speaker
     }
 
-    pub(in crate::compare) fn utterance_index(&self) -> UtteranceIndex<S> {
+    pub(in crate::compare) const fn utterance_index(&self) -> UtteranceIndex<S> {
         self.utterance_index
     }
 
-    pub(in crate::compare) fn language(&self) -> &SidedLanguage<S> {
+    pub(in crate::compare) const fn language(&self) -> &SidedLanguage<S> {
         &self.language
     }
 
@@ -519,31 +523,37 @@ pub struct LanguageErrorCounts {
 
 impl LanguageErrorCounts {
     /// Gold words matched by a main word.
-    pub fn matches(&self) -> usize {
+    #[must_use]
+    pub const fn matches(&self) -> usize {
         self.matches
     }
 
     /// Gold words paired with a wrong main word.
-    pub fn substitutions(&self) -> usize {
+    #[must_use]
+    pub const fn substitutions(&self) -> usize {
         self.substitutions
     }
 
     /// Gold words with no main counterpart.
-    pub fn deletions(&self) -> usize {
+    #[must_use]
+    pub const fn deletions(&self) -> usize {
         self.deletions
     }
 
     /// Unpaired main words attributed to this language.
-    pub fn insertions(&self) -> usize {
+    #[must_use]
+    pub const fn insertions(&self) -> usize {
         self.insertions
     }
 
     /// Gold words in this language.
-    pub fn gold_words(&self) -> usize {
+    #[must_use]
+    pub const fn gold_words(&self) -> usize {
         self.matches + self.substitutions + self.deletions
     }
 
     /// `(substitutions + deletions + insertions) / gold words`.
+    #[must_use]
     pub fn wer_with_substitutions(&self) -> Rate {
         Rate::of(
             self.substitutions + self.deletions + self.insertions,
@@ -629,6 +639,7 @@ impl LanguageConfusion {
     }
 
     /// Items scored, whatever their agreement.
+    #[must_use]
     pub fn scored(&self) -> usize {
         self.counts.values().sum()
     }
@@ -641,17 +652,20 @@ impl LanguageConfusion {
     }
 
     /// Items whose two languages are the same.
+    #[must_use]
     pub fn agreeing(&self) -> usize {
         self.with_agreement(LanguageAgreement::Same)
     }
 
     /// Items where either language is unresolved or ambiguous.
+    #[must_use]
     pub fn indeterminate(&self) -> usize {
         self.with_agreement(LanguageAgreement::Indeterminate)
     }
 
     /// `agreeing / (agreeing + differing)`: indeterminate items are neither
     /// right nor wrong, so they are left out of the denominator.
+    #[must_use]
     pub fn accuracy(&self) -> Rate {
         let agreeing = self.agreeing();
         Rate::of(
@@ -706,13 +720,15 @@ pub struct UtteranceLanguageAgreement {
 
 impl UtteranceLanguageAgreement {
     /// Gold utterances mapped to a main utterance, by both languages.
-    pub fn placed(&self) -> &LanguageConfusion {
+    #[must_use]
+    pub const fn placed(&self) -> &LanguageConfusion {
         &self.placed
     }
 
     /// Gold utterances with words that no main utterance matched, by gold
     /// language. Not disagreements: there was nothing to compare against.
-    pub fn unplaced(&self) -> &BTreeMap<LanguageBucket, usize> {
+    #[must_use]
+    pub const fn unplaced(&self) -> &BTreeMap<LanguageBucket, usize> {
         &self.unplaced
     }
 
@@ -744,7 +760,7 @@ pub struct SwitchAgreement {
 }
 
 impl SwitchAgreement {
-    fn record(&mut self, gold: &WordLanguage<Gold>, main: &WordLanguage<Main>) {
+    const fn record(&mut self, gold: &WordLanguage<Gold>, main: &WordLanguage<Main>) {
         let cell = match (gold.role, main.role) {
             (LanguageRole::Switched, LanguageRole::Switched) => &mut self.both_switched,
             (LanguageRole::Switched, LanguageRole::UtteranceLanguage) => &mut self.gold_only,
@@ -755,31 +771,37 @@ impl SwitchAgreement {
     }
 
     /// Matched words switched in both transcripts.
-    pub fn both_switched(&self) -> usize {
+    #[must_use]
+    pub const fn both_switched(&self) -> usize {
         self.both_switched
     }
 
     /// Matched words switched in gold only: missed switches.
-    pub fn gold_only(&self) -> usize {
+    #[must_use]
+    pub const fn gold_only(&self) -> usize {
         self.gold_only
     }
 
     /// Matched words switched in main only: spurious switches.
-    pub fn main_only(&self) -> usize {
+    #[must_use]
+    pub const fn main_only(&self) -> usize {
         self.main_only
     }
 
     /// Matched words switched in neither.
-    pub fn neither(&self) -> usize {
+    #[must_use]
+    pub const fn neither(&self) -> usize {
         self.neither
     }
 
     /// Of the switches main marked, the share gold agrees with.
+    #[must_use]
     pub fn precision(&self) -> Rate {
         Rate::of(self.both_switched, self.both_switched + self.main_only)
     }
 
     /// Of the switches gold marks, the share main marked too.
+    #[must_use]
     pub fn recall(&self) -> Rate {
         Rate::of(self.both_switched, self.both_switched + self.gold_only)
     }
@@ -847,22 +869,26 @@ impl LanguageScores {
 
     /// Unpaired insertions with no gold word to attribute them to, charged to
     /// no language: every insertion against a gold with no compared words.
-    pub fn unattributed_insertions(&self) -> usize {
+    #[must_use]
+    pub const fn unattributed_insertions(&self) -> usize {
         self.unattributed_insertions
     }
 
     /// Utterance language agreement.
-    pub fn utterances(&self) -> &UtteranceLanguageAgreement {
+    #[must_use]
+    pub const fn utterances(&self) -> &UtteranceLanguageAgreement {
         &self.utterances
     }
 
     /// Word language agreement over matched words.
-    pub fn words(&self) -> &LanguageConfusion {
+    #[must_use]
+    pub const fn words(&self) -> &LanguageConfusion {
         &self.words
     }
 
     /// Code-switch detection over matched words.
-    pub fn switches(&self) -> &SwitchAgreement {
+    #[must_use]
+    pub const fn switches(&self) -> &SwitchAgreement {
         &self.switches
     }
 
@@ -881,11 +907,13 @@ impl LanguageScores {
     }
 
     /// Gold words not matched: substituted or deleted.
+    #[must_use]
     pub fn unmatched_gold_words(&self) -> usize {
         self.sum(|counts| counts.substitutions + counts.deletions)
     }
 
     /// Main words not matched: substituting, inserted, or unattributed.
+    #[must_use]
     pub fn unmatched_main_words(&self) -> usize {
         self.sum(|counts| counts.substitutions + counts.insertions) + self.unattributed_insertions
     }
@@ -897,6 +925,7 @@ impl LanguageScores {
 
     /// `(substitutions + deletions + insertions) / gold words`, over every
     /// language plus the unattributed insertions.
+    #[must_use]
     pub fn wer_with_substitutions(&self) -> Rate {
         let edits = self.sum(|counts| counts.substitutions + counts.deletions + counts.insertions)
             + self.unattributed_insertions;
@@ -984,7 +1013,7 @@ pub(in crate::compare) enum SiteUtterances {
 impl<W: GoldNeighbour> InsertionSite<W> {
     /// The gold word the insertion's error belongs to: the next gold word, or
     /// the last when none follows.
-    pub(in crate::compare) fn owner(self) -> W {
+    pub(in crate::compare) const fn owner(self) -> W {
         match self {
             Self::BeforeGold { next } | Self::BetweenGoldWords { next, .. } => next,
             Self::AfterGold { previous } => previous,
@@ -998,9 +1027,10 @@ impl<W: GoldNeighbour> InsertionSite<W> {
             Self::AfterGold { previous } => SiteUtterances::Within(previous.gold_utterance()),
             Self::BetweenGoldWords { previous, next } => {
                 let (before, after) = (previous.gold_utterance(), next.gold_utterance());
-                match before == after {
-                    true => SiteUtterances::Within(before),
-                    false => SiteUtterances::Across { before, after },
+                if before == after {
+                    SiteUtterances::Within(before)
+                } else {
+                    SiteUtterances::Across { before, after }
                 }
             }
         }

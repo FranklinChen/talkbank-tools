@@ -45,7 +45,7 @@
       ]
     },
     {
-      "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+      "description": "`FunASR` Paraformer, with its voice-activity and punctuation models.",
       "type": "object",
       "properties": {
         "asr": {
@@ -73,11 +73,11 @@
       ]
     },
     {
-      "description": "FunASR SenseVoice, with its voice-activity model.",
+      "description": "`FunASR` `SenseVoice`, with its voice-activity model.",
       "type": "object",
       "properties": {
         "asr": {
-          "description": "The SenseVoice checkpoint.",
+          "description": "The `SenseVoice` checkpoint.",
           "$ref": "#/$defs/RequestedModelV2"
         },
         "engine": {

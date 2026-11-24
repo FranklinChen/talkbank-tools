@@ -16,7 +16,7 @@ use talkbank_model::UtteranceIdx;
 /// [`SecondaryMorphologySpan`] only when the report is recorded against that
 /// document, for the spans the record names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SpanAddress {
+pub struct SpanAddress {
     utterance: UtteranceIdx,
     /// One-based morphology-item position within that utterance.
     first_word: u64,
@@ -49,7 +49,7 @@ impl SpanAddress {
     }
 
     /// Transcript order: by utterance, then by first word.
-    pub(super) fn order(&self) -> (UtteranceIdx, u64) {
+    pub(super) const fn order(&self) -> (UtteranceIdx, u64) {
         (self.utterance, self.first_word)
     }
 
@@ -70,7 +70,7 @@ impl SpanAddress {
 /// the report describes. Each is left exactly as it was; the report is what
 /// says so.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PrimaryReport {
+pub struct PrimaryReport {
     declined: Vec<DeclinedPrimary>,
 }
 
@@ -83,7 +83,7 @@ struct DeclinedPrimary {
 
 impl PrimaryReport {
     /// No utterance was declined.
-    pub(crate) fn none() -> Self {
+    pub(crate) const fn none() -> Self {
         Self {
             declined: Vec::new(),
         }
@@ -163,7 +163,7 @@ impl PrimaryReport {
 /// outcomes, each its own domain. One value, required by
 /// [`MorphosyntaxOutput::new`], so no path can drop one by forgetting it.
 #[derive(Debug, Clone)]
-pub(crate) struct AnalysisReports {
+pub struct AnalysisReports {
     pub(crate) primary: PrimaryReport,
     pub(crate) secondary: SecondaryReport,
 }
@@ -184,7 +184,7 @@ struct Unplaced {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SecondaryReport {
+pub struct SecondaryReport {
     failures: Vec<SpanFailure>,
     exclusions: Vec<SpanAddress>,
     unplaced: Vec<Unplaced>,
@@ -261,7 +261,7 @@ impl SecondaryReport {
         &self,
         chat: &mut crate::chat_ops::ChatFile,
     ) -> Result<(), talkbank_model::model::BlankContent> {
-        use talkbank_model::{Header, Line, Location};
+        use talkbank_model::{Header, Line};
         const PREFIX: &str = "[batchalign morphology availability]";
         let preserve = |line: &Line| {
             !matches!(line,
@@ -301,11 +301,7 @@ impl SecondaryReport {
         );
         let content = talkbank_model::model::CommentContent::try_from_text(text)?;
         chat.lines.retain(preserve);
-        let position = crate::provenance::insert_pos_after_constant_headers(chat);
-        chat.lines.insert(
-            position,
-            Line::header(Location::Unlocated, Header::Comment { content }),
-        );
+        crate::provenance::CommentSlot::in_preamble(chat).insert(content);
         Ok(())
     }
 
@@ -381,14 +377,14 @@ impl SecondaryReport {
 /// document requires handling its report; CHAT validity says nothing about
 /// whether secondary morphology was available.
 #[derive(Debug, Clone)]
-pub(crate) struct MorphosyntaxOutput<D = PostValidated> {
+pub struct MorphosyntaxOutput<D = PostValidated> {
     document: D,
     report: MorphologyReport,
 }
 
 /// Independent report domains share writeback, not each other's semantics.
 #[derive(Debug, Clone)]
-pub(crate) struct MorphologyReport {
+pub struct MorphologyReport {
     primary: PrimaryReport,
     secondary: SecondaryReport,
     provenance: crate::provenance::MorphologyProvenanceReport,
@@ -414,14 +410,14 @@ impl MorphologyReport {
 /// A text command's output as it will be written, with its records located
 /// against that same document. Made only by [`MorphosyntaxOutput::finish`].
 #[derive(Debug)]
-pub(crate) struct FinishedMorphosyntax<D = PostValidated> {
+pub struct FinishedMorphosyntax<D = PostValidated> {
     pub(crate) document: D,
     pub(crate) shortfalls: Vec<OutputShortfallRecord>,
     pub(crate) exclusions: Vec<OutputExclusionRecord>,
 }
 
 /// A judged document the reports can be located against: the one written.
-pub(crate) trait WrittenDocument {
+pub trait WrittenDocument {
     fn written(&self) -> &crate::chat_ops::ChatFile;
 }
 
@@ -548,6 +544,11 @@ mod tests {
             .expect_built()
     }
 
+    /// Guards: Secondary diagnostics sort, bound and count actual spans without conflating exclusions.
+    /// Kind: wire
+    /// Not a type: Inputs can arrive out of order with large Unicode details and a separate exclusion population.
+    /// State: A synthetic source and numbered span reports produce exact bounded diagnostic records.
+    /// Concurrency: One local report owns all span observations.
     #[test]
     fn reports_sort_bound_and_count_every_span_without_conflating_exclusions() {
         let mut report = SecondaryReport::default();
@@ -595,6 +596,11 @@ mod tests {
         "#);
     }
 
+    /// Guards: A consumer that omits reports refuses outstanding exclusions or provenance gaps and preserves their exported meaning.
+    /// Kind: contract
+    /// Not a type: A completed analysis can still carry lost diagnostics unless the consumer handles its actual outcome.
+    /// State: Typed report cases and an exact JSON round trip witness omission and serialization.
+    /// Concurrency: Pure report conversion and JSON inspection.
     #[test]
     fn opting_out_consumer_cannot_silently_drop_a_secondary_report() {
         let mut report = SecondaryReport::default();

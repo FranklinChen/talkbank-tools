@@ -18,7 +18,7 @@
       }
     },
     "special_forms": {
-      "description": "Special form and language per word: (form_type, resolved_language).",
+      "description": "Special form and language per word: (`form_type`, `resolved_language`).",
       "type": "array",
       "items": {
         "type": "array",

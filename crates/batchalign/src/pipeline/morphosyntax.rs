@@ -9,12 +9,12 @@ use super::plan::{StageId, observe_stage};
 use crate::morphosyntax::report::MorphosyntaxOutput;
 use crate::pipeline::post_validate::PostValidated;
 use crate::{error::ServerError, pipeline::PipelineServices};
-pub(crate) use language::resolve_per_file_lang;
-pub(crate) use states::ParsedFile;
+pub use language::resolve_per_file_lang;
+pub use states::ParsedFile;
 use states::{Admitted, Analysis, AnalysisScope, LocalizedParse, RunOptions};
 
 /// Run morphosyntax without exposing an uninitialized or out-of-order context.
-pub(crate) async fn run_morphosyntax_pipeline(
+pub async fn run_morphosyntax_pipeline(
     chat_text: &str,
     services: PipelineServices<'_>,
     params: &crate::params::MorphosyntaxParams<'_>,
@@ -36,7 +36,7 @@ pub(crate) async fn run_morphosyntax_pipeline(
 
 /// Full regeneration consumes an existing admission instead of reparsing when
 /// an incremental plan discovers that no prior analysis can be reused.
-pub(crate) async fn run_admitted_morphosyntax(
+pub async fn run_admitted_morphosyntax(
     parsed: ParsedFile,
     services: PipelineServices<'_>,
     params: &crate::params::MorphosyntaxParams<'_>,
@@ -70,7 +70,7 @@ pub(crate) async fn run_admitted_morphosyntax(
 
 /// What morphosyntax made of a generated transcript diagnosed for findings
 /// confined to some utterances.
-pub(crate) enum LocalizedMorphosyntax {
+pub enum LocalizedMorphosyntax {
     /// The document declares `@Options: CA` and the policy honors it: not
     /// analyzed, handed back unchanged.
     Declined(crate::pipeline::post_validate::DiagnosedOutput),
@@ -84,7 +84,7 @@ pub(crate) enum LocalizedMorphosyntax {
 /// utterances: every other utterance is analyzed, the held-out ones are never
 /// sent to a worker. An analysis that adds a finding of its own outside them
 /// is refused as `ServerError::OutputAdmission`, as for an admitted document.
-pub(crate) async fn run_localized_morphosyntax(
+pub async fn run_localized_morphosyntax(
     localized: crate::pipeline::post_validate::LocalizedDiagnosis,
     services: PipelineServices<'_>,
     params: &crate::params::MorphosyntaxParams<'_>,

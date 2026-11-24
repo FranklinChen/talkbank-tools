@@ -3,7 +3,7 @@
 //!
 //! The Python worker emits `{"op": "progress_v2", ...}` lines on stdout
 //! during long-running cache-relevant operations: Stanza catalog
-//! download, Stanza per-language pack download, HuggingFace model
+//! download, Stanza per-language pack download, `HuggingFace` model
 //! download (Whisper / pyannote / fasttext / transformers), torch
 //! checkpoint warm-up, and similar. These events arrive interleaved
 //! with the actual request/response IPC.
@@ -41,7 +41,7 @@ use super::protocol::WorkerResponse;
 /// implement it, so [`read_skipping_progress`] is the one progress loop all
 /// three run. There used to be three copies of that loop, each changed by
 /// hand when the wait gained progress-driven re-arming.
-pub(crate) trait ResponseSource {
+pub trait ResponseSource {
     /// The next complete response.
     async fn read_response(&mut self) -> Result<WorkerResponse, WorkerError>;
 }
@@ -64,7 +64,7 @@ impl ResponseSource for WorkerHandle {
 /// stall the worker. The consumed operation admits the terminal before a
 /// completion proof can authorize worker reuse. A foreign terminal remains an
 /// incomplete exchange.
-pub(crate) async fn read_skipping_progress<S: ResponseSource, E: ExpectedReply>(
+pub async fn read_skipping_progress<S: ResponseSource, E: ExpectedReply>(
     source: &mut S,
     expected: E,
     progress_tx: Option<&mpsc::Sender<ProgressEventV2>>,

@@ -14,7 +14,7 @@ use super::types::AsrResponse;
 /// `eval utseg-replay` rebuild. The replay used to skip it and so compared a
 /// transcript carrying seam comments against one without them, blaming
 /// segmentation for a difference it did not make.
-pub(crate) fn place_response_seams(
+pub fn place_response_seams(
     utterances: &mut [batchalign_transform::asr_postprocess::Utterance],
     response: &AsrResponse,
 ) -> Result<(), batchalign_transform::asr_postprocess::UnplacedSeams> {
@@ -28,7 +28,7 @@ pub(crate) fn place_response_seams(
 ///
 /// Groups consecutive tokens by speaker. Adjacent tokens with the same speaker
 /// are combined into a single monologue. Speaker changes create new monologues.
-pub(crate) fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
+pub fn convert_asr_response(response: &AsrResponse) -> AsrOutput {
     if let Some(monologues) = &response.source_monologues {
         return AsrOutput {
             monologues: monologues.clone(),

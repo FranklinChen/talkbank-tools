@@ -39,6 +39,7 @@ const PRESENT_PARTICIPLE: CuratedFeats = CuratedFeats::new("Tense=Pres|VerbForm=
 
 /// English-specific rewrite, in place. Returns the input untouched when no
 /// rescue applies.
+#[must_use]
 pub fn rescue_english_copula_progressive(mut sentence: UdSentence) -> UdSentence {
     if let Some(plan) = detect_rescue(&sentence) {
         apply_rescue(&mut sentence, plan);
@@ -115,7 +116,7 @@ mod distinct_roles {
             })
         }
 
-        pub(super) fn predicate(&self) -> UdWordId {
+        pub(super) const fn predicate(&self) -> UdWordId {
             self.predicate.id
         }
 
@@ -130,13 +131,13 @@ mod distinct_roles {
     }
 
     impl Progressive {
-        pub(super) fn part(&self) -> UdWordId {
+        pub(super) const fn part(&self) -> UdWordId {
             self.part
         }
-        pub(super) fn subject(&self) -> UdWordId {
+        pub(super) const fn subject(&self) -> UdWordId {
             self.subject
         }
-        pub(super) fn predicate(&self) -> UdWordId {
+        pub(super) const fn predicate(&self) -> UdWordId {
             self.predicate
         }
         pub(super) fn into_lemma(self) -> VerbLemma {

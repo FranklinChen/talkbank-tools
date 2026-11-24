@@ -233,6 +233,7 @@ fn expansion_of(text: &str) -> Option<&'static Contraction> {
 
 /// Expand, in place, every whole token the table knows that Stanza left as a
 /// single word. Tokens Stanza already expanded are ranges and are skipped.
+#[must_use]
 pub fn expand_english_contractions(mut sentence: UdSentence) -> UdSentence {
     // Component membership is read once; an expansion inserts a new range
     // whose components are the just-built parts, which the loop steps over.

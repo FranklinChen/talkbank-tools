@@ -1,7 +1,7 @@
 # translate: Developer Reference
 
 **Status:** Current
-**Last updated:** 2026-10-21 11:40 EDT
+**Last updated:** 2026-11-17 17:39 EST
 
 Implementation guide for the `translate` command. For user-facing
 documentation, see [User Guide: translate](../../user-guide/commands/translate.md).
@@ -20,7 +20,7 @@ documentation, see [User Guide: translate](../../user-guide/commands/translate.m
 | Per-item loop | `crates/batchalign/src/translate/items.rs` | `translate_items`: one request per utterance through an `ItemTransport`, pacing and cooldowns by the engine's policy, the file stopped at the first failure, echoed translations counted |
 | Provider policy | `crates/batchalign/src/translate/provider.rs` | `TranslateEngineName::provider_policy()`: request spacing, the statuses waited out, the cooldown schedule and ceiling; `Throttle`, the typestate that carries the remaining schedule |
 | Source model and injection | `crates/batchalign-transform/src/translate.rs` | `TranslationSource` (what the speaker produced) and `render()`, its one renderer; `TranslationText` (a translation with something to apply) and `%xtra` injection |
-| Job dispatch | `crates/batchalign/src/execution/translate.rs`: `dispatch_translate_job` | Reached from `runner::routing::dispatch_batched_text_command`; one gateway call per file, each with the source language read from that file's `@Languages:` header |
+| Job dispatch | `crates/batchalign/src/execution/translate.rs`: `dispatch_translate_job` | Admits each named source before the gateway and moves the admitted model and route into one submission |
 | Engine type | `crates/batchalign/src/types/engines.rs`: `TranslateEngineName` | Wire-format enum (`google` / `seamless` / `nllb` / `tencent` / `aliyun`), `EngineBackend` impl, `EngineOverrides.translate` field |
 | Engine resolution (server) | `crates/batchalign/src/types/options.rs`: `TranslateOptions::effective_translate_engine` | Precedence: shared `--engine-overrides` `{"translate":"..."}` > `--translate-engine` flag > Google default |
 | Engine bootstrap | `batchalign/worker/_model_loading/translation.py::load_translation_engine(bootstrap)` | Reads `bootstrap.engine_overrides["translate"]`, dispatches via exhaustive match to `_load_google_translate`, `_load_seamless_translate`, `_load_nllb_translate`, `_load_tencent_translate`, or `_load_aliyun_translate`. Unknown engine names raise `ValueError` |
@@ -32,6 +32,32 @@ as of 2026-04-14: the CLI posts source/output path lists instead of CHAT
 bytes. See [Submission Modes](../../reference/command-io.md#submission-modes-paths_modetrue-vs-paths_modefalse).
 
 ---
+
+## Source admission and route ownership
+
+Each file moves through a single source parse. Chatter's `ParsedSourceChat`
+couples the original bytes to the model and its parse diagnostics. Complete
+admission consumes that result under the actual transcript name, including
+tier alignment checks. A refused source keeps its original diagnostics and
+source coordinates. Only an `AdmittedTextSource` can select a route and form
+a `TranslateSubmission`.
+
+```mermaid
+flowchart TD
+    named["Read CHAT bytes and keep the actual filename"] --> parsed["Parse once into a model and diagnostics"]
+    parsed --> gate{"Admit the same parse under that filename"}
+    gate -->|Refused| refusal["Report the original finding with its source location"]
+    gate -->|Admitted| route["Read the admitted language header and bind target and engine"]
+    route -->|Refused| no_route["Report the language error before dispatch"]
+    route -->|Ready| collect["Consume the admitted model to collect translation items"]
+    collect -->|No items| unchanged["Keep the exact original CHAT bytes"]
+    collect -->|Items| work["Run inference and apply replies on the admitted model"]
+    work --> output["Check and publish the translated output"]
+```
+
+Collection uses the admitted model directly. It keeps the original bytes for
+pass-through, or transfers the admitted model to application when there is
+translation work. Output validation still judges the transformed document.
 
 ## Checked translation direction
 
@@ -69,7 +95,8 @@ malformed provider output. Model doubles do not certify translation fidelity.
 Translations are not cached. The utterance cache holds audio evidence only
 (forced alignment, UTR ASR, Rev.AI transcripts and speaker evidence); text NLP
 caching was removed because re-running warm inference cost less than the cache
-lookups. Every translate run calls the worker.
+lookups. Each run with translatable items asks its selected worker for new
+results.
 
 ---
 
@@ -121,13 +148,13 @@ flowchart TD
     spacing -- yes --> wait1[pause: spacing] --> send
     spacing -- no --> send[one execute_v2 request, one item]
     send --> answer{worker reported}
-    answer -- translated / blank --> admit[admit; fresh throttle] --> next
+    answer -- translated / blank --> admit["Admit result and refresh throttle"] --> next
     answer -- provider_status / no_response --> verdict{policy verdict}
     verdict -- wait and retry --> wait2[pause: cooldown, spend one schedule slot] --> send
     verdict -- give up --> fail[item fails: Provider]
     answer -- failed --> fail2[item fails: EngineReported]
     admit -- empty translation --> fail3[item fails: EmptyTranslation]
-    fail --> stop[remaining utterances: NotAttempted; file fails]
+    fail --> stop["Mark remaining utterances NotAttempted and fail the file"]
     fail2 --> stop
     fail3 --> stop
 ```

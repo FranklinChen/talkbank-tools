@@ -33,6 +33,7 @@ pub enum TuiEvent {
 /// Poll for a TUI event with the given timeout.
 ///
 /// Returns `None` if no event is available within the timeout.
+#[must_use]
 pub fn poll_event(timeout: Duration) -> Option<TuiEvent> {
     if event::poll(timeout).ok()? {
         match event::read().ok()? {

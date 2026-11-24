@@ -1,9 +1,9 @@
 //! `batchalign3 doctor`: pre-flight diagnostic for the worker pipeline.
 //!
-//! Spawns a test worker, sends known inputs through the morphosyntax
-//! pipeline, and validates the output structure. Catches machine-specific
-//! issues (stale models, missing processors, MWT quirks) before they
-//! become production failures.
+//! Starts the worker a morphotag job would start, sends it known inputs the
+//! way a job does, and admits the reply with the job's own decoder. Catches
+//! machine-specific issues (stale models, missing processors, MWT quirks)
+//! before they become production failures.
 
 use crate::cli::args::DoctorArgs;
 use crate::cli::error::CliError;
@@ -16,8 +16,6 @@ use crate::host_facts::{
 };
 
 use crate::media::tools::MediaTool;
-use std::io::{BufRead, Write};
-use std::ops::Not;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -120,7 +118,7 @@ impl EffectiveConfigSummary {
     }
 }
 
-/// Per-knob trio of (effective, recommended, operator_override) plus
+/// Per-knob trio of (effective, recommended, `operator_override`) plus
 /// a `redundant` flag set when the override is present and equal to
 /// the recommendation. The flag is the operator's deletion signal:
 /// `redundant: true` means the override can be removed from
@@ -231,20 +229,102 @@ impl ConfigAudit {
     }
 }
 
-/// JSON-friendly projection of [`host_facts::ConfigValidation`].
-/// Each finding renders as its rich `Display` string so the JSON
-/// consumer doesn't have to know the variant tag layout.
-#[derive(Debug, serde::Serialize)]
-struct ValidationReport {
-    warnings: Vec<String>,
-    errors: Vec<String>,
+/// The typed validation, serialized as the `--format json` contract:
+/// `{"warnings": [..], "errors": [..]}`, each finding rendered as its rich
+/// `Display` string so the consumer doesn't have to know the variant tag
+/// layout. `errors` is empty when startup is admitted. The strings exist
+/// only on the wire; doctor's own decisions read the verdict.
+#[derive(Debug)]
+struct ValidationReport(host_facts::ConfigValidation);
+
+impl serde::Serialize for ValidationReport {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Wire {
+            warnings: Vec<String>,
+            errors: Vec<String>,
+        }
+        let errors = match &self.0.verdict {
+            host_facts::StartupVerdict::Admitted => Vec::new(),
+            host_facts::StartupVerdict::Refused(error) => vec![error.to_string()],
+        };
+        Wire {
+            warnings: self.0.warnings.iter().map(ToString::to_string).collect(),
+            errors,
+        }
+        .serialize(serializer)
+    }
 }
 
-impl ValidationReport {
-    fn from_validation(v: &host_facts::ConfigValidation) -> Self {
-        Self {
-            warnings: v.warnings.iter().map(|w| w.to_string()).collect(),
-            errors: v.errors.iter().map(|e| e.to_string()).collect(),
+/// Whether `doctor --check` treats warnings as fatal (`--warnings-as-errors`,
+/// the CI-gate posture for zero-warning deployments) or as advice (the
+/// default: the operator may have overridden a recommendation on purpose).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarningPolicy {
+    Advisory,
+    Fatal,
+}
+
+impl WarningPolicy {
+    const fn from_flag(warnings_as_errors: bool) -> Self {
+        if warnings_as_errors {
+            Self::Fatal
+        } else {
+            Self::Advisory
+        }
+    }
+}
+
+/// What `doctor --check` concludes from one validation under one policy:
+/// the message it prints and its exit status both follow from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckOutcome {
+    /// Startup would be refused.
+    Refused,
+    /// Warnings, made fatal by the policy.
+    WarningsFatal,
+    /// Warnings, advisory.
+    Warned,
+    /// No findings.
+    Clean,
+}
+
+impl CheckOutcome {
+    const fn of(validation: &host_facts::ConfigValidation, policy: WarningPolicy) -> Self {
+        match (&validation.verdict, validation.warnings.is_empty(), policy) {
+            (host_facts::StartupVerdict::Refused(_), _, _) => Self::Refused,
+            (host_facts::StartupVerdict::Admitted, true, _) => Self::Clean,
+            (host_facts::StartupVerdict::Admitted, false, WarningPolicy::Fatal) => {
+                Self::WarningsFatal
+            }
+            (host_facts::StartupVerdict::Admitted, false, WarningPolicy::Advisory) => Self::Warned,
+        }
+    }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::Refused => {
+                "Validation found errors. Resolve the configurations above before deploying."
+            }
+            Self::WarningsFatal => {
+                "Validation passed with warnings; --warnings-as-errors is set, so they are fatal."
+            }
+            Self::Warned => {
+                "Validation passed with warnings. The deployment is safe but not optimal."
+            }
+            Self::Clean => "Validation passed cleanly.",
+        }
+    }
+
+    fn exit(self) -> Result<(), CliError> {
+        match self {
+            Self::Refused => Err(CliError::InvalidArgument(
+                "host-facts validation found errors".into(),
+            )),
+            Self::WarningsFatal => Err(CliError::InvalidArgument(
+                "host-facts validation found warnings (--warnings-as-errors)".into(),
+            )),
+            Self::Warned | Self::Clean => Ok(()),
         }
     }
 }
@@ -264,7 +344,10 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
     // spawn, no model load); only host-facts inspection runs. Useful
     // for fast config-sanity verification.
     if args.check {
-        return run_host_facts_only(&args.format, args.warnings_as_errors);
+        return run_host_facts_only(
+            &args.format,
+            WarningPolicy::from_flag(args.warnings_as_errors),
+        );
     }
 
     let python = args
@@ -339,42 +422,49 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
             .map_err(|fault| fault.explain()),
     );
 
+    // --- Checks 3 and 4: the morphotag worker, launched and asked through
+    // the pool's own path (see "Why doctor owns no worker client") ---
+    // A malformed server.yaml is a failed check, not a silent default: the
+    // worker checks and the host-facts report then use the defaults, and the
+    // `server_config` row (recorded below, in its usual place) says so.
+    let (config, config_check) = match load_doctor_server_config() {
+        Ok(config) => (
+            config,
+            CheckResult {
+                name: "server_config".into(),
+                status: CheckStatus::Pass,
+                detail: "server.yaml reads (or is absent: defaults)".into(),
+                duration_ms: None,
+            },
+        ),
+        Err(error) => (
+            crate::config::ServerConfig::default(),
+            CheckResult {
+                name: "server_config".into(),
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "{error}; the worker checks and host-facts report use the defaults"
+                ),
+                duration_ms: None,
+            },
+        ),
+    };
+    let launch = doctor_worker_pool(&config, &python)
+        .and_then(|pool| SmokeProbe::build(&args.lang).map(|probe| (pool, probe)));
+
     let start = Instant::now();
-    let echo_check = Worker::spawn(
-        &python,
-        &[
-            "--test-echo",
-            "--task",
-            "morphosyntax",
-            "--lang",
-            &args.lang,
-        ],
-    )
-    .and_then(|worker| worker.await_ready(std::time::Duration::from_secs(60)))
-    .and_then(|worker| {
-        let pid = worker.pid();
-        worker
-            .shutdown()
-            .map(|()| format!("Ready signal received (pid {pid})"))
-    });
+    let echo_check = match &launch {
+        Ok((pool, probe)) => check_worker_ready(pool, probe).await,
+        Err(reason) => Err(reason.clone()),
+    };
     record(&mut results, "worker_ready_echo", start, echo_check);
 
-    // --- Check 4: Real morphosyntax worker (loads Stanza model) ---
+    // Loads the Stanza model, and so waits for host memory as a job would.
     let start = Instant::now();
-    let morpho_check = talkbank_model::LanguageCode::new(&args.lang)
-        .map_err(|e| format!("--lang {:?} is not a language code: {e}", args.lang))
-        .and_then(|lang| smoke_batch_items(&lang))
-        .and_then(|items| {
-            Worker::spawn(&python, &["--task", "morphosyntax", "--lang", &args.lang])
-                .and_then(|worker| worker.await_ready(std::time::Duration::from_secs(120)))
-                .and_then(|worker| {
-                    worker.morphosyntax_batch(
-                        &args.lang,
-                        &items,
-                        std::time::Duration::from_secs(120),
-                    )
-                })
-        });
+    let morpho_check = match &launch {
+        Ok((pool, probe)) => check_morphosyntax(pool, probe).await,
+        Err(reason) => Err(reason.clone()),
+    };
     record(&mut results, "morphosyntax_smoke", start, morpho_check);
 
     // --- Check 5: Memory ---
@@ -400,28 +490,7 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
     });
 
     // --- Server config ---
-    // A malformed server.yaml is a failed check, not a silent default: the
-    // host-facts report below then uses the defaults, and says so here.
-    let config = match load_doctor_server_config() {
-        Ok(config) => {
-            results.push(CheckResult {
-                name: "server_config".into(),
-                status: CheckStatus::Pass,
-                detail: "server.yaml reads (or is absent: defaults)".into(),
-                duration_ms: None,
-            });
-            config
-        }
-        Err(error) => {
-            results.push(CheckResult {
-                name: "server_config".into(),
-                status: CheckStatus::Fail,
-                detail: format!("{error}; the host-facts report below uses the defaults"),
-                duration_ms: None,
-            });
-            crate::config::ServerConfig::default()
-        }
-    };
+    results.push(config_check);
 
     // --- Host-facts report ---
     let host_facts_report = build_host_facts_report(&config)?;
@@ -430,7 +499,10 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
     let any_fail = results
         .iter()
         .any(|r| matches!(r.status, CheckStatus::Fail));
-    let any_validation_error = host_facts_report.validation.errors.is_empty().not();
+    let any_validation_error = matches!(
+        host_facts_report.validation.0.verdict,
+        host_facts::StartupVerdict::Refused(_)
+    );
 
     match args.format {
         crate::cli::args::DoctorFormat::Human => {
@@ -480,39 +552,18 @@ pub async fn run(args: &DoctorArgs) -> Result<(), CliError> {
 }
 
 /// Run host-facts inspection only (the `--check` path). Skips the
-/// Python worker-pipeline phase entirely.
-///
-/// Exit policy:
-/// - Errors always fail (`Err`).
-/// - Warnings fail iff `warnings_as_errors == true`, the CI-gate
-///   posture for zero-warning deployments. Without the flag, warnings
-///   are surfaced but the process exits 0; the operator may have
-///   intentionally overridden a recommendation.
+/// Python worker-pipeline phase entirely. The exit policy is
+/// [`CheckOutcome`]'s.
 fn run_host_facts_only(
     format: &crate::cli::args::DoctorFormat,
-    warnings_as_errors: bool,
+    policy: WarningPolicy,
 ) -> Result<(), CliError> {
     let report = build_host_facts_report(&load_doctor_server_config()?)?;
-    let any_validation_error = !report.validation.errors.is_empty();
-    let any_warning = !report.validation.warnings.is_empty();
+    let outcome = CheckOutcome::of(&report.validation.0, policy);
     match format {
         crate::cli::args::DoctorFormat::Human => {
             print_host_facts_human(&report);
-            if any_validation_error {
-                eprintln!(
-                    "\nValidation found errors. Resolve the configurations above before deploying."
-                );
-            } else if any_warning && warnings_as_errors {
-                eprintln!(
-                    "\nValidation passed with warnings; --warnings-as-errors is set, so they are fatal."
-                );
-            } else if any_warning {
-                eprintln!(
-                    "\nValidation passed with warnings. The deployment is safe but not optimal."
-                );
-            } else {
-                eprintln!("\nValidation passed cleanly.");
-            }
+            eprintln!("\n{}", outcome.summary());
         }
         crate::cli::args::DoctorFormat::Json => {
             let json = serde_json::to_string_pretty(&report).map_err(|e| {
@@ -521,30 +572,7 @@ fn run_host_facts_only(
             println!("{json}");
         }
     }
-    check_exit_outcome(any_validation_error, any_warning, warnings_as_errors)
-}
-
-/// Pure decision policy for `doctor --check`'s exit code.
-///
-/// Errors always fail. Warnings fail iff `warnings_as_errors == true`.
-/// Pulled out as a free function so the policy can be unit-tested
-/// without exercising the full `build_host_facts_report` pipeline.
-fn check_exit_outcome(
-    any_error: bool,
-    any_warning: bool,
-    warnings_as_errors: bool,
-) -> Result<(), CliError> {
-    if any_error {
-        return Err(CliError::InvalidArgument(
-            "host-facts validation found errors".into(),
-        ));
-    }
-    if any_warning && warnings_as_errors {
-        return Err(CliError::InvalidArgument(
-            "host-facts validation found warnings (--warnings-as-errors)".into(),
-        ));
-    }
-    Ok(())
+    outcome.exit()
 }
 
 /// Trace why one knob's resolved value is what it is.
@@ -603,7 +631,7 @@ struct KnobExplanation {
     /// "1 when GPU is non-functional, 4 otherwise").
     rule: String,
     /// Narrative description of the facts that drove the
-    /// recommendation (e.g., "gpu = AppleMps { ... }, ram_total_mb
+    /// recommendation (e.g., "gpu = `AppleMps` { ... }, `ram_total_mb`
     /// = 65536").
     facts_used: String,
 }
@@ -799,7 +827,7 @@ fn build_host_facts_report_from(
     Ok(HostFactsReport {
         detected,
         effective: summary,
-        validation: ValidationReport::from_validation(&validation),
+        validation: ValidationReport(validation),
     })
 }
 
@@ -810,6 +838,23 @@ fn build_host_facts_report_from(
 fn load_doctor_server_config() -> Result<crate::config::ServerConfig, crate::config::ConfigError> {
     let layout = RuntimeLayout::from_env();
     config::load_config_from_layout(&layout, None)
+}
+
+/// The pool configuration a direct morphotag run on this host would use,
+/// with doctor's interpreter. A malformed `server.yaml` is reported by the
+/// `server_config` check; the worker checks then run on the defaults, as the
+/// host-facts report does.
+fn doctor_worker_pool(
+    config: &crate::config::ServerConfig,
+    python: &str,
+) -> Result<crate::worker::pool::PoolConfig, String> {
+    let host = crate::host_facts::HostSnapshot::read(config)
+        .map_err(|e| format!("Cannot read this host's facts: {e}"))?;
+    let layout = RuntimeLayout::from_env();
+    Ok(crate::worker::pool::PoolConfig {
+        python_path: python.to_owned(),
+        ..crate::cli::dispatch::build_direct_pool_config(config, &host, layout.state_dir())
+    })
 }
 
 /// Render the host-facts section in human-readable form.
@@ -859,16 +904,19 @@ fn print_host_facts_human(report: &HostFactsReport) {
         }
     }
 
-    let v = &report.validation;
-    if v.warnings.is_empty() && v.errors.is_empty() {
-        eprintln!("\nValidation:           OK (no override contradicts detected facts)");
-    } else {
-        eprintln!("\nValidation findings:");
-        for w in &v.warnings {
-            eprintln!("  WARN  {w}");
+    let v = &report.validation.0;
+    match (&v.verdict, v.warnings.is_empty()) {
+        (host_facts::StartupVerdict::Admitted, true) => {
+            eprintln!("\nValidation:           OK (no override contradicts detected facts)");
         }
-        for e in &v.errors {
-            eprintln!("  ERROR {e}");
+        (verdict, _) => {
+            eprintln!("\nValidation findings:");
+            for w in &v.warnings {
+                eprintln!("  WARN  {w}");
+            }
+            if let host_facts::StartupVerdict::Refused(e) = verdict {
+                eprintln!("  ERROR {e}");
+            }
         }
     }
 }
@@ -910,7 +958,7 @@ enum MediaDecodeFault {
     ///
     /// Carries the diagnostic rather than an ffmpeg version: an earlier shape
     /// spawned `ffmpeg -version` a SECOND time to interpolate a version into a
-    /// sentence that reads "this is NOT an FFmpeg version problem", while the
+    /// sentence that reads "this is NOT an `FFmpeg` version problem", while the
     /// `ffmpeg` check two lines above had already printed that banner.
     DecoderUnusable { detail: String },
     /// A module the decode path needs is missing from the interpreter.
@@ -954,7 +1002,7 @@ impl MediaDecodeFault {
 /// A previous version of this check imported `torchcodec.decoders` and a still
 /// earlier one was DELETED on the reasoning that nothing used torchcodec. Both
 /// were wrong in the same way: they asked whether a name resolved. When
-/// Homebrew moved to FFmpeg 9, every torchcodec library (built for majors 4 to
+/// Homebrew moved to `FFmpeg` 9, every torchcodec library (built for majors 4 to
 /// 8) stopped loading and transcription began failing at job time, while
 /// `import torchaudio` kept succeeding and `torchaudio.load` still existed as
 /// an attribute. Only CALLING it reveals the fault, which is why this probe
@@ -1091,214 +1139,107 @@ fn check_ffmpeg() -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// The Python worker seam, modelled as a type state
+// The worker checks, through the pool's own launch and execute path
 // ---------------------------------------------------------------------------
 //
-// # Why a type state rather than two functions with a `ready` flag
+// # Why doctor owns no worker client
 //
-// This file previously carried two near-identical helpers, each spawning a
-// worker, looping for a `{"ready": true}` line, and tracking success in a
-// local `bool`. Nothing in either signature said a request may only be written
-// AFTER that signal, so the rule lived in whichever function you happened to
-// read.
+// Doctor once had its own stdio client: its own command line, ready loop,
+// request and reply reader. Each was a copy of the real path that could
+// drift, and they did: the command line lacked `--serving`, so the worker
+// refused every doctor launch; the reply was walked as untyped JSON at a path
+// the worker no longer used, so the check passed with "0 words"; and it sent
+// `batch_infer`, which real morphotag jobs stopped sending, so a machine could
+// pass doctor and still fail every job. Its timeouts were checked only when a
+// line arrived, so a silent worker hung it.
 //
-// Now `spawn` yields `Worker<Spawned>`, which has no method that writes a
-// request, and `await_ready` CONSUMES it to yield `Worker<Ready>`, which does.
-// Sending to a worker that has not signalled ready is not a discouraged
-// ordering; it is a program that does not compile. The `bool` is gone because
-// the state it tracked is now the type.
+// Both worker checks now go through `PoolConfig::spawn_standalone`, which
+// launches the worker a pool would launch for the morphotag request, and
+// `StandaloneWorker::execute`, which loads and executes it as a pool dispatch
+// does. The reply is admitted by `admit_morphosyntax_result`, the function a
+// morphotag job uses. What doctor still owns is only its verdict.
 
-/// A spawned worker that has not yet signalled readiness.
-struct Spawned;
-
-/// A worker that has signalled readiness and will accept one request.
-struct Ready;
-
-/// The process handles, separated so `Worker` itself owns no `Drop` glue and a
-/// state transition can move the handles out of the old state.
-struct WorkerIo {
-    child: std::process::Child,
-    stdin: std::process::ChildStdin,
-    lines: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
-    /// The pid the OPERATING SYSTEM gave us when we spawned it.
-    ///
-    /// Kept distinct from the pid the worker reports about itself. They are
-    /// two different facts and one used to overwrite the other in place, with
-    /// `unwrap_or` papering over the case where the worker said nothing: after
-    /// that assignment nothing could tell which source a given value came
-    /// from, which is the shape where a value proxies for a richer fact.
-    spawned_pid: u32,
-    /// The pid the worker announced in its ready line, if it announced one.
-    ///
-    /// `None` means it signalled ready without naming itself, which is not the
-    /// same as "the pid is the one we spawned".
-    reported_pid: Option<u32>,
+/// The doctor's morphotag request: the self-test utterances, encoded by the
+/// job's own request builder.
+struct SmokeProbe {
+    /// The items sent, which the reply is admitted against.
+    items: Vec<crate::chat_ops::morphosyntax_ops::MorphosyntaxBatchItem>,
+    /// The `execute_v2` request carrying them, with its attachment.
+    prepared: crate::morphosyntax::PreparedMorphosyntaxRequest,
+    /// The worker language the request is served in.
+    language: crate::api::WorkerLanguage,
 }
 
-impl Drop for WorkerIo {
-    /// Never leave a worker behind. Every early return in this module drops
-    /// the `Worker`, and a diagnostic command that leaks Python processes on
-    /// the failure paths is worse than the fault it was run to find.
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// A Python worker subprocess, parameterised by what it is ready to do.
-struct Worker<State> {
-    io: WorkerIo,
-    _state: std::marker::PhantomData<State>,
-}
-
-impl Worker<Spawned> {
-    /// Start `python -m batchalign.worker` with `args`.
-    fn spawn(python: &str, args: &[&str]) -> Result<Self, String> {
-        let mut cmd = Command::new(python);
-        cmd.args(["-m", "batchalign.worker"]);
-        cmd.args(args);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(|e| format!("Spawn failed: {e}"))?;
-        let stdout = child.stdout.take().ok_or("No stdout")?;
-        let stdin = child.stdin.take().ok_or("No stdin")?;
-        let spawned_pid = child.id();
+impl SmokeProbe {
+    /// Build the probe for `lang` (the `--lang` the operator gave).
+    fn build(lang: &str) -> Result<Self, String> {
+        let code = talkbank_model::LanguageCode::new(lang)
+            .map_err(|e| format!("--lang {lang:?} is not a language code: {e}"))?;
+        let items = smoke_batch_items(&code)?;
+        let lang3 = crate::api::LanguageCode3::try_new(lang)
+            .map_err(|e| format!("--lang {lang:?} is not a three-letter code: {e}"))?;
+        // No MWT lexicon and no retokenization: the defaults a morphotag job
+        // runs with when the operator names neither.
+        let prepared = crate::morphosyntax::PreparedMorphosyntaxRequest::prepare(
+            &lang3,
+            &items,
+            &crate::chat_ops::morphosyntax_ops::MwtDict::new(),
+            false,
+        )
+        .map_err(|e| format!("Cannot encode the morphotag request: {e}"))?;
         Ok(Self {
-            io: WorkerIo {
-                child,
-                stdin,
-                lines: std::io::BufReader::new(stdout).lines(),
-                spawned_pid,
-                reported_pid: None,
-            },
-            _state: std::marker::PhantomData,
+            items,
+            prepared,
+            language: crate::api::WorkerLanguage::from(&lang3),
         })
     }
-
-    /// Consume the spawned worker and yield one that is ready to be asked.
-    ///
-    /// Consuming is the point: after this returns there is no value left that
-    /// represents "spawned but not ready", so no later code can act on one.
-    fn await_ready(mut self, timeout: std::time::Duration) -> Result<Worker<Ready>, String> {
-        let deadline = Instant::now() + timeout;
-        while let Some(line) = self.io.lines.next() {
-            if Instant::now() > deadline {
-                return Err(format!(
-                    "Timeout ({}s) waiting for ready signal",
-                    timeout.as_secs()
-                ));
-            }
-            let line = line.map_err(|e| format!("Read error: {e}"))?;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue; // worker logging, not protocol
-            };
-            if value.get("ready") == Some(&serde_json::Value::Bool(true)) {
-                let mut io = self.io;
-                io.reported_pid = value
-                    .get("pid")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|reported| u32::try_from(reported).ok());
-                return Ok(Worker {
-                    io,
-                    _state: std::marker::PhantomData,
-                });
-            }
-        }
-        Err("Worker exited without ready signal".into())
-    }
 }
 
-impl Worker<Ready> {
-    /// The pid to show an operator: what the worker called itself, falling
-    /// back to what we spawned. The FALLBACK IS AT THE DISPLAY EDGE, where a
-    /// human reads it, rather than baked into storage where the two facts
-    /// become indistinguishable.
-    fn pid(&self) -> u32 {
-        self.io.reported_pid.unwrap_or(self.io.spawned_pid)
+/// An echo worker, launched as the pool would launch the morphotag worker,
+/// starts and signals ready. Loads no model.
+async fn check_worker_ready(
+    pool: &crate::worker::pool::PoolConfig,
+    probe: &SmokeProbe,
+) -> Result<String, String> {
+    let echo = crate::worker::pool::PoolConfig {
+        test_echo: true,
+        ..pool.clone()
+    };
+    let worker = echo
+        .spawn_standalone(probe.prepared.request(), probe.language.clone())
+        .await
+        .map_err(|e| format!("Cannot start the worker: {e}"))?;
+    let pid = worker.pid();
+    worker
+        .shutdown()
+        .await
+        .map_err(|e| format!("The worker did not shut down: {e}"))?;
+    Ok(format!("Ready signal received (pid {pid})"))
+}
+
+/// A real worker loads Stanza and analyzes the probe, read exactly as a
+/// morphotag job reads it.
+async fn check_morphosyntax(
+    pool: &crate::worker::pool::PoolConfig,
+    probe: &SmokeProbe,
+) -> Result<String, String> {
+    let request = probe.prepared.request();
+    let mut worker = pool
+        .spawn_standalone(request, probe.language.clone())
+        .await
+        .map_err(|e| format!("Cannot start the worker: {e}"))?;
+    let response = worker.execute(request).await;
+    // A failed shutdown changes nothing the check reports: the handle's drop
+    // kills the worker, and the reply already in hand is the verdict.
+    if let Err(error) = worker.shutdown().await {
+        tracing::debug!(%error, "doctor's morphosyntax worker did not shut down cleanly");
     }
-
-    /// Ask the worker to exit, and wait for it.
-    fn shutdown(mut self) -> Result<(), String> {
-        writeln!(self.io.stdin, r#"{{"op":"shutdown"}}"#)
-            .map_err(|e| format!("Write failed: {e}"))?;
-        self.io
-            .child
-            .wait()
-            .map_err(|e| format!("Wait failed: {e}"))?;
-        Ok(())
-    }
-
-    /// Send one morphosyntax batch and return the worker's raw response.
-    ///
-    /// # Why this takes the real payload type
-    ///
-    /// It used to take `&[Vec<&str>]` and build each item with a `json!`
-    /// literal. That literal was written when `terminator` did not exist. When
-    /// the schema gained it as a REQUIRED field with no default (deliberately:
-    /// a default period would be a sentinel that is also a legal value),
-    /// production was forced to follow by the compiler and this call site was
-    /// not, because a `json!` object accepts any shape. Every doctor run since
-    /// reported three "Invalid batch item" errors, and the doctor was the one
-    /// tool nobody suspected.
-    ///
-    /// Taking `&[MorphosyntaxBatchItem]` puts this seam back under the
-    /// compiler. The next required field breaks the build here.
-    fn morphosyntax_batch(
-        mut self,
-        lang: &str,
-        items: &[crate::chat_ops::morphosyntax_ops::MorphosyntaxBatchItem],
-        timeout: std::time::Duration,
-    ) -> Result<String, String> {
-        let encoded = items
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Could not encode batch items: {e}"))?;
-
-        let request = serde_json::json!({
-            "op": "batch_infer",
-            "request": { "task": "morphosyntax", "lang": lang, "items": encoded }
-        });
-        let body = serde_json::to_string(&request)
-            .map_err(|e| format!("Could not encode request: {e}"))?;
-        writeln!(self.io.stdin, "{body}").map_err(|e| format!("Write failed: {e}"))?;
-        self.io
-            .stdin
-            .flush()
-            .map_err(|e| format!("Flush failed: {e}"))?;
-
-        let deadline = Instant::now() + timeout;
-        while let Some(line) = self.io.lines.next() {
-            if Instant::now() > deadline {
-                return Err(format!(
-                    "Timeout ({}s) waiting for batch_infer response",
-                    timeout.as_secs()
-                ));
-            }
-            let line = line.map_err(|e| format!("Read error: {e}"))?;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue; // worker logging, not protocol
-            };
-            match value.get("op").and_then(serde_json::Value::as_str) {
-                Some("error") => {
-                    let err = value
-                        .get("error")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown");
-                    return Err(format!("Worker error: {err}"));
-                }
-                Some("batch_infer") => {
-                    let summary = summarize_morphosyntax_response(&value, items.len());
-                    let _ = self.shutdown();
-                    return summary;
-                }
-                _ => continue,
-            }
-        }
-        Err("Worker exited without batch_infer response".into())
-    }
+    let response = response.map_err(|e| format!("The morphotag request failed: {e}"))?;
+    let result = crate::worker::text_result_v2::parse_morphosyntax_result_v2(response)
+        .map_err(|refusal| format!("The worker's reply was refused: {refusal}"))?;
+    let admitted = crate::morphosyntax::admit_morphosyntax_result(result, &probe.items)
+        .map_err(|e| format!("The worker's reply was refused: {e}"))?;
+    summarize_analyses(admitted.iter().map(|item| item.response().analysis()))
 }
 
 /// The doctor's self-test utterances, built the way production builds them.
@@ -1360,76 +1301,41 @@ fn smoke_batch_items(
         .collect())
 }
 
-/// Check that every word the worker returned carries the fields morphotag needs.
-fn summarize_morphosyntax_response(
-    value: &serde_json::Value,
-    expected: usize,
+/// The check's verdict over the admitted analyses: it passes only when every
+/// item was analyzed into a sentence with words.
+///
+/// Every field a word must carry was already enforced when the reply was
+/// admitted (the production parser refuses a word without them), so what is
+/// left to judge is only the item states, matched exhaustively.
+fn summarize_analyses<'a>(
+    analyses: impl Iterator<Item = &'a batchalign_transform::morphosyntax::UdAnalysis>,
 ) -> Result<String, String> {
-    let results = value
-        .pointer("/response/results")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("No results array in response")?;
+    use batchalign_transform::morphosyntax::UdAnalysis;
 
-    if results.len() != expected {
-        return Err(format!(
-            "Expected {expected} results, got {}",
-            results.len()
-        ));
-    }
-
-    let mut total_words = 0usize;
+    let mut items = 0usize;
+    let mut words = 0usize;
     let mut problems: Vec<String> = Vec::new();
-
-    for (ri, result) in results.iter().enumerate() {
-        let Some(sentences) = result
-            .pointer("/result/raw_sentences")
-            .and_then(serde_json::Value::as_array)
-        else {
-            if let Some(err) = result.get("error").and_then(serde_json::Value::as_str) {
-                problems.push(format!("result {ri}: worker error: {err}"));
+    for (index, analysis) in analyses.enumerate() {
+        items = index + 1;
+        match analysis {
+            UdAnalysis::Sentence(sentence) => words += sentence.words.len(),
+            // Every probe sentence has words, so "none" is itself a fault.
+            UdAnalysis::Empty => {
+                problems.push(format!(
+                    "item {index}: the worker found no words to analyze"
+                ));
             }
-            continue;
-        };
-        for (si, sentence) in sentences.iter().enumerate() {
-            let Some(words) = sentence.as_array() else {
-                continue;
-            };
-            for (wi, word) in words.iter().enumerate() {
-                total_words += 1;
-                for field in ["text", "lemma", "upos", "deprel"] {
-                    let present = word
-                        .get(field)
-                        .is_some_and(|v| *v != serde_json::Value::Null);
-                    if present {
-                        continue;
-                    }
-                    // An MWT range token legitimately lacks the analysis
-                    // fields; it carries only the surface text.
-                    let is_range = word
-                        .get("id")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|ids| ids.len() > 1);
-                    if !is_range || field == "text" {
-                        let text = word
-                            .get("text")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("?");
-                        problems.push(format!(
-                            "result {ri} sent {si} word {wi} ('{text}'): missing {field}"
-                        ));
-                    }
-                }
-            }
+            UdAnalysis::WorkerFailed(reason) => problems.push(format!("item {index}: {reason}")),
         }
     }
-
+    if items == 0 {
+        problems.push("the worker answered no items".to_owned());
+    }
     if problems.is_empty() {
-        Ok(format!(
-            "{expected} sentences, {total_words} words, all fields present"
-        ))
+        Ok(format!("{items} sentences, {words} words analyzed"))
     } else {
         Err(format!(
-            "{} field issues: {}",
+            "{} problems: {}",
             problems.len(),
             problems.join("; ")
         ))
@@ -1439,6 +1345,41 @@ fn summarize_morphosyntax_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards: The morphotag smoke check passes only when every item was analyzed into a sentence with words; a failed item, a wordless item, or no items at all fails the check instead of reporting a pass.
+    /// Kind: policy
+    /// Not a type: The reply reaches this verdict already admitted by the job's own decoder, and `UdAnalysis` names every item state; which states count as a doctor failure is a choice about what the diagnostic promises, which only its verdict shows.
+    /// State: None. Item analyses built in memory through the production Stanza parser; no worker starts.
+    /// Concurrency: None. The verdict is a pure function called serially.
+    #[test]
+    fn morphotag_smoke_fails_unless_every_item_was_analyzed() {
+        use batchalign_transform::morphosyntax::{
+            AdmittedUdResponse, UdAnalysis, parse_raw_stanza_output,
+        };
+        let raw = serde_json::json!([[
+            {"id": 1, "text": "dog", "lemma": "dog", "upos": "NOUN", "head": 0, "deprel": "root"}
+        ]]);
+        let analyzed = AdmittedUdResponse::try_from(
+            parse_raw_stanza_output(raw.as_array().expect("one sentence")).expect("a word"),
+        )
+        .expect("one sentence");
+        let failed = UdAnalysis::WorkerFailed("load has not completed".to_owned());
+
+        assert_eq!(
+            summarize_analyses([analyzed.analysis()].into_iter()),
+            Ok("1 sentences, 1 words analyzed".to_owned())
+        );
+        for (label, analyses) in [
+            ("failed item", vec![analyzed.analysis(), &failed]),
+            ("wordless item", vec![&UdAnalysis::Empty]),
+            ("no items", vec![]),
+        ] {
+            assert!(
+                summarize_analyses(analyses.into_iter()).is_err(),
+                "{label} must fail the check"
+            );
+        }
+    }
     use crate::config::ServerConfig;
     use crate::host_facts::ConfigOverrides;
     use crate::host_facts::test_helpers::apple_silicon_64gb;
@@ -1541,40 +1482,43 @@ mod tests {
         );
     }
 
-    /// On an unconfigured host (default `ServerConfig`), the
-    /// validation report's warnings and errors are both empty.
-    /// Pins the "default config -> clean validation" contract that
-    /// production startup relies on.
-    #[test]
-    fn validation_report_is_empty_for_default_config() {
-        let cfg = ServerConfig::default();
-        let facts = apple_silicon_64gb();
-        let v = host_facts::validate(&cfg, &facts);
-        let report = ValidationReport::from_validation(&v);
-        assert!(report.warnings.is_empty());
-        assert!(report.errors.is_empty());
-    }
+    // Test concurrency pure-doctor: None. Doctor's report projection, wire serialization and exit policy are pure functions of in-memory values, so these tests share no resource and run in any order or in parallel.
 
-    /// An operator setting `gpu_thread_pool_size: 4` on Apple Silicon
-    /// triggers the configured-vs-recommended warning, which surfaces
-    /// in the `ValidationReport` as a rendered string. The `--format
-    /// json` consumer reads strings, not enum tags, so the
-    /// `Display` -> string conversion is the API contract.
+    /// Guards: The `--format json` validation object is `{"warnings": [..], "errors": [..]}` with each finding as its `Display` string: empty lists for the default config, the configured value inside a warning's text, and a refusal as the single error.
+    /// Kind: wire
+    /// Not a type: `ValidationReport` holds the typed verdict, but the JSON field names and string rendering are an external contract read by scripts, observable only by serializing.
+    /// State: None. One declared in-memory host and in-memory configs; no worker or daemon starts.
+    /// Concurrency: [pure-doctor]
     #[test]
-    fn validation_report_renders_warning_strings() {
-        let cfg = ServerConfig {
+    fn validation_report_wire_shape() {
+        let facts = apple_silicon_64gb();
+        let wire = |cfg: &ServerConfig| {
+            serde_json::to_value(ValidationReport(host_facts::validate(cfg, &facts)))
+                .expect("serialize")
+        };
+        assert_eq!(
+            wire(&ServerConfig::default()),
+            serde_json::json!({"warnings": [], "errors": []})
+        );
+        let warned = wire(&ServerConfig {
             gpu_thread_pool_size: Some(4),
             ..Default::default()
-        };
-        let facts = apple_silicon_64gb();
-        let v = host_facts::validate(&cfg, &facts);
-        let report = ValidationReport::from_validation(&v);
-        assert_eq!(report.warnings.len(), 1);
+        });
+        let warnings = warned["warnings"].as_array().expect("warnings list");
+        assert_eq!(warnings.len(), 1);
         assert!(
-            report.warnings[0].contains("gpu_thread_pool_size=4"),
-            "warning string should include the configured value: {:?}",
-            report.warnings[0]
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .contains("gpu_thread_pool_size=4"),
+            "warning text names the configured value: {warned}"
         );
+        assert_eq!(warned["errors"], serde_json::json!([]));
+        let refused = wire(&ServerConfig {
+            max_concurrent_jobs: Some(99),
+            ..Default::default()
+        });
+        assert_eq!(refused["errors"].as_array().map(Vec::len), Some(1));
     }
 
     // -----------------------------------------------------------------
@@ -1611,7 +1555,7 @@ mod tests {
         );
     }
 
-    /// `Some(4)` operator override: source = OperatorOverride;
+    /// `Some(4)` operator override: source = `OperatorOverride`;
     /// resolved value = 4; recommendation field still shows what
     /// the recommendation would have been (1 on Apple Silicon).
     #[test]
@@ -1653,7 +1597,7 @@ mod tests {
         insta::assert_json_snapshot!("host_facts_report_default_apple_silicon", report);
     }
 
-    /// Operator override that triggers a warning: gpu_thread_pool_size=4
+    /// Operator override that triggers a warning: `gpu_thread_pool_size=4`
     /// on a non-functional GPU. Snapshot pins both the rendered warning
     /// string and the resolved override propagation.
     #[test]
@@ -1725,39 +1669,78 @@ mod tests {
     // --check exit policy (--warnings-as-errors)
     // -----------------------------------------------------------------
 
-    /// No findings, default policy: exit 0.
+    /// Guards: `doctor --check` fails exactly when startup is refused, or when warnings exist under `--warnings-as-errors`; warnings alone under the default policy and a clean validation exit 0.
+    /// Kind: policy
+    /// Not a type: `CheckOutcome::of` is an exhaustive match, but which outcomes exit non-zero is the operator-facing policy choice itself.
+    /// State: None. Validations are built in memory; no host is read and no worker starts.
+    /// Concurrency: [pure-doctor]
     #[test]
-    fn check_exit_clean_validation_succeeds() {
-        assert!(check_exit_outcome(false, false, false).is_ok());
-        assert!(check_exit_outcome(false, false, true).is_ok());
+    fn check_outcome_exit_policy_matrix() {
+        use host_facts::{ConfigError, ConfigValidation, ConfigWarning, StartupVerdict};
+        let warning = ConfigWarning::GpuThreadPoolSizeAboveOneOnCpu {
+            configured: 4,
+            recommended: 1,
+        };
+        let refused =
+            StartupVerdict::Refused(ConfigError::MaxConcurrentJobsWouldDeterministicallyOom {
+                configured: 99,
+                ram_total_mb: 65_536,
+                per_job_peak_mb: 16_000,
+            });
+        let validation = |warnings: Vec<ConfigWarning>, verdict: StartupVerdict| ConfigValidation {
+            warnings,
+            verdict,
+        };
+        let cases = [
+            (
+                validation(vec![], StartupVerdict::Admitted),
+                WarningPolicy::Advisory,
+                CheckOutcome::Clean,
+                true,
+            ),
+            (
+                validation(vec![], StartupVerdict::Admitted),
+                WarningPolicy::Fatal,
+                CheckOutcome::Clean,
+                true,
+            ),
+            (
+                validation(vec![warning.clone()], StartupVerdict::Admitted),
+                WarningPolicy::Advisory,
+                CheckOutcome::Warned,
+                true,
+            ),
+            (
+                validation(vec![warning.clone()], StartupVerdict::Admitted),
+                WarningPolicy::Fatal,
+                CheckOutcome::WarningsFatal,
+                false,
+            ),
+            (
+                validation(vec![], refused.clone()),
+                WarningPolicy::Advisory,
+                CheckOutcome::Refused,
+                false,
+            ),
+            (
+                validation(vec![warning], refused),
+                WarningPolicy::Fatal,
+                CheckOutcome::Refused,
+                false,
+            ),
+        ];
+        for (validation, policy, expected, exits_ok) in cases {
+            let outcome = CheckOutcome::of(&validation, policy);
+            assert_eq!(outcome, expected, "{validation:?} under {policy:?}");
+            assert_eq!(outcome.exit().is_ok(), exits_ok, "{expected:?} exit status");
+        }
     }
 
-    /// Warnings without `--warnings-as-errors`: exit 0 (operator
-    /// may have intentionally overridden a recommendation).
-    #[test]
-    fn check_exit_warnings_alone_succeed_by_default() {
-        assert!(check_exit_outcome(false, true, false).is_ok());
-    }
-
-    /// Warnings WITH `--warnings-as-errors`: exit non-zero. The
-    /// CI-gate posture for zero-warning deployments.
-    #[test]
-    fn check_exit_warnings_with_warnings_as_errors_fail() {
-        assert!(check_exit_outcome(false, true, true).is_err());
-    }
-
-    /// Errors always fail, regardless of `--warnings-as-errors`.
-    #[test]
-    fn check_exit_errors_always_fail() {
-        assert!(check_exit_outcome(true, false, false).is_err());
-        assert!(check_exit_outcome(true, false, true).is_err());
-        assert!(check_exit_outcome(true, true, false).is_err());
-        assert!(check_exit_outcome(true, true, true).is_err());
-    }
-
-    /// `HostFactsReport` round-trips through serde_json without
-    /// errors. JSON consumers treat the schema as stable, so any
-    /// future field change must consciously break this test.
+    /// Guards: The `--format json` host-facts object keeps its top-level keys (`detected`, `effective`, `validation`) and a representative set of `effective` knob names, so a field rename breaks here rather than in an operator's script.
+    /// Kind: wire
+    /// Not a type: The structs serialize through derived serde, but the emitted key names are an external contract; only serializing shows them.
+    /// State: None. One declared in-memory host and the default config; no worker or daemon starts.
+    /// Concurrency: [pure-doctor]
     #[test]
     fn host_facts_report_serializes_to_json() {
         let cfg = ServerConfig::default();
@@ -1769,7 +1752,7 @@ mod tests {
         let report = HostFactsReport {
             detected: facts,
             effective: EffectiveConfigSummary::from_effective(&effective, &cfg, &facts_for_summary),
-            validation: ValidationReport::from_validation(&validation),
+            validation: ValidationReport(validation),
         };
         let json = serde_json::to_value(&report).expect("serialize");
         // Top-level keys are the operator's contract.

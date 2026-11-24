@@ -74,11 +74,11 @@ impl Serialize for FaRequestNamespace {
 pub(super) struct ExpectedFaWords(usize);
 
 impl ExpectedFaWords {
-    pub(super) fn new(value: usize) -> Self {
+    pub(super) const fn new(value: usize) -> Self {
         Self(value)
     }
 
-    pub(super) fn get(self) -> usize {
+    pub(super) const fn get(self) -> usize {
         self.0
     }
 }
@@ -317,26 +317,26 @@ impl FaRawEvidence {
     }
 
     #[cfg(test)]
-    pub(super) fn requested_engine(&self) -> FaEngineName {
+    pub(super) const fn requested_engine(&self) -> FaEngineName {
         self.requested_engine
     }
 
-    pub(super) fn effective_engine(&self) -> FaEngineName {
+    pub(super) const fn effective_engine(&self) -> FaEngineName {
         self.effective_engine
     }
 
     #[cfg(test)]
-    pub(super) fn expected_words(&self) -> ExpectedFaWords {
+    pub(super) const fn expected_words(&self) -> ExpectedFaWords {
         self.expected_words
     }
 
     /// The timing payload read once at admission.
-    pub(super) fn payload(&self) -> &crate::chat_ops::nlp::FaRawResponse {
+    pub(super) const fn payload(&self) -> &crate::chat_ops::nlp::FaRawResponse {
         &self.payload
     }
 
     #[cfg(test)]
-    pub(super) fn fallback_reason(
+    pub(super) const fn fallback_reason(
         &self,
     ) -> Option<crate::worker::fa_result_v2::FaEngineConstraint> {
         self.fallback_reason
@@ -425,21 +425,21 @@ impl ReplayableFaRawEvidence {
         self.0
     }
 
-    pub(super) fn requested_engine(&self) -> FaEngineName {
+    pub(super) const fn requested_engine(&self) -> FaEngineName {
         self.0.requested_engine
     }
 
     /// The FA cache namespace this evidence was requested, and admitted,
     /// under.
-    pub(super) fn request_engine_version(&self) -> &FaCacheNamespace {
+    pub(super) const fn request_engine_version(&self) -> &FaCacheNamespace {
         &self.0.request_engine_identity.namespace
     }
 
-    pub(super) fn expected_words(&self) -> ExpectedFaWords {
+    pub(super) const fn expected_words(&self) -> ExpectedFaWords {
         self.0.expected_words
     }
 
-    pub(super) fn cache_key(&self) -> &CacheKey {
+    pub(super) const fn cache_key(&self) -> &CacheKey {
         &self.0.cache_key
     }
 }

@@ -170,7 +170,7 @@ mod tests {
         );
     }
 
-    /// TalkBank variant: a self-headed relation explicitly labelled
+    /// `TalkBank` variant: a self-headed relation explicitly labelled
     /// ROOT is the structural root (see `talkbank_model::GrammaticalRelation::is_root`).
     /// Must continue to validate.
     #[test]

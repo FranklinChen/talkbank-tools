@@ -38,7 +38,7 @@ pub struct PendingSecondaryWord {
 
 impl PendingSecondaryWord {
     /// The source resolver's result, including genuine ambiguity or absence.
-    pub fn resolution(&self) -> &talkbank_model::validation::LanguageResolution {
+    pub const fn resolution(&self) -> &talkbank_model::validation::LanguageResolution {
         &self.resolution
     }
 
@@ -78,6 +78,7 @@ pub enum WordRole {
 impl WordRole {
     /// The role of a word with this form type and governing language: a
     /// code-switch wins over a form type.
+    #[must_use]
     pub fn of(
         form_type: Option<talkbank_model::model::FormType>,
         language: Option<talkbank_model::validation::LanguageResolution>,
@@ -101,26 +102,30 @@ pub struct BatchWord {
 impl BatchWord {
     /// Retain actual source text. Special forms become a separate protocol
     /// mask only when the worker request is serialized.
-    pub fn new(text: talkbank_model::ChatCleanedText, role: WordRole) -> Self {
+    #[must_use]
+    pub const fn new(text: talkbank_model::ChatCleanedText, role: WordRole) -> Self {
         Self { text, role }
     }
 
     /// A word the model analyses in the utterance's language.
-    pub fn analysed(text: talkbank_model::ChatCleanedText) -> Self {
+    #[must_use]
+    pub const fn analysed(text: talkbank_model::ChatCleanedText) -> Self {
         Self::new(text, WordRole::Analysed)
     }
 
     /// The actual source word, independently of provider masking.
-    pub fn text(&self) -> &talkbank_model::ChatCleanedText {
+    #[must_use]
+    pub const fn text(&self) -> &talkbank_model::ChatCleanedText {
         &self.text
     }
 
     /// The word's role.
-    pub fn role(&self) -> &WordRole {
+    #[must_use]
+    pub const fn role(&self) -> &WordRole {
         &self.role
     }
 
-    fn request_word(&self) -> ProviderRequestWord<'_> {
+    const fn request_word(&self) -> ProviderRequestWord<'_> {
         match self.role {
             WordRole::SpecialForm(_) => ProviderRequestWord::SpecialFormMask,
             WordRole::Analysed | WordRole::CodeSwitched(_) => {
@@ -165,6 +170,7 @@ impl MorphosyntaxBatchItem {
 
     /// Words no tokenizer may merge (each its own run): an item with no
     /// authority to retokenize, such as a secondary-language span.
+    #[must_use]
     pub fn unmergeable(
         words: Vec<BatchWord>,
         terminator: talkbank_model::Terminator,
@@ -179,6 +185,7 @@ impl MorphosyntaxBatchItem {
     }
 
     /// The words, each with its role.
+    #[must_use]
     pub fn words(&self) -> &[BatchWord] {
         &self.words
     }
@@ -202,7 +209,7 @@ struct MorphosyntaxBatchItemWire<'a> {
     #[serde(serialize_with = "serialize_terminator_ref_as_chat_str")]
     #[schemars(with = "String")]
     terminator: &'a talkbank_model::Terminator,
-    /// Special form and language per word: (form_type, resolved_language).
+    /// Special form and language per word: (`form_type`, `resolved_language`).
     #[schemars(with = "Vec<(Option<String>, Option<String>)>")]
     special_forms: Vec<(Option<String>, Option<String>)>,
     /// Run lengths partitioning `words`: a tokenizer may merge words only
@@ -288,7 +295,7 @@ impl schemars::JsonSchema for MorphosyntaxBatchItem {
 /// One owner, deliberately. The secondary L2 dispatch path needs exactly this
 /// answer, and when it had no way to ask for it, it hardcoded a Period for
 /// every span instead, which told Stanza that every question was a statement.
-pub(crate) fn stanza_input_terminator(
+pub fn stanza_input_terminator(
     utt: &talkbank_model::model::Utterance,
 ) -> talkbank_model::Terminator {
     utt.main
@@ -334,12 +341,14 @@ impl UtteranceAddress {
     /// soon as a header line is inserted (provenance stamps are, before
     /// notes are written). Anything written later names the utterance by
     /// [`Self::utterance`], which header edits do not move.
-    pub fn line(&self) -> LineIdx {
+    #[must_use]
+    pub const fn line(&self) -> LineIdx {
         self.line
     }
 
     /// The utterance's position among the file's utterances, from 0.
-    pub fn utterance(&self) -> talkbank_model::UtteranceIdx {
+    #[must_use]
+    pub const fn utterance(&self) -> talkbank_model::UtteranceIdx {
         self.utterance
     }
 
@@ -368,31 +377,37 @@ pub struct CollectedUtterance {
 
 impl CollectedUtterance {
     /// The utterance's line in `ChatFile.lines`.
-    pub fn line(&self) -> LineIdx {
+    #[must_use]
+    pub const fn line(&self) -> LineIdx {
         self.address.line
     }
 
     /// Where the utterance is: its line and its position among utterances.
-    pub fn address(&self) -> UtteranceAddress {
+    #[must_use]
+    pub const fn address(&self) -> UtteranceAddress {
         self.address
     }
 
     /// The utterance's 0-based ordinal among the file's utterances.
+    #[must_use]
     pub fn utt_ordinal(&self) -> usize {
         self.address.utterance.raw()
     }
 
     /// The item sent to the worker.
-    pub fn item(&self) -> &MorphosyntaxBatchItem {
+    #[must_use]
+    pub const fn item(&self) -> &MorphosyntaxBatchItem {
         &self.item
     }
 
     /// The item alone, for a caller that sends it and injects nothing.
+    #[must_use]
     pub fn into_item(self) -> MorphosyntaxBatchItem {
         self.item
     }
 
     /// The utterance's words, as extracted from its main tier.
+    #[must_use]
     pub fn words(&self) -> &[ExtractedWord] {
         &self.words
     }
@@ -449,6 +464,7 @@ impl<'source> MorphologyInput<'source> {
     /// Prepare one analyzable utterance, irrespective of its existing tiers.
     ///
     /// `None` when the utterance has no `%mor` words.
+    #[must_use]
     pub fn from_utterance(
         utterance: &'source talkbank_model::model::Utterance,
         declared_languages: talkbank_model::DeclaredLanguagesRef<'_>,
@@ -498,6 +514,7 @@ impl<'source> MorphologyInput<'source> {
 
     /// Compare semantic inputs, not source offsets, speaker identity or timing.
     /// A matching word list alone is insufficient to transfer prior analysis.
+    #[must_use]
     pub fn equivalent_to(&self, other: &Self) -> bool {
         self.item.lang == other.item.lang
             && self
@@ -530,6 +547,7 @@ impl<'source> MorphologyInput<'source> {
 
 /// Walk utterances, build typed payloads, and classify every utterance that had
 /// zero Mor-alignable content into a `MorOutcome`.
+#[must_use]
 pub fn collect_payloads(
     chat_file: &talkbank_model::model::ChatFile,
     primary_lang: &talkbank_model::model::LanguageCode,
@@ -621,7 +639,7 @@ impl MorphologyLanguages {
     }
 
     /// Preserve whether this is source metadata or explicit command policy.
-    pub fn origin(&self) -> InputLanguageOrigin {
+    pub const fn origin(&self) -> InputLanguageOrigin {
         self.origin
     }
 
@@ -729,6 +747,7 @@ pub fn clear_morphosyntax_selective(
 
 /// Validate that every utterance's `%mor` word count equals the main-tier
 /// alignable word count.
+#[must_use]
 pub fn validate_mor_alignment(
     chat_file: &talkbank_model::model::ChatFile,
 ) -> Vec<AlignmentWarning> {
@@ -768,6 +787,7 @@ pub fn validate_mor_alignment(
 }
 
 /// Join words with spaces and strip parentheses for morphosyntax inference.
+#[must_use]
 pub fn prepare_text(words: &[String]) -> String {
     let joined = words.join(" ");
     joined.replace(['(', ')'], "").trim().to_string()

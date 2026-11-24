@@ -96,6 +96,11 @@ fn encode(path: &Path, tone: ToneMs, codec_args: &[&str]) {
 /// header, whose container duration ffprobe ESTIMATES from the declared
 /// bitrate and so under-reports by 0.23%. The probe must return the length
 /// the frames hold, which is the length a decode produces.
+/// Guards: The packet walk measures unpadded MPEG-1 CBR audio independently of the short reported estimate.
+/// Kind: measurement
+/// Not a type: The native demuxer and decoder can report different lengths for these actual frame bytes.
+/// State: Generated MPEG-1 frame bytes plus the actual probe and independent decode.
+/// Concurrency: Private media path and sequential measurements.
 #[tokio::test]
 async fn an_unpadded_cbr_mp3_is_walked_not_estimated() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -120,6 +125,11 @@ async fn an_unpadded_cbr_mp3_is_walked_not_estimated() {
 /// MPEG-2 Layer III holds 576 samples per frame, not 1152. The walk sums
 /// what each packet holds rather than multiplying a count by a frame size, so
 /// it needs no table to be right here.
+/// Guards: MPEG-2 packets contribute their real 576 samples rather than an MPEG-1 assumption.
+/// Kind: measurement
+/// Not a type: The actual frame format controls the samples per packet beyond any Rust routing enum.
+/// State: Generated unpadded MPEG-2 data with a short estimate, proved by real decoding.
+/// Concurrency: One private recording is inspected and decoded sequentially.
 #[tokio::test]
 async fn an_unpadded_mpeg2_mp3_is_walked_at_576_samples_per_frame() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -141,6 +151,11 @@ async fn an_unpadded_mpeg2_mp3_is_walked_at_576_samples_per_frame() {
 
 /// An ffmpeg-encoded VBR MP3 without an Info header: the estimate comes from
 /// the first frame's bitrate and misses by seconds; the walk does not.
+/// Guards: A VBR MP3 without an Info header agrees with decode despite a seconds-scale estimate error.
+/// Kind: measurement
+/// Not a type: Actual variable bitrate frames make the external container estimate diverge from decoded audio.
+/// State: An encoder-produced VBR MP3 with no Xing header, probed and decoded.
+/// Concurrency: Fixture generation finishes before any measurement.
 #[tokio::test]
 async fn a_vbr_mp3_without_an_info_header_is_walked() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -162,6 +177,11 @@ async fn a_vbr_mp3_without_an_info_header_is_walked() {
 /// An MP3 WITH a LAME Info header carries encoder delay and padding that the
 /// decoder trims. The walk subtracts them, so it matches the decode exactly
 /// rather than running a frame long; the blocking and async spawns agree.
+/// Guards: LAME priming and padding are subtracted and sync and async probes agree.
+/// Kind: measurement
+/// Not a type: The actual bitstream carries native trim metadata which the tools can interpret differently.
+/// State: One native MP3 with an Info header and real decoded PCM duration.
+/// Concurrency: The same immutable file is read by both runtime adapters in sequence.
 #[tokio::test]
 async fn trimmed_priming_is_not_counted_as_audio() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -192,6 +212,11 @@ async fn trimmed_priming_is_not_counted_as_audio() {
 /// ignores an ISO media edit list's duration and decodes a 20.3 s AAC tone
 /// 17.5 ms long (its untrimmed end padding), which is how these tests failed
 /// on an unpinned CI runner.
+/// Guards: All stating formats cover decoded audio with their admitted stated duration.
+/// Kind: measurement
+/// Not a type: Native encoders and decoders can disagree about trim, edit lists or final sample count.
+/// State: Real generated audio from the measured container matrix, plus decode of each output.
+/// Concurrency: Each recipe owns one path and observations run after encoding.
 #[tokio::test]
 async fn stated_lengths_agree_with_a_full_decode() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -238,6 +263,11 @@ async fn stated_lengths_agree_with_a_full_decode() {
 
 /// A FLAC written to a pipe cannot seek back to state its sample count. Its
 /// packets sum exactly, so it is walked rather than refused.
+/// Guards: A streamed FLAC without a sample count obtains its duration from actual packets.
+/// Kind: measurement
+/// Not a type: A real nonseekable encoder can omit length while the written packets remain measurable.
+/// State: FLAC produced through stdout and measured after retaining its bytes.
+/// Concurrency: One private file and process-owned stdout buffer.
 #[tokio::test]
 async fn a_flac_that_states_no_length_is_walked() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -274,6 +304,11 @@ async fn a_flac_that_states_no_length_is_walked() {
 /// A container nobody has measured is refused by its demuxer's name rather
 /// than trusted: AIFF is a real format ffmpeg reads, and admitting it is a
 /// measured decision this crate has not made.
+/// Guards: A real AIFF refusal reports ffprobe's unsupported demuxer name.
+/// Kind: contract
+/// Not a type: The actual tool chooses the demuxer name for the exact input bytes.
+/// State: Generated AIFF and a native ffprobe subprocess.
+/// Concurrency: The file is complete before probe and belongs only to this test.
 #[tokio::test]
 async fn an_unmeasured_container_is_refused_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -286,6 +321,11 @@ async fn an_unmeasured_container_is_refused_by_name() {
 }
 
 /// A file ffprobe cannot read is refused with ffprobe's own words.
+/// Guards: A native probe refusal preserves diagnostics on non-audio bytes.
+/// Kind: contract
+/// Not a type: Process exit status and stderr are independent observations from the running tool.
+/// State: Private corrupt MP3-named bytes and actual ffprobe stderr.
+/// Concurrency: No unrelated process uses the temporary file.
 #[tokio::test]
 async fn an_unreadable_file_is_refused_with_ffprobe_diagnostics() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -302,6 +342,11 @@ async fn an_unreadable_file_is_refused_with_ffprobe_diagnostics() {
 /// An MP4 whose video runs past its audio: ffprobe states 10 s for the file
 /// and 6 s for the audio stream. The probe measures AUDIO, so it takes the
 /// stream's length: the tone's, not the video's.
+/// Guards: An actual MP4 measures the audio track even when video runs several seconds longer.
+/// Kind: measurement
+/// Not a type: Real muxers can report a longer whole file than the selected stream.
+/// State: Generated audio plus longer video, measured by ffprobe and decoded independently.
+/// Concurrency: Encoding exits before the probe and decoder run.
 #[tokio::test]
 async fn an_mp4_with_longer_video_is_measured_by_its_audio() {
     let dir = tempfile::tempdir().expect("tempdir");

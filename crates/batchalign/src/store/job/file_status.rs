@@ -17,7 +17,7 @@ use crate::store::FileStatus;
 
 /// Why a [`Job`] did not apply a write to one of its files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileWriteRefusal {
+pub enum FileWriteRefusal {
     /// The job has no file of that name.
     UnknownFile,
     /// The file already finished in this run. Only a restart, which starts

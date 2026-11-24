@@ -32,7 +32,7 @@ mod stream;
 /// themselves, borrowed from the plan that laid them out, so there is no
 /// index to check against a separate list of units.
 #[derive(Debug)]
-pub(crate) struct FaWorkerBatch<'a> {
+pub struct FaWorkerBatch<'a> {
     /// Proof that the cache policy permits inference for these requests.
     pub authorization: FaInferenceAuthorization<'a>,
     /// Worker-runtime language hint for FA model bootstrap.
@@ -46,7 +46,7 @@ pub(crate) struct FaWorkerBatch<'a> {
 /// Its field is private and [`plan_fa_inference`] is its only constructor, so
 /// a required-cache miss has no route to [`FaWorkerBatch`].
 #[derive(Debug)]
-pub(crate) struct FaInferenceAuthorization<'a> {
+pub struct FaInferenceAuthorization<'a> {
     misses: Vec<ReplyTicket<'a>>,
 }
 
@@ -58,7 +58,7 @@ impl<'a> FaInferenceAuthorization<'a> {
 
 /// Whether one cache partition needs and permits worker inference.
 #[derive(Debug)]
-pub(crate) enum FaInferencePlan<'a> {
+pub enum FaInferencePlan<'a> {
     /// Every request was satisfied by reusable or cached evidence.
     NothingToInfer,
     /// Cache misses exist and policy permits worker inference.
@@ -78,7 +78,7 @@ pub(super) struct SingleFaAuthorization<'a> {
 impl<'a> OptionalFaInference<'a> {
     /// Optional exact-source recovery never turns a required-cache miss into
     /// inference authority or a failure of the accepted primary population.
-    pub(super) fn optional_source(policy: CachePolicy, unit: &'a DispatchUnit<'a>) -> Self {
+    pub(super) const fn optional_source(policy: CachePolicy, unit: &'a DispatchUnit<'a>) -> Self {
         match policy {
             CachePolicy::RequireCache => Self::CacheOnly,
             CachePolicy::UseCache | CachePolicy::SkipCache => {
@@ -90,7 +90,7 @@ impl<'a> OptionalFaInference<'a> {
 
 /// Convert cache misses into a worker-inference capability, or refuse when
 /// the job required complete reusable evidence.
-pub(crate) fn plan_fa_inference<'a>(
+pub fn plan_fa_inference<'a>(
     policy: CachePolicy,
     misses: Vec<ReplyTicket<'a>>,
 ) -> Result<FaInferencePlan<'a>, ServerError> {
@@ -120,7 +120,7 @@ pub(crate) fn plan_fa_inference<'a>(
 /// Successful model evidence and an intentional unaligned fallback are
 /// distinct states. Only the former can cross the raw-evidence cache boundary.
 #[derive(Debug)]
-pub(crate) enum FaWorkerUnitResult<'a> {
+pub enum FaWorkerUnitResult<'a> {
     /// A successful worker response admitted against the request and parsed.
     Evidence(Box<FaWorkerEvidenceResult>),
     /// Another output ownership range using the same single execution.
@@ -130,13 +130,13 @@ pub(crate) enum FaWorkerUnitResult<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct FaSharedProjection {
+pub struct FaSharedProjection {
     timings: Vec<Option<WordTiming>>,
 }
 
 /// Timing projection and provenance issued together by the worker outcome.
 /// Callers cannot construct a projection with a fabricated evidence source.
-pub(crate) struct FaWorkerProjection {
+pub struct FaWorkerProjection {
     /// One optional timing per requested word.
     pub timings: Vec<Option<WordTiming>>,
     /// Replayable direct evidence, when admitted by the worker boundary.
@@ -148,7 +148,7 @@ pub(crate) struct FaWorkerProjection {
 
 impl FaWorkerProjection {
     /// Provenance of this projection, including the absence of worker evidence.
-    pub fn source(&self) -> crate::types::traces::FaEvidenceSourceTrace {
+    pub const fn source(&self) -> crate::types::traces::FaEvidenceSourceTrace {
         self.source
     }
 }
@@ -196,7 +196,7 @@ impl<'a> FaWorkerUnitResult<'a> {
 
 /// Successful FA evidence paired inseparably with its parsed timing projection.
 #[derive(Debug)]
-pub(crate) struct FaWorkerEvidenceResult {
+pub struct FaWorkerEvidenceResult {
     /// Parsed timings in the established Rust FA timing domain.
     pub timings: Vec<Option<WordTiming>>,
     /// Immutable worker response admitted against engine and word cardinality.
@@ -208,7 +208,7 @@ pub(crate) struct FaWorkerEvidenceResult {
 /// A request-local failure that is safe to retain as explicitly unaligned:
 /// every one of the request's words, and no more, is left without timing.
 #[derive(Debug)]
-pub(crate) struct FaWorkerUnalignedResult<'a> {
+pub struct FaWorkerUnalignedResult<'a> {
     /// The request left unaligned.
     pub unit: &'a DispatchUnit<'a>,
 }
@@ -238,7 +238,7 @@ impl<'unit> FaWorkerReply<'unit> {
         // alias has no second raw-evidence capability.
         if let Some(raw) = projection.raw_evidence {
             super::cache_storage::store_unit_evidence(
-                services.pipeline.cache,
+                services.recording_cache,
                 &projection.timings,
                 raw,
             )
@@ -251,7 +251,7 @@ impl<'unit> FaWorkerReply<'unit> {
 
 /// Narrow transport adapter for FA worker inference.
 #[derive(Clone, Copy)]
-pub(crate) enum FaWorkerTransport<'a> {
+pub enum FaWorkerTransport<'a> {
     /// Live typed worker-protocol V2 transport using prepared artifacts.
     V2 {
         /// FA services: worker-pool access plus the namespace admitted
@@ -289,7 +289,7 @@ pub(super) struct FaWorkerSingle<'unit> {
 
 impl<'a> FaWorkerTransport<'a> {
     /// Return the production FA worker transport.
-    pub(crate) fn production(services: super::FaServices<'a>) -> Self {
+    pub(crate) const fn production(services: super::FaServices<'a>) -> Self {
         Self::V2 { services }
     }
 
@@ -484,7 +484,7 @@ async fn infer_prepared_unit<'b>(
 /// recognised engine constraints) return this same shape so the orchestrator can
 /// continue to the next request without aborting the file. For an anchored
 /// group that leaves one piece untimed and its neighbours aligned.
-fn unaligned_unit_result<'a>(unit: &'a DispatchUnit<'a>) -> FaWorkerUnitResult<'a> {
+const fn unaligned_unit_result<'a>(unit: &'a DispatchUnit<'a>) -> FaWorkerUnitResult<'a> {
     FaWorkerUnitResult::Unaligned(FaWorkerUnalignedResult { unit })
 }
 
@@ -673,7 +673,7 @@ pub(super) enum FaUnitFailure {
 }
 
 impl FaUnitFailure {
-    fn worker(unit: &DispatchUnit<'_>, failure: FaWorkerFailure) -> Self {
+    const fn worker(unit: &DispatchUnit<'_>, failure: FaWorkerFailure) -> Self {
         Self::Worker {
             request: unit.ordinal().index(),
             group: unit.group().index(),
@@ -682,7 +682,7 @@ impl FaUnitFailure {
     }
 
     /// The worker's own report, when that is what this failure is.
-    fn worker_failure(&self) -> Option<&FaWorkerFailure> {
+    const fn worker_failure(&self) -> Option<&FaWorkerFailure> {
         match self {
             Self::Worker { failure, .. } => Some(failure),
             Self::Evidence { .. } | Self::Response { .. } => None,
@@ -780,7 +780,7 @@ impl FallbackStep {
 /// # Why this is always group-local
 ///
 /// A process crash is triggered by the *content* of the request: a specific
-/// combination of audio length and word count can push the Wave2Vec or Whisper
+/// combination of audio length and word count can push the `Wave2Vec` or Whisper
 /// model into OOM or cause a C-extension assertion failure.  The crash is
 /// deterministic on the same group, retrying with a fresh worker on the same
 /// group will produce the same crash.  Other groups have different audio and
@@ -797,7 +797,7 @@ impl FallbackStep {
 /// the file level so the retry loop and fallback UTR path can attempt recovery.
 /// `ProcessExited` is different: it is caused by this specific group's input,
 /// not by a broken environment.
-fn is_worker_process_crash(error: &ServerError) -> bool {
+const fn is_worker_process_crash(error: &ServerError) -> bool {
     matches!(
         error,
         ServerError::Worker(crate::worker::error::WorkerError::ProcessExited { .. })
@@ -810,7 +810,7 @@ fn is_worker_process_crash(error: &ServerError) -> bool {
 /// retry runs on are one decision: the reason comes from the failure, the
 /// target comes from the failing engine's own row, and a caller holding only
 /// the reason has to name the target itself. It did, as a literal `Whisper`,
-/// and the warn line beside it said "Wave2Vec FA" for every retry, so a
+/// and the warn line beside it said "`Wave2Vec` FA" for every retry, so a
 /// Cantonese group reported the wrong engine to whoever read the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FaGroupRetry {
@@ -907,6 +907,11 @@ mod tests {
         }
     }
 
+    /// Guards: Two answer ranges sharing one model context store one raw and one derived row, and replay prefers raw evidence but falls back to derived timings when raw is malformed.
+    /// Kind: contract
+    /// Not a type: The alias's lack of raw evidence is typed, but row layout in the real store and the admission order between two persisted layers are not.
+    /// State: Private SQLite cache in a temporary directory; a pool whose interpreter path does not exist, so no inference can run.
+    /// Concurrency: Private temporary directory; both retains are awaited in order before any read.
     #[tokio::test]
     async fn shared_context_projection_cannot_duplicate_raw_evidence() {
         let source = FaGroup::test_fixture(
@@ -985,12 +990,11 @@ mod tests {
             crate::types::engines::FaEngineName::Wave2Vec,
             None,
         );
-        let services = super::super::FaServices {
-            pipeline: crate::pipeline::PipelineServices::new(&pool, &cache),
-            cache_namespace: &namespace,
-            gpu: &gpu,
-            attention_capture_dir: None,
-        };
+        let services = super::super::FaServices::for_tests(
+            crate::pipeline::PipelineServices::new(&pool, &cache),
+            &namespace,
+            &gpu,
+        );
         assert!(canonical.retain(services).await.unwrap().is_none());
         assert!(shared.retain(services).await.unwrap().is_none());
         frame
@@ -1027,6 +1031,91 @@ mod tests {
             super::super::AdmittedFaCacheGroup::DerivedTimings(_)
         ));
         assert_eq!(fallback.refusals.len(), 1);
+        pool.shutdown().await;
+    }
+
+    /// Guards: A recording whose identity is unreadable neither writes FA evidence nor reads rows under its key.
+    /// Kind: contract
+    /// Not a type: `FaServices.pipeline.cache` stays reachable for content-keyed Rev.AI evidence, so only a run against a real store shows that FA storage goes through the withheld handle and not around it.
+    /// State: Private SQLite cache in a temporary directory; one canonical reply retained per access mode.
+    /// Concurrency: Private temporary directory; the pool is never asked to infer and is shut down at the end.
+    #[tokio::test]
+    async fn an_unidentified_recording_neither_writes_nor_reads_fa_rows() {
+        let groups = single_groups(&[(0, 100)]);
+        let plan = plan_for(&groups);
+        let unit = plan.units().next().expect("one request");
+        let namespace = crate::engine_reports::FaCacheNamespace::for_test("unidentified-v1");
+        let response = ExecuteResponseV2::success(
+            "one".into(),
+            TaskResultV2::IndexedWordTimingResult(
+                crate::types::worker_v2::IndexedWordTimingResultV2 {
+                    indexed_timings: vec![None],
+                },
+            ),
+            NonNegativeSeconds::try_from(0.01).unwrap(),
+        );
+        let reply = |ledger: &mut Vec<_>| FaWorkerReply {
+            reply: ledger.pop().expect("one reply ticket"),
+            result: FaWorkerUnitResult::Evidence(Box::new(
+                FaUnitEvidenceAdmission {
+                    requested_engine: crate::types::engines::FaEngineName::Wave2Vec,
+                    cache_namespace: &namespace,
+                    unit,
+                }
+                .admit(&response, FaEvidenceRoute::Direct)
+                .unwrap(),
+            )),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let cache = crate::cache::UtteranceCache::sqlite(Some(directory.path().join("cache")))
+            .await
+            .unwrap();
+        let pool =
+            crate::worker::pool::WorkerPool::new(crate::worker::pool::PoolConfig::for_tests());
+        let gpu = crate::worker::pool::GpuModelPlan::alignment(
+            crate::types::engines::FaEngineName::Wave2Vec,
+            None,
+        );
+        let keyed = super::super::FaServices::for_tests(
+            crate::pipeline::PipelineServices::new(&pool, &cache),
+            &namespace,
+            &gpu,
+        );
+        let withheld = super::super::FaServices {
+            recording_cache: super::super::RecordingCache::for_recording(
+                &cache,
+                &crate::chat_ops::fa::RecordingIdentity::read(&directory.path().join("absent.wav"))
+                    .await,
+            ),
+            ..keyed
+        };
+        let keys = vec![unit.cache_key().as_str().to_owned()];
+
+        // The ledger owns the receiving slot; it lives until the reply lands.
+        let mut first = super::super::units::UnitLedger::open(&plan, |_| None);
+        assert!(
+            reply(&mut first.replies)
+                .retain(withheld)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (derived, raw) = super::super::cache_storage::read_values(&keys, keyed).await;
+        assert!(derived.is_empty() && raw.is_empty(), "nothing was written");
+
+        // The ledger owns the receiving slot; it lives until the reply lands.
+        let mut second = super::super::units::UnitLedger::open(&plan, |_| None);
+        assert!(
+            reply(&mut second.replies)
+                .retain(keyed)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (_, raw) = super::super::cache_storage::read_values(&keys, keyed).await;
+        assert_eq!(raw.len(), 1, "a stable recording's row is written");
+        let (derived, raw) = super::super::cache_storage::read_values(&keys, withheld).await;
+        assert!(derived.is_empty() && raw.is_empty(), "nothing is read");
         pool.shutdown().await;
     }
 

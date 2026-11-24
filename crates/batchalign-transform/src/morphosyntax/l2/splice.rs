@@ -1,4 +1,4 @@
-//! Splice merged L2 morphology back into a ChatFile.
+//! Splice merged L2 morphology back into a `ChatFile`.
 //!
 //! Overwrites `L2|xxx` MOR items with pre-mapped `Mor` items from the
 //! structural merge algorithm, and optionally corrects GRA deprels.
@@ -78,23 +78,28 @@ pub struct SpanSpliceOutcome {
 
 impl SpanSpliceOutcome {
     /// Zero-based position in the source AST's line sequence, not a text line.
-    pub fn line_idx(&self) -> usize {
+    #[must_use]
+    pub const fn line_idx(&self) -> usize {
         self.line_idx
     }
     /// First morphology item targeted by this span.
-    pub fn first_word(&self) -> MorItemIndex {
+    #[must_use]
+    pub const fn first_word(&self) -> MorItemIndex {
         self.first_word
     }
     /// Number of morphology positions targeted by this span.
-    pub fn words(&self) -> usize {
+    #[must_use]
+    pub const fn words(&self) -> usize {
         self.words
     }
     /// The secondary language requested for this span.
-    pub fn target_lang(&self) -> &talkbank_model::model::LanguageCode {
+    #[must_use]
+    pub const fn target_lang(&self) -> &talkbank_model::model::LanguageCode {
         &self.target_lang
     }
     /// What the splice actually installed or retained.
-    pub fn disposition(&self) -> SpanSpliceDisposition {
+    #[must_use]
+    pub const fn disposition(&self) -> SpanSpliceDisposition {
         self.disposition
     }
 }
@@ -107,10 +112,12 @@ pub struct SpliceOutcome {
 
 impl SpliceOutcome {
     /// Every attempted span, including retained placeholders.
+    #[must_use]
     pub fn spans(&self) -> &[SpanSpliceOutcome] {
         &self.spans
     }
     /// Number of positions actually installed.
+    #[must_use]
     pub fn spliced(&self) -> usize {
         self.spans
             .iter()
@@ -119,6 +126,7 @@ impl SpliceOutcome {
             .sum()
     }
     /// Number of attempted positions retained. Unmerged spans are not counted.
+    #[must_use]
     pub fn fallback(&self) -> usize {
         self.spans
             .iter()
@@ -127,6 +135,7 @@ impl SpliceOutcome {
             .sum()
     }
     /// Number of planned external relation corrections actually installed.
+    #[must_use]
     pub fn gra_upgraded(&self) -> usize {
         self.spans
             .iter()
@@ -146,7 +155,7 @@ impl SpliceOutcome {
 /// positions. Each variant doubles as a TODO bucket: a category is
 /// a candidate for smarter merge logic that would *recover*
 /// secondary morphology instead of falling back to `L2|xxx`.
-/// `Display` emits the lower-case snake_case tag used in
+/// `Display` emits the lower-case `snake_case` tag used in
 /// `tracing::warn!` `category` fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpliceFallbackCategory {
@@ -664,7 +673,7 @@ mod cardinality_tests {
 
     /// Splice replaces a 1-chunk `L2|xxx` slot with an N-chunk merged Mor.
     /// The output `%mor` chunk count grows but `%gra` count stays the same;
-    /// the resulting ChatFile must still validate.
+    /// the resulting `ChatFile` must still validate.
     ///
     /// Fixture note (2026-05-06): the original fixture was
     /// `*PAR: yellow@s .`: a whole-utterance `@s` pattern that
@@ -749,8 +758,8 @@ mod cardinality_tests {
         validate_morphosyntax(&mut chat_file);
     }
 
-    /// Helper: build a one-utterance ChatFile with N L2 placeholders.
-    /// Returns (ChatFile, line_idx). The %mor and %gra are pre-validated
+    /// Helper: build a one-utterance `ChatFile` with N L2 placeholders.
+    /// Returns (`ChatFile`, `line_idx`). The %mor and %gra are pre-validated
     /// to ensure the precondition is met before splicing.
     fn build_l2_fixture(
         languages_header: &str,
@@ -800,7 +809,7 @@ mod cardinality_tests {
         (chat_file, line_idx)
     }
 
-    /// Helper: construct a deferred position with no head/no head_upos
+    /// Helper: construct a deferred position with no head/no `head_upos`
     /// other than what the caller provides. Models the primary analysis
     /// of a single `@s` word.
     fn deferred_position(
@@ -1058,7 +1067,7 @@ mod cardinality_tests {
     /// tests catches some but not all cardinality issues (per postmortem
     /// §4b: "the 235 wild files passed `validate_chat_file_with_options`
     /// at write time but fail `chatter validate` afterwards"). This test
-    /// closes that gap by serializing the spliced ChatFile and re-validating
+    /// closes that gap by serializing the spliced `ChatFile` and re-validating
     /// the round-tripped form, which is what `chatter validate` itself does.
     #[test]
     fn chatter_validate_passes_after_splice() {
@@ -1580,7 +1589,7 @@ mod cardinality_tests {
     // (head = 0 but deprel ≠ "ROOT"), symmetric and equally broken.
     // ========================================================================
 
-    /// Walk a GraTier's relations and assert the joint root invariant
+    /// Walk a `GraTier`'s relations and assert the joint root invariant
     /// holds. Reports the offending relation(s) with the full %gra body
     /// for debuggability. Use from any Family B test.
     fn assert_joint_root_invariant(
@@ -1878,7 +1887,7 @@ mod cardinality_tests {
     // because the splice does not validate its own output.
     // ========================================================================
 
-    /// Helper: assert post-splice ChatFile passes ALL the L2 splice
+    /// Helper: assert post-splice `ChatFile` passes ALL the L2 splice
     /// integrity invariants. Reports the offending utterance and the
     /// validation diagnostics for debuggability. Use from any Family C
     /// test.
@@ -2351,11 +2360,11 @@ mod cardinality_tests {
         assert_post_splice_gra_valid(&mut chat_file, "refused secondary graph preserves host");
     }
 
-    /// Test 2 (multi_root): L2 word is NOT the host root, and secondary
+    /// Test 2 (`multi_root)`: L2 word is NOT the host root, and secondary
     /// returned `1|0|ROOT` for the L2 word (parsed it as its local root).
     /// Splice must rewrite secondary's `head=0/ROOT` to attach to the
     /// host anchor with the host's deprel, not preserve a second root.
-    /// Real-world shape from warn log: host_pre had `16|0|ROOT, 18|...`;
+    /// Real-world shape from warn log: `host_pre` had `16|0|ROOT, 18|...`;
     /// L2 at host pos 18; secondary returned `1|0|ROOT`; current splice
     /// produces both `16|0|ROOT` and `18|0|ROOT`.
     #[test]
@@ -2746,9 +2755,10 @@ mod cardinality_tests {
             // otherwise the merge's correction.
             TestAttachment::Host(source, deprel) => {
                 let primary = deferred[source].primary().clone();
-                let relation = match primary.deprel().as_str() == deprel {
-                    true => ExternalRelation::Primary,
-                    false => ExternalRelation::Corrected(UdDeprel::new(deprel)),
+                let relation = if primary.deprel().as_str() == deprel {
+                    ExternalRelation::Primary
+                } else {
+                    ExternalRelation::Corrected(UdDeprel::new(deprel))
                 };
                 L2Attachment::HostGovernor {
                     source_word: deferred[source].word_idx(),

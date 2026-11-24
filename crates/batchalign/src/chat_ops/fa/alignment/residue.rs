@@ -56,7 +56,7 @@ use super::token_map::{
 /// Above it the residue is REFUSED, not truncated: aligning a prefix and
 /// letting the rest fall off would attribute labels from a comparison that
 /// never saw the words they belong to.
-pub(crate) const MAX_RESIDUE_ALIGN_CHARS: usize = 4_096;
+pub const MAX_RESIDUE_ALIGN_CHARS: usize = 4_096;
 /// Give the residue's labels to the residue's words by character edit distance.
 ///
 /// # The algorithm, and the two rules that keep it honest
@@ -76,7 +76,7 @@ pub(crate) const MAX_RESIDUE_ALIGN_CHARS: usize = 4_096;
 ///    are the numeral's span. This only fires when exactly one unplaced word
 ///    sits in the gap, because two unplaced words in one gap have nothing to
 ///    say which label starts the second.
-pub(crate) fn remap_residue(
+pub fn remap_residue(
     words: &WordTrack,
     labels: &LabelTrack,
     first_word: WordSlot,
@@ -242,12 +242,13 @@ pub(crate) fn remap_residue(
         // proved its labels spell its words and consumed exactly
         // `0..first_label`. But only when there IS a prefix; an empty one
         // brackets nothing.
-        let left = match word == first_word {
-            true => words.before(first_word).map(|_| first_label.0),
-            false => match words.before(word) {
+        let left = if word == first_word {
+            words.before(first_word).map(|_| first_label.0)
+        } else {
+            match words.before(word) {
                 Some(previous) => claim.get(&previous).map(|(_, last)| last.0 + 1),
                 None => None,
-            },
+            }
         };
         // The right bracket is the first label the next placed word took. A
         // residue that runs to the end of the word list has none.
@@ -309,7 +310,7 @@ struct LabelOwner {
 /// Unowned labels are skipped: a gap in the middle of a word's run is fine
 /// (the engine emitted something neither side matched), and only the ORDER of
 /// the owners that do exist carries the property.
-pub(crate) fn owners_are_monotone(owner: &[Option<WordSlot>]) -> bool {
+pub fn owners_are_monotone(owner: &[Option<WordSlot>]) -> bool {
     let mut previous: Option<WordSlot> = None;
     for word in owner.iter().flatten() {
         if let Some(previous) = previous

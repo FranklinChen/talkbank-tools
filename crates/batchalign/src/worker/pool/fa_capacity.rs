@@ -12,13 +12,13 @@ use crate::worker::memory_guard::MemoryGuardError;
 /// refuses a never-fitting request against, so a request judged feasible
 /// here is one the queue can eventually grant.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FaPhysicalCapacity {
+pub struct FaPhysicalCapacity {
     ceiling: HostCeiling,
     reserve: MemoryMb,
 }
 
 impl FaPhysicalCapacity {
-    pub(crate) fn from_snapshot(snapshot: &HostMemorySnapshot) -> Self {
+    pub(crate) const fn from_snapshot(snapshot: &HostMemorySnapshot) -> Self {
         Self {
             ceiling: snapshot.ceiling,
             reserve: snapshot.reserve_mb,
@@ -29,7 +29,7 @@ impl FaPhysicalCapacity {
 /// Loaded-model allocation evidence in the coordinator's units. Conversion,
 /// the stated allocator margin and worker baseline have one owner.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FaProjectedDemand {
+pub struct FaProjectedDemand {
     model: MemoryMb,
     workspace_with_margin: MemoryMb,
     /// The model and the worker baseline: what any request of this model
@@ -39,7 +39,10 @@ pub(crate) struct FaProjectedDemand {
 }
 
 impl FaProjectedDemand {
-    pub(crate) fn from_projection(workspace: FaWorkspaceBytesV2, model: FaModelBytesV2) -> Self {
+    pub(crate) const fn from_projection(
+        workspace: FaWorkspaceBytesV2,
+        model: FaModelBytesV2,
+    ) -> Self {
         let workspace = workspace.get().div_ceil(1024 * 1024);
         let model = model.get().div_ceil(1024 * 1024);
         let margin =
@@ -79,13 +82,13 @@ impl FaProjectedDemand {
 
 /// A feasible observation, never a permit to execute or allocate memory.
 #[derive(Debug)]
-pub(crate) struct HostFeasibleFaDemand {
+pub struct HostFeasibleFaDemand {
     demand: FaProjectedDemand,
 }
 
 /// Hosting agreement and physical feasibility, before any execution lease.
 #[derive(Debug)]
-pub(crate) enum FaHostAssessment {
+pub enum FaHostAssessment {
     ModelFree,
     Fits(HostFeasibleFaDemand),
     Exceeds(FaCapacityRefusal),
@@ -95,7 +98,7 @@ impl HostFeasibleFaDemand {
     /// Do not assume mapped weights are physically resident. Subtract only
     /// the reservation the confirmed load's lease still covers, which can
     /// include unread in-use memory and its margin.
-    pub(super) fn additional_reservation(self, covered: ModelLeaseCoverage) -> MemoryMb {
+    pub(super) const fn additional_reservation(self, covered: ModelLeaseCoverage) -> MemoryMb {
         let unread = self.demand.model.0.saturating_sub(covered.reserved().0);
         MemoryMb(self.demand.workspace_with_margin.0 + unread)
     }
@@ -104,14 +107,14 @@ impl HostFeasibleFaDemand {
 /// Exact physical quantities that made a request impossible. No duration
 /// proxy and no transient available-memory reading enters this refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FaCapacityNumbers {
+pub struct FaCapacityNumbers {
     pub(crate) required: MemoryMb,
     pub(crate) reserve: MemoryMb,
     pub(crate) ceiling: MemoryMb,
 }
 
 impl FaCapacityNumbers {
-    pub(crate) fn into_guard_error(self, label: String) -> MemoryGuardError {
+    pub(crate) const fn into_guard_error(self, label: String) -> MemoryGuardError {
         MemoryGuardError::ExceedsHost(crate::host_memory::NeverFits {
             label,
             needed_mb: self.required.0,
@@ -127,7 +130,7 @@ impl FaCapacityNumbers {
 /// too large can be cut, and at its smallest cut leaves only its own words
 /// untimed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FaCapacityRefusal {
+pub enum FaCapacityRefusal {
     /// The model and the worker baseline alone exceed what the host can
     /// ever offer. `required` is that floor.
     ModelNeverFits(FaCapacityNumbers),
@@ -140,7 +143,7 @@ impl FaCapacityRefusal {
     /// The final memory refusal of a request that reached execution. Either
     /// cause is final there: planning already judged the request, so the
     /// host cannot have more to offer it now.
-    pub(crate) fn into_guard_error(self, label: String) -> MemoryGuardError {
+    pub(crate) const fn into_guard_error(self, label: String) -> MemoryGuardError {
         match self {
             Self::ModelNeverFits(numbers) | Self::RequestTooLarge(numbers) => {
                 numbers.into_guard_error(label)

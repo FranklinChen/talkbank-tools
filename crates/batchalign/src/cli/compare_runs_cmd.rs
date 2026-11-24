@@ -607,6 +607,11 @@ mod csv_shape_tests {
     /// refactor of the producer emptied eleven of sixteen transcription
     /// columns and seven of seventeen morphotag columns, and both shipped
     /// green because every gate passed. This is the connection.
+    /// Guards: Comparison CSV reads lemma, POS and relation differences from the emitted axis array.
+    /// Kind: wire
+    /// Not a type: An actual JSON report can name any combination of axes and the column must match.
+    /// State: Two literal rows model changed and identical output.
+    /// Concurrency: Pure projection over local input values.
     #[test]
     fn morphotag_axes_come_from_the_differences_array() {
         let row = json!({ "differences": ["lemma", "pos"] });
@@ -618,6 +623,11 @@ mod csv_shape_tests {
         assert_eq!(differs(&identical, "lemma"), "false");
     }
 
+    /// Guards: Transcription CSV derives rate from nested counts and leaves an undefined rate empty.
+    /// Kind: wire
+    /// Not a type: A reference length can be zero or differ from the edit total carried by the report.
+    /// State: Nested metrics supply edits, denominator and zero reference.
+    /// Concurrency: Pure projection over local input values.
     #[test]
     fn transcription_metrics_are_read_and_derived_from_the_nested_shape() {
         let metrics = json!({
@@ -643,6 +653,11 @@ mod csv_shape_tests {
     /// state is internally tagged and `start_ms` / `end_ms` sit beside the tag
     /// rather than under a further level. The state column is what an untimed
     /// token now carries in place of three empty cells and no reason.
+    /// Guards: Alignment CSV exposes timing state and omits missing coordinates.
+    /// Kind: wire
+    /// Not a type: Tagged timing variants can carry different fields and CSV text must reflect them.
+    /// State: Literal timed and untimed report rows.
+    /// Concurrency: Pure projection over local input values.
     #[test]
     fn alignment_timing_columns_are_read_from_the_tagged_state() {
         let timed = json!({ "left_timing": { "state": "timed", "start_ms": 10, "end_ms": 20 } });

@@ -80,6 +80,7 @@ impl AbsoluteMediaRoot {
     }
 
     /// Borrow the admitted root for local media-search I/O.
+    #[must_use]
     pub fn as_path(&self) -> &Path {
         Path::new(&self.0)
     }

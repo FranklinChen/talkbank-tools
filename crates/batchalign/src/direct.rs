@@ -95,6 +95,7 @@ impl DirectHost {
     }
 
     /// Return the released command surface available to this host.
+    #[must_use]
     pub fn capabilities(&self) -> &[crate::api::ReleasedCommand] {
         self.capabilities.commands()
     }

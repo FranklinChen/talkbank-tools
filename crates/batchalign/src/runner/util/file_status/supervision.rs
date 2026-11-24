@@ -44,7 +44,7 @@ use super::{FileTaskOutcome, RunnerEventSink};
 
 /// Handle to one spawned file task whose terminal file-state transition is
 /// supervised by the runner rather than inferred later from a job-wide sweep.
-pub(crate) struct SpawnedFileTask {
+pub struct SpawnedFileTask {
     /// Human-readable task role for diagnostics (`"align file"`, etc.).
     pub role: &'static str,
     /// Logical filename owned by this task.
@@ -60,7 +60,7 @@ pub(crate) struct SpawnedFileTask {
 /// responsible for two invariants: once the task stops running, the runner
 /// must know whether the corresponding file already reached a terminal state;
 /// and a task of a cancelled job stops (see the module docs).
-pub(crate) fn spawn_supervised_file_task<F>(
+pub fn spawn_supervised_file_task<F>(
     filename: DisplayPath,
     role: &'static str,
     future: F,
@@ -112,39 +112,125 @@ where
 ///
 /// This keeps panics and early returns from being discovered only by the
 /// runner's coarse "force unfinished files to terminal state" fallback.
-pub(crate) async fn drain_supervised_file_tasks(
+pub async fn drain_supervised_file_tasks(
     sink: &dyn RunnerEventSink,
     cancel_token: &CancellationToken,
     tasks: Vec<SpawnedFileTask>,
 ) -> usize {
     let mut abnormal_exits = 0usize;
-
     for task in tasks {
-        // A task that died without a terminal state is attributed to the
-        // cancellation when the job was cancelled: an abort is how a cancelled
-        // task ends.
-        let exit = match (task.handle.await, cancel_token.is_cancelled()) {
-            (Ok(FileTaskOutcome::TerminalStateRecorded(_)), _) => continue,
-            // The supervisor stopped it: an expected consequence of the
-            // cancel, not an abnormal exit.
-            (Ok(FileTaskOutcome::StoppedByCancellation), _) => {
-                record_abnormal_file_task_exit(
-                    sink,
-                    task.filename.as_ref(),
-                    task.role,
-                    FileTaskExit::Cancelled,
-                )
+        let joined = task.handle.await;
+        if let Settled::Abnormal =
+            settle(sink, cancel_token, &task.filename, task.role, joined).await
+        {
+            abnormal_exits += 1;
+        }
+    }
+    abnormal_exits
+}
+
+/// How one joined file task left its file.
+enum Settled {
+    /// The task recorded the file's terminal state, or the supervisor stopped
+    /// it for the job's cancellation (recorded here as the expected cancel).
+    Expected,
+    /// The task died without a terminal state; recorded here as a failure.
+    Abnormal,
+}
+
+/// The one decision, for every runner, of what a joined file task means for
+/// its file. A task that died without a terminal state is attributed to the
+/// cancellation when the job was cancelled (an abort is how a cancelled task
+/// ends), and to a panic otherwise.
+async fn settle(
+    sink: &dyn RunnerEventSink,
+    cancel_token: &CancellationToken,
+    filename: &DisplayPath,
+    role: &'static str,
+    joined: Result<FileTaskOutcome, tokio::task::JoinError>,
+) -> Settled {
+    let exit = match (joined, cancel_token.is_cancelled()) {
+        (Ok(FileTaskOutcome::TerminalStateRecorded(_)), _) => return Settled::Expected,
+        // The supervisor stopped it: an expected consequence of the cancel,
+        // not an abnormal exit, but the file still needs its terminal state.
+        (Ok(FileTaskOutcome::StoppedByCancellation), _) => {
+            record_abnormal_file_task_exit(sink, filename.as_ref(), role, FileTaskExit::Cancelled)
                 .await;
-                continue;
-            }
-            (Err(_), true) => FileTaskExit::Cancelled,
-            (Err(join_error), false) => FileTaskExit::Panicked(join_error.to_string()),
-        };
-        abnormal_exits += 1;
-        record_abnormal_file_task_exit(sink, task.filename.as_ref(), task.role, exit).await;
+            return Settled::Expected;
+        }
+        (Err(_), true) => FileTaskExit::Cancelled,
+        (Err(join_error), false) => FileTaskExit::Panicked(join_error.to_string()),
+    };
+    record_abnormal_file_task_exit(sink, filename.as_ref(), role, exit).await;
+    Settled::Abnormal
+}
+
+// ---------------------------------------------------------------------------
+// SupervisedFileTasks: a bounded set for runners that read as they spawn
+// ---------------------------------------------------------------------------
+
+/// Supervised file tasks joined in completion order, for a runner that keeps
+/// at most N files in flight and so must wait for whichever finishes first
+/// ([`drain_supervised_file_tasks`] joins in spawn order). Each entry keeps
+/// its filename with its handle, so a task that dies is still settled against
+/// its own file; dropping the set aborts every task still running.
+pub struct SupervisedFileTasks {
+    running: futures::stream::FuturesUnordered<
+        futures::future::BoxFuture<'static, (SpawnedFileTask, JoinedOutcome)>,
+    >,
+}
+
+type JoinedOutcome = Result<FileTaskOutcome, tokio::task::JoinError>;
+
+impl SupervisedFileTasks {
+    pub(crate) fn new() -> Self {
+        Self {
+            running: futures::stream::FuturesUnordered::new(),
+        }
     }
 
-    abnormal_exits
+    /// Tasks still running.
+    pub(crate) fn len(&self) -> usize {
+        self.running.len()
+    }
+
+    pub(crate) fn push(&mut self, mut task: SpawnedFileTask) {
+        use futures::FutureExt;
+        self.running.push(
+            async move {
+                // The handle stays in the task while it is awaited, so
+                // dropping this future (the set) still aborts the work.
+                let joined = (&mut task.handle).await;
+                (task, joined)
+            }
+            .boxed(),
+        );
+    }
+
+    /// Wait for the next task to end and settle its file (at once when the
+    /// set is empty).
+    pub(crate) async fn settle_next(
+        &mut self,
+        sink: &dyn RunnerEventSink,
+        cancel_token: &CancellationToken,
+    ) {
+        use futures::StreamExt;
+        if let Some((task, joined)) = self.running.next().await {
+            settle(sink, cancel_token, &task.filename, task.role, joined).await;
+        }
+    }
+
+    /// Wait for every task and settle each file.
+    pub(crate) async fn drain(
+        mut self,
+        sink: &dyn RunnerEventSink,
+        cancel_token: &CancellationToken,
+    ) {
+        use futures::StreamExt;
+        while let Some((task, joined)) = self.running.next().await {
+            settle(sink, cancel_token, &task.filename, task.role, joined).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +253,7 @@ pub(crate) async fn drain_supervised_file_tasks(
 /// it has published everything they sent; await
 /// [`FileProgressForwarder::finished`] after the attempt, before the file's
 /// next stage is published, so no late update lands after it.
-pub(crate) fn spawn_observed_progress_forwarder(
+pub fn spawn_observed_progress_forwarder(
     sink: Arc<dyn RunnerEventSink>,
     filename: String,
 ) -> (
@@ -216,7 +302,7 @@ pub(crate) fn spawn_observed_progress_forwarder(
 /// A running progress forwarder, to be awaited once its sender and observer
 /// are gone.
 #[must_use = "await `finished` after the attempt so no late update lands after its next stage"]
-pub(crate) struct FileProgressForwarder {
+pub struct FileProgressForwarder {
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -235,7 +321,7 @@ impl FileProgressForwarder {
 /// For work that is not an audio-file attempt: a text batch over one file or
 /// several, or align's utterance-timing pre-pass. Returns once every wait is
 /// recorded as ended.
-pub(crate) async fn observing_file_waits<F: std::future::Future>(
+pub async fn observing_file_waits<F: std::future::Future>(
     sink: &Arc<dyn RunnerEventSink>,
     filenames: impl IntoIterator<Item = String>,
     work: F,
@@ -325,10 +411,7 @@ impl crate::worker::pool::checkout_wait::PoolWaitObserver for ForwardedWaits {
 /// [`record_abnormal_file_task_exit`]'s cancelled branch, so a cancelled
 /// job's file list always accounts for every pending file, not just the
 /// ones whose task actually started.
-pub(crate) async fn record_file_cancelled_before_dispatch(
-    sink: &dyn RunnerEventSink,
-    filename: &str,
-) {
+pub async fn record_file_cancelled_before_dispatch(sink: &dyn RunnerEventSink, filename: &str) {
     let finished_at = sink.now();
     let message = "dispatch cancelled before this file's task was ever started".to_owned();
 

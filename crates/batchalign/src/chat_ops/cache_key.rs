@@ -35,6 +35,7 @@ impl CacheKey {
     }
 
     /// View the hex string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -126,7 +127,8 @@ impl CacheTaskName {
     /// The wire string stored in the cache database.
     ///
     /// Changing any of these values invalidates existing cache entries.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::ForcedAlignment => "forced_alignment",
             Self::ForcedAlignmentRawEvidence => "forced_alignment_raw_evidence",

@@ -400,13 +400,13 @@ pub(crate) mod test_fixtures {
     };
 
     /// The commit the plan pins in these fixtures.
-    pub(crate) const PINNED: &str = "06f233fe06e710322aca913c1bc4249a0d71fce1";
+    pub const PINNED: &str = "06f233fe06e710322aca913c1bc4249a0d71fce1";
 
-    pub(crate) fn commit(hex: &str) -> HubCommitV2 {
+    pub fn commit(hex: &str) -> HubCommitV2 {
         HubCommitV2::try_from(hex).expect("a 40 hex character commit is valid")
     }
 
-    pub(crate) fn whisper_id() -> ModelIdV2 {
+    pub fn whisper_id() -> ModelIdV2 {
         ModelIdV2::try_from("openai/whisper-large-v3").expect("a hub model id is stamp safe")
     }
 
@@ -414,7 +414,7 @@ pub(crate) mod test_fixtures {
     /// checkpoint ran. Pinned and observed to the same commit, so it is a value
     /// [`test_requested`] admits: these fixtures must agree, or every test here
     /// would be measuring the refusal instead of the lowering.
-    pub(crate) fn test_identity() -> AsrModelIdentityV2 {
+    pub fn test_identity() -> AsrModelIdentityV2 {
         AsrModelIdentityV2::Whisper {
             asr: LoadedModelV2 {
                 id: whisper_id(),
@@ -429,7 +429,7 @@ pub(crate) mod test_fixtures {
     }
 
     /// The pin [`test_identity`] answers: the same model at the same commit.
-    pub(crate) fn test_requested() -> crate::model_manifest::PinnedAsrPlan {
+    pub fn test_requested() -> crate::model_manifest::PinnedAsrPlan {
         crate::model_manifest::PinnedAsrPlan::for_test(AsrRequestedModelsV2::Whisper {
             asr: RequestedModelV2 {
                 id: whisper_id(),
@@ -441,10 +441,7 @@ pub(crate) mod test_fixtures {
     }
 
     /// Independent decodes of overlapping sample windows.
-    pub(crate) fn window_response(
-        left: serde_json::Value,
-        right: serde_json::Value,
-    ) -> ExecuteResponseV2 {
+    pub fn window_response(left: serde_json::Value, right: serde_json::Value) -> ExecuteResponseV2 {
         let chunks = serde_json::from_value(serde_json::json!({
             "sample_rate_hz": 16000,
             "windows": [

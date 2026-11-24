@@ -28,7 +28,7 @@ use super::routes::{ControlAnswer, Retirement, StreamClosed};
 const SHUTDOWN_ACK_LIMIT: Duration = Duration::from_secs(2);
 
 /// One worker's request stream and the routes its replies come back on.
-pub(crate) struct SharedGpuChannel<W> {
+pub struct SharedGpuChannel<W> {
     /// Serialized writes, so concurrent requests' JSON lines never interleave.
     writer: tokio::sync::Mutex<W>,
 
@@ -67,7 +67,7 @@ pub(crate) struct SharedGpuChannel<W> {
 }
 
 /// The pending map owns both execution memory and actual executor capacity.
-pub(crate) struct ScheduledInvocation {
+pub struct ScheduledInvocation {
     permit: crate::worker::pool::RunPermit,
     _slot: tokio::sync::OwnedSemaphorePermit,
     _registration: crate::worker::pool::job_tracker::TrackerGuard,
@@ -88,7 +88,7 @@ impl super::routes::DispatchOwner for ScheduledInvocation {
     }
 }
 
-/// The external write can finish or become uncertain. Only sent() consumes
+/// The external write can finish or become uncertain. Only `sent()` consumes
 /// successful writing authority. Every other exit retires the actual routes.
 struct WritingInvocation(WriteDisposition);
 enum WriteDisposition {
@@ -99,7 +99,7 @@ enum WriteDisposition {
     Sent,
 }
 impl WritingInvocation {
-    fn begin(routes: Routes, reader: tokio::task::AbortHandle) -> Self {
+    const fn begin(routes: Routes, reader: tokio::task::AbortHandle) -> Self {
         Self(WriteDisposition::Uncertain { routes, reader })
     }
     fn sent(mut self) {
@@ -152,7 +152,7 @@ impl<W: AsyncWrite + Unpin + Send> SharedGpuChannel<W> {
     }
 
     /// The worker process ID.
-    pub(super) fn pid(&self) -> WorkerPid {
+    pub(super) const fn pid(&self) -> WorkerPid {
         self.pid
     }
 

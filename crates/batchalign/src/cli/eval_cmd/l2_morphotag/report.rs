@@ -83,9 +83,9 @@ pub struct PairAggregate {
     pub missing_mor: u64,
     /// Count of records with zero heuristic flags.
     pub heuristic_clean: u64,
-    /// Per-flag counts (BTreeMap for determinism).
+    /// Per-flag counts (`BTreeMap` for determinism).
     pub flag_counts: BTreeMap<HeuristicFlag, u64>,
-    /// Top-POS distribution (BTreeMap for determinism).
+    /// Top-POS distribution (`BTreeMap` for determinism).
     pub pos_counts: BTreeMap<String, u64>,
     /// Post-morphotag outcome distribution across all utterances in all
     /// files for this pair (Wave 4 of the morphotag reconciliation
@@ -112,7 +112,8 @@ pub struct OutcomeCounts {
 
 impl OutcomeCounts {
     /// Total utterances counted across all four variants.
-    pub fn total(&self) -> u64 {
+    #[must_use]
+    pub const fn total(&self) -> u64 {
         self.not_applicable
             + self.aligned
             + self.count_mismatch_in_file
@@ -121,12 +122,14 @@ impl OutcomeCounts {
 
     /// Count of anomaly outcomes (not-applicable and aligned are expected;
     /// the other two are pipeline anomalies that require attention).
-    pub fn anomalies(&self) -> u64 {
+    #[must_use]
+    pub const fn anomalies(&self) -> u64 {
         self.count_mismatch_in_file + self.pipeline_absorbed_failure
     }
 
     /// Fraction of utterances that are anomalies. Zero when no
     /// utterances were seen.
+    #[must_use]
     pub fn anomaly_rate(&self) -> f64 {
         let total = self.total();
         if total == 0 {
@@ -140,7 +143,8 @@ impl OutcomeCounts {
 impl PairAggregate {
     /// Ratio of spliced `@s` words to total, pessimistic because any
     /// `missing_mor` reduces the numerator even when the feature itself
-    /// succeeded. With the AST walker missing_mor should be rare.
+    /// succeeded. With the AST walker `missing_mor` should be rare.
+    #[must_use]
     pub fn splice_rate(&self) -> f64 {
         if self.at_s_total == 0 {
             0.0
@@ -152,6 +156,7 @@ impl PairAggregate {
     /// L2-dispatch success rate: `1 - L2xxx / total`. Counts `missing_mor`
     /// as NOT a dispatch failure; this is the metric gated against the
     /// pre-registered 99% threshold.
+    #[must_use]
     pub fn dispatch_rate(&self) -> f64 {
         if self.at_s_total == 0 {
             0.0
@@ -161,6 +166,7 @@ impl PairAggregate {
     }
 
     /// Fraction of records with zero heuristic flags.
+    #[must_use]
     pub fn heuristic_clean_rate(&self) -> f64 {
         if self.at_s_total == 0 {
             0.0
@@ -171,6 +177,7 @@ impl PairAggregate {
 }
 
 /// Roll up per-file analyses into per-pair aggregates.
+#[must_use]
 pub fn aggregate_by_pair(files: &[FileAnalysis]) -> BTreeMap<PairKey, PairAggregate> {
     use super::types::UtteranceOutcome;
     let mut out: BTreeMap<PairKey, PairAggregate> = BTreeMap::new();
@@ -415,6 +422,7 @@ fn pct(numer: u64, denom: u64) -> f64 {
 /// aggregate counts), a pair-by-pair table with splice/dispatch/
 /// clean-heuristic percentages, and an anomaly breakdown when any
 /// pair recorded absorbed failures or count mismatches.
+#[must_use]
 pub fn summary_markdown(
     pairs: &BTreeMap<PairKey, PairAggregate>,
     eval_set_path: &Path,

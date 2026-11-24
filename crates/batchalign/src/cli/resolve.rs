@@ -43,12 +43,13 @@ pub struct FileListLine(NonZeroUsize);
 
 impl FileListLine {
     /// Line number for the zero-based index `str::lines` yields.
-    fn from_index(index: usize) -> Self {
+    const fn from_index(index: usize) -> Self {
         Self(NonZeroUsize::MIN.saturating_add(index))
     }
 
     /// The 1-based line number.
-    pub fn get(self) -> usize {
+    #[must_use]
+    pub const fn get(self) -> usize {
         self.0.get()
     }
 }
@@ -107,11 +108,13 @@ impl ResolvedInputs {
     }
 
     /// The inputs as written (after list-directory resolution).
+    #[must_use]
     pub fn as_paths(&self) -> &[PathBuf] {
         &self.0
     }
 
     /// Give up the proof and take the paths.
+    #[must_use]
     pub fn into_paths(self) -> Vec<PathBuf> {
         self.0
     }

@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use crate::error::ServerError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreparedAsrMediaInput {
+pub struct PreparedAsrMediaInput {
     pub original_audio_path: PathBuf,
     pub inference_audio_path: PathBuf,
     /// The `@Media` name, parsed here, before any recognition is paid for.
     pub media_name: Option<talkbank_model::model::MediaFilename>,
 }
 
-pub(crate) fn preserved_media_name_for_chat(
+pub fn preserved_media_name_for_chat(
     original_audio_path: &Path,
     inference_audio_path: &Path,
 ) -> Option<String> {
@@ -22,7 +22,7 @@ pub(crate) fn preserved_media_name_for_chat(
         .map(|s| s.to_string_lossy().into_owned())
 }
 
-pub(crate) async fn prepare_asr_media_input(
+pub async fn prepare_asr_media_input(
     original_audio_path: PathBuf,
     media_name: Option<String>,
     context_label: &str,
@@ -72,6 +72,11 @@ mod tests {
     /// This is the whole point of the check's placement: the operator's fix is
     /// to rename the file, and learning that after paying for transcription is
     /// the expensive version of the same message.
+    /// Guards: A comma-bearing source name is refused with a rename diagnostic before media conversion.
+    /// Kind: wire
+    /// Not a type: An external basename may contain a separator that makes the intended CHAT header invalid.
+    /// State: A synthetic unusable basename paired with a path that cannot yield valid audio.
+    /// Concurrency: Exclusive scratch path and no recognition request.
     #[tokio::test]
     async fn an_unusable_media_name_is_rejected_before_asr() {
         // `tempfile`'s RAII guard, not a hand-rolled directory: the manual
@@ -98,10 +103,15 @@ mod tests {
 
     use std::path::PathBuf;
 
+    /// Guards: A renumbered inference path cannot replace the original recording basename in generated CHAT.
+    /// Kind: policy
+    /// Not a type: Original and prepared paths name different roles but can legitimately have different stems.
+    /// State: Distinct literal source and cache filenames, with no filesystem use.
+    /// Concurrency: The path values are immutable.
     #[test]
     fn preserved_media_name_prefers_original_basename() {
         let original = PathBuf::from("/corpus/interview.mp4");
-        let inference = PathBuf::from("/cache/worker/interview.wav");
+        let inference = PathBuf::from("/cache/worker/f843c.wav");
         assert_eq!(
             preserved_media_name_for_chat(&original, &inference).as_deref(),
             Some("interview")

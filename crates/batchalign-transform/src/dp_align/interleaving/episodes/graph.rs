@@ -22,7 +22,7 @@ enum PreparedEpisode {
 }
 
 impl PreparedEpisode {
-    fn span(&self) -> &Episode {
+    const fn span(&self) -> &Episode {
         match self {
             Self::Empty(span) | Self::Grid { span, .. } => span,
         }

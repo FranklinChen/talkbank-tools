@@ -7,6 +7,7 @@ use super::*;
 use crate::chat_ops::fa::injection::InjectedTimings;
 use crate::chat_ops::fa::postprocess::PendingTiming;
 use talkbank_model::UtteranceIdx;
+use talkbank_model::alignment::helpers::{WordItem, walk_words};
 use talkbank_model::model::{Line, UtteranceContent, WriteChat};
 use talkbank_parser::TreeSitterParser;
 

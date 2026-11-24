@@ -40,7 +40,7 @@
       ]
     },
     {
-      "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+      "description": "The runtime exposes no revision at all. True of every `ModelScope` loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
       "type": "object",
       "properties": {
         "kind": {

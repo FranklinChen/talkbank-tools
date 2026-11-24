@@ -101,7 +101,7 @@ mod abbreviation_data {
     // Data is compile-time-constant: `include_str!` embeds the JSON at build
     // time, and the crate's own tests load it, so a malformed list fails there.
     #[allow(clippy::expect_used)]
-    pub(crate) static ENTRIES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    pub static ENTRIES: LazyLock<Vec<String>> = LazyLock::new(|| {
         serde_json::from_str(include_str!("../data/abbrev.json"))
             .expect("embedded abbrev.json is valid")
     });

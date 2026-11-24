@@ -31,7 +31,7 @@
 //! constructor):
 //!   - Pattern-match arm: `Foo::Bar(...)` followed by `=>` on the same
 //!     line.
-//!   - Markdown rustdoc link: `[`Foo::Bar`]` (the backtick
+//!   - Markdown rustdoc link: `` [`Foo::Bar`] `` (the backtick
 //!     disambiguates from a Rust slice literal `[Foo::A, Foo::B]`,
 //!     which IS a valid constructor context).
 //!   - `use` import lines.
@@ -362,7 +362,7 @@ fn scan_line_for_paths(
     }
 }
 
-fn is_ident_byte(b: u8) -> bool {
+const fn is_ident_byte(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
 }
 
@@ -405,7 +405,7 @@ fn is_constructor(content: &str, qualifier: &str, variant: &str) -> bool {
 }
 
 /// Whether any of the entries in `entries` is a constructor for
-/// `(qualifier, variant)`. For Self:: matches, also checks that the
+/// `(qualifier, variant)`. For `Self::` matches, also checks that the
 /// match is in the enum's home file.
 fn has_constructor(entries: &[MatchEntry], enum_info: &EnumInfo, variant: &str) -> bool {
     entries.iter().any(|entry| {

@@ -107,7 +107,7 @@ impl FileStampOutcome {
     /// a `stamp` exactly when a command decided one and the existing wire
     /// shape is unchanged for every command that stamps nothing.
     #[must_use]
-    pub fn is_unrecorded(&self) -> bool {
+    pub const fn is_unrecorded(&self) -> bool {
         matches!(self, Self::Unrecorded)
     }
 }
@@ -317,6 +317,7 @@ impl FileOutputDiagnostics {
 
     /// How many findings the record reports, zero when only shortfalls
     /// diagnose the file.
+    #[must_use]
     pub fn finding_count(&self) -> u64 {
         self.findings
             .as_ref()
@@ -324,6 +325,7 @@ impl FileOutputDiagnostics {
     }
 
     /// The first findings on the record.
+    #[must_use]
     pub fn first_findings(&self) -> &[OutputFindingRecord] {
         self.findings
             .as_ref()
@@ -587,7 +589,8 @@ pub enum OptionalStage {
 
 impl OptionalStage {
     /// The stage's name in a report.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::UtteranceSegmentation => "utterance segmentation",
             Self::Morphosyntax => "morphosyntax",
@@ -608,6 +611,7 @@ pub enum UtrPass {
 
 impl UtrPass {
     /// Stable name used by the wire record, provenance and presentation.
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Initial => "initial",
@@ -733,6 +737,7 @@ impl OutputShortfallRecord {
     /// A shortfall that carries utterances names each one the record holds,
     /// as written, then how many more it counted: a reader acts on the
     /// utterances, and the headline gives only the counts.
+    #[must_use]
     pub fn detail_lines(&self) -> Vec<String> {
         match self {
             Self::TimingIncomplete {
@@ -873,7 +878,8 @@ pub enum PrimaryMorphologyDeclineCause {
 
 impl PrimaryMorphologyDeclineCause {
     /// Plain words for a reader.
-    pub fn describe(self) -> &'static str {
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
         match self {
             Self::NoAnalysis => "no analysis returned",
             Self::MappingFailed => "analysis could not be mapped",
@@ -1158,7 +1164,8 @@ impl From<UtteranceLocator> for StoredUtteranceLocation {
 
 impl StoredUtteranceLocation {
     /// The utterance's position among the file's utterances, counting from 1.
-    pub fn utterance(&self) -> u64 {
+    #[must_use]
+    pub const fn utterance(&self) -> u64 {
         match &self.0 {
             StoredLocation::Located(locator) => locator.utterance,
             StoredLocation::Numbered(utterance) => *utterance,
@@ -1167,7 +1174,8 @@ impl StoredUtteranceLocation {
 
     /// The utterance's main tier as written; absent only in a record an
     /// earlier build stored.
-    pub fn main_tier(&self) -> Option<&MainTierExcerpt> {
+    #[must_use]
+    pub const fn main_tier(&self) -> Option<&MainTierExcerpt> {
         match &self.0 {
             StoredLocation::Located(locator) => Some(&locator.main_tier),
             StoredLocation::Numbered(_) => None,
@@ -1236,6 +1244,7 @@ impl MainTierExcerpt {
     }
 
     /// The excerpt's text.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -1411,6 +1420,7 @@ pub struct ExcludedUtteranceRecord {
 impl OutputExclusionRecord {
     /// The record in a short phrase, for a one-line summary of what a file
     /// left out.
+    #[must_use]
     pub fn summary_phrase(&self) -> String {
         match self {
             Self::NotInRecording {
@@ -1428,6 +1438,7 @@ impl OutputExclusionRecord {
     /// The lines under this exclusion's own line: each utterance or span the
     /// record names, then how many more it counted. Exhaustive, like
     /// [`OutputShortfallRecord::detail_lines`].
+    #[must_use]
     pub fn detail_lines(&self) -> Vec<String> {
         match self {
             Self::NotInRecording {
@@ -1497,6 +1508,7 @@ impl OffRecordPostcode {
     const ALL: [Self; 1] = [Self::Diary];
 
     /// The postcode's text, as written between `[+ ` and `]`.
+    #[must_use]
     pub const fn text(self) -> &'static str {
         match self {
             Self::Diary => "diary",
@@ -1504,6 +1516,7 @@ impl OffRecordPostcode {
     }
 
     /// The member whose text this postcode's is, exactly.
+    #[must_use]
     pub fn of_postcode_text(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|member| member.text() == text)
     }
@@ -1841,11 +1854,13 @@ pub struct ReviewBlock {
 
 impl ReviewBlock {
     /// The headline.
+    #[must_use]
     pub fn headline(&self) -> &str {
         &self.headline
     }
 
     /// The lines under it.
+    #[must_use]
     pub fn lines(&self) -> &[String] {
         &self.lines
     }
@@ -1853,6 +1868,7 @@ impl ReviewBlock {
 
 impl FileReview {
     /// The review of a file with this status, diagnostics and exclusions.
+    #[must_use]
     pub fn of(
         status: FileStatusKind,
         diagnostics: Option<&FileOutputDiagnostics>,
@@ -1901,17 +1917,20 @@ impl FileReview {
     }
 
     /// Whether there is nothing to review and nothing left out.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.needs_review.is_none() && self.left_out.is_none()
     }
 
     /// What needs review, for a file written with diagnostics.
-    pub fn needs_review(&self) -> Option<&ReviewBlock> {
+    #[must_use]
+    pub const fn needs_review(&self) -> Option<&ReviewBlock> {
         self.needs_review.as_ref()
     }
 
     /// What was left out on purpose, when anything was.
-    pub fn left_out(&self) -> Option<&ReviewBlock> {
+    #[must_use]
+    pub const fn left_out(&self) -> Option<&ReviewBlock> {
         self.left_out.as_ref()
     }
 }
@@ -1924,6 +1943,7 @@ impl FileReview {
 /// only by untimed words never reads as "0 diagnostics".
 impl FileOutputDiagnostics {
     /// One line: what needs review, in the order a reader acts on it.
+    #[must_use]
     pub fn summary(&self) -> String {
         let diagnostics = self;
         let mut parts = Vec::new();
@@ -2005,7 +2025,8 @@ pub struct JobControlPlaneInfo {
 
 impl JobControlPlaneInfo {
     /// Local control-plane marker.
-    pub fn local() -> Self {
+    #[must_use]
+    pub const fn local() -> Self {
         Self {
             backend: JobControlPlaneBackendKind::Local,
         }
@@ -2117,7 +2138,8 @@ pub struct JobInfo {
 
 impl JobInfo {
     /// Attach server control-plane metadata to this job projection.
-    pub fn with_control_plane(mut self, control_plane: JobControlPlaneInfo) -> Self {
+    #[must_use]
+    pub const fn with_control_plane(mut self, control_plane: JobControlPlaneInfo) -> Self {
         self.control_plane = Some(control_plane);
         self
     }
@@ -2207,7 +2229,8 @@ pub struct JobListItem {
 
 impl JobListItem {
     /// Attach server control-plane metadata to this list projection.
-    pub fn with_control_plane(mut self, control_plane: JobControlPlaneInfo) -> Self {
+    #[must_use]
+    pub const fn with_control_plane(mut self, control_plane: JobControlPlaneInfo) -> Self {
         self.control_plane = Some(control_plane);
         self
     }
@@ -2668,9 +2691,9 @@ mod tests {
         );
     }
 
-    /// Regression: the server returns relative paths like "PWA/TYO_a1.cha" as
-    /// display names in file_statuses. These must deserialize successfully.
-    /// Previously DisplayPath rejected path separators, causing "error decoding
+    /// Regression: the server returns relative paths like "`PWA/TYO_a1.cha`" as
+    /// display names in `file_statuses`. These must deserialize successfully.
+    /// Previously `DisplayPath` rejected path separators, causing "error decoding
     /// response body" on any job with files in subdirectories.
     #[test]
     fn job_info_deserializes_relative_path_filenames() {

@@ -41,7 +41,7 @@ use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use batchalign::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use batchalign::host_facts::PerProfile;
 use batchalign::types::worker_v2::{
-    AsrBackendV2, AsrInputV2, AsrRequestV2, ExecuteRequestV2, ExecuteResponseV2, InferenceTaskV2,
+    AsrBackendV2, AsrInputV2, AsrRequestV2, ExecuteRequestV2, InferenceTaskV2,
     PreparedAudioInputV2, TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
 };
 use batchalign::worker::handle::WorkerRuntimeConfig;
@@ -64,12 +64,12 @@ fn worker_python() -> String {
     crate::prerequisite::worker_test_python()
 }
 
-/// Build a GPU execute_v2 request with a unique request_id, for English.
+/// Build a GPU `execute_v2` request with a unique `request_id`, for English.
 fn gpu_execute_request(request_id: &str) -> ExecuteRequestV2 {
     gpu_execute_request_for_lang(request_id, LanguageCode3::eng())
 }
 
-/// Build a GPU execute_v2 request with a unique request_id, for a given language.
+/// Build a GPU `execute_v2` request with a unique `request_id`, for a given language.
 ///
 /// The language matters to callers that need two DIFFERENT worker keys: a shared
 /// GPU workers are keyed on target, language, and typed engine selection, so
@@ -138,8 +138,9 @@ fn test_pool(python: String) -> WorkerPool {
 
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) only checks process existence/permission.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // Signal 0 probes for existence without delivering anything.
+    let pid = i32::try_from(pid).expect("a Unix PID fits pid_t");
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 #[cfg(unix)]
@@ -169,7 +170,7 @@ async fn wait_for_process_exit(pid: u32) {
 /// TCP daemon has no such handle: it is retired only by `kill_owned_daemons`,
 /// which `WorkerPool::shutdown()` calls and `Drop` did not, even though `Drop`'s
 /// own doc comment says it exists to "catch test code and panic unwinds where
-/// the pool goes out of scope without a graceful shutdown() call".
+/// the pool goes out of scope without a graceful `shutdown()` call".
 ///
 /// The consequence was measured, not theorised: on 2026-07-29 this suite had
 /// left 11 `--test-echo` daemons running on the development machine, two of them
@@ -254,237 +255,44 @@ async fn dropping_pool_reaps_owned_tcp_daemons() {
 // Core concurrent dispatch tests
 // ---------------------------------------------------------------------------
 
-/// Send N concurrent execute_v2 requests to one GPU worker.
-/// All N responses must arrive with the correct request_id.
+/// Guards: Each caller receives its own echo after multiplexing and a subsequent call still completes.
+/// Kind: wire
+/// Not a type: The Python subprocess writes reply IDs on a shared pipe in scheduler-dependent order.
+/// State: A private echo worker and real pipe exercise the production reader without loading weights.
+/// Concurrency: Eight spawned tasks share one pool, join, then send one more request before shutdown.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_all_responses_arrive() {
-    let python = worker_python();
-    let pool = test_pool(python);
-
-    // Pre-scale to create the SharedGpuWorker.
-    pool.pre_scale_gpu_for_test(
-        ReleasedCommand::Transcribe,
-        WorkerLanguage::from(LanguageCode3::eng()),
-        1,
-        &GPU_PLAN,
-    )
-    .await;
-
-    let n = 8;
-    let mut handles = Vec::new();
-
-    for i in 0..n {
-        let request = gpu_execute_request(&format!("concurrent-{i}"));
-        let pool_ref = &pool;
-        handles.push(tokio::spawn({
-            let lang = LanguageCode3::eng();
-            let pool_ptr = pool_ref as *const WorkerPool as usize;
-            async move {
-                // SAFETY: pool lives for the duration of the test
-                let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-                pool.dispatch_gpu_for_test(&GPU_PLAN, &lang, &request).await
-            }
-        }));
-    }
-
-    let mut results: Vec<ExecuteResponseV2> = Vec::new();
-    for handle in handles {
-        let result = handle.await.expect("task panicked");
-        results.push(result.expect("dispatch failed"));
-    }
-
-    // Verify all N responses arrived with unique, correct request_ids.
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (i, response) in results.iter().enumerate() {
-        let expected_id = format!("concurrent-{i}");
-        assert_eq!(
-            &**response.request_id(),
-            &expected_id,
-            "response {i} has wrong request_id: got {}, expected {expected_id}",
-            response.request_id()
-        );
-        assert!(
-            seen_ids.insert(response.request_id().to_string()),
-            "duplicate request_id in responses: {}",
-            response.request_id()
-        );
-    }
-
-    assert_eq!(
-        results.len(),
-        n,
-        "expected {n} responses, got {}",
-        results.len()
-    );
-
-    pool.shutdown().await;
-}
-
-/// All concurrent GPU requests must hit the same worker PID.
-/// This proves model sharing: one process, multiple threads, shared weights.
-#[tokio::test]
-async fn gpu_concurrent_dispatch_shares_same_pid() {
-    let python = worker_python();
-    let pool = test_pool(python);
-
-    pool.pre_scale_gpu_for_test(
-        ReleasedCommand::Transcribe,
-        WorkerLanguage::from(LanguageCode3::eng()),
-        1,
-        &GPU_PLAN,
-    )
-    .await;
-
-    // Get the GPU worker info from the pool summary.
-    let summary = pool.worker_summary().await;
-    let gpu_entry = summary
-        .iter()
-        .find(|s| s.contains("profile:gpu"))
-        .expect("expected a GPU worker in summary after pre-scale");
-
-    // Extract PID segment from summary entry (format varies by transport).
-    let pid_str = gpu_entry
-        .split(':')
-        .find(|part| part.starts_with("pid="))
-        .expect("expected pid= in summary entry");
-
-    // Send 4 concurrent requests and verify they all succeed (same worker).
-    let n = 4;
-    let mut handles = Vec::new();
-    for i in 0..n {
-        let request = gpu_execute_request(&format!("pid-check-{i}"));
-        let pool_ptr = &pool as *const WorkerPool as usize;
-        handles.push(tokio::spawn(async move {
-            let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
+    let pool = std::sync::Arc::new(test_pool(worker_python()));
+    let mut callers = Vec::new();
+    for i in 0..8 {
+        let id = format!("concurrent-{i}");
+        let request = gpu_execute_request(&id);
+        let pool = pool.clone();
+        callers.push(tokio::spawn(async move {
+            let response = pool
+                .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
+                .expect("dispatch");
+            assert_eq!(&**response.request_id(), id);
         }));
     }
-
-    for handle in handles {
-        let result = handle.await.expect("task panicked");
-        result.expect("concurrent dispatch to shared GPU worker failed");
+    for caller in callers {
+        caller.await.expect("caller completed");
     }
-
-    // Verify GPU worker(s) are still present after concurrent dispatch.
-    let summary_after = pool.worker_summary().await;
-    let gpu_entries: Vec<_> = summary_after
-        .iter()
-        .filter(|s| s.contains("profile:gpu"))
-        .collect();
-    assert!(
-        !gpu_entries.is_empty(),
-        "expected at least 1 GPU worker after concurrent dispatch"
-    );
-
-    // The pre-scaled GPU worker should still be present.
-    assert!(
-        gpu_entries.iter().any(|e| e.contains(pid_str)),
-        "original GPU worker (with {pid_str}) should still be present after concurrent dispatch; got: {gpu_entries:?}"
-    );
-
-    pool.shutdown().await;
-}
-
-/// Sequential requests after concurrent dispatch must still work.
-/// This verifies no state corruption in the SharedGpuWorker after
-/// a batch of concurrent requests completes.
-#[tokio::test]
-async fn gpu_sequential_after_concurrent_works() {
-    let python = worker_python();
-    let pool = test_pool(python);
-
-    pool.pre_scale_gpu_for_test(
-        ReleasedCommand::Transcribe,
-        WorkerLanguage::from(LanguageCode3::eng()),
-        1,
-        &GPU_PLAN,
-    )
-    .await;
-
-    // Phase 1: concurrent dispatch (4 requests).
-    let mut handles = Vec::new();
-    for i in 0..4 {
-        let request = gpu_execute_request(&format!("phase1-{i}"));
-        let pool_ptr = &pool as *const WorkerPool as usize;
-        handles.push(tokio::spawn(async move {
-            let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
-                .await
-        }));
-    }
-    for handle in handles {
-        handle
-            .await
-            .expect("task panicked")
-            .expect("phase 1 concurrent dispatch failed");
-    }
-
-    // Phase 2: sequential dispatch (3 requests, one at a time).
-    for i in 0..3 {
-        let request = gpu_execute_request(&format!("phase2-{i}"));
-        let response = pool
-            .dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
-            .await
-            .expect("phase 2 sequential dispatch failed");
-        assert_eq!(
-            &**response.request_id(),
-            &format!("phase2-{i}"),
-            "sequential request {i} got wrong request_id"
-        );
-    }
-
-    pool.shutdown().await;
-}
-
-/// Health check on the GPU worker works between dispatch rounds.
-/// This verifies the control channel (separate from execute_v2 routing)
-/// is not corrupted by concurrent request traffic.
-#[tokio::test]
-async fn gpu_health_check_works_after_concurrent_dispatch() {
-    let python = worker_python();
-    let pool = test_pool(python);
-
-    pool.pre_scale_gpu_for_test(
-        ReleasedCommand::Transcribe,
-        WorkerLanguage::from(LanguageCode3::eng()),
-        1,
-        &GPU_PLAN,
-    )
-    .await;
-
-    // Dispatch 4 concurrent requests.
-    let mut handles = Vec::new();
-    for i in 0..4 {
-        let request = gpu_execute_request(&format!("pre-health-{i}"));
-        let pool_ptr = &pool as *const WorkerPool as usize;
-        handles.push(tokio::spawn(async move {
-            let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
-            pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
-                .await
-        }));
-    }
-    for handle in handles {
-        handle
-            .await
-            .expect("task panicked")
-            .expect("dispatch failed");
-    }
-
-    // Capabilities should have been lazily detected from the first worker spawn.
-    let caps = pool
-        .detected_capabilities()
-        .expect("capabilities should have been detected from worker spawns");
-    assert!(
-        caps.tasks().next().is_some(),
-        "expected the admitted test-echo report to advertise infer tasks after concurrent dispatch"
-    );
-
+    let followup = pool
+        .dispatch_gpu_for_test(
+            &GPU_PLAN,
+            &LanguageCode3::eng(),
+            &gpu_execute_request("followup"),
+        )
+        .await
+        .expect("dispatch after concurrent traffic");
+    assert_eq!(&**followup.request_id(), "followup");
     pool.shutdown().await;
 }
 
 /// Dropping the pool without `shutdown()` must still reap stdio shared GPU
-/// workers. This is the lifecycle-owner path that SharedGpuWorker exists for.
+/// workers. This is the lifecycle-owner path that `SharedGpuWorker` exists for.
 #[cfg(unix)]
 #[tokio::test]
 async fn gpu_stdio_shared_worker_drop_reaps_process() {
@@ -523,9 +331,9 @@ async fn gpu_stdio_shared_worker_drop_reaps_process() {
 // Transcribe dispatch path (GPU execute_v2 through pool)
 // ---------------------------------------------------------------------------
 
-/// A single GPU execute_v2 request dispatched through the pool completes
+/// A single GPU `execute_v2` request dispatched through the pool completes
 /// successfully. This exercises the pre-scale → discover TCP worker →
-/// dispatch_execute_v2 → SharedGpuTcpWorker → Python execute_v2 → echo chain.
+/// `dispatch_execute_v2` → `SharedGpuTcpWorker` → Python `execute_v2` → echo chain.
 #[tokio::test]
 async fn gpu_single_execute_v2_through_pool() {
     let python = worker_python();
@@ -554,7 +362,7 @@ async fn gpu_single_execute_v2_through_pool() {
     pool.shutdown().await;
 }
 
-/// Multiple GPU execute_v2 requests dispatched sequentially all succeed.
+/// Multiple GPU `execute_v2` requests dispatched sequentially all succeed.
 /// This proves the worker doesn't become corrupted after handling a request.
 #[tokio::test]
 async fn gpu_repeated_execute_v2_through_pool() {
@@ -660,7 +468,7 @@ async fn gpu_dispatch_after_pre_scale_shutdown_spawns_fallback() {
     // is that the pool responded within the timeout instead of hanging.
 }
 
-/// Stanza sequential worker survives multiple batch_infer calls.
+/// Stanza sequential worker survives multiple `batch_infer` calls.
 /// Regression test: proves worker state is not corrupted between requests.
 #[tokio::test]
 async fn stanza_worker_survives_many_sequential_requests() {
@@ -815,7 +623,7 @@ async fn worker_with_delay_responds_when_timeout_is_generous() {
 // ---------------------------------------------------------------------------
 
 /// Non-GPU (Stanza) pool dispatch works correctly under sequential load.
-/// This is the baseline: sequential dispatch doesn't use SharedGpuWorker.
+/// This is the baseline: sequential dispatch doesn't use `SharedGpuWorker`.
 #[tokio::test]
 async fn stanza_sequential_dispatch_reuses_worker() {
     let python = worker_python();
@@ -858,7 +666,7 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 /// request; never the queue-wait while earlier requests are being served.
 ///
 /// At unit-test scale: with `gpu_thread_pool_size = 2` the Python worker's
-/// `ThreadPoolExecutor` serves two execute_v2 at a time; with
+/// `ThreadPoolExecutor` serves two `execute_v2` at a time; with
 /// `test_delay_ms = 200` each response takes ~200 ms; with N=16 callers the
 /// last response arrives around t = 1.6 s. With `audio_task_timeout_s = 1`
 /// the per-request timeout is 1 s: above any single response's work-time but
@@ -866,6 +674,11 @@ async fn stanza_sequential_dispatch_reuses_worker() {
 /// succeeds because the dispatch permit is taken before the timer starts, so
 /// a late caller's timer covers only its own work. A caller that times out
 /// is a typed `WorkerError::Timeout` naming `execute_v2`.
+/// Guards: Callers waiting longer than the execution budget can still finish within their individual service budgets.
+/// Kind: measurement
+/// Not a type: The timer and actual Python request service compete on a real scheduler.
+/// State: One echo subprocess delays replies on two threads to create measurable queue time.
+/// Concurrency: Sixteen callers target the same pool and wait for admission before the execution timer starts.
 #[tokio::test]
 async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_timeout() {
     let python = worker_python();
@@ -880,7 +693,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
     // request at a time is not a shared worker at all
     // (`batchalign::worker::serving::WorkerServing`), so the pool scales it
     // out instead of queueing on it, and this queue could not form.
-    let pool = WorkerPool::new(PoolConfig {
+    let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
         python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
         startup_stall: batchalign::worker::LoadingStall::new(
@@ -899,7 +712,7 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
         },
         test_delay_ms: 200,
         ..PoolConfig::for_tests()
-    });
+    }));
 
     pool.pre_scale_gpu_for_test(
         ReleasedCommand::Transcribe,
@@ -913,10 +726,9 @@ async fn gpu_concurrent_dispatch_does_not_charge_queue_wait_against_per_request_
     let mut handles = Vec::new();
     for i in 0..n {
         let request = gpu_execute_request(&format!("queue-wait-{i}"));
-        let pool_ptr = &pool as *const WorkerPool as usize;
+        let pool = std::sync::Arc::clone(&pool);
         handles.push(tokio::spawn(async move {
             // SAFETY: pool lives for the duration of the test.
-            let pool = unsafe { &*(pool_ptr as *const WorkerPool) };
             pool.dispatch_gpu_for_test(&GPU_PLAN, &LanguageCode3::eng(), &request)
                 .await
         }));

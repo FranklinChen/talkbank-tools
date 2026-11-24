@@ -136,7 +136,7 @@ fn long_turns(timed: impl Fn(usize) -> bool) -> Vec<Turn> {
 }
 
 /// The retained 2,800-word control, also exercised through the owned task.
-pub(crate) fn long_turn_fixture(anchored: bool) -> (ChatFile, Vec<AsrTimingToken>) {
+pub fn long_turn_fixture(anchored: bool) -> (ChatFile, Vec<AsrTimingToken>) {
     let turns = long_turns(|index| anchored && index % 2 == 0);
     (chat(&turns), heard(&turns))
 }

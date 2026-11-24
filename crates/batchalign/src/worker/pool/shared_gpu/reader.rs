@@ -46,7 +46,7 @@ use super::routes::{
 };
 
 /// The two places a worker's lines are routed to.
-pub(crate) struct Routes<O: DispatchOwner = super::channel::ScheduledInvocation> {
+pub struct Routes<O: DispatchOwner = super::channel::ScheduledInvocation> {
     /// V2 dispatches, by request id.
     pub(crate) pending: PendingDispatches<O>,
     /// The one sequential op.
@@ -100,7 +100,7 @@ impl<O: DispatchOwner> Drop for CloseOnExit<O> {
 }
 
 /// Spawn the reader task for one worker's output.
-pub(crate) fn spawn_reader<R, O: DispatchOwner>(
+pub fn spawn_reader<R, O: DispatchOwner>(
     mut reader: R,
     routes: Routes<O>,
     pid: WorkerPid,
@@ -463,7 +463,7 @@ mod tests {
 
     /// Guards: A refused `execute_v2` line that names no request fails no dispatch: its siblings are left to their own replies.
     /// Kind: wire
-    /// Not a type: a malformed execute envelope can omit request_id entirely, leaving no evidence that permits failing either registered sibling.
+    /// Not a type: a malformed execute envelope can omit `request_id` entirely, leaving no evidence that permits failing either registered sibling.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
@@ -487,7 +487,7 @@ mod tests {
 
     /// Guards: A tagged `invalid_request` refusal fails its dispatch with the terminal `WorkerError::RequestRefused`.
     /// Kind: wire
-    /// Not a type: the external invalid_request tag chooses a terminal refusal for its named request, including the original diagnostic text.
+    /// Not a type: the external `invalid_request` tag chooses a terminal refusal for its named request, including the original diagnostic text.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
@@ -613,7 +613,7 @@ mod tests {
 
     /// Guards: A late `ensure_task` reply for a task other than the one the waiting op asked for does not answer it: the op that sent it timed out, and the waiting op's own reply is still to come, and answers it.
     /// Kind: wire
-    /// Not a type: valid ensure_task bytes can name fa while morphosyntax waits, requiring task correspondence before the admitted load proof is created.
+    /// Not a type: valid `ensure_task` bytes can name fa while morphosyntax waits, requiring task correspondence before the admitted load proof is created.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
@@ -644,7 +644,7 @@ mod tests {
 
     /// Guards: A model load's own download progress reaches the load (which uses it to keep its stall window open) and does not answer or fail it. It used to fall through to the unknown-op arm and fail whichever op waited, so a shared GPU worker's `ensure_task` was failed by its first progress report. A load's real reply still answers it afterwards.
     /// Kind: wire
-    /// Not a type: load-scoped download_growth bytes must deliver 2048 KiB to the load observer while preserving the later ASR terminal reply.
+    /// Not a type: load-scoped `download_growth` bytes must deliver 2048 KiB to the load observer while preserving the later ASR terminal reply.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
@@ -769,7 +769,7 @@ mod tests {
 
     /// Guards: A capabilities reply does not answer an `ensure_task`, and the reverse: each waiter takes only its own op's reply.
     /// Kind: wire
-    /// Not a type: a valid capabilities envelope can arrive while ensure_task waits, which requires external operation correspondence before delivery.
+    /// Not a type: a valid capabilities envelope can arrive while `ensure_task` waits, which requires external operation correspondence before delivery.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]
@@ -849,7 +849,7 @@ mod tests {
 
     /// Guards: The reader stops trusting a stream after the sequential path's noise limit of consecutive non-JSON lines.
     /// Kind: wire
-    /// Not a type: a concrete run of noise bytes reaches the stream trust limit and must produce retryable OutputNoise for its pending owner.
+    /// Not a type: a concrete run of noise bytes reaches the stream trust limit and must produce retryable `OutputNoise` for its pending owner.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[tokio::test]

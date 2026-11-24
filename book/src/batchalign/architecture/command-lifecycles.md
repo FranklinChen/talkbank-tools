@@ -19,8 +19,8 @@ Contributor rule of thumb: if you are adding new command semantics, start in
 
 | Workflow Family | Commands | Parallelism | Key shape |
 |------------------|----------|-------------|-----------|
-| **Per-file transform** | `align`, `transcribe`, `transcribe_s`, `morphotag` | Concurrent files (semaphore-bounded by `num_workers`) | One file in, one primary output out |
-| **Cross-file batch transform** | `utseg`, `coref` | Cross-file batching: pool utterances, group by language, dispatch languages concurrently, chunk large language groups across multiple workers | Two-level parallelism: cross-language × intra-language chunking (up to `max_workers_per_key` per language) |
+| **Per-file transform** | `align`, `transcribe`, `transcribe_s`, `morphotag`, `utseg` | Concurrent files bounded by the job's worker grant | One file in, one primary output out |
+| **Cross-file batch transform** | `coref` | One batch of all readable inputs, with a model item per eligible file | One result per source, including per-file refusals and pass-through |
 | **Per-file, per-utterance** | `translate` | One gateway call per file (the source language is read from that file's `@Languages:` header), one worker request per utterance, paced and retried on the server by the engine's provider policy; the file stops at its first failed utterance | One file in, one primary output out |
 | **Reference projection** | `compare` | Concurrent files, but with two primary CHAT inputs per file | Main+gold comparison bundle plus AST-first materializers |
 | **Composite workflow** | `benchmark` | Concurrent files (semaphore-bounded by `num_workers`) | Transcribe first, then compare via typed command composition |
@@ -54,28 +54,55 @@ pipelines. The API now exposes that state in two parallel fields:
 `progress_stage` for stable client logic and `progress_label` as the derived
 operator-facing display string.
 
-Batched text commands (`utseg`, `coref`) take a
-different approach: they **pool all utterances from all files**, group them by
-per-item language, and dispatch with **two levels of bounded parallelism**. At
-the outer level, language groups run concurrently but bounded by a semaphore
-(`max_total_workers / max_workers_per_key` concurrent groups) to prevent
-exceeding the global worker cap (`morphosyntax/batch.rs`). At the inner level,
-each language group's `infer_batch` call (`morphosyntax/worker.rs`) splits
-large batches into chunks across up to `max_workers_per_key` workers of the
-same language. When a language group finishes and its workers return to the
-pool, the next queued group starts. `compare`
-does not use this pooled-text shape any more; it is its own reference
-projection workflow because it needs both a main transcript and a gold
-companion per file. `benchmark` is a composite workflow that composes
-transcribe and compare rather than inventing its own third orchestration style.
+Segmentation and morphotag read and process independent files within the
+granted concurrency. Morphotag groups each file's work by effective language
+and can split a large group across several workers. Translation completes
+one file before advancing to the next. Coreference submits one batch of the
+readable sources and keeps their individual admission outcomes. Comparison
+adopts its reference before running morphology on the main transcript.
+Benchmark composes transcribe and compare.
 
 | Shape | File-level parallelism | Within-file parallelism |
 |-------|------------------------|-------------------------|
 | Per-file transform | Supervised tasks + `Semaphore(N)` | Single worker call or Rust composition per file |
 | Reference projection | Supervised tasks + `Semaphore(N)` | Main+gold comparison bundle plus materializers per file |
 | Composite workflow | Supervised tasks + `Semaphore(N)` | Transcribe then compare per file |
-| Cross-file batch transform | N/A (single batch) | One GPU batch call covers all files |
+| Cross-file batch transform | One batch | One worker call covers eligible files |
 | Media analysis V2 | Supervised tasks + `Semaphore(N)` | Single worker call per file |
+
+## Text worker submission
+
+Preparation owns each source's bytes and publication plan. A read file's
+command type chooses its submission method. Submitting consumes the read file
+or nonempty coreference batch and moves its inputs into a private,
+non-cloneable gateway argument. Translation carries the completely admitted
+CHAT and the route derived from its language header. See the [translation
+admission flow](../developer/commands/translate.md#source-admission-and-route-ownership).
+Morphotag carries either
+the current source or the admitted prior and current pair. Comparison moves
+its main source into morphology while retaining the admitted reference.
+
+```mermaid
+flowchart TD
+    admitted["Prepared source and publication plan"] --> read["Read file for its command or gather a nonempty coreference batch"]
+    read --> consume["Consume the read owner to enter the worker gateway"]
+    read --> refusal["Report source or route refusal without submitting"]
+    consume --> work["Gateway owns the source and cancellation authority"]
+    consume --> publish["Keep the original publication owner"]
+    work --> policy["Worker request policy may authorize a retry"]
+    work --> response["Apply the reply or refusal"]
+    policy --> response
+    response --> correspondence["Bind each result to its original source"]
+    publish --> correspondence
+    correspondence --> output["Publish once or report the file failure"]
+```
+
+The gateway has no way to reuse the original submission after it takes
+ownership. The lower retry loop takes the worker packet and may create another
+attempt only after policy admission. An already-cancelled token stops before
+the attempt factory runs. The [worker memory lifecycle](../developer/memory-safety.md)
+describes execution permits, pending replies and resource ownership after
+transport submission.
 
 ---
 
@@ -127,7 +154,7 @@ sequenceDiagram
                 Server->>Server: inject_utr_timing(): exact subsequence fast path, else global DP
                 Note over Server: Untimed utterances get<br/>utterance-level bullets from ASR
             else All utterances timed OR no utr_engine
-                Note over Server: Skip UTR (use existing bullets;<br/>refuse unsupported localization)
+                Note over Server: Skip UTR and use existing bullets<br/>Refuse unsupported localization
             end
 
             Server->>Server: Observe timing on the admitted working document
@@ -330,7 +357,7 @@ sequenceDiagram
         Cmp-->>Server: ComparisonBundle
 
         Server->>Server: project_gold_structurally() on gold AST
-        Note over Server: Exact matches copy %mor / %gra / %wor;<br/>unsafe partial projection stays conservative
+        Note over Server: Exact matches copy %mor / %gra / %wor<br/>Unsafe partial projection stays conservative
         Server->>Server: build typed %xsrep / %xsmor models\nlower once to gold AST tiers
         opt Internal benchmark/main path
             Server->>Server: MainAnnotatedCompareMaterializer<br/>reuse typed tier models on main AST
@@ -563,7 +590,7 @@ sequenceDiagram
     Server->>DB: Mark queued/running jobs interrupted
     Server->>DB: Prune expired entries
     Server->>DB: Load jobs and reconcile runtime state
-    Note over Server,DB: Requeue resumable work; promote all-terminal jobs to final state; persist canonical status and cleared leases
+    Note over Server,DB: Requeue resumable work<br/>Promote all-terminal jobs to final state<br/>Persist canonical status and cleared leases
 
     Server->>DB: Load persisted jobs, init utterance cache
     Note over Server: Server ready, accepting requests<br/>(capabilities not yet known)

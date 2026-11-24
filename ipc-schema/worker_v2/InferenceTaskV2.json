@@ -49,7 +49,7 @@
       "const": "speaker_embedding"
     },
     {
-      "description": "OpenSMILE feature extraction.",
+      "description": "`OpenSMILE` feature extraction.",
       "type": "string",
       "const": "opensmile"
     },

@@ -15,7 +15,7 @@ use crate::{api::LanguageCode3, chat_ops::ChatFile, error::ServerError};
 /// Earlier BA2 code defaulted missing headers to `["eng"]`. That parity
 /// shortcut was a known correctness hazard, see the 2026-05-03 incident.
 /// We deliberately diverge.
-pub(crate) fn resolve_per_file_lang(chat_file: &ChatFile) -> Result<LanguageCode3, ServerError> {
+pub fn resolve_per_file_lang(chat_file: &ChatFile) -> Result<LanguageCode3, ServerError> {
     let languages = chat_file.language_declaration().map_err(|error| {
         ServerError::Validation(format!(
             "morphotag: unusable `@Languages:` declaration ({error}). Supply one valid header before analysis."

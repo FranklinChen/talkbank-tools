@@ -40,7 +40,7 @@ use crate::error::ServerError;
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn cancel_job(
+pub async fn cancel_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -117,7 +117,7 @@ pub(crate) async fn cancel_job(
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn list_job_cancellations(
+pub async fn list_job_cancellations(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<Json<Vec<CancellationRecord>>, ServerError> {
@@ -157,7 +157,7 @@ pub(crate) async fn list_job_cancellations(
         (status = 409, description = "Job still running", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn delete_job(
+pub async fn delete_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
@@ -202,7 +202,7 @@ pub(crate) async fn delete_job(
         (status = 409, description = "Job not restartable", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn restart_job(
+pub async fn restart_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,

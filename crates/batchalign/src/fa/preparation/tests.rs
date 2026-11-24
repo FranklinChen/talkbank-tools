@@ -32,6 +32,11 @@ fn params() -> FaParams {
     }
 }
 
+/// Guards: Native prepared audio survives source removal through worker response admission.
+/// Kind: journey
+/// Not a type: A live worker bridge can accidentally reopen the original source after artifacts are owned.
+/// State: One real WAV observed once, an actual echo worker and private cache/artifacts.
+/// Concurrency: The source is removed only after the prepared artifact exists.
 #[tokio::test]
 async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_reopening_media() {
     let directory = tempfile::tempdir().unwrap();
@@ -41,17 +46,14 @@ async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_r
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tSPK Speaker\n@ID:\teng|test|SPK|||||Speaker|||\n@Media:\tsample, audio\n*SPK:\thello world . \u{15}0_100\u{15}\n@End\n"
     ).expect_built();
     let identity = AudioIdentity::from_metadata("sample.wav", 0, 0);
-    let audio = AudioContext {
-        audio_path: &audio_path,
-        audio_identity: &identity,
-        audio_duration: None,
-    };
+    let measured = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+    let audio = AudioContext::new(&measured, &identity);
     let anchors = AnchorIndex::not_observed();
     let params = params();
     let groups = group_utterances(
         &chat,
         params.aggregation_target(),
-        &Recording::of_duration(Ms(100)).unwrap(),
+        &audio.recording().expect("the staged WAV was measured"),
         &anchors,
     )
     .groups;
@@ -64,12 +66,7 @@ async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_r
         .unwrap();
     let namespace = FaCacheNamespace::for_test("test-echo");
     let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-    let services = FaServices {
-        pipeline: PipelineServices::new(&pool, &cache),
-        cache_namespace: &namespace,
-        gpu: &gpu,
-        attention_capture_dir: None,
-    };
+    let services = FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
     let language = LanguageCode3::eng();
     let outcome = async {
         let population = prepare_population(
@@ -167,6 +164,11 @@ async fn worker_roundtrip_retained_preparation_reaches_reply_admission_without_r
     outcome.expect("no media decode after preparation");
 }
 
+/// Guards: Admitted cached geometry needs neither audio read nor a model setup.
+/// Kind: contract
+/// Not a type: A correctly typed cache result can still be followed by an unintended decoder or worker effect.
+/// State: Private cache with replayable geometry, a refused audio fixture and unavailable interpreter.
+/// Concurrency: No independent process can supply the prohibited effects.
 #[tokio::test]
 async fn admitted_cached_geometry_requires_neither_a_decoder_nor_a_model_preparer() {
     let directory = tempfile::tempdir().unwrap();
@@ -175,11 +177,8 @@ async fn admitted_cached_geometry_requires_neither_a_decoder_nor_a_model_prepare
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tSPK Speaker\n@ID:\teng|test|SPK|||||Speaker|||\n@Media:\talready-resolved, audio\n*SPK:\thello world . \u{15}0_100\u{15}\n@End\n"
     ).expect_built();
     let identity = AudioIdentity::from_metadata("already-resolved.wav", 0, 0);
-    let audio = AudioContext {
-        audio_path: &audio_path,
-        audio_identity: &identity,
-        audio_duration: None,
-    };
+    let measured = crate::ensure_wav::MeasuredAudio::unmeasurable_fixture(&audio_path);
+    let audio = AudioContext::new(&measured, &identity);
     let anchors = AnchorIndex::not_observed();
     let mut params = params();
     params.cache_policy = CachePolicy::UseCache;
@@ -203,12 +202,7 @@ async fn admitted_cached_geometry_requires_neither_a_decoder_nor_a_model_prepare
         .unwrap();
     let namespace = FaCacheNamespace::for_test("declared-cached-wave-v1");
     let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-    let services = FaServices {
-        pipeline: PipelineServices::new(&pool, &cache),
-        cache_namespace: &namespace,
-        gpu: &gpu,
-        attention_capture_dir: None,
-    };
+    let services = FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
     let language = LanguageCode3::eng();
     let key = {
         let plan = super::super::units::DispatchPlan::build(
@@ -308,6 +302,11 @@ async fn admitted_cached_geometry_requires_neither_a_decoder_nor_a_model_prepare
     );
 }
 
+/// Guards: A genuinely empty window decode retains its measurement without model work.
+/// Kind: contract
+/// Not a type: A source path can exist while its requested decode produces no bytes.
+/// State: Real shorter WAV, admitted larger window and private decode artifact.
+/// Concurrency: The test owns the replacement bytes and prohibited worker setup.
 #[tokio::test]
 async fn an_empty_decode_keeps_its_measurement_without_loading_a_model_or_failing_the_file() {
     let directory = tempfile::tempdir().unwrap();
@@ -323,11 +322,8 @@ async fn an_empty_decode_keeps_its_measurement_without_loading_a_model_or_failin
     )
     .unwrap();
     let identity = AudioIdentity::from_metadata("sample.wav", 0, 0);
-    let audio = AudioContext {
-        audio_path: &audio_path,
-        audio_identity: &identity,
-        audio_duration: None,
-    };
+    let measured = crate::ensure_wav::MeasuredAudio::unmeasurable_fixture(&audio_path);
+    let audio = AudioContext::new(&measured, &identity);
     let params = params();
     let pool = WorkerPool::new(PoolConfig {
         python_path: directory
@@ -342,12 +338,7 @@ async fn an_empty_decode_keeps_its_measurement_without_loading_a_model_or_failin
         .unwrap();
     let namespace = FaCacheNamespace::for_test("declared-wave-v1");
     let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-    let services = FaServices {
-        pipeline: PipelineServices::new(&pool, &cache),
-        cache_namespace: &namespace,
-        gpu: &gpu,
-        attention_capture_dir: None,
-    };
+    let services = FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
     let language = LanguageCode3::eng();
     let mut probe = LiveResourceProbe {
         context: FaPreparationContext {
@@ -396,6 +387,11 @@ async fn an_empty_decode_keeps_its_measurement_without_loading_a_model_or_failin
     );
 }
 
+/// Guards: Two answer ranges share one actual native preparation and its final artifact owner.
+/// Kind: journey
+/// Not a type: Independent logical requests can duplicate physical artifact preparation and worker execution.
+/// State: One private recording, shared resource preparation, an echo subprocess and cache.
+/// Concurrency: The fallback consumes the recorded final artifact owner.
 #[tokio::test]
 async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_one_owner_for_two_answer_ranges()
  {
@@ -403,11 +399,8 @@ async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_o
     let audio_path = directory.path().join("shared.wav");
     crate::media::probe::fixtures::write_pcm_wav(&audio_path, 1);
     let identity = AudioIdentity::from_metadata("shared.wav", 0, 0);
-    let audio = AudioContext {
-        audio_path: &audio_path,
-        audio_identity: &identity,
-        audio_duration: None,
-    };
+    let measured = crate::ensure_wav::MeasuredAudio::unmeasurable_fixture(&audio_path);
+    let audio = AudioContext::new(&measured, &identity);
     let params = params();
     let pool = WorkerPool::new(PoolConfig {
         test_echo: true,
@@ -418,12 +411,7 @@ async fn worker_roundtrip_shared_contexts_reuse_native_preparation_and_execute_o
         .unwrap();
     let namespace = FaCacheNamespace::for_test("test-echo");
     let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-    let services = FaServices {
-        pipeline: PipelineServices::new(&pool, &cache),
-        cache_namespace: &namespace,
-        gpu: &gpu,
-        attention_capture_dir: None,
-    };
+    let services = FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
     let language = LanguageCode3::eng();
     let group = FaGroup::test_fixture(
         crate::chat_ops::fa::TimeSpan::new(0, 100),

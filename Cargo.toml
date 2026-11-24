@@ -84,7 +84,7 @@ rand = "0.10"
 ratatui = { version = "0.30", features = ["serde"] }
 regex = "1.13"
 reqwest = { version = "0.13", features = ["multipart", "json", "blocking"] }
-rstest = { version = "0.28.0", default-features = false }
+rstest = { version = "0.29.0", default-features = false }
 schemars = { version = "1.2", features = ["indexmap2", "smol_str03"] }
 yaml_serde = "0.10"
 
@@ -95,6 +95,9 @@ yaml_serde = "0.10"
 # (`0.1.x`) are intentionally separate release trains.
 batchalign-types = { path = "crates/batchalign-types" }
 libc = "0.2"
+# Safe wrappers for the POSIX process calls (signals, sessions, user IDs),
+# so they need no `unsafe` of our own.
+nix = { version = "0.32", features = ["process", "signal", "user"] }
 moka = { version = "0.12", features = ["future"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
@@ -119,7 +122,7 @@ thiserror = "^2.0.21"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio = { version = "1.54", features = ["full"] }
 tokio-util = "0.7"
-toml = "^1.2.1"
+toml = "^1.2.2"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.34"
 tower-http = { version = "0.7", features = ["cors", "fs", "limit", "trace", "compression-gzip", "compression-br", "catch-panic", "timeout"] }

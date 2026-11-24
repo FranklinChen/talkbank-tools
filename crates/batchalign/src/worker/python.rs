@@ -7,6 +7,7 @@
 //! 4. Walk up from the binary looking for a `.venv` that has batchalign
 //! 5. `python3.14` on Unix-like systems, or `python` on Windows
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,16 @@ pub(crate) fn worker_command(python: impl AsRef<OsStr>) -> std::process::Command
     let mut cmd = isolated_python(python);
     cmd.arg("-c").arg(WORKER_ENTRY);
     cmd
+}
+
+/// The arguments that bind a stdio worker to the process launching it: the
+/// worker watches this PID and exits with it. The worker refuses a stdio
+/// launch without them, so every stdio launcher appends exactly these.
+pub(crate) fn supervised_stdio_args() -> [String; 2] {
+    [
+        "--supervisor-pid".to_owned(),
+        std::process::id().to_string(),
+    ]
 }
 
 /// Runtime-owned inputs for resolving the worker Python executable.
@@ -82,29 +93,68 @@ impl PythonRuntime {
             return path.clone();
         }
 
-        if let Some(dir) = self.venv_dir.as_deref()
-            && let Some(candidate) = first_existing_python(venv_python_candidates(dir))
+        if let Some(candidate) = self
+            .venv_dir
+            .as_deref()
+            .into_iter()
+            .flat_map(venv_python_candidates)
+            .find(|candidate| candidate.is_file())
         {
-            return candidate.to_string_lossy().to_string();
+            return candidate.to_string_lossy().into_owned();
         }
 
-        if let Some(path) = discover_sibling_python(self.current_exe.as_deref()) {
-            return path;
-        }
-        if let Some(path) = discover_venv_from_binary(self.current_exe.as_deref()) {
-            return path;
-        }
-
-        default_python_command().to_string()
+        WorkerImportSearch::from_binary(self.current_exe.as_deref())
+            .resolve()
+            .map_or_else(
+                || default_python_command().to_owned(),
+                |path| path.to_string_lossy().into_owned(),
+            )
     }
 }
 
-fn venv_python_candidates(venv_dir: &Path) -> Vec<PathBuf> {
+fn venv_python_candidates(venv_dir: &Path) -> impl Iterator<Item = PathBuf> + use<> {
     let bin = venv_dir.join(if cfg!(windows) { "Scripts" } else { "bin" });
+    python_candidates(bin)
+}
+
+fn python_candidates(bin: PathBuf) -> impl Iterator<Item = PathBuf> {
     sibling_python_names()
         .iter()
-        .map(|name| bin.join(name))
-        .collect()
+        .map(move |name| bin.join(name))
+}
+
+/// One ordered search for an interpreter which imports the isolated worker.
+/// A path can be both beside the server and inside an ancestor's .venv.
+struct WorkerImportSearch<'a> {
+    bin: Option<&'a Path>,
+}
+
+impl<'a> WorkerImportSearch<'a> {
+    fn from_binary(executable: Option<&'a Path>) -> Self {
+        Self {
+            bin: executable.and_then(Path::parent),
+        }
+    }
+
+    fn resolve(self) -> Option<PathBuf> {
+        self.find_with(|candidate| candidate.is_file() && python_has_batchalign(candidate))
+    }
+
+    fn find_with(self, mut admits_worker: impl FnMut(&Path) -> bool) -> Option<PathBuf> {
+        let adjacent = self
+            .bin
+            .into_iter()
+            .flat_map(|bin| python_candidates(bin.to_owned()));
+        let ancestor_venvs = self
+            .bin
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .flat_map(|dir| venv_python_candidates(&dir.join(".venv")));
+        let mut inspected = HashSet::new();
+        adjacent
+            .chain(ancestor_venvs)
+            .find(|candidate| inspected.insert(candidate.clone()) && admits_worker(candidate))
+    }
 }
 
 /// Check whether a Python executable can import `batchalign.worker`.
@@ -117,11 +167,7 @@ fn python_has_batchalign(python: &Path) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn first_existing_python(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    candidates.into_iter().find(|candidate| candidate.is_file())
-}
-
-fn sibling_python_names() -> &'static [&'static str] {
+const fn sibling_python_names() -> &'static [&'static str] {
     if cfg!(windows) {
         &["python.exe"]
     } else {
@@ -129,7 +175,7 @@ fn sibling_python_names() -> &'static [&'static str] {
     }
 }
 
-fn default_python_command() -> &'static str {
+const fn default_python_command() -> &'static str {
     if cfg!(windows) {
         "python"
     } else {
@@ -137,55 +183,21 @@ fn default_python_command() -> &'static str {
     }
 }
 
-/// Check for a sibling Python in the same directory as the running binary.
-///
-/// When the binary is installed into a venv via `pip install` (e.g.
-/// `.venv/bin/batchalign3`), the venv's Python sits right next to it at
-/// `.venv/bin/python3.14` (or another preferred sibling name). This handles
-/// the common case where `VIRTUAL_ENV`
-/// is not set (venv not activated).
-fn discover_sibling_python(current_exe: Option<&Path>) -> Option<String> {
-    let exe = current_exe?;
-    let bin_dir = exe.parent()?;
-    for name in sibling_python_names() {
-        let candidate = bin_dir.join(name);
-        if candidate.is_file() && python_has_batchalign(&candidate) {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
-}
-
-/// Walk up from the running binary looking for a `.venv` that has batchalign.
-///
-/// The binary typically lives at `batchalign3/target/{profile}/batchalign3`,
-/// and the project venv is at `batchalign3/.venv/`. Walking up ancestors of the
-/// binary will find it.
-fn discover_venv_from_binary(current_exe: Option<&Path>) -> Option<String> {
-    let exe = current_exe?;
-    let mut dir = exe.parent();
-
-    while let Some(d) = dir {
-        for candidate in venv_python_candidates(&d.join(".venv")) {
-            if candidate.is_file() && python_has_batchalign(&candidate) {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-        dir = d.parent();
-    }
-    None
-}
-
 /// Resolve Python executable for worker subprocesses.
+#[must_use]
 pub fn resolve_python_executable() -> String {
     PythonRuntime::from_env().resolve_executable()
 }
 
 #[cfg(test)]
 mod tests {
-    /// The real mechanism, on a real interpreter: a module sitting in the
-    /// working directory is importable by plain `python -c` and not by the
-    /// isolated command every worker is started with.
+    /// Guards: The worker command uses the packaged entry point and excludes the
+    /// current directory from Python's import path.
+    /// Kind: contract
+    /// Not a type: The host Python interpreter decides whether its actual
+    /// import search path includes the process working directory.
+    /// State: One real interpreter and a temporary import marker with a positive control.
+    /// Concurrency: Commands run in their own directories without altering the parent.
     #[test]
     fn isolated_python_does_not_import_from_the_working_directory() {
         let cwd = tempfile::tempdir().expect("tmp");
@@ -205,10 +217,6 @@ mod tests {
             "control: plain python -c imports from the working directory"
         );
         assert!(!imports(isolated_python("python3")));
-    }
-
-    #[test]
-    fn a_worker_command_is_isolated_and_runs_the_worker_entry() {
         let cmd = worker_command("python3");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(
@@ -219,14 +227,15 @@ mod tests {
 
     use super::*;
 
+    /// Guards: Explicit Python overrides a present active venv; absent inputs
+    /// use the platform command.
+    /// Kind: policy
+    /// Not a type: A valid interpreter path from each source still leaves
+    /// precedence and fallback spelling to the runtime resolution policy.
+    /// State: Only active-venv file existence is observed in an owned directory.
+    /// Concurrency: No environment variables or interpreter installations change.
     #[test]
-    fn python_runtime_explicit_wins() {
-        let got = PythonRuntime::from_sources(Some("/x/python"), None, None).resolve_executable();
-        assert_eq!(got, "/x/python");
-    }
-
-    #[test]
-    fn python_runtime_venv_used_when_present() {
+    fn python_resolution_prefers_explicit_then_active_venv_then_baseline() {
         let tmp = tempfile::tempdir().expect("tmp");
         let sub = if cfg!(windows) {
             tmp.path().join("Scripts")
@@ -241,17 +250,51 @@ mod tests {
         };
         std::fs::write(&py, b"").expect("touch");
 
-        let got = PythonRuntime::from_sources(None, Some(tmp.path()), None).resolve_executable();
-        assert_eq!(got, py.to_string_lossy().to_string());
+        let from_sources = |explicit| {
+            PythonRuntime::from_sources(explicit, Some(tmp.path()), None).resolve_executable()
+        };
+        assert_eq!(from_sources(Some("  /x/python  ")), "/x/python");
+        assert_eq!(from_sources(Some("  ")), py.to_string_lossy());
+        let fallback = PythonRuntime::from_sources(None, None, None).resolve_executable();
+        assert_eq!(
+            fallback,
+            if cfg!(windows) {
+                "python"
+            } else {
+                "python3.14"
+            }
+        );
     }
 
+    /// Guards: Overlapping discovery paths attempt each interpreter once.
+    /// Kind: policy
+    /// Not a type: An executable can occur in two directory roles, and the
+    /// search order controls which admission attempt runs and whether it repeats.
+    /// State: Logical paths and a probe recorder, with no interpreter launched.
+    /// Concurrency: The recorder and search are owned by this case.
     #[test]
-    fn python_runtime_fallback_uses_supported_baseline() {
-        let got = PythonRuntime::from_sources(None, None, None).resolve_executable();
-        if cfg!(windows) {
-            assert_eq!(got, "python");
-        } else {
-            assert_eq!(got, "python3.14");
-        }
+    fn overlapping_python_discovery_probes_each_interpreter_once() {
+        let project = Path::new("project");
+        let venv = project.join(".venv");
+        let preferred = venv_python_candidates(&venv)
+            .next()
+            .expect("platform Python");
+        let executable = preferred.with_file_name("batchalign3");
+        let mut observations = Vec::new();
+        assert_eq!(
+            WorkerImportSearch::from_binary(Some(&executable)).find_with(|candidate| {
+                observations.push(candidate.to_owned());
+                false
+            }),
+            None
+        );
+        assert_eq!(observations.first(), Some(&preferred));
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|path| *path == &preferred)
+                .count(),
+            1
+        );
     }
 }

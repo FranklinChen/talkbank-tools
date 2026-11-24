@@ -192,24 +192,22 @@ pub(crate) mod tasks {
     use crate::chat_ops::CacheTaskName;
 
     /// Derived FA timings, namespaced by the reported FA engine.
-    pub(crate) const FORCED_ALIGNMENT: CacheTask<crate::engine_reports::FaCacheNamespace> =
+    pub const FORCED_ALIGNMENT: CacheTask<crate::engine_reports::FaCacheNamespace> =
         CacheTask::new(CacheTaskName::ForcedAlignment);
     /// Immutable FA worker responses, namespaced by the reported FA engine.
-    pub(crate) const FORCED_ALIGNMENT_RAW_EVIDENCE: CacheTask<
-        crate::engine_reports::FaCacheNamespace,
-    > = CacheTask::new(CacheTaskName::ForcedAlignmentRawEvidence);
+    pub const FORCED_ALIGNMENT_RAW_EVIDENCE: CacheTask<crate::engine_reports::FaCacheNamespace> =
+        CacheTask::new(CacheTaskName::ForcedAlignmentRawEvidence);
     /// Normalized UTR ASR responses, namespaced by the UTR engine.
-    pub(crate) const UTR_ASR: CacheTask<UtrAsrCacheNamespace> =
-        CacheTask::new(CacheTaskName::UtrAsr);
+    pub const UTR_ASR: CacheTask<UtrAsrCacheNamespace> = CacheTask::new(CacheTaskName::UtrAsr);
     /// Raw Rev.AI transcripts, namespaced by the provider revision.
-    pub(crate) const REV_ASR_EVIDENCE: CacheTask<crate::revai::RevAsrModelRevision> =
+    pub const REV_ASR_EVIDENCE: CacheTask<crate::revai::RevAsrModelRevision> =
         CacheTask::new(CacheTaskName::RevAsrEvidence);
     /// Raw speaker evidence, namespaced by the speaker model revision.
-    pub(crate) const SPEAKER_DIARIZATION_RAW_EVIDENCE: CacheTask<
+    pub const SPEAKER_DIARIZATION_RAW_EVIDENCE: CacheTask<
         crate::transcribe::SpeakerEvidenceModelRevision,
     > = CacheTask::new(CacheTaskName::SpeakerDiarizationRawEvidence);
     /// Derived speaker segments, namespaced by the normalization revision.
-    pub(crate) const SPEAKER_DIARIZATION_SEGMENTS: CacheTask<
+    pub const SPEAKER_DIARIZATION_SEGMENTS: CacheTask<
         crate::transcribe::SpeakerNormalizationRevision,
     > = CacheTask::new(CacheTaskName::SpeakerDiarizationSegments);
 }
@@ -327,7 +325,7 @@ impl BuildOwnedNamespace {
 
     /// A namespace derived when it is needed, from literals and compiled-in
     /// files.
-    pub(crate) fn derived(bytes: String) -> Self {
+    pub(crate) const fn derived(bytes: String) -> Self {
         Self(std::borrow::Cow::Owned(bytes))
     }
 
@@ -393,6 +391,7 @@ impl UtteranceCache {
     /// benefit (e.g., text NLP tasks where re-inference with warm workers
     /// is faster than SQLite lookups on a large cache). Puts are silently
     /// discarded; gets always return `None`.
+    #[must_use]
     pub fn noop() -> Self {
         Self {
             backend: Box::new(noop::NoopBackend),
@@ -401,6 +400,7 @@ impl UtteranceCache {
     }
 
     /// Create a cache from an existing backend (for testing or custom backends).
+    #[must_use]
     pub fn from_backend(backend: Box<dyn CacheBackend>) -> Self {
         Self {
             backend,
@@ -408,7 +408,7 @@ impl UtteranceCache {
         }
     }
 
-    pub(super) fn instance_id(&self) -> CacheInstanceId {
+    pub(super) const fn instance_id(&self) -> CacheInstanceId {
         self.instance_id
     }
 
@@ -538,6 +538,11 @@ mod typed_cache_tests {
     /// the namespace names the engine the account chose, so an account that
     /// moves from `16k_yue` to `16k_zh_en_2.0` re-recognizes its recordings
     /// rather than reusing the general engine's words.
+    /// Guards: A Tencent engine change leaves old engine rows inaccessible to the current producer.
+    /// Kind: contract
+    /// Not a type: Historical namespace strings and their collision behavior depend on persisted storage keys.
+    /// State: Private SQLite fixture holds old engine entries and checks current misses.
+    /// Concurrency: Private temporary directory and awaited writes.
     #[tokio::test]
     async fn a_tencent_engine_change_does_not_reuse_the_old_engines_rows() {
         use crate::model_manifest::{TencentEngine, TencentEngineSetting};
@@ -590,6 +595,11 @@ mod typed_cache_tests {
     /// for another language would have replayed rows decoded the old way.
     /// Every Whisper namespace now carries its language's decode decision,
     /// and a row written under any other producer is not read.
+    /// Guards: Whisper namespaces preserve Cantonese automatic decoding and forced English while refusing superseded keys.
+    /// Kind: wire
+    /// Not a type: Legacy persisted strings can overlap even though current decode decisions are closed variants.
+    /// State: Private SQLite writes the previous namespaces and verifies lookup under both current decoding plans.
+    /// Concurrency: Private temporary directory and serial awaited pairs.
     #[tokio::test]
     async fn whisper_namespaces_carry_their_languages_decode_decision() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -644,6 +654,11 @@ mod typed_cache_tests {
 
     /// Each namespace names both its producer algorithm and pinned models.
     /// Stock Whisper word evidence must not replay the older segment producer.
+    /// Guards: Every UTR ASR branch emits its own pinned producer namespace.
+    /// Kind: wire
+    /// Not a type: The namespace spelling and engine manifest policy exist as serialized string values.
+    /// State: Uses embedded producer manifest and pure namespace projection.
+    /// Concurrency: none
     #[test]
     fn utr_asr_namespaces_name_the_engine_and_its_pinned_models() {
         for engine in [UtrEngine::RevAi, UtrEngine::Whisper, UtrEngine::HkTencent] {
@@ -674,6 +689,11 @@ mod typed_cache_tests {
 
     /// The typed read finds what the typed write stored, and a different
     /// namespace of the same type is a miss.
+    /// Guards: Whisper producer revisions and the Rev namespace cannot read another producer's rows.
+    /// Kind: contract
+    /// Not a type: Persisted namespace values can differ even when sharing a structured cache address.
+    /// State: Private SQLite holds old producer revisions and one current row.
+    /// Concurrency: Private temporary directory and awaited reads.
     #[tokio::test]
     async fn a_row_is_read_back_only_under_its_namespace() {
         let tempdir = tempfile::tempdir().expect("tempdir");

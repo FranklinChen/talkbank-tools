@@ -73,7 +73,8 @@ pub struct UtteranceSegmentation {
 
 impl UtteranceSegmentation {
     /// A segmentation whose segmenter stated no terminator.
-    pub fn unstated(assignments: Vec<usize>) -> Self {
+    #[must_use]
+    pub const fn unstated(assignments: Vec<usize>) -> Self {
         Self {
             assignments,
             ends: SegmentEnds::Unstated,
@@ -114,18 +115,21 @@ impl UtteranceSegmentation {
     }
 
     /// Group id per request word.
+    #[must_use]
     pub fn assignments(&self) -> &[usize] {
         &self.assignments
     }
 
     /// The group ids alone, for a receipt that records what a worker
     /// declared; the ends are dropped with the value.
+    #[must_use]
     pub fn into_assignments(self) -> Vec<usize> {
         self.assignments
     }
 
     /// How the segments end.
-    pub fn ends(&self) -> &SegmentEnds {
+    #[must_use]
+    pub const fn ends(&self) -> &SegmentEnds {
         &self.ends
     }
 
@@ -135,6 +139,7 @@ impl UtteranceSegmentation {
     /// `None` also for a cut the segmentation does not have, which a caller
     /// iterating its own groups never asks for; the pre-CHAT split indexes
     /// cuts by the group changes of these same assignments.
+    #[must_use]
     pub fn cut_end(&self, cut: usize) -> Option<BoundaryTerminator> {
         match &self.ends {
             SegmentEnds::Predicted { cuts, .. } => cuts.get(cut).copied(),
@@ -143,7 +148,8 @@ impl UtteranceSegmentation {
     }
 
     /// The terminator predicted after the last word, if any.
-    pub fn tail_end(&self) -> Option<BoundaryTerminator> {
+    #[must_use]
+    pub const fn tail_end(&self) -> Option<BoundaryTerminator> {
         match &self.ends {
             SegmentEnds::Predicted { tail, .. } => *tail,
             SegmentEnds::Unstated => None,

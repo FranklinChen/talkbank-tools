@@ -20,7 +20,7 @@ const PHASE_LABELS: &[&str] = &["R", "T", "A", "M", "F"];
 /// Map a `FileProgressStage` to a 0-4 phase index, matching the React
 /// `PipelineStageBar` phase grouping. Returns `None` for `Processing`
 /// (generic fallback) and `RetryScheduled`.
-fn phase_index(stage: FileProgressStage) -> Option<usize> {
+const fn phase_index(stage: FileProgressStage) -> Option<usize> {
     match stage {
         // Phase 0: Read
         FileProgressStage::Reading

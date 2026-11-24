@@ -31,7 +31,7 @@
 //! read path stays cheap (uncontended `RwLock::read`), and the loader
 //! runs OUTSIDE the lock, so two cold concurrent callers may both load
 //! and the loser's copy is dropped (one wasted load, same trade the
-//! previous OnceLock design made).
+//! previous `OnceLock` design made).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};

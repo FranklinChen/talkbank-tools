@@ -31,11 +31,13 @@ pub struct MachineTime(Timestamp);
 
 impl MachineTime {
     /// The current instant, to the millisecond.
+    #[must_use]
     pub fn now() -> Self {
         Self::from_timestamp(Timestamp::now())
     }
 
     /// `timestamp` truncated to the millisecond, the precision written.
+    #[must_use]
     pub fn from_timestamp(timestamp: Timestamp) -> Self {
         // `constant` panics only out of range, and the whole milliseconds of
         // a valid instant are in range.
@@ -67,6 +69,7 @@ impl MachineTime {
     }
 
     /// `duration` later, saturating at the last representable instant.
+    #[must_use]
     pub fn plus(self, duration: std::time::Duration) -> Self {
         Self::from_saturated_millis(
             self.0
@@ -76,6 +79,7 @@ impl MachineTime {
     }
 
     /// `duration` earlier, saturating at the first representable instant.
+    #[must_use]
     pub fn minus(self, duration: std::time::Duration) -> Self {
         Self::from_saturated_millis(
             self.0
@@ -87,6 +91,7 @@ impl MachineTime {
     /// The time from `earlier` to `self`, or zero when `earlier` is later
     /// (as `std::time::Instant::saturating_duration_since`): how long has
     /// passed, or how long is left to wait.
+    #[must_use]
     pub fn saturating_duration_since(self, earlier: Self) -> std::time::Duration {
         if self > earlier {
             self.0.duration_since(earlier.0).unsigned_abs()
@@ -108,12 +113,14 @@ impl MachineTime {
     }
 
     /// The instant.
-    pub fn timestamp(self) -> Timestamp {
+    #[must_use]
+    pub const fn timestamp(self) -> Timestamp {
         self.0
     }
 
     /// For people: the viewer's local time with its zone abbreviation,
     /// `2026-09-28 12:00:00 EDT`.
+    #[must_use]
     pub fn local_display(self) -> String {
         self.0
             .to_zoned_datetime(TimeZone::system())

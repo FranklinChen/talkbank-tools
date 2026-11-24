@@ -21,8 +21,8 @@
 //! This line said `batch_infer(task="morphosyntax")` until 2026-08-13, which
 //! had stopped being true: the production path moved to `execute_v2` (see
 //! `worker.rs`, "Send batch items to workers for NLP inference via batched
-//! `execute_v2`"), and `batch_infer` survives only for the PyO3 bridge, the
-//! worker tests and `doctor`. The stale line matters because it is what a
+//! `execute_v2`"), and `batch_infer` survives only for the `PyO3` bridge and
+//! the worker tests (`doctor` moved to `execute_v2` on 2026-11-18). The stale line matters because it is what a
 //! reader consults to decide which seam a change belongs at.
 //!
 //! # Invariants for contributors
@@ -60,7 +60,7 @@ use tracing::{info, warn};
 
 pub(crate) use batch::dispatch_secondary_l2;
 pub use capability::{AnalysisLanguageRequirement, AnalysisUnavailable, AnalysisUnavailableReason};
-pub(crate) use worker::infer_batch;
+pub(crate) use worker::{PreparedMorphosyntaxRequest, admit_morphosyntax_result, infer_batch};
 
 // ---------------------------------------------------------------------------
 // Per-file morphosyntax processing
@@ -569,6 +569,11 @@ mod tests {
         )
     }
 
+    /// Guards: Unchanged input with absent or partial prior analysis still owes fresh inference.
+    /// Kind: transcript
+    /// Not a type: The actual prior CHAT may contain none or only one of the needed analysis tiers.
+    /// State: Two literal prior tier populations and current text exercise real incremental selection.
+    /// Concurrency: Each comparison starts from independent parsed documents.
     #[test]
     fn incremental_unchanged_missing_or_partial_analysis_remains_owed() {
         for tiers in [String::new(), INCREMENTAL_MOR.to_owned()] {
@@ -583,6 +588,11 @@ mod tests {
         }
     }
 
+    /// Guards: Complete prior morphology and grammar discharge the unchanged utterance's analysis obligation.
+    /// Kind: transcript
+    /// Not a type: Pair admission depends on actual prior tier text and current source correspondence.
+    /// State: One complete paired prior and unchanged current CHAT go through the incremental producer.
+    /// Concurrency: One privately parsed input pair.
     #[test]
     fn incremental_complete_pair_alone_discharge_reuse_obligation() {
         let before =
@@ -593,6 +603,11 @@ mod tests {
         assert_eq!(selected, before);
     }
 
+    /// Guards: Mixed incremental reuse preserves contributor comments and schedules the utterance missing analysis.
+    /// Kind: transcript
+    /// Not a type: A real document can contain both reusable and unprocessed utterances and interleaved authored material.
+    /// State: Two synthetic CHAT revisions and a checked exact output snapshot exercise both cases together.
+    /// Concurrency: Scoped pure transformation over one revision pair.
     #[test]
     fn incremental_mixed_reuse_keeps_missing_utterance_and_contributor_comment() {
         let before = INCREMENTAL_MAIN.replace("@End", &format!(
@@ -620,6 +635,11 @@ mod tests {
         ");
     }
 
+    /// Guards: Changed words make even a fully analyzed prior utterance ineligible for reuse.
+    /// Kind: transcript
+    /// Not a type: Valid before and after lines can differ in words while retaining the same position.
+    /// State: A complete prior annotation pair and one changed source line.
+    /// Concurrency: Independent parsed before and after models.
     #[test]
     fn incremental_changed_words_cannot_reuse_complete_prior_pair() {
         let before =
@@ -631,6 +651,11 @@ mod tests {
         assert_eq!(selected, after);
     }
 
+    /// Guards: Morphology context changes invalidate reuse even when normalized words match.
+    /// Kind: transcript
+    /// Not a type: Actual terminator, code-switch, hint, pause and header changes may disappear under lexical normalization.
+    /// State: Eight literal edits are compared after building the same prior analysis.
+    /// Concurrency: Each row runs an independent parsed comparison.
     #[test]
     fn incremental_same_cleaned_words_do_not_certify_morphology_context() {
         let main = INCREMENTAL_MAIN
@@ -666,6 +691,11 @@ mod tests {
         }
     }
 
+    /// Guards: Editing the selected replacement's POS hints requires fresh analysis.
+    /// Kind: transcript
+    /// Not a type: Actual replacement spelling and analyzer hints can differ independently of normalized input words.
+    /// State: Three before and after replacement pairs with a complete prior tier pair.
+    /// Concurrency: Pure per-case incremental selection.
     #[test]
     fn incremental_selected_replacement_hints_require_fresh_analysis() {
         for (before_main, after_main) in [
@@ -684,6 +714,11 @@ mod tests {
         }
     }
 
+    /// Guards: Speaker-only and timing-only edits preserve compatible prior morphology and grammar.
+    /// Kind: transcript
+    /// Not a type: Real edits can change speaker metadata or timing without affecting analyzer context.
+    /// State: Two edited CHAT lines share the same kind of complete prior analysis.
+    /// Concurrency: Each comparison owns its parsed models.
     #[test]
     fn incremental_context_compatibility_preserves_speaker_and_timing_fast_paths() {
         let main = INCREMENTAL_MAIN
@@ -706,6 +741,11 @@ mod tests {
         }
     }
 
+    /// Guards: The language context admits the English CHAT declaration used in morphology.
+    /// Kind: transcript
+    /// Not a type: Actual CHAT header parsing and its declaration, independent of the resulting typed primary, can fail.
+    /// State: A literal English CHAT fixture enters the actual parser and language admission.
+    /// Concurrency: Pure parsing and language selection.
     #[test]
     fn test_declared_languages_via_chat_ops() {
         let parser = TreeSitterParser::new().unwrap();
@@ -717,6 +757,11 @@ mod tests {
         assert_eq!(langs.as_ref().primary().as_str(), "eng");
     }
 
+    /// Guards: The staged multilingual policy changes whether a switched utterance enters analysis.
+    /// Kind: policy
+    /// Not a type: The same valid bilingual document can be filtered differently under the two supported policies.
+    /// State: A parsed code-switched CHAT fixture with admitted language context serves both controls.
+    /// Concurrency: Only immutable inputs are shared between evaluations.
     #[test]
     fn test_collect_payloads_skip_non_primary_skips_non_primary() {
         let parser = TreeSitterParser::new().unwrap();
@@ -754,6 +799,11 @@ mod tests {
         );
     }
 
+    /// Guards: Process-all collects both utterances in the available bilingual input.
+    /// Kind: policy
+    /// Not a type: A valid mixed-language fixture can still lose a whole payload in policy projection.
+    /// State: One parsed bilingual source and its actual admitted declared languages.
+    /// Concurrency: Pure payload collection from immutable inputs.
     #[test]
     fn test_collect_payloads_process_all_includes_all() {
         let parser = TreeSitterParser::new().unwrap();
@@ -774,12 +824,19 @@ mod tests {
         assert_eq!(items.len(), 2, "ProcessAll should include all utterances");
     }
 
+    /// Guards: A dummy declaration can be recognized without authorizing the invalid CHAT to enter analysis.
+    /// Kind: transcript
+    /// Not a type: The legacy syntax can parse leniently and still fail real source admission for its exact bytes.
+    /// State: Dummy and ordinary transcript fixtures exercise detection, collection and actual source admission.
+    /// Concurrency: A local parser and immutable registry double supply all observations.
     #[test]
     fn legacy_dummy_detection_does_not_establish_input_admission() {
         let parser = TreeSitterParser::new().unwrap();
         let chat = include_str!("../../../../test-fixtures/eng_hello_world_dummy.cha");
         let (chat_file, _) = parse_lenient(&parser, chat);
         assert!(is_dummy(&chat_file), "@Options: dummy should be detected");
+        let plain = include_str!("../../../../test-fixtures/eng_hello_world.cha");
+        assert!(!is_dummy(&parse_lenient(&parser, plain).0));
 
         // Legacy detection and payload collection do not certify valid input.
         let primary = LanguageCode::new("eng").expect("valid test language code");
@@ -801,13 +858,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn test_non_dummy_file_not_detected() {
-        let parser = TreeSitterParser::new().unwrap();
-        let chat = include_str!("../../../../test-fixtures/eng_hello_world.cha");
-        let (chat_file, _) = parse_lenient(&parser, chat);
-        assert!(!is_dummy(&chat_file));
     }
 }

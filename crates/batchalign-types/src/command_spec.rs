@@ -24,6 +24,7 @@ impl LoadingOverhead {
     /// Construct without validation. Use only with literal values in
     /// `const` context. Runtime construction should validate via a
     /// (yet-to-be-added) `try_new` constructor.
+    #[must_use]
     pub const fn new_unchecked(value: f64) -> Self {
         Self(value)
     }
@@ -52,7 +53,8 @@ pub enum GilProcessNeed {
 
 impl GilProcessNeed {
     /// Whether the command needs a process worker; the same in every runtime.
-    pub fn needs_process(self) -> bool {
+    #[must_use]
+    pub const fn needs_process(self) -> bool {
         match self {
             Self::Always => true,
             Self::Never { .. } => false,
@@ -73,12 +75,12 @@ pub struct CommandSpec {
     /// Worker infer tasks the command's recipe dispatches to.
     /// Slice rather than scalar for composite commands (benchmark);
     /// today only benchmark would carry a multi-task list, but
-    /// every InferTask::Eval-class addition would land here.
+    /// every `InferTask::Eval-class` addition would land here.
     pub tasks: &'static [InferTask],
     /// Literal cmd2task TOML label. Verbatim string emitted to
     /// `runtime_constants.toml::cmd2task` for Python's import-time
     /// dict. Most commands' label equals their first `tasks` element's
-    /// snake_case name; `utseg` (label `"utterance"`) and `benchmark`
+    /// `snake_case` name; `utseg` (label `"utterance"`) and `benchmark`
     /// (label `"asr,eval"`) diverge: see the table in the Phase β
     /// plan, Step 4.1.
     pub task_label: &'static str,
@@ -96,9 +98,9 @@ pub struct CommandSpec {
 /// memory budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonRuntime {
-    /// GIL-enabled CPython: thread workers cannot share a model.
+    /// GIL-enabled `CPython`: thread workers cannot share a model.
     Gil,
-    /// Free-threaded CPython (`PYTHON_GIL=0`): a command that does not need
+    /// Free-threaded `CPython` (`PYTHON_GIL=0`): a command that does not need
     /// a process may share one process's models on threads.
     FreeThreaded,
 }
@@ -106,7 +108,8 @@ pub enum PythonRuntime {
 impl CommandSpec {
     /// Pick the base budget appropriate for the runtime: the one figure
     /// every budget table is generated from.
-    pub fn base_mb_for_runtime(&self, runtime: PythonRuntime) -> MemoryMb {
+    #[must_use]
+    pub const fn base_mb_for_runtime(&self, runtime: PythonRuntime) -> MemoryMb {
         match (self.gil_process_need, runtime) {
             (GilProcessNeed::Never { threaded_base_mb }, PythonRuntime::FreeThreaded) => {
                 threaded_base_mb
@@ -120,6 +123,7 @@ impl CommandSpec {
     /// The command's execution reservation in `runtime`: its base budget
     /// with the model-loading spike. The one computation the execution plan
     /// and the host planner both read.
+    #[must_use]
     pub fn execution_budget_mb(&self, runtime: PythonRuntime) -> MemoryMb {
         MemoryMb((self.base_mb_for_runtime(runtime).0 as f64 * self.loading_overhead.0) as u64)
     }
@@ -316,6 +320,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
 /// Lookup helper. Panics if the registry is missing an entry
 /// the exhaustive-coverage test catches that at test time.
 #[allow(clippy::expect_used)]
+#[must_use]
 pub fn command_spec_for(name: ReleasedCommand) -> &'static CommandSpec {
     COMMAND_SPECS
         .iter()
@@ -335,7 +340,7 @@ mod tests {
     use crate::worker_profile::WorkerProfile;
 
     /// Catalog invariant: every released command has an entry.
-    /// Adding a new ReleasedCommand variant fails here.
+    /// Adding a new `ReleasedCommand` variant fails here.
     #[test]
     fn every_released_command_has_a_spec() {
         for command in &ReleasedCommand::ALL {

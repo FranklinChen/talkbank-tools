@@ -363,12 +363,14 @@ impl WorkerHandle {
     }
 
     /// The PID of the worker process.
-    pub fn pid(&self) -> WorkerPid {
+    pub const fn pid(&self) -> WorkerPid {
         self.pid
     }
 
     /// Content-addressed Python runtime evidence required by the ready schema.
-    pub fn runtime_identity(&self) -> &crate::worker::runtime_identity::WorkerRuntimeIdentity {
+    pub const fn runtime_identity(
+        &self,
+    ) -> &crate::worker::runtime_identity::WorkerRuntimeIdentity {
         &self.runtime
     }
 
@@ -383,7 +385,7 @@ impl WorkerHandle {
     }
 
     /// The transport this worker uses.
-    pub fn transport(&self) -> &'static str {
+    pub const fn transport(&self) -> &'static str {
         "stdio"
     }
 
@@ -393,7 +395,7 @@ impl WorkerHandle {
     }
 
     /// Reference to this worker's configuration.
-    pub(crate) fn config(&self) -> &super::config::WorkerConfig {
+    pub(crate) const fn config(&self) -> &super::config::WorkerConfig {
         &self.config
     }
 
@@ -406,6 +408,10 @@ impl WorkerHandle {
         // Use ManuallyDrop to prevent Drop::drop from killing the child.
         let md = std::mem::ManuallyDrop::new(self);
 
+        // Reason: moving fields out of a type with `Drop` needs either this
+        // or an `Option` that every accessor would have to re-check; the
+        // handle's kill-on-drop must not run once the caller owns the parts.
+        #[allow(unsafe_code)]
         // SAFETY: We're moving each field out of a ManuallyDrop wrapper.
         // ManuallyDrop prevents Drop from running. Each field is moved
         // exactly once, so no double-free can occur.

@@ -1,7 +1,7 @@
 # Doctor
 
 **Status:** Current
-**Last updated:** 2026-10-01 14:58 EDT
+**Last updated:** 2026-11-18 10:13 EST
 
 `batchalign3 doctor` is the diagnostic surface for a batchalign3
 deployment. It runs in two modes:
@@ -87,11 +87,15 @@ Valid knob names:
 batchalign3 doctor
 ```
 
-Default mode. Spawns a test worker, runs the morphotag pipeline
-end-to-end, validates every word has the expected fields, and
-reports timing per check. Catches machine-specific issues (stale
-Stanza models, missing processors, MWT quirks) before they surface
-during real jobs.
+Default mode. Starts the same worker a morphotag job would start,
+sends it a short test transcript the way a job sends one, reads the
+answer the way a job reads it, and reports timing per check. Catches
+machine-specific issues (stale Stanza models, missing processors, MWT
+quirks) before they surface during real jobs.
+
+Because it loads a model the way a job does, doctor waits for free
+memory on a busy machine, as a job would, rather than starting a
+worker regardless.
 
 Slower than `--check` because it loads ML models. Use it after
 software updates, model refreshes, or when a new fleet host comes

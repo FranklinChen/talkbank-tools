@@ -58,7 +58,7 @@
 //!   `classify_not_applicable`.
 //!
 //! Every public item in those submodules is re-exported below so existing
-//! consumers (`batchalign`, `batchalign-chat-ops`, the CLI, PyO3) keep
+//! consumers (`batchalign`, `batchalign-chat-ops`, the CLI, `PyO3`) keep
 //! their `talkbank_transform::morphosyntax::<name>` import paths working.
 
 pub use crate::inject::{MisalignmentClass, MisalignmentDiagnostic};

@@ -2,7 +2,7 @@
 //!
 //! `tokio::task::spawn_blocking` runs its closure on a pool thread with no
 //! span, so anything logged there loses the file and job the calling task was
-//! working on (see `runner::current_file_span`). Rev.AI's language-detection
+//! working on (see `spawn_supervised_file_task`). Rev.AI's language-detection
 //! warnings and the native Whisper engine's messages were written that way,
 //! naming no file in a batch of hundreds. [`spawn_in_span`] is the one route to
 //! a blocking thread: it carries the current span across. The workspace's

@@ -46,6 +46,88 @@ A loopback probe contract cancels pending health I/O, observes EOF and starts
 a fresh probe. A foreign capability reply retires the fresh socket and preserves
 the registry row.
 
+## Shared echo worker fixtures
+
+An integration binary has one slot for the profile echo worker and one for the
+morphosyntax bootstrap echo worker. The closed fixture choice selects both the
+slot and its launch. Tests cannot supply a second launch configuration, change
+the transport or attach another host's load preparation. A Stanza catalog probe
+owns a separate worker and shuts it down after capturing its report.
+
+On first use, the fixture admits the worker interpreter and hands initialization
+to the shared reactor. The slot serializes startup until the worker is ready.
+The shared reactor owns publication, so a test that stops awaiting initialization
+leaves the startup with its existing owner. Later checkouts lease the live
+child and its load preparation together. Only the lease exposes exchanges.
+
+```mermaid
+flowchart TD
+    scenario["Profile or morphosyntax echo scenario"] --> slot{"Scenario's worker slot"}
+    slot -- empty --> admit["Admit the worker interpreter"]
+    admit --> start["Shared reactor owns startup and publication"]
+    start -- ready --> own["Slot holds child and its load preparation"]
+    start -- refused --> slot
+    slot -- already ready --> own
+    own --> lease["Exclusive exchange lease"]
+    lease -- drop lease --> own
+```
+
+The native fixture contract closes one caller reactor and uses its original
+child from another. It observes process identity and the Python health bytes
+for both launch choices. Capability reports and legacy single and batch infer
+payloads retain separate wire contracts. The V2 malformed-task check borrows
+the same admitted load context for all its replies.
+
+## Python worker launch contracts
+
+The bootstrap matrix checks the original argv and environment through the
+parser. It covers the default device policy, explicit force-CPU and MPS
+opt-in. The native launch cases pair the profile, serving mode and device
+selection before spawning the echo worker. A fresh interpreter refuses model
+imports and exercises the actual ready, health and shutdown lines.
+
+The supervisor contract waits for a marker from the entered request handler
+before it kills the supervisor. The test holds the request at that handler
+with an event. The actual pipe reports EOF when the worker exits.
+
+```mermaid
+flowchart TD
+    launch["Spawn supervisor and separate worker group"] --> ready["Match parent announcement with worker ready PID"]
+    ready --> busy["Observe request-handler entry"]
+    busy --> kill["Kill the owning supervisor"]
+    kill --> eof["Observe the last writer close the pipe"]
+```
+
+The registry lock contract opens the independently named Rust lock path to
+check actual kernel exclusion and release. Separate cases observe published
+file modes, the directory descriptor passed to fsync, and the exact Windows
+lock and unlock operations through a platform double.
+
+## Prepared artifact fixtures
+
+The store journey writes PCM and JSON in a single scoped runtime, checks their
+file bytes and descriptors, then observes cleanup. A raw incomplete audio frame
+still exercises the writer's admission boundary. Inline JSON uses the wire
+union's inline variant and needs no artifact store.
+
+The native decode fixture owns a WAV path and one duration measurement from
+that file. Its selection borrows the measured source, keeping the path paired
+with the admitted bounds. The test decodes the original window, replaces the
+file with shorter audio, then observes the decoder's zero-frame refusal for
+the same selection. The constructor establishes the original association.
+The decode observes whatever bytes are present at that path when it runs.
+
+```mermaid
+flowchart TD
+    wav["Write WAV and measure its duration"] --> source["Fixture owns measured recording and path"]
+    source --> window["Admit window from that recording"]
+    window --> decode["Decode window using the paired path"]
+    decode --> pcm["Publish descriptor for observed frames"]
+    pcm --> replace["Replace the WAV at the same path"]
+    replace --> retry["Decode the original selection against changed bytes"]
+    retry --> empty["Report zero frames and leave no artifact"]
+```
+
 ## Response-budget fixtures
 
 Fixed and loading waits have separate private deadline owners. Transport callers
@@ -180,6 +262,57 @@ The memory-tier architecture test scans Rust files in process and parses the
 embedded runtime TOML. It requires no `rg` subprocess or workspace-root search;
 unreadable source files fail the check. This keeps ordinary test and coverage
 environments equivalent without adding a search executable to every runner.
+
+### Media preparation and publication checks
+
+Use real filesystem entries to test name resolution and keep independent
+roots in one owned fixture. A late writer belongs after output verification
+and before publication. A path admitted as absent conveys no promise about
+future writes. For export, keep one regular source, the final destination
+roles and the encoder's source-bound observation together. Decode or inspect
+published bytes independently when asserting actual codec, sample layout or
+audio duration.
+
+Worker intervals remain typed through the turns writer. The retained JSON
+contract checks actual backend strings, track numbering, interval order and
+the exact fields Chatter reads. Corrupt interval bytes belong at worker
+admission.
+
+### Worker process checks
+
+Raw launch errors belong at the actual Python subprocess boundary. Use admitted
+targets for valid fixtures. Use the real subprocess only when the claim needs
+argument bytes, Python import isolation, native supervision, Rust/Python
+framing or process retirement. Routing cases join futures that borrow the pool
+and keep each echo payload with its own route and reply assertion. Retirement
+uses typed worker IDs captured from that pool's structured status. Separate
+tests own a worker only when they must drop, kill or observe the process.
+
+```mermaid
+flowchart TD
+    launch["Carry the admitted interpreter into a private pool"] --> probe["Bind the route and payload in one echo probe"]
+    probe --> join["Join requests while they borrow the pool"]
+    join --> pods["Observe positive worker PIDs in structured status"]
+    pods --> retire["Drop or shut down the owning pool"]
+    retire --> exitCheck["Confirm native process exit"]
+```
+
+The pre-ready failure and mid-request failure contracts start at different
+boundaries. The latter signals its actual child only after the child reads
+the batch frame. Startup serialization has its own check. The wrapper
+records any overlap while a worker owns the startup window and the Python
+startup hook releases that window after publication.
+
+The protocol matrix reads the shared manifest once, selects the decoder from
+a closed schema discriminator, and keeps every decoded execute value with
+its source filename. The separate Rust and Python roundtrip checks still
+exercise each language's serializers against the original JSON.
+
+The opt-in Stanza pool sweep takes `STANZA_PER_KEY` and `STANZA_DISPATCHES`.
+Keep the same dispatch population across sweep points, above the largest
+tested per-key limit. A measurement needs every requested result, and timing
+includes cold startup.
+
 
 ### Media tests run against one pinned ffmpeg
 

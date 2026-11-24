@@ -25,13 +25,13 @@ pub(super) const MAX_READY_STDOUT_PREAMBLE_LINES: usize = 32;
 
 /// Consecutive non-protocol lines a reader tolerates before it stops
 /// trusting the stream.
-pub(crate) const MAX_RESPONSE_STDOUT_NOISE_LINES: usize = 8;
+pub const MAX_RESPONSE_STDOUT_NOISE_LINES: usize = 8;
 
 /// How much of a refused line a log or error message carries.
 const LINE_EXCERPT_CHARS: usize = 200;
 
 /// The start of a line, for a log or an error message.
-pub(crate) fn excerpt(line: &str) -> String {
+pub fn excerpt(line: &str) -> String {
     match line.char_indices().nth(LINE_EXCERPT_CHARS) {
         Some((cut, _)) => format!("{}...", &line[..cut]),
         None => line.to_owned(),
@@ -42,7 +42,7 @@ pub(crate) fn excerpt(line: &str) -> String {
 /// reader (sequential stdio, sequential TCP, shared GPU) applies: a JSON
 /// object is a protocol message, a blank line is nothing, and anything else
 /// (text, a JSON scalar or array) is noise.
-pub(crate) enum WireLine {
+pub enum WireLine {
     /// Whitespace only.
     Blank,
     /// A JSON object: a message the reader decodes, or refuses as a
@@ -75,14 +75,14 @@ impl WireLine {
 
 /// A run of consecutive noise lines on one stream, ended by a message.
 #[derive(Default)]
-pub(crate) struct NoiseRun {
+pub struct NoiseRun {
     consecutive: usize,
 }
 
 /// A stream that reached [`MAX_RESPONSE_STDOUT_NOISE_LINES`] consecutive
 /// noise lines: it is not trusted further.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NoiseLimit {
+pub struct NoiseLimit {
     /// The last noise line, as an [`excerpt`].
     pub(crate) last_line: String,
 }
@@ -99,7 +99,7 @@ impl NoiseLimit {
 
 impl NoiseRun {
     /// A message ends the run.
-    pub(crate) fn message(&mut self) {
+    pub(crate) const fn message(&mut self) {
         self.consecutive = 0;
     }
 
@@ -128,7 +128,7 @@ pub(super) use ready::ReadySignal;
 /// Wire-level request envelope sent to a Python worker, over stdio or TCP.
 #[derive(Debug, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-pub(crate) enum WorkerRequest<'a> {
+pub enum WorkerRequest<'a> {
     Infer { request: &'a InferRequest },
     BatchInfer { request: &'a BatchInferRequest },
     ExecuteV2 { request: &'a ExecuteRequestV2 },
@@ -149,7 +149,7 @@ pub(crate) enum WorkerRequest<'a> {
 /// ids apart from V2 dispatch ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub(crate) struct ControlRequestId(String);
+pub struct ControlRequestId(String);
 
 impl ControlRequestId {
     /// A fresh id, unique within this server process.
@@ -173,13 +173,13 @@ impl std::fmt::Display for ControlRequestId {
 
 /// Request payload for the `capabilities` IPC operation: only its id.
 #[derive(Debug, Serialize)]
-pub(crate) struct CapabilitiesRequest<'a> {
+pub struct CapabilitiesRequest<'a> {
     pub(crate) request_id: &'a ControlRequestId,
 }
 
 /// Request payload for the `ensure_task` IPC operation.
 #[derive(Debug, Serialize)]
-pub(crate) struct EnsureTaskRequest<'a> {
+pub struct EnsureTaskRequest<'a> {
     pub(crate) request_id: &'a ControlRequestId,
     pub(crate) task: InferTask,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,7 +194,7 @@ pub(crate) struct EnsureTaskRequest<'a> {
 /// multiplexed read loop.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
-pub(crate) enum WorkerResponse {
+pub enum WorkerResponse {
     Infer {
         response: InferResponse,
     },
@@ -227,7 +227,7 @@ pub(crate) enum WorkerResponse {
 /// through the methods here, so the same line means the same error on every
 /// transport and for every op.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct ReportedFailure {
+pub struct ReportedFailure {
     /// The worker's own diagnosis.
     #[serde(rename = "error")]
     pub(crate) message: String,
@@ -237,7 +237,7 @@ pub(crate) struct ReportedFailure {
 
 impl ReportedFailure {
     /// The failure as the error of a request the worker had admitted (infer,
-    /// batch_infer, execute_v2, capabilities).
+    /// `batch_infer`, `execute_v2`, capabilities).
     pub(crate) fn into_worker_error(self) -> WorkerError {
         let worker = self.kind.worker_after();
         match self.kind {

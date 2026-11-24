@@ -32,7 +32,7 @@ impl Hash for InvocationIdentity {
 /// The map records invocation ownership. PID deduplication happens only when
 /// projecting cancellation targets, so two users of one process stay distinct.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct JobWorkerTracker {
+pub struct JobWorkerTracker {
     by_job: Arc<DashMap<JobId, Mutex<HashMap<InvocationIdentity, WorkerPid>>>>,
 }
 
@@ -130,7 +130,7 @@ impl Drop for JobRegistration {
 /// registration payload. Keeping this guard owns registration until completion,
 /// cancellation or unwinding, independently of other uses of the same process.
 #[must_use = "guard must be held for the dispatch lifetime"]
-pub(crate) struct TrackerGuard {
+pub struct TrackerGuard {
     _registration: Option<JobRegistration>,
 }
 

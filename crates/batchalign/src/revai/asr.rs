@@ -197,10 +197,10 @@ pub(super) fn classify_language_response(
 
 /// Production Rev.AI boundary carrying all inputs authorized by an evidence
 /// cache miss or explicit refresh.
-pub(crate) struct RevAsrService;
+pub struct RevAsrService;
 
 impl RevAsrService {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self
     }
 }
@@ -224,7 +224,7 @@ impl RevAsrEvidenceInference for RevAsrService {
 /// A timed element whose two times are not an interval (inverted, or past the
 /// admissible range, as an epoch timestamp would be) refuses the response,
 /// naming the element: the policy every ASR route shares.
-pub(crate) fn rev_evidence_to_asr_response(
+pub fn rev_evidence_to_asr_response(
     evidence: &CompletedRevAsrEvidence,
 ) -> Result<AsrResponse, ServerError> {
     let transcript = AdmittedRevTranscript::admit(evidence.transcript_evidence().transcript())?;

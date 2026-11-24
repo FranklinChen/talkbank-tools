@@ -81,7 +81,8 @@ impl ReleasedCommand {
         Self::try_from(value.trim())
     }
 
-    /// Return the canonical snake_case released command name.
+    /// Return the canonical `snake_case` released command name.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Align => "align",
@@ -102,6 +103,7 @@ impl ReleasedCommand {
     }
 
     /// Return the canonical wire/storage spelling.
+    #[must_use]
     pub const fn as_wire_name(self) -> &'static str {
         self.as_str()
     }
@@ -159,12 +161,14 @@ pub struct ChatText<'a>(&'a str);
 
 impl<'a> ChatText<'a> {
     /// Wrap one borrowed CHAT document string.
-    pub fn new(text: &'a str) -> Self {
+    #[must_use]
+    pub const fn new(text: &'a str) -> Self {
         Self(text)
     }
 
     /// Borrow the underlying CHAT string.
-    pub fn as_str(self) -> &'a str {
+    #[must_use]
+    pub const fn as_str(self) -> &'a str {
         self.0
     }
 }
@@ -233,30 +237,37 @@ impl LanguageCode3 {
     // -- Well-known language codes (use these instead of string literals) --
 
     /// English (`"eng"`).
+    #[must_use]
     pub fn eng() -> Self {
         Self("eng".to_owned())
     }
     /// Spanish (`"spa"`).
+    #[must_use]
     pub fn spa() -> Self {
         Self("spa".to_owned())
     }
     /// French (`"fra"`).
+    #[must_use]
     pub fn fra() -> Self {
         Self("fra".to_owned())
     }
     /// Chinese / Mandarin (`"zho"`).
+    #[must_use]
     pub fn zho() -> Self {
         Self("zho".to_owned())
     }
     /// Cantonese (`"yue"`).
+    #[must_use]
     pub fn yue() -> Self {
         Self("yue".to_owned())
     }
     /// Japanese (`"jpn"`).
+    #[must_use]
     pub fn jpn() -> Self {
         Self("jpn".to_owned())
     }
     /// German (`"deu"`).
+    #[must_use]
     pub fn deu() -> Self {
         Self("deu".to_owned())
     }
@@ -414,6 +425,7 @@ impl WorkerLanguage {
     }
 
     /// Return the CLI/registry string form used by the worker runtime.
+    #[must_use]
     pub fn as_worker_arg(&self) -> &str {
         match self {
             Self::Resolved(code) => code.as_ref(),
@@ -424,7 +436,8 @@ impl WorkerLanguage {
     }
 
     /// Return the resolved ISO language code, if present.
-    pub fn as_resolved(&self) -> Option<&LanguageCode3> {
+    #[must_use]
+    pub const fn as_resolved(&self) -> Option<&LanguageCode3> {
         match self {
             Self::Resolved(code) => Some(code),
             Self::Auto | Self::PerFile | Self::Unspecified => None,
@@ -432,18 +445,21 @@ impl WorkerLanguage {
     }
 
     /// Return `true` when the worker should auto-detect the language.
-    pub fn is_auto(&self) -> bool {
+    #[must_use]
+    pub const fn is_auto(&self) -> bool {
         matches!(self, Self::Auto)
     }
 
     /// Return `true` when the worker has no job-level language and
     /// should resolve per-file.
-    pub fn is_per_file(&self) -> bool {
+    #[must_use]
+    pub const fn is_per_file(&self) -> bool {
         matches!(self, Self::PerFile)
     }
 
     /// Return `true` when the worker should receive no language hint.
-    pub fn is_unspecified(&self) -> bool {
+    #[must_use]
+    pub const fn is_unspecified(&self) -> bool {
         matches!(self, Self::Unspecified)
     }
 }
@@ -561,9 +577,10 @@ impl LanguagePair {
         primary: LanguageCode3,
         secondary: LanguageCode3,
     ) -> Result<Self, InvalidLanguagePair> {
-        match primary == secondary {
-            true => Err(InvalidLanguagePair::SameLanguage(primary)),
-            false => Ok(Self { primary, secondary }),
+        if primary == secondary {
+            Err(InvalidLanguagePair::SameLanguage(primary))
+        } else {
+            Ok(Self { primary, secondary })
         }
     }
 
@@ -579,17 +596,20 @@ impl LanguagePair {
     }
 
     /// The language an unmarked utterance is in.
-    pub fn primary(&self) -> &LanguageCode3 {
+    #[must_use]
+    pub const fn primary(&self) -> &LanguageCode3 {
         &self.primary
     }
 
     /// The other language.
-    pub fn secondary(&self) -> &LanguageCode3 {
+    #[must_use]
+    pub const fn secondary(&self) -> &LanguageCode3 {
         &self.secondary
     }
 
     /// Both languages, in `@Languages` order.
-    pub fn declared(&self) -> [&LanguageCode3; 2] {
+    #[must_use]
+    pub const fn declared(&self) -> [&LanguageCode3; 2] {
         [&self.primary, &self.secondary]
     }
 }
@@ -660,7 +680,8 @@ impl LanguageSpec {
     /// None of those three has a single job-level code, each for its own
     /// reason. Callers that need to tell them apart must match on the variant
     /// directly; a caller that can receive a `Pair` must not use this.
-    pub fn as_resolved(&self) -> Option<&LanguageCode3> {
+    #[must_use]
+    pub const fn as_resolved(&self) -> Option<&LanguageCode3> {
         match self {
             Self::Auto | Self::Pair(_) | Self::PerFile => None,
             Self::Resolved(code) => Some(code),
@@ -668,7 +689,8 @@ impl LanguageSpec {
     }
 
     /// Return `true` if this is `PerFile`.
-    pub fn is_per_file(&self) -> bool {
+    #[must_use]
+    pub const fn is_per_file(&self) -> bool {
         matches!(self, Self::PerFile)
     }
 
@@ -678,7 +700,7 @@ impl LanguageSpec {
     /// Each `LanguageSpec` variant maps to its `WorkerLanguage`
     /// counterpart. `PerFile` does **not** collapse into `Auto`: those are
     /// semantically different states (Auto = "ASR detect a single
-    /// language for this whole job"; PerFile = "no job-level language at
+    /// language for this whole job"; `PerFile` = "no job-level language at
     /// all, dispatch per-file") and the wire format must distinguish
     /// them. Otherwise the Python worker, which parses `--lang` as a
     /// plain string: would receive `"auto"` for both cases and try to
@@ -691,6 +713,7 @@ impl LanguageSpec {
     /// its primary language. Nothing marks an utterance or word as the
     /// secondary language yet, so those stages treat the whole transcript as
     /// the primary.
+    #[must_use]
     pub fn to_worker_language(&self) -> WorkerLanguage {
         match self {
             Self::Auto => WorkerLanguage::Auto,
@@ -841,7 +864,8 @@ impl AsrLanguageRequest {
     /// The language processing will run under when it is known before
     /// recognition: the one requested, or a pair's primary. `None` only for
     /// detection.
-    pub fn primary_if_known(&self) -> Option<&LanguageCode3> {
+    #[must_use]
+    pub const fn primary_if_known(&self) -> Option<&LanguageCode3> {
         match self {
             Self::One(code) => Some(code),
             Self::Pair(pair) => Some(pair.primary()),
@@ -971,7 +995,8 @@ impl TranscriptLanguage {
     /// The language an unmarked utterance is in, and the one the transcript's
     /// language-bearing processing (number expansion, segmentation,
     /// morphosyntax) runs under.
-    pub fn primary(&self) -> &LanguageCode3 {
+    #[must_use]
+    pub const fn primary(&self) -> &LanguageCode3 {
         match self {
             Self::One(code) => code,
             Self::Pair(pair) => pair.primary(),
@@ -979,6 +1004,7 @@ impl TranscriptLanguage {
     }
 
     /// Every language, in `@Languages` order.
+    #[must_use]
     pub fn declared(&self) -> Vec<&LanguageCode3> {
         match self {
             Self::One(code) => vec![code],
@@ -1231,6 +1257,7 @@ impl NonNegativeSeconds {
     /// How long from `start` to `end`, never negative: an `end` before
     /// `start` (clock skew across a restart) is zero. The one way a span
     /// between two recorded instants becomes a length.
+    #[must_use]
     pub fn between(
         start: crate::machine_time::MachineTime,
         end: crate::machine_time::MachineTime,
@@ -1275,12 +1302,14 @@ pub enum InvalidPositiveSeconds {
 
 impl PositiveSeconds {
     /// A literal or already-proven count.
+    #[must_use]
     pub const fn new(seconds: std::num::NonZeroU64) -> Self {
         Self(seconds)
     }
 
     /// A literal count, checked non-zero when the constant is evaluated, so a
     /// default can be written as a number without a runtime check.
+    #[must_use]
     pub const fn literal<const SECONDS: u64>() -> Self {
         const {
             assert!(
@@ -1292,11 +1321,13 @@ impl PositiveSeconds {
     }
 
     /// The count of seconds.
+    #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
     }
 
     /// The same length as a `std::time::Duration`.
+    #[must_use]
     pub const fn duration(self) -> std::time::Duration {
         std::time::Duration::from_secs(self.0.get())
     }
@@ -1304,6 +1335,7 @@ impl PositiveSeconds {
     /// The larger of a computed count and a positive floor: a budget that
     /// scales with work but never falls below its minimum, positive by
     /// construction.
+    #[must_use]
     pub const fn at_least(seconds: u64, floor: Self) -> Self {
         match std::num::NonZeroU64::new(seconds) {
             Some(computed) if computed.get() > floor.0.get() => Self(computed),
@@ -1312,6 +1344,7 @@ impl PositiveSeconds {
     }
 
     /// This length plus `seconds`, saturating at `u64::MAX`.
+    #[must_use]
     pub const fn saturating_add_seconds(self, seconds: u64) -> Self {
         Self(self.0.saturating_add(seconds))
     }
@@ -1377,12 +1410,14 @@ impl WorkerCap {
     /// A literal cap, checked non-zero when the constant is evaluated, so
     /// `--sequential`'s cap of one is written as a number without a runtime
     /// check.
+    #[must_use]
     pub const fn literal<const WORKERS: u32>() -> Self {
         const { assert!(WORKERS > 0, "WorkerCap::literal needs a non-zero count") };
         Self(std::num::NonZeroU32::MIN.saturating_add(WORKERS - 1))
     }
 
     /// The cap, as the server's `max_workers_per_job` takes it.
+    #[must_use]
     pub const fn get(self) -> u32 {
         self.0.get()
     }
@@ -1441,6 +1476,7 @@ validated_numeric!(
 impl AudioPositionSeconds {
     /// A position given in whole milliseconds. Every `u64` converts to a
     /// finite non-negative `f64`, so this cannot fail.
+    #[must_use]
     pub fn from_millis(ms: u64) -> Self {
         Self(ms as f64 / 1000.0)
     }
@@ -1449,6 +1485,7 @@ impl AudioPositionSeconds {
     ///
     /// Saturates at `u64::MAX` for a position beyond it; it cannot see a
     /// negative or non-finite value, which the type refuses.
+    #[must_use]
     pub fn whole_millis(self) -> u64 {
         (self.0 * 1000.0) as u64
     }
@@ -1470,6 +1507,7 @@ impl AudioPositionSeconds {
     /// Clippy's `derive_ord_xor_partial_ord` refuses. Written with the
     /// comparison operators rather than `f64::total_cmp` so it agrees with the
     /// derived `PartialEq`, under which `-0.0` and `0.0` are the same instant.
+    #[must_use]
     pub fn order(self, other: Self) -> std::cmp::Ordering {
         if self.0 < other.0 {
             std::cmp::Ordering::Less
@@ -1508,7 +1546,8 @@ numeric_id!(
 
 impl DurationMs {
     /// The same length as a `std::time::Duration`.
-    pub fn duration(self) -> std::time::Duration {
+    #[must_use]
+    pub const fn duration(self) -> std::time::Duration {
         std::time::Duration::from_millis(self.0)
     }
 }
@@ -1584,6 +1623,7 @@ pub enum StampJoiner {
 
 impl StampJoiner {
     /// The separator text, for a reader that splits what a join wrote.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Concat => "",
@@ -1613,6 +1653,7 @@ impl StampSafeText {
     /// Admit a literal. In a `const` context an unsafe literal is a compile
     /// error, which is the only way this constructor may be used: it accepts
     /// ASCII only, so the check stays exact without decoding UTF-8 in `const`.
+    #[must_use]
     pub const fn from_static(text: &'static str) -> Self {
         assert!(
             static_text_is_stamp_safe(text),
@@ -1639,6 +1680,7 @@ impl StampSafeText {
     }
 
     /// The text, byte for byte.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -1654,6 +1696,7 @@ impl StampSafeText {
     /// ABSENCE states "none" must not also be writable as `0`, or the same
     /// fact would have two spellings in the grammar and a reader would have to
     /// know they mean the same thing.
+    #[must_use]
     pub fn from_count(count: NonZeroUsize) -> Self {
         Self(Cow::Owned(count.to_string()))
     }
@@ -1662,6 +1705,7 @@ impl StampSafeText {
     /// [`Self::WHITESPACE`] and [`Self::STAMP_STRUCTURE`] so the two cannot
     /// disagree: a first and last character that are neither whitespace nor
     /// structure, and no structure character anywhere between.
+    #[must_use]
     pub fn json_schema_pattern() -> String {
         use std::fmt::Write as _;
         let mut edge = String::new();
@@ -1792,12 +1836,14 @@ pub struct ReportedEngineName(StampSafeText);
 
 impl ReportedEngineName {
     /// The name as the worker reported it, byte for byte.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 
     /// The name as stamp-safe text, for writing into a provenance field.
-    pub fn as_stamp_text(&self) -> &StampSafeText {
+    #[must_use]
+    pub const fn as_stamp_text(&self) -> &StampSafeText {
         &self.0
     }
 }
@@ -2014,6 +2060,7 @@ impl std::fmt::Display for ContentType {
 
 impl ContentType {
     /// Whether this discriminator requires binary artifact transport.
+    #[must_use]
     pub const fn is_binary(self) -> bool {
         match self {
             Self::Wav | Self::Mp3 => true,
@@ -2022,6 +2069,7 @@ impl ContentType {
     }
 
     /// HTTP media type for a binary output, with no text fallback.
+    #[must_use]
     pub const fn binary_media_type(self) -> Option<&'static str> {
         match self {
             Self::Wav => Some("audio/wav"),
@@ -2110,6 +2158,7 @@ string_id!(
 impl CancelReason {
     /// The reason recorded when a `cancel_all` runs as part of graceful
     /// server shutdown (i.e. not a user gesture).
+    #[must_use]
     pub fn server_cancel_all() -> Self {
         Self::from("server-cancel-all")
     }

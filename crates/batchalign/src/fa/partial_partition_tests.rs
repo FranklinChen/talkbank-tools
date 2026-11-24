@@ -165,11 +165,8 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
             let audio_path = dir.path().join("sample.mp3");
             crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
             let identity = AudioIdentity::from_metadata("sample.mp3", 0, 0);
-            let audio = AudioContext {
-                audio_path: &audio_path,
-                audio_identity: &identity,
-                audio_duration: None,
-            };
+            let measured = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+            let audio = AudioContext::new(&measured, &identity);
             let pool = WorkerPool::new(PoolConfig::for_tests());
             let cache = UtteranceCache::sqlite(Some(dir.path().join("cache")))
                 .await
@@ -306,15 +303,11 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
                 grouped,
                 &audio,
                 &crate::api::LanguageCode3::eng(),
-                FaServices {
-                    pipeline: PipelineServices::new(&pool, &cache),
-                    cache_namespace: &namespace,
-                    gpu: &crate::worker::pool::GpuModelPlan::alignment(
-                        FaEngineName::Wave2Vec,
-                        None,
-                    ),
-                    attention_capture_dir: None,
-                },
+                FaServices::for_tests(
+                    PipelineServices::new(&pool, &cache),
+                    &namespace,
+                    &crate::worker::pool::GpuModelPlan::alignment(FaEngineName::Wave2Vec, None),
+                ),
                 None,
             )
             .await
@@ -466,15 +459,11 @@ fn partition_output_control(control: PartitionControl) -> futures::future::BoxFu
                     grouped,
                     &audio,
                     &crate::api::LanguageCode3::eng(),
-                    FaServices {
-                        pipeline: PipelineServices::new(&pool, &cache),
-                        cache_namespace: &namespace,
-                        gpu: &crate::worker::pool::GpuModelPlan::alignment(
-                            FaEngineName::Wave2Vec,
-                            None,
-                        ),
-                        attention_capture_dir: None,
-                    },
+                    FaServices::for_tests(
+                        PipelineServices::new(&pool, &cache),
+                        &namespace,
+                        &crate::worker::pool::GpuModelPlan::alignment(FaEngineName::Wave2Vec, None),
+                    ),
                     None,
                 )
                 .await

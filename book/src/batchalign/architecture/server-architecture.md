@@ -687,6 +687,20 @@ There is no CLI command literally named `speaker`; speaker is the low-level
 worker capability. It supports integrated `transcribe_s` and the standalone
 `diarize` command, whose product is anonymous turns JSON rather than CHAT.
 
+The turns writer groups admitted intervals by the worker's actual label and
+numbers those groups in lexical order. This uses the same coordinate policy
+as mapped speaker output. Each turn carries its original admitted interval
+into chronological sorting and JSON serialization. The JSON still presents
+`start_ms`, `end_ms` and the anonymous `track` expected by Chatter.
+
+```mermaid
+flowchart LR
+    wire["Worker labels and admitted intervals"] --> grouped["Group actual intervals by label"]
+    grouped --> numbered["Number tracks in lexical order"]
+    numbered --> ordered["Sort turns by interval and track"]
+    ordered --> written["Write the existing Chatter JSON shape"]
+```
+
 ## SSE job streaming
 
 For lightweight real-time progress monitoring (alternative to WebSocket):

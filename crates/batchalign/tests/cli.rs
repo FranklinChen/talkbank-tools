@@ -2,7 +2,7 @@
 //!
 //! Uses `assert_cmd` to run the binary and verify exit codes, stdout, stderr.
 //! Argument-only tests use the shared baseline environment. Processing tests
-//! own a CliHarness with isolated HOME and explicit setup configuration; live
+//! own a `CliHarness` with isolated HOME and explicit setup configuration; live
 //! dispatch tests additionally own their local server session.
 // Integration tests are exempt from the crate's deny-level panic lints,
 // matching the src/lib.rs `#![cfg_attr(test, allow(...))]` pattern
@@ -869,7 +869,7 @@ fn cli_transcribe_explicit_remote_server_refuses_unshippable_audio() {
 /// Ignored on macOS: the stub listens inside this unsigned test binary, and
 /// with the application firewall on, macOS holds every inbound LAN flow to
 /// such a binary for an approval nobody can give (the firewall log shows
-/// "Enqueuing new inbound flow for cli_integration_suite-..."), so the CLI's
+/// "Enqueuing new inbound flow for `cli_integration_suite`-..."), so the CLI's
 /// connection hangs until the budget kills it. The admission half of this
 /// contract (align to a remote origin is accepted) is the unit test
 /// `explicit_remote_server_admits_transcript_input_commands_as_content`.

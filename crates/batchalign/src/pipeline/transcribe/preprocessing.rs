@@ -105,7 +105,7 @@ enum PipelineTraceWriteError {
     Write(#[from] std::io::Error),
 }
 
-pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
+pub fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Vec<UtsegBatchItem> {
     chunks
         .iter()
         .map(|chunk| {
@@ -132,7 +132,7 @@ pub(crate) fn build_prechat_utseg_items(chunks: &[PreparedMonologueChunk]) -> Ve
 /// ([`asr_postprocess::RetraceAnalyzedChunk::analyze`] mints the state
 /// [`asr_postprocess::RetraceAnalyzedChunk::split`] consumes), so this path
 /// cannot cut before it. Each piece carries the terminator its cut predicted.
-pub(crate) fn apply_prechat_segmentations(
+pub fn apply_prechat_segmentations(
     chunks: Vec<PreparedMonologueChunk>,
     predictions: &[crate::utseg::AdmittedUtsegPrediction],
     lang: &str,
@@ -188,7 +188,7 @@ struct PostprocessedSpeech {
 /// the true union rather than a guess made after the fact. Speakers are final
 /// (diarization has been projected), so a speaker change ends a run. And no
 /// CHAT exists yet, so nothing is parsed or re-serialized to make the change.
-pub(crate) fn resolve_abbreviations(
+pub fn resolve_abbreviations(
     policy: crate::params::MergeAbbrevPolicy,
     chunks: Vec<PreparedMonologueChunk>,
 ) -> (Vec<PreparedMonologueChunk>, AbbreviationMerging) {
@@ -207,7 +207,7 @@ pub(crate) fn resolve_abbreviations(
 }
 
 /// `TranscribePipelineContext` has no job cancellation token wired yet (see
-/// `stage_run_morphosyntax`'s identical note); genuinely NotWired rather than
+/// `stage_run_morphosyntax`'s identical note); genuinely `NotWired` rather than
 /// a fabricated stand-in.
 const fn transcribe_cancellation() -> Cancellation<'static> {
     Cancellation::NotWired {
@@ -416,7 +416,7 @@ async fn process_asr_with_prechat_segmentation<P: TranscribePlan>(
 /// boundary model, so no replay of one is affected. Abbreviation merging is
 /// the caller's next step ([`resolve_abbreviations`]), under the policy the
 /// run used: the replay reads it from the retained output's stamp.
-pub(crate) fn prepare_asr_chunks<'a>(
+pub fn prepare_asr_chunks<'a>(
     asr_output: &batchalign_transform::asr_postprocess::AsrOutput,
     language: impl Into<asr_postprocess::AsrTextLanguage<'a>>,
 ) -> Result<Vec<PreparedMonologueChunk>, ServerError> {
@@ -484,114 +484,120 @@ mod prechat_segmentation_tests {
         }
     }
 
-    /// An admitted boundary-model prediction for `words` whose model placed
-    /// `action` after each word named in `boundaries`, exactly as the worker
-    /// declares one: applied actions equal to raw ones, assignments derived
-    /// from them, admitted through the one constructor.
-    fn admitted(
-        words: &[&str],
-        boundaries: &[(usize, UtsegBoundaryActionV2)],
-    ) -> crate::utseg::AdmittedUtsegPrediction {
-        let word_evidence: Vec<_> = (0..words.len())
-            .map(|index| {
-                let action = boundaries
-                    .iter()
-                    .find(|(at, _)| *at == index)
-                    .map_or(UtsegBoundaryActionV2::Ordinary, |(_, action)| *action);
-                UtsegWordBoundaryEvidenceV2::Classified {
-                    raw_action: action,
-                    applied_action: action,
-                    boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(900_000)
-                        .expect("fixture probability"),
-                }
-            })
-            .collect();
-        // The assignments the worker derives from its applied actions.
-        let assignments = batchalign_types::segmentation::UtteranceSegmentation::from_boundaries(
-            word_evidence.iter().map(|evidence| match evidence {
-                UtsegWordBoundaryEvidenceV2::Classified { applied_action, .. } => {
-                    applied_action.boundary()
-                }
-                UtsegWordBoundaryEvidenceV2::NormalizationOmission
-                | UtsegWordBoundaryEvidenceV2::ModelShortCircuit => None,
-            }),
-        )
-        .into_assignments();
-        let evidence = UtsegBoundaryModelEvidenceV2 {
-            model_id: "talkbank/utterance-boundary".to_owned(),
-            model_revision: HubCommitV2::try_from("0123456789abcdef0123456789abcdef01234567")
-                .expect("fixture commit"),
-            normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
-            adjacency_policy_revision:
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
-            word_evidence,
-        };
-        let request = UtsegBatchItem {
-            words: words.iter().map(|w| (*w).to_owned()).collect(),
-            text: words.join(" "),
-        };
-        admit_prediction(
-            &request,
-            assignments,
-            UtsegPredictionOrigin::BoundaryModel(&evidence),
-        )
-        .expect("a worker-declared prediction is admitted")
+    /// The prepared chunk owns the words used for its own model request and
+    /// the admitted prediction that will be projected onto it.
+    struct BoundaryFixture {
+        chunk: PreparedMonologueChunk,
+        prediction: crate::utseg::AdmittedUtsegPrediction,
     }
 
-    /// The written CHAT of the pre-CHAT pass over one chunk and its
-    /// prediction: cut, retokenize, finalize, build, serialize.
-    fn written_chat(
-        chunk: &PreparedMonologueChunk,
-        prediction: &crate::utseg::AdmittedUtsegPrediction,
-    ) -> String {
-        let pieces = apply_prechat_segmentations(
-            vec![chunk.clone()],
-            std::slice::from_ref(prediction),
-            "eng",
-        )
-        .expect("the prediction is the chunk's");
-        let mut utterances = asr_postprocess::utterances_from_segmented_chunks(pieces);
-        asr_postprocess::finalize_utterances(&mut utterances, "eng");
-        let transcript =
-            batchalign_transform::build_chat::NamedAsrUtterances::numbered(&utterances)
-                .into_transcript(&["eng".to_owned()], None, false)
-                .expect("transcript");
-        let built = batchalign_transform::build_chat::build_chat(transcript.description)
-            .expect("CHAT builds")
-            .into_file();
-        batchalign_transform::serialize::to_chat_string(&built)
+    impl BoundaryFixture {
+        fn new(words: &[&str], boundaries: &[(usize, UtsegBoundaryActionV2)]) -> Self {
+            let chunk = chunk(words);
+            let [request]: [UtsegBatchItem; 1] =
+                build_prechat_utseg_items(std::slice::from_ref(&chunk))
+                    .try_into()
+                    .expect("fixture contributes exactly one model request");
+            let word_evidence: Vec<_> = (0..request.words.len())
+                .map(|index| {
+                    let action = boundaries
+                        .iter()
+                        .find(|(at, _)| *at == index)
+                        .map_or(UtsegBoundaryActionV2::Ordinary, |(_, action)| *action);
+                    UtsegWordBoundaryEvidenceV2::Classified {
+                        raw_action: action,
+                        applied_action: action,
+                        boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(900_000)
+                            .expect("fixture probability"),
+                    }
+                })
+                .collect();
+            // The assignments the worker derives from its applied actions.
+            let assignments =
+                batchalign_types::segmentation::UtteranceSegmentation::from_boundaries(
+                    word_evidence.iter().map(|evidence| match evidence {
+                        UtsegWordBoundaryEvidenceV2::Classified { applied_action, .. } => {
+                            applied_action.boundary()
+                        }
+                        UtsegWordBoundaryEvidenceV2::NormalizationOmission
+                        | UtsegWordBoundaryEvidenceV2::ModelShortCircuit => None,
+                    }),
+                )
+                .into_assignments();
+            let evidence = UtsegBoundaryModelEvidenceV2 {
+                model_id: "talkbank/utterance-boundary".to_owned(),
+                model_revision: HubCommitV2::try_from("0123456789abcdef0123456789abcdef01234567")
+                    .expect("fixture commit"),
+                normalization_revision: UtsegNormalizationRevisionV2::LowerStripAsciiPunctuationV1,
+                adjacency_policy_revision:
+                    UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentNonordinaryV1,
+                word_evidence,
+            };
+            let prediction = admit_prediction(
+                &request,
+                assignments,
+                UtsegPredictionOrigin::BoundaryModel(&evidence),
+            )
+            .expect("a worker-declared prediction is admitted");
+            Self { chunk, prediction }
+        }
+
+        fn written_chat(self) -> String {
+            let pieces = apply_prechat_segmentations(
+                vec![self.chunk],
+                std::slice::from_ref(&self.prediction),
+                "eng",
+            )
+            .expect("the prediction is the chunk's");
+            let mut utterances = asr_postprocess::utterances_from_segmented_chunks(pieces);
+            asr_postprocess::finalize_utterances(&mut utterances, "eng");
+            let transcript =
+                batchalign_transform::build_chat::NamedAsrUtterances::numbered(&utterances)
+                    .into_transcript(&["eng".to_owned()], None, false)
+                    .expect("transcript");
+            let built = batchalign_transform::build_chat::build_chat(transcript.description)
+                .expect("CHAT builds")
+                .into_file();
+            batchalign_transform::serialize::to_chat_string(&built)
+        }
     }
 
     /// RED FIRST: a model boundary after the first `I` of `yeah I I went`
     /// cut the chunk before retrace detection ran, so the repetition's copies
     /// were in different utterances and no `[/]` was written. The split now
     /// consumes the retrace analysis and keeps the copies together.
+    /// Guards: A model cut inside a repeated phrase still preserves its CHAT retrace.
+    /// Kind: transcript
+    /// Not a type: The model can propose a grammatical cut that conflicts with actual repeated words.
+    /// State: An admitted model prediction carried with one timed chunk through CHAT serialization.
+    /// Concurrency: Only the fixture owns its chunk and prediction.
     #[test]
     fn a_model_boundary_inside_a_repetition_does_not_strand_the_retrace() {
         let words = ["yeah", "I", "I", "went"];
-        let chat = written_chat(
-            &chunk(&words),
-            &admitted(&words, &[(1, UtsegBoundaryActionV2::PeriodBoundary)]),
-        );
+        let chat = BoundaryFixture::new(&words, &[(1, UtsegBoundaryActionV2::PeriodBoundary)])
+            .written_chat();
         assert!(chat.contains("*PAR0:\tYeah I [/] I went ."), "{chat}");
     }
 
     /// A model boundary writes the terminator it predicted on the utterance
     /// it closes (`?`, `!`), and the words after the last prediction end
     /// with a period. Until 2026-11-03 every cut wrote `.`.
+    /// Guards: Question and exclamation boundary predictions survive final CHAT punctuation.
+    /// Kind: transcript
+    /// Not a type: A valid prediction and resulting transcript can still disagree on the chosen terminator.
+    /// State: A source-bound typed chunk and two model actions projected into actual CHAT.
+    /// Concurrency: The fixture is consumed by projection.
     #[test]
     fn a_model_boundary_writes_the_terminator_it_predicted() {
         let words = ["what", "did", "you", "do", "okay", "yeah", "fine"];
-        let chat = written_chat(
-            &chunk(&words),
-            &admitted(
-                &words,
-                &[
-                    (3, UtsegBoundaryActionV2::QuestionBoundary),
-                    (5, UtsegBoundaryActionV2::ExclamationBoundary),
-                ],
-            ),
-        );
+        let chat = BoundaryFixture::new(
+            &words,
+            &[
+                (3, UtsegBoundaryActionV2::QuestionBoundary),
+                (5, UtsegBoundaryActionV2::ExclamationBoundary),
+            ],
+        )
+        .written_chat();
         assert!(chat.contains("*PAR0:\tWhat did you do ?"), "{chat}");
         assert!(chat.contains("*PAR0:\tOkay yeah !"), "{chat}");
         assert!(chat.contains("*PAR0:\tFine ."), "{chat}");
@@ -602,6 +608,11 @@ mod prechat_segmentation_tests {
 mod trace_write_tests {
     use super::*;
 
+    /// Guards: Pipeline trace JSON keeps its schema and reports a filesystem write refusal.
+    /// Kind: contract
+    /// Not a type: A correct trace value cannot determine whether its output path accepts writes.
+    /// State: One private directory is a deliberately invalid file target, then a real JSON destination.
+    /// Concurrency: The test owns its paths and reads the completed write.
     #[test]
     fn snapshot_write_preserves_schema_and_reports_filesystem_failure() {
         let dir = tempfile::tempdir().expect("temporary directory");
@@ -669,6 +680,11 @@ mod abbreviation_tests {
     /// The merged word reaches CHAT as one word whose `%wor` bullet is the
     /// union of its letters' intervals, and the document is admitted by the
     /// same gate every transcribe output passes.
+    /// Guards: Merged spoken letters become one word timed by the union of source bounds.
+    /// Kind: transcript
+    /// Not a type: Correct single-word output can still discard timing evidence from individual letters.
+    /// State: A synthetic timed spoken abbreviation passed through real produced CHAT admission.
+    /// Concurrency: Source words and result bytes are confined to this test.
     #[test]
     fn merged_letters_become_one_admitted_word_timed_by_their_union() {
         let (chunks, merging) = resolve_abbreviations(MergeAbbrevPolicy::Merge, spoken_letters());
@@ -685,6 +701,11 @@ mod abbreviation_tests {
 
     /// Without the option the letters reach CHAT as recognized, each with
     /// its own timing, and the step records that it was not asked for.
+    /// Guards: Keeping recognized letters retains their separate spelling and admitted timing.
+    /// Kind: transcript
+    /// Not a type: A valid policy selection can still project merged tokens or alter their individual timing.
+    /// State: A kept-letter timed source and the actual CHAT builder and serializer.
+    /// Concurrency: No native model or ambient state is read.
     #[test]
     fn without_the_option_the_letters_are_written_as_recognized() {
         let (chunks, merging) = resolve_abbreviations(MergeAbbrevPolicy::Keep, spoken_letters());

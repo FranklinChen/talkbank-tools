@@ -1,7 +1,7 @@
 # Morphotag Reconciliation Invariants
 
 **Status:** Current
-**Last updated:** 2026-11-11 23:22 EST
+**Last updated:** 2026-11-18 11:07 EST
 
 This page documents the **1-to-1 invariant** that the morphotag pipeline
 relies on, the three stages that together make it hold deterministically,
@@ -212,7 +212,7 @@ silent `%mor` loss.
 
 | Kind | Meaning | Surfaces as |
 | --- | --- | --- |
-| `NotApplicable { reason }` | The utterance had zero Mor-alignable words. No `%mor` is produced, and that is correct. Reasons: `FillerOnly`, `FragmentOnly`, `NonwordOnly`, `UntranscribedOnly`, `AllRetraced`, `MixedNonLinguistic`, `Empty`. | Typed `morphosyntax:not_applicable` record. |
+| `NotApplicable { reason }` | The utterance had zero Mor-alignable words. No `%mor` is produced, and that is correct. Reasons: `FillerOnly`, `FragmentOnly`, `NonwordOnly`, `UntranscribedOnly`, `OmissionOnly`, `AllRetraced`, `MixedNonLinguistic`, `Empty`. Each word is classified by a closed `WordKind` matched exhaustively from `WordCategory`, so an omission (`0is`) is never counted as linguistic. | Typed `morphosyntax:not_applicable` record. |
 | `Aligned { n_words }` | `N` CHAT words, `N` `%mor` items; happy path. | No anomaly record. |
 | `MisalignmentBug(diag)` | `|mors| ≠ N` after mapping. A bug in extract, realign, or project. Carries a typed diagnostic with `chat_words`, `stanza_tokens_after_mapping`, `expected`, `actual`, and a best-effort `suspected_class`. | The utterance is declined (`DeclineCause::Misaligned`): left as it was, and named in the file's `PrimaryMorphologyIncomplete` shortfall. |
 

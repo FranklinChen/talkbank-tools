@@ -45,6 +45,7 @@ impl PairKey {
     }
 
     /// Borrow as `&str` for format strings and CSV output.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -71,6 +72,7 @@ impl SurfaceWord {
     }
 
     /// Borrow as `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -97,6 +99,7 @@ impl MorItemText {
     }
 
     /// Borrow as `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -106,6 +109,7 @@ impl MorItemText {
     /// `L2|xxx` is emitted by the morphotag pipeline when secondary dispatch
     /// failed (unsupported language, empty response, etc.). The analyzer
     /// counts these against the feature's dispatch-rate gate.
+    #[must_use]
     pub fn is_l2_fallback(&self) -> bool {
         self.0.contains("L2|xxx")
     }
@@ -131,6 +135,7 @@ impl GraItemText {
     }
 
     /// Borrow as `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -158,12 +163,14 @@ impl FeatureSet {
     }
 
     /// Borrow as `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Whether the feature set is empty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
@@ -201,6 +208,7 @@ impl LanguageMarkerKind {
     ///   bi-or-multi-lingual; otherwise falls back to the primary.
     ///
     /// Returns `None` only when the header is empty (pathological CHAT).
+    #[must_use]
     pub fn effective_language(&self, languages: &[LanguageCode]) -> Option<LanguageCode> {
         match self {
             LanguageMarkerKind::Explicit(codes) => codes.first().cloned(),
@@ -256,7 +264,8 @@ pub enum AtSStatus {
 
 impl AtSStatus {
     /// CSV spelling matching the Python analyzer for downstream compatibility.
-    pub fn as_csv_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_csv_str(&self) -> &'static str {
         match self {
             AtSStatus::Spliced => "spliced",
             AtSStatus::L2Xxx => "l2xxx",
@@ -276,6 +285,7 @@ impl fmt::Display for AtSStatus {
 /// Free function (not a method on `Option`) because its meaning is domain-
 /// specific: presence is *not* success, the item can be present but equal
 /// to `L2|xxx`.
+#[must_use]
 pub fn classify_status(mor_item: Option<&MorItemText>) -> AtSStatus {
     match mor_item {
         None => AtSStatus::MissingMor,
@@ -313,7 +323,8 @@ pub enum HeuristicFlag {
 
 impl HeuristicFlag {
     /// Short name used in CSV / CSV flag columns (matches Python names).
-    pub fn name(&self) -> &'static str {
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
         match self {
             HeuristicFlag::L2Xxx => "L2Xxx",
             HeuristicFlag::MissingMor => "MissingMor",
@@ -468,7 +479,8 @@ pub enum UtteranceOutcome {
 
 impl UtteranceOutcome {
     /// Short label for CSV output (stable across releases).
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::NotApplicable => "not_applicable",
             Self::Aligned { .. } => "aligned",
@@ -478,9 +490,10 @@ impl UtteranceOutcome {
     }
 
     /// Whether this outcome represents a pipeline anomaly that requires
-    /// developer attention. NotApplicable and Aligned are expected
+    /// developer attention. `NotApplicable` and Aligned are expected
     /// behavior; the other two variants are not.
-    pub fn is_anomaly(&self) -> bool {
+    #[must_use]
+    pub const fn is_anomaly(&self) -> bool {
         matches!(
             self,
             Self::CountMismatchInFile { .. } | Self::PipelineAbsorbedFailure { .. }

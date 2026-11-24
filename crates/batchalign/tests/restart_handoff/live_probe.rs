@@ -66,14 +66,14 @@ enum LoadBoundary {
 }
 
 impl LoadBoundary {
-    fn peer_mode(self) -> &'static str {
+    const fn peer_mode(self) -> &'static str {
         match self {
             Self::Capability | Self::JobSlot => "live",
             Self::WorkerWarmup => "warmup",
         }
     }
 
-    fn load_after_cancel(self) -> LoadAfterCancel {
+    const fn load_after_cancel(self) -> LoadAfterCancel {
         match self {
             Self::Capability | Self::WorkerWarmup => LoadAfterCancel::Stops,
             // The cancelled job only waited for the slot; the first job's

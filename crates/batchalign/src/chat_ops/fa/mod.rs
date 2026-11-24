@@ -1,7 +1,7 @@
 //! Forced alignment orchestration for CHAT files.
 //!
-//! Extracts pure-Rust FA logic from the PyO3 bridge (`batchalign-core`) so that
-//! both the PyO3 layer and the root Rust workspace can share it.
+//! Extracts pure-Rust FA logic from the `PyO3` bridge (`batchalign-core`) so that
+//! both the `PyO3` layer and the root Rust workspace can share it.
 //!
 //! Pipeline: parse -> group utterances -> dispatch inference -> parse responses
 //! -> inject timings -> postprocess -> generate %wor -> enforce monotonicity/E704.
@@ -35,7 +35,6 @@ use self::origin::Origin;
 use crate::types::engines::FaTimingResolution;
 use serde::{Deserialize, Serialize};
 use talkbank_model::alignment::CompleteWorTimingSlot;
-use talkbank_model::alignment::helpers::{TierDomain, WordItem, counts_for_tier, walk_words};
 use talkbank_model::model::{
     Bullet, ChatFile, DependentTier, Line, Utterance, UtteranceContent, Word, WordCategory,
 };
@@ -125,12 +124,14 @@ pub struct TimeSpan {
 
 impl TimeSpan {
     /// Create a new time span. Caller is responsible for ensuring start <= end.
-    pub fn new(start_ms: u64, end_ms: u64) -> Self {
+    #[must_use]
+    pub const fn new(start_ms: u64, end_ms: u64) -> Self {
         Self { start_ms, end_ms }
     }
 
     /// Duration in milliseconds.
-    pub fn duration_ms(&self) -> u64 {
+    #[must_use]
+    pub const fn duration_ms(&self) -> u64 {
         self.end_ms.saturating_sub(self.start_ms)
     }
 }
@@ -171,7 +172,7 @@ pub struct WordTiming {
     /// Optional score emitted by the alignment model for this word.
     ///
     /// This is deliberately not called a probability or accuracy confidence:
-    /// MMS_FA supplies a CTC path score, which still needs empirical
+    /// `MMS_FA` supplies a CTC path score, which still needs empirical
     /// calibration against human boundary judgments.
     model_score: Option<ModelAlignmentScore>,
     /// How the word's START was produced.
@@ -243,6 +244,7 @@ impl WordTiming {
     /// cannot build one has learned something real: the engine gave no usable
     /// timing for that word, and the honest result is no timing rather than a
     /// zero-length or backwards one.
+    #[must_use]
     pub fn new(
         start_ms: u64,
         end_ms: u64,
@@ -270,28 +272,32 @@ impl WordTiming {
     }
 
     /// Attach the model's own alignment score to this otherwise valid timing.
-    pub fn with_model_score(mut self, score: ModelAlignmentScore) -> Self {
+    #[must_use]
+    pub const fn with_model_score(mut self, score: ModelAlignmentScore) -> Self {
         self.model_score = Some(score);
         self
     }
 
-    fn with_model_score_option(mut self, score: Option<ModelAlignmentScore>) -> Self {
+    const fn with_model_score_option(mut self, score: Option<ModelAlignmentScore>) -> Self {
         self.model_score = score;
         self
     }
 
     /// The aligner's score for this word, when its response shape supplies one.
+    #[must_use]
     pub const fn model_score(&self) -> Option<ModelAlignmentScore> {
         self.model_score
     }
 
     /// How the word's start was produced.
-    pub fn start_origin(&self) -> &Origin {
+    #[must_use]
+    pub const fn start_origin(&self) -> &Origin {
         &self.start_origin
     }
 
     /// How the word's end was produced.
-    pub fn end_origin(&self) -> &Origin {
+    #[must_use]
+    pub const fn end_origin(&self) -> &Origin {
         &self.end_origin
     }
 
@@ -321,6 +327,7 @@ impl WordTiming {
     /// this conversion infallible: Chatter has already proved that the
     /// interval is present and positive and that it belongs to the matching
     /// main-tier word.
+    #[must_use]
     pub fn from_complete_wor_slot(slot: &CompleteWorTimingSlot<'_>) -> Self {
         let interval = slot.timing();
         Self {
@@ -354,11 +361,13 @@ impl ModelAlignmentScore {
     }
 
     /// Stable integer representation used by evidence artifacts.
+    #[must_use]
     pub const fn millionths(self) -> u32 {
         self.0
     }
 
     /// Floating representation for summaries and thresholds.
+    #[must_use]
     pub fn as_f64(self) -> f64 {
         f64::from(self.0) / Self::SCALE
     }
@@ -517,6 +526,7 @@ pub struct FaWord {
 
 impl FaWord {
     /// Stable word identifier for callback protocols.
+    #[must_use]
     pub fn stable_id(&self) -> String {
         format!("u{}:w{}", self.utterance_index, self.utterance_word_index)
     }
@@ -651,7 +661,8 @@ pub enum MainBulletPolicy {
 pub const DEFAULT_MAIN_BULLET_POLICY: MainBulletPolicy = MainBulletPolicy::DeriveFromWords;
 
 /// `serde(default = "...")` needs a function; this reads the one constant.
-pub fn default_main_bullet_policy_serde() -> MainBulletPolicy {
+#[must_use]
+pub const fn default_main_bullet_policy_serde() -> MainBulletPolicy {
     DEFAULT_MAIN_BULLET_POLICY
 }
 
@@ -680,7 +691,8 @@ impl MainBulletPolicy {
     }
 
     /// The provenance-stamp and wire spelling (`derive`, `keep` or `exact`).
-    pub fn stamp_name(self) -> &'static str {
+    #[must_use]
+    pub const fn stamp_name(self) -> &'static str {
         match self {
             Self::DeriveFromWords => "derive",
             Self::KeepGiven => "keep",
@@ -753,7 +765,8 @@ pub const DEFAULT_END_OVERLAP_POLICY: EndOverlapPolicy = EndOverlapPolicy::Prese
 /// `serde(default = "...")` needs a function, not a const path; this is that
 /// function, reading the one constant so a deserialized job that omits the
 /// field gets the same default every other caller does.
-pub fn default_end_overlap_policy_serde() -> EndOverlapPolicy {
+#[must_use]
+pub const fn default_end_overlap_policy_serde() -> EndOverlapPolicy {
     DEFAULT_END_OVERLAP_POLICY
 }
 
@@ -803,7 +816,8 @@ impl FaProjectionPolicy {
     /// own bullets at the parse ([`MainBulletAuthority::bind`]) and joins this
     /// policy in [`FaProjection`], so nothing can carry the choice without the
     /// bullets it refers to.
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         word_ends: WordEndPolicy,
         existing_wor_boundaries: ExistingWorBoundaryPolicy,
         end_overlaps: EndOverlapPolicy,
@@ -816,24 +830,28 @@ impl FaProjectionPolicy {
     }
 
     /// Word-end and gap-healing policy for this projection.
-    pub fn word_ends(self) -> WordEndPolicy {
+    #[must_use]
+    pub const fn word_ends(self) -> WordEndPolicy {
         self.word_ends
     }
 
     /// Treatment of boundaries inherited from an earlier `%wor` projection.
-    pub fn existing_wor_boundaries(self) -> ExistingWorBoundaryPolicy {
+    #[must_use]
+    pub const fn existing_wor_boundaries(self) -> ExistingWorBoundaryPolicy {
         self.existing_wor_boundaries
     }
 
     /// Treatment of one utterance ending after the next begins.
-    pub fn end_overlaps(self) -> EndOverlapPolicy {
+    #[must_use]
+    pub const fn end_overlaps(self) -> EndOverlapPolicy {
         self.end_overlaps
     }
 }
 
 impl WordEndPolicy {
     /// Derive the policy for an engine, given what the user asked for.
-    pub fn for_engine(
+    #[must_use]
+    pub const fn for_engine(
         engine: crate::types::engines::FaEngineName,
         gap_healing: WordGapHealing,
     ) -> Self {
@@ -845,7 +863,8 @@ impl WordEndPolicy {
 
     /// A word-interval engine: ends came from the model.
     #[cfg(test)]
-    pub fn measured(gap_healing: WordGapHealing) -> Self {
+    #[must_use]
+    pub const fn measured(gap_healing: WordGapHealing) -> Self {
         Self {
             gap_healing,
             resolution: crate::types::engines::FaTimingResolution::WordIntervals,
@@ -854,7 +873,8 @@ impl WordEndPolicy {
 
     /// An onset-only engine: ends were derived from the next onset.
     #[cfg(test)]
-    pub fn onset_only(gap_healing: WordGapHealing) -> Self {
+    #[must_use]
+    pub const fn onset_only(gap_healing: WordGapHealing) -> Self {
         Self {
             gap_healing,
             resolution: crate::types::engines::FaTimingResolution::TokenOnsets,
@@ -862,6 +882,7 @@ impl WordEndPolicy {
     }
 
     /// Whether small gaps between words may be closed.
+    #[must_use]
     pub fn heals(self) -> bool {
         self.gap_healing == WordGapHealing::Heal
     }
@@ -870,6 +891,7 @@ impl WordEndPolicy {
     ///
     /// A derived end may be replaced by a better one, such as the utterance
     /// bullet; a measured end is the model's own answer and is left alone.
+    #[must_use]
     pub fn ends_are_derived(self) -> bool {
         self.resolution == crate::types::engines::FaTimingResolution::TokenOnsets
     }
@@ -891,16 +913,19 @@ pub struct DroppedWordTimings {
 
 impl DroppedWordTimings {
     /// Whether any word lost its timing.
-    pub fn any(self) -> bool {
+    #[must_use]
+    pub const fn any(self) -> bool {
         self.total() > 0
     }
 
     /// How many words lost their timing, for any reason.
-    pub fn total(self) -> usize {
+    #[must_use]
+    pub const fn total(self) -> usize {
         self.clamped_to_utterance_boundary + self.without_extent
     }
 
     /// A decision-record reason naming only the causes that actually fired.
+    #[must_use]
     pub fn reason(self) -> String {
         let mut causes = Vec::new();
         if self.clamped_to_utterance_boundary > 0 {
@@ -1023,6 +1048,7 @@ pub(crate) fn add_wor_tier(utterance: &mut Utterance) {
 /// `InternalBullet` tokens, while `%wor` carries the durable first-class timing
 /// bullets. For the cheap rerun path we therefore verify that `%wor` fully and
 /// cleanly aligns back to the main tier.
+#[must_use]
 pub fn has_reusable_wor_timing(chat_file: &ChatFile) -> bool {
     let mut saw_alignable_word = false;
     let reusable = find_reusable_utterance_indices(chat_file);
@@ -1123,29 +1149,11 @@ pub fn find_reusable_utterance_indices(chat_file: &ChatFile) -> std::collections
     reusable
 }
 
-/// Count Wor-alignable words in the main tier.
+/// Count Wor-alignable words in the main tier: the FA units extraction
+/// sends, so the injection cursor stays in step with them.
 pub(crate) fn count_alignable_main_words(utterance: &Utterance) -> usize {
     let mut count = 0usize;
-    walk_words(
-        &utterance.main.content.content,
-        None,
-        &mut |leaf| match leaf {
-            WordItem::Word(word) => {
-                if counts_for_tier(word, TierDomain::Wor) {
-                    count += 1;
-                }
-            }
-            WordItem::ReplacedWord(replaced) => {
-                // Must mirror extraction policy: the original word is the FA
-                // unit, not the replacement words.  Counting replacement words
-                // here would overcount vs. extraction and desync the cursor.
-                if counts_for_tier(&replaced.word, TierDomain::Wor) {
-                    count += 1;
-                }
-            }
-            WordItem::Separator(_) => {}
-        },
-    );
+    extraction::walk_wor_units(&utterance.main.content.content, &mut |_| count += 1);
     count
 }
 
@@ -1270,15 +1278,10 @@ fn has_untimed_leading_filler_coverage(content: &[UtteranceContent]) -> bool {
     let mut before_first_timed_word = true;
     let mut has_untimed_leading_filler = false;
 
-    walk_words(content, Some(TierDomain::Wor), &mut |leaf| {
+    extraction::walk_wor_units(content, &mut |word| {
         if !before_first_timed_word {
             return;
         }
-        let word = match leaf {
-            WordItem::Word(word) => word,
-            WordItem::ReplacedWord(replaced) => &replaced.word,
-            WordItem::Separator(_) => return,
-        };
         if get_word_timing(word).is_some() {
             before_first_timed_word = false;
             return;
@@ -1297,36 +1300,14 @@ fn has_untimed_leading_filler_coverage(content: &[UtteranceContent]) -> bool {
 /// This is the stable timing surface for selective reuse: when an utterance has
 /// already been refreshed from `%wor`, the returned vector can be stitched
 /// directly into a preserved FA group without a worker roundtrip.
+#[must_use]
 pub fn collect_existing_fa_word_timings(utterance: &Utterance) -> Vec<Option<WordTiming>> {
     let mut timings = Vec::new();
-    walk_words(
-        &utterance.main.content.content,
-        None,
-        &mut |leaf| match leaf {
-            WordItem::Word(word) => {
-                if counts_for_tier(word, TierDomain::Wor) {
-                    timings.push(
-                        get_word_timing(word)
-                            .and_then(|span| WordTiming::from_transcript(span).ok()),
-                    );
-                }
-            }
-            WordItem::ReplacedWord(replaced) => {
-                // Mirror extraction policy: the original word is the FA unit.
-                // Replacement words never receive inline_bullet after injection,
-                // so collecting them would always produce None for each and
-                // miscount vs. collect_fa_words → collect_preserved_group_timings
-                // would return None and needlessly bypass the %wor preservation path.
-                if counts_for_tier(&replaced.word, TierDomain::Wor) {
-                    timings.push(
-                        get_word_timing(&replaced.word)
-                            .and_then(|span| WordTiming::from_transcript(span).ok()),
-                    );
-                }
-            }
-            WordItem::Separator(_) => {}
-        },
-    );
+    // The FA units extraction sends: a replaced word's unit is the original
+    // word, whose bullet injection writes (replacement words never get one).
+    extraction::walk_wor_units(&utterance.main.content.content, &mut |word| {
+        timings.push(get_word_timing(word).and_then(|span| WordTiming::from_transcript(span).ok()));
+    });
     timings
 }
 
@@ -1435,11 +1416,13 @@ pub struct AudioIdentity(String);
 
 impl AudioIdentity {
     /// Build an identity from resolved path + filesystem metadata.
+    #[must_use]
     pub fn from_metadata(path: &str, mtime_secs: u64, size: u64) -> Self {
         Self(format!("{path}|{mtime_secs}|{size}"))
     }
 
     /// Access the raw identity string (for display/logging).
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -1448,6 +1431,137 @@ impl AudioIdentity {
 impl std::fmt::Display for AudioIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Why a recording's metadata identity could not be read.
+#[derive(Debug, thiserror::Error)]
+pub enum AudioIdentityError {
+    /// The path could not be resolved, or its metadata or modification time
+    /// could not be read.
+    #[error("could not read the metadata of {path}: {source}")]
+    Unreadable {
+        /// The path as given.
+        path: String,
+        /// The filesystem's account.
+        source: std::io::Error,
+    },
+    /// The modification time is earlier than 1970.
+    #[error("the modification time of {0} is before 1970")]
+    BeforeEpoch(String),
+    /// The resolved path is not UTF-8, so it cannot be part of a key.
+    #[error("the resolved path of {0} is not UTF-8")]
+    NonUtf8Path(String),
+}
+
+impl AudioIdentity {
+    /// Read a recording's identity: its resolved path (so a symlink or
+    /// another spelling of the path shares one identity), modification time
+    /// and size.
+    ///
+    /// # Errors
+    ///
+    /// Any of the three cannot be read.
+    pub async fn read(path: &std::path::Path) -> Result<Self, AudioIdentityError> {
+        let shown = || path.display().to_string();
+        let unreadable = |source| AudioIdentityError::Unreadable {
+            path: shown(),
+            source,
+        };
+        let resolved = tokio::fs::canonicalize(path).await.map_err(unreadable)?;
+        let metadata = tokio::fs::metadata(&resolved).await.map_err(unreadable)?;
+        let mtime = metadata
+            .modified()
+            .map_err(unreadable)?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| AudioIdentityError::BeforeEpoch(shown()))?
+            .as_secs();
+        let resolved = resolved
+            .to_str()
+            .ok_or_else(|| AudioIdentityError::NonUtf8Path(shown()))?;
+        Ok(Self::from_metadata(resolved, mtime, metadata.len()))
+    }
+}
+
+/// What the runner could establish about a prepared recording, decided once
+/// when its media is resolved.
+///
+/// Rows in the FA and UTR caches are keyed by [`AudioIdentity`], whose
+/// modification time and size are what tell one version of a file from the
+/// next. When that metadata cannot be read, a key built from the path alone
+/// would match every earlier version of the file and replay its results, so
+/// such a recording is still aligned but reads and writes no cache row.
+///
+/// The state is private and [`Self::read`] is the only constructor outside
+/// tests, so a stable identity exists only for a recording whose metadata
+/// was actually read; the cache handle ([`crate::fa::RecordingCache`]) opens
+/// only for one.
+#[derive(Debug, Clone)]
+pub struct RecordingIdentity(IdentityState);
+
+#[derive(Debug, Clone)]
+enum IdentityState {
+    Stable(AudioIdentity),
+    Unidentified {
+        /// Unique to this reading, so it keys only requests within this run
+        /// and can match no stored row even if one were written.
+        run_local: AudioIdentity,
+        why: std::sync::Arc<AudioIdentityError>,
+    },
+}
+
+/// A borrowed view of a [`RecordingIdentity`]'s state. It cannot be turned
+/// back into an identity, so matching on it grants nothing.
+#[derive(Debug, Clone, Copy)]
+pub enum RecordingIdentityView<'a> {
+    /// Resolved path, modification time and size were read.
+    Stable(&'a AudioIdentity),
+    /// The metadata could not be read, for this reason.
+    Unidentified(&'a AudioIdentityError),
+}
+
+impl RecordingIdentity {
+    /// Read the identity of the recording at `path`, or record why it has
+    /// none.
+    pub async fn read(path: &std::path::Path) -> Self {
+        Self(match AudioIdentity::read(path).await {
+            Ok(identity) => IdentityState::Stable(identity),
+            Err(why) => IdentityState::Unidentified {
+                run_local: AudioIdentity(format!(
+                    "{}|unidentified|{}",
+                    path.display(),
+                    uuid::Uuid::new_v4()
+                )),
+                why: std::sync::Arc::new(why),
+            },
+        })
+    }
+
+    /// A stable identity for a test that needs the cache opened.
+    #[cfg(test)]
+    pub(crate) fn stable_for_tests() -> Self {
+        Self(IdentityState::Stable(AudioIdentity::from_metadata(
+            "test.wav", 1, 2,
+        )))
+    }
+
+    /// Which state this identity is in.
+    #[must_use]
+    pub fn view(&self) -> RecordingIdentityView<'_> {
+        match &self.0 {
+            IdentityState::Stable(identity) => RecordingIdentityView::Stable(identity),
+            IdentityState::Unidentified { why, .. } => RecordingIdentityView::Unidentified(why),
+        }
+    }
+
+    /// The identity this run's request keys are built from: the stable
+    /// identity, or the run-local one of an unidentified recording.
+    #[must_use]
+    pub const fn keying(&self) -> &AudioIdentity {
+        match &self.0 {
+            IdentityState::Stable(identity) => identity,
+            IdentityState::Unidentified { run_local, .. } => run_local,
+        }
     }
 }
 
@@ -1475,6 +1589,7 @@ enum KeyScope {
 
 impl FaKeyLanguage {
     /// The key language for `engine` aligning in `language`.
+    #[must_use]
     pub fn for_engine(
         engine: crate::types::engines::FaEngineName,
         language: &crate::api::LanguageCode3,
@@ -1491,6 +1606,7 @@ impl FaKeyLanguage {
 ///
 /// Key = `BLAKE3("{audio_identity}|{start}|{end}|{text}|{text_mode}|{engine}{schema}[|lang={code}]")`,
 /// the language only for an engine whose timings depend on it.
+#[must_use]
 pub fn cache_key(
     words: &[String],
     audio_identity: &AudioIdentity,

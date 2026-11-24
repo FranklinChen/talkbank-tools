@@ -91,12 +91,14 @@ pub struct WorSlotDrift {
 
 impl WorSlotDrift {
     /// Slots the `%wor` tier actually carries.
-    pub fn wor_slots(&self) -> usize {
+    #[must_use]
+    pub const fn wor_slots(&self) -> usize {
         self.wor_slots
     }
 
     /// Main-tier words the projection expected one slot each for.
-    pub fn main_words(&self) -> usize {
+    #[must_use]
+    pub const fn main_words(&self) -> usize {
         self.main_words
     }
 }
@@ -112,7 +114,8 @@ pub struct LexicalMismatchCount {
 
 impl LexicalMismatchCount {
     /// Slots whose display token did not match its main-tier word.
-    pub fn mismatches(&self) -> usize {
+    #[must_use]
+    pub const fn mismatches(&self) -> usize {
         self.mismatches
     }
 }
@@ -156,7 +159,7 @@ impl TokenTimingState {
     ///
     /// Private, like the payload types' fields: the only caller is the one
     /// place that asked chatter and was told.
-    fn drifted(wor_slots: usize, main_words: usize) -> Self {
+    const fn drifted(wor_slots: usize, main_words: usize) -> Self {
         Self::WorTierDrifted(WorSlotDrift {
             wor_slots,
             main_words,
@@ -164,7 +167,7 @@ impl TokenTimingState {
     }
 
     /// Name a lexical corroboration failure, from chatter's own payload.
-    fn uncorroborated(mismatches: usize) -> Self {
+    const fn uncorroborated(mismatches: usize) -> Self {
         Self::WorTierUncorroborated(LexicalMismatchCount { mismatches })
     }
 
@@ -175,7 +178,8 @@ impl TokenTimingState {
     /// untimed ones. This is the only place in the module that turns a state
     /// back into an `Option`, and it exists because a DELTA between two tokens
     /// genuinely requires both of them to be timed.
-    pub fn timing(&self) -> Option<TokenTiming> {
+    #[must_use]
+    pub const fn timing(&self) -> Option<TokenTiming> {
         match self {
             Self::Timed(timing) => Some(*timing),
             Self::Unaligned
@@ -240,6 +244,7 @@ pub struct AlignmentPairResult {
 }
 
 /// Compare every pair in a validated alignment plan, continuing after pair failures.
+#[must_use]
 pub fn compare_validated_alignment_plan(
     plan: &ValidatedAlignmentPlan,
 ) -> Vec<PairOutcome<AlignmentPairResult>> {
@@ -249,6 +254,7 @@ pub fn compare_validated_alignment_plan(
 }
 
 /// Compare every pair in a validated transcription plan, continuing after pair failures.
+#[must_use]
 pub fn compare_validated_transcription_pairs(
     plan: &ValidatedTranscriptionPlan,
 ) -> Vec<PairOutcome<CrossRunTranscriptionReport>> {
@@ -376,7 +382,7 @@ struct CompleteSpeakerCorrespondence<'a> {
 }
 
 impl CompleteSpeakerCorrespondence<'_> {
-    fn assignments(&self) -> &BTreeMap<String, String> {
+    const fn assignments(&self) -> &BTreeMap<String, String> {
         self.map.assignments()
     }
 }
@@ -640,7 +646,7 @@ fn distribution(mut values: Vec<u64>) -> TimingDistribution {
     }
 }
 
-fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
+const fn percentile(values: &[u64], percentile: usize) -> Option<u64> {
     if values.is_empty() {
         None
     } else {

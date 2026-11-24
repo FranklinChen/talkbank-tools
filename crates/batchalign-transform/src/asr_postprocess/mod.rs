@@ -118,7 +118,8 @@ pub enum AsrTextLanguage<'a> {
 
 impl<'a> AsrTextLanguage<'a> {
     /// The language structural rules run under.
-    pub fn rules(self) -> &'a str {
+    #[must_use]
+    pub const fn rules(self) -> &'a str {
         match self {
             Self::One(lang) | Self::CodeSwitched { primary: lang } => lang,
         }
@@ -177,6 +178,7 @@ impl AsrWord {
     /// character. A retrace-marked word has none: it is already structure.
     /// The question a pass over single-character words asks (Han characters
     /// for word segmentation, letters for abbreviation merging), answered once.
+    #[must_use]
     pub fn sole_char(&self) -> Option<char> {
         match self.kind {
             WordKind::Regular => {
@@ -193,6 +195,7 @@ impl AsrWord {
     /// The word's admitted, non-empty span, when it has one. Its bounds were
     /// admitted when the words were prepared, so a refusal cannot arise here;
     /// a word without a whole, non-empty span has no time to contribute.
+    #[must_use]
     pub fn timed_interval(&self) -> Option<AdmittedInterval> {
         WordTiming::from_millis(self.start_ms, self.end_ms)
             .ok()?
@@ -217,6 +220,7 @@ impl UnwritableEndMark {
     pub const ALL: [Self; 2] = [Self::Ellipsis, Self::Pause];
 
     /// The mark's canonical text, as stage 3 emits it as a token.
+    #[must_use]
     pub const fn text(self) -> &'static str {
         match self {
             Self::Ellipsis => "...",
@@ -268,7 +272,8 @@ pub enum SynthesisCause {
 /// The one place a [`BoundaryTerminator`] becomes a [`Terminator`], for the
 /// pre-CHAT pass (through [`UtteranceEnd::terminator`]) and the post-CHAT
 /// split alike.
-pub fn chat_terminator(
+#[must_use]
+pub const fn chat_terminator(
     kind: BoundaryTerminator,
     location: talkbank_model::Location,
 ) -> talkbank_model::model::Terminator {
@@ -312,6 +317,7 @@ impl UtteranceEnd {
     /// The terminator CHAT is written with: the observed one, the one the
     /// boundary model predicted, or a period for an end synthesized with no
     /// prediction behind it. The one place that period is chosen.
+    #[must_use]
     pub fn terminator(&self) -> talkbank_model::model::Terminator {
         match self {
             Self::Observed(terminator) => terminator.clone(),
@@ -410,6 +416,7 @@ pub struct MonologueWords {
 
 impl MonologueWords {
     /// The monologue's words, in order.
+    #[must_use]
     pub fn words(&self) -> &[AsrWord] {
         &self.words
     }
@@ -475,6 +482,7 @@ impl AsrElement {
     /// as [`AsrWord::timed_interval`], over the provider's positions. An
     /// element whose bounds are absent, inadmissible or zero-width has no time
     /// to contribute.
+    #[must_use]
     pub fn timed_interval(&self) -> Option<AdmittedInterval> {
         WordTiming::from_positions(self.ts, self.end_ts)
             .ok()?
@@ -504,7 +512,7 @@ pub(super) const ENDING_PUNCT: &[&str] = &[
 ///
 /// Main-tier-legal separators that are NOT words, the tree-sitter
 /// word fragment parser rejects them as such. `ChatWordText`'s
-/// structural_check uses this list as a second short-circuit
+/// `structural_check` uses this list as a second short-circuit
 /// alongside `Terminator::is_chat_terminator` so the ASR pipeline
 /// can emit separator tokens (comma at clause boundaries, vocative
 /// ‡, tag „) as regular `AsrWord` entries without tripping the

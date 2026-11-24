@@ -73,7 +73,7 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
         };
         Ok(Ok(Self { surveyed, rows }))
     }
-    pub(super) fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
+    pub(super) const fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
         self.surveyed.prepared()
     }
     pub(super) fn source(&self) -> &'g [&'s str] {
@@ -85,7 +85,7 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
     pub(super) fn mode(&self) -> LiteralMatchMode {
         self.prepared().mode()
     }
-    pub(super) fn geometry(&self) -> &Geometry {
+    pub(super) const fn geometry(&self) -> &Geometry {
         match &self.rows {
             AdmittedRows::Full(rows) => &rows.geometry,
             AdmittedRows::Viable(rows) => &rows.geometry,
@@ -104,7 +104,7 @@ impl<'g, 's> AdmittedProblem<'g, 's> {
         }
     }
     /// Full row passes are already reserved; only candidate visits add work.
-    pub(super) fn additional_pass_work(&self, units: usize) -> usize {
+    pub(super) const fn additional_pass_work(&self, units: usize) -> usize {
         match &self.rows {
             AdmittedRows::Full(_) => 0,
             AdmittedRows::Viable(_) => units,

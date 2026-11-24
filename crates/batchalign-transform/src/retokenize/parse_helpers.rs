@@ -75,11 +75,13 @@ pub fn try_parse_token_as_bracketed_item(
 }
 
 /// Returns true if `text` is a tag-marker separator character.
+#[must_use]
 pub fn is_tag_marker_text(text: &str) -> bool {
     matches!(text, "," | "\u{201E}" | "\u{2021}")
 }
 
 /// Returns true if `text` is a CHAT utterance terminator.
+#[must_use]
 pub fn is_ending_punct(text: &str) -> bool {
     talkbank_model::model::content::Terminator::is_chat_terminator(text)
 }
@@ -129,6 +131,7 @@ pub fn try_parse_token_as_word(
 }
 
 /// Resolve the token text for a token, handling xbxxx restoration.
+#[must_use]
 pub fn resolve_token_text(
     stanza_text: &str,
     orig_word_idx: usize,

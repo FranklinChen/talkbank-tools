@@ -65,13 +65,13 @@ impl MediaWindow {
     /// themselves with `.get()`, which is one visible step rather than a second
     /// sanctioned way to ask the same question.
     #[must_use]
-    pub fn start(self) -> FileMs {
+    pub const fn start(self) -> FileMs {
         self.start
     }
 
     /// End, as the position it is.
     #[must_use]
-    pub fn end(self) -> FileMs {
+    pub const fn end(self) -> FileMs {
         self.end
     }
 }
@@ -131,7 +131,7 @@ pub struct EmptyReason(Emptiness);
 impl EmptyReason {
     /// Lower the producer's admitted observation, without guessing EOF or
     /// turning a partial sample into a zero-byte decode.
-    pub(crate) fn into_wire(self) -> crate::types::worker_v2::DecodedAudioShortfallV2 {
+    pub(crate) const fn into_wire(self) -> crate::types::worker_v2::DecodedAudioShortfallV2 {
         use crate::types::worker_v2::DecodedAudioShortfallV2;
         match self.0 {
             Emptiness::NoBytesDecoded => DecodedAudioShortfallV2::NoBytes,
@@ -308,6 +308,11 @@ mod tests {
     /// Kept because it is the argument for why [`EmptyReason`] has the
     /// variants it has, and that argument lives in a type rather than in the
     /// enum's prose.
+    /// Guards: Raw zero and inverted bounds refuse at window construction.
+    /// Kind: policy
+    /// Not a type: Independently valid start and end values still need a positive ordered span.
+    /// State: Three in-memory pairs of file offsets.
+    /// Concurrency: No media source or external effect.
     #[test]
     fn a_window_that_holds_nothing_cannot_be_built() {
         let at = FileMs::new(1_000);
@@ -316,58 +321,38 @@ mod tests {
         assert!(MediaWindow::new(FileMs::new(1_000), FileMs::new(1_001)).is_ok());
     }
 
-    /// RED FIRST (2026-09-07): a decode that wrote SOME bytes but fewer than
-    /// one whole sample is a different fact from one that wrote none, and the
-    /// measuring party is the only one that can tell them apart.
-    ///
-    /// `byte_len / sample_bytes` is integer division, so before this the two
-    /// cases were the same value and a truncated write was reported as an
-    /// empty window.
+    /// Guards: Measured bytes distinguish no output, a partial sample and a
+    /// positive count of complete samples with a trailing remainder.
+    /// Kind: policy
+    /// Not a type: The decoder's byte count must cross this boundary before
+    /// it can prove that a complete sample exists.
+    /// State: A pure matrix of in-memory f32 byte counts and expected outcomes.
+    /// Concurrency: No decoder, mutable state or filesystem is involved.
     #[test]
-    fn a_partial_sample_is_not_the_same_emptiness_as_no_bytes() {
-        // Rendered rather than compared against a literal, because a literal
-        // is exactly what no caller can write any more: the two facts are
-        // observable through what they SAY, which is what an operator reads.
-        assert_eq!(
-            reason_of(DecodedFrames::measure_f32le(0)).to_string(),
-            "the decoder produced no bytes"
-        );
-        assert_eq!(
-            reason_of(DecodedFrames::measure_f32le(3)).to_string(),
-            "the decoder produced 3 bytes, less than one 4-byte sample",
-            "a truncated decode must say so rather than reporting an empty window"
-        );
-        assert_ne!(
-            reason_of(DecodedFrames::measure_f32le(0)),
-            reason_of(DecodedFrames::measure_f32le(3)),
-            "the two emptinesses are different facts, not one message"
-        );
-    }
-
-    /// The reason a decode of `byte_len` bytes reports, from the measurement.
-    ///
-    /// The only way to obtain an [`EmptyReason`] anywhere, tests included.
-    fn reason_of(measured: DecodedFrames) -> EmptyReason {
-        match measured {
-            DecodedFrames::None(reason) => reason,
-            DecodedFrames::Frames(frames) => {
-                panic!("expected an empty decode, got {frames} whole frames")
+    fn measuring_distinguishes_partial_and_complete_frames() {
+        enum Expected {
+            Empty(&'static str),
+            Frames(u64),
+        }
+        for (bytes, expected) in [
+            (0, Expected::Empty("the decoder produced no bytes")),
+            (
+                3,
+                Expected::Empty("the decoder produced 3 bytes, less than one 4-byte sample"),
+            ),
+            (4, Expected::Frames(1)),
+            (8, Expected::Frames(2)),
+            (9, Expected::Frames(2)),
+        ] {
+            match (DecodedFrames::measure_f32le(bytes), expected) {
+                (DecodedFrames::None(reason), Expected::Empty(message)) => {
+                    assert_eq!(reason.to_string(), message)
+                }
+                (DecodedFrames::Frames(frames), Expected::Frames(count)) => {
+                    assert_eq!(frames.get(), count)
+                }
+                _ => panic!("wrong frame admission for {bytes} bytes"),
             }
         }
-    }
-
-    /// The success arm counts whole samples and cannot be zero, so a caller
-    /// that matched `Frames` has a frame count it can hand to a model.
-    #[test]
-    fn measuring_counts_whole_samples_and_discards_the_remainder_as_frames() {
-        let frames = |byte_len| match DecodedFrames::measure_f32le(byte_len) {
-            DecodedFrames::Frames(frames) => Some(frames.get()),
-            DecodedFrames::None(_) => None,
-        };
-        assert_eq!(frames(4), Some(1));
-        assert_eq!(frames(8), Some(2));
-        // A trailing partial sample does not make the decode empty; the whole
-        // samples before it are real.
-        assert_eq!(frames(9), Some(2));
     }
 }

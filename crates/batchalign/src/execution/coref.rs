@@ -2,29 +2,14 @@
 
 use super::text_io::{CoreferenceText, PreparedTextJob};
 use super::worker_gateway::CorefGateway;
-use crate::runner::util::{FileRunTracker, FileStage};
-use crate::scheduling::WorkUnitKind;
 
-pub(crate) async fn dispatch_coref_job(
+pub async fn dispatch_coref_job(
     files: PreparedTextJob<CoreferenceText>,
     gateway: &dyn CorefGateway,
 ) -> Result<(), crate::error::ServerError> {
-    let batch = files.read_batch().await;
-    if batch.inputs().is_empty() {
-        return Ok(());
+    if let Some(batch) = files.read_batch().await {
+        batch.submit(gateway).await;
     }
-    for file in batch.inputs() {
-        FileRunTracker::new(batch.host().sink().as_ref(), file.filename.as_ref())
-            .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::ResolvingCoreference)
-            .await;
-    }
-    let results = crate::runner::util::observing_file_waits(
-        batch.host().sink(),
-        batch.inputs().iter().map(|file| file.filename.to_string()),
-        gateway.coref_batch(batch.inputs(), batch.cancellation()),
-    )
-    .await;
-    batch.complete(results).await;
     Ok(())
 }
 
@@ -40,10 +25,11 @@ mod tests {
     use crate::api::{
         CorrelationId, DisplayPath, JobId, LanguageSpec, NumSpeakers, ReleasedCommand,
     };
+    use crate::execution::text_io::CorefSubmission;
     use crate::options::{CommandOptions, CommonOptions, CorefOptions};
     use crate::runner::DispatchHostContext;
     use crate::store::RunnerJobSnapshot;
-    use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
+    use crate::text_batch::{TextBatchFileResult, TextBatchFileResults};
 
     #[derive(Default)]
     struct FakeCorefGateway {
@@ -57,11 +43,8 @@ mod tests {
 
     #[async_trait]
     impl CorefGateway for FakeCorefGateway {
-        async fn coref_batch(
-            &self,
-            files: &[TextBatchFileInput],
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
+        async fn coref_batch(&self, submission: CorefSubmission<'_>) -> TextBatchFileResults {
+            let (files, _) = submission.into_parts();
             self.batches.lock().unwrap().push(ObservedCoreference {
                 sources: files.iter().map(|file| file.filename.clone()).collect(),
             });
@@ -137,7 +120,7 @@ mod tests {
 
     /// Guards: Two declared CHAT files share one coreference request and retain its xcoref output.
     /// Kind: contract
-    /// Not a type: CorefGateway restricts the available effect, while the actual ordered source population and serialized xcoref bytes require observing the dispatcher and filesystem.
+    /// Not a type: `CorefGateway` restricts the available effect, while the actual ordered source population and serialized xcoref bytes require observing the dispatcher and filesystem.
     /// State: Isolated temporary CHAT inputs exercise the real reader and writer. The recording gateway captures one source-bound batch and the shared sink records lifecycle effects.
     /// Concurrency: The fake gateway mutex records this test alone. Each run owns its directory and recording sink.
     #[tokio::test]

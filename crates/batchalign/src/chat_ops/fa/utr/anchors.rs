@@ -58,21 +58,23 @@ pub struct AlignableWords(usize);
 
 impl AlignableWords {
     /// The count of an extracted word list.
-    pub fn of<T>(words: &[T]) -> Self {
+    pub const fn of<T>(words: &[T]) -> Self {
         Self(words.len())
     }
 
     /// A count UTR recorded in its plan for the same extraction.
-    pub(super) fn recorded(count: usize) -> Self {
+    pub(super) const fn recorded(count: usize) -> Self {
         Self(count)
     }
 
     /// Whether `word` is one of these words.
+    #[must_use]
     pub fn holds(self, word: WordIdx) -> bool {
         word.raw() < self.0
     }
 
     /// Whether `word` is the last of these words.
+    #[must_use]
     pub fn is_last(self, word: WordIdx) -> bool {
         word.raw() + 1 == self.0
     }
@@ -98,18 +100,21 @@ pub struct WordAnchor {
 
 impl WordAnchor {
     /// The anchored word's position among its utterance's alignable words.
-    pub fn word(self) -> WordIdx {
+    #[must_use]
+    pub const fn word(self) -> WordIdx {
         self.word
     }
 
     /// When the recognizer heard the word begin.
-    pub fn start(self) -> FileMs {
+    #[must_use]
+    pub const fn start(self) -> FileMs {
         self.start
     }
 
     /// When the recognizer heard the word end: the instant an over-budget
     /// utterance may be cut at.
-    pub fn end(self) -> FileMs {
+    #[must_use]
+    pub const fn end(self) -> FileMs {
         self.end
     }
 
@@ -294,12 +299,14 @@ impl UtteranceAnchors {
     }
 
     /// The anchors, in word order (which is also time order).
+    #[must_use]
     pub fn anchors(&self) -> &[WordAnchor] {
         &self.anchors
     }
 
     /// How many alignable words the utterance had when UTR matched it.
-    pub fn alignable_words(&self) -> AlignableWords {
+    #[must_use]
+    pub const fn alignable_words(&self) -> AlignableWords {
         self.alignable_words
     }
 }
@@ -351,7 +358,8 @@ enum Observation {
 
 impl AnchorIndex {
     /// No anchors: UTR did not run, or had no tokens to match.
-    pub fn not_observed() -> Self {
+    #[must_use]
+    pub const fn not_observed() -> Self {
         Self {
             state: Observation::NotObserved,
             search_envelopes: BTreeMap::new(),
@@ -471,6 +479,7 @@ impl AnchorIndex {
     }
 
     /// What UTR observed about one utterance.
+    #[must_use]
     pub fn lookup(&self, utterance: UtteranceIdx) -> AnchorLookup<'_> {
         match &self.state {
             Observation::NotObserved => AnchorLookup::NotRecovered,
@@ -524,6 +533,7 @@ impl AnchorIndex {
     }
 
     /// How many utterances have admitted anchors, for logging.
+    #[must_use]
     pub fn anchored_utterances(&self) -> usize {
         match &self.state {
             Observation::NotObserved => 0,

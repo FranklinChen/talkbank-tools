@@ -33,6 +33,7 @@ fn tailscale_map() -> &'static HashMap<String, String> {
 /// Resolve an IP address to a hostname.
 ///
 /// Returns the Tailscale hostname if available, otherwise the raw IP string.
+#[must_use]
 pub fn resolve_hostname(ip: &IpAddr) -> String {
     let ip_str = ip.to_string();
 

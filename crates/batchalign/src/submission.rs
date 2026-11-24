@@ -13,7 +13,7 @@ use crate::store::{
 };
 
 /// Trusted host-side context needed to materialize one job from a submission.
-pub(crate) struct SubmissionContext {
+pub struct SubmissionContext {
     /// Stable identifier for the new job.
     pub job_id: JobId,
     /// Correlation context attached to logs and responses.
@@ -82,7 +82,7 @@ async fn write_staged_file(path: &Path, content: &str) -> Result<(), ServerError
 /// what can still fail here is the filesystem itself. Content-mode files are
 /// written only at their admitted [`StagedName`](crate::types::request::StagedName)s,
 /// which cannot leave the staging directory or collide.
-pub(crate) async fn materialize_submission_job(
+pub async fn materialize_submission_job(
     validated: &crate::types::request::ValidatedSubmission<'_>,
     context: &SubmissionContext,
 ) -> Result<Job, ServerError> {

@@ -9,7 +9,6 @@
 //! receives audio covering the full utterance including edge fillers.
 //! Runs after UTR but before FA grouping.
 
-use talkbank_model::alignment::helpers::{TierDomain, WordItem, walk_words};
 use talkbank_model::model::{ChatFile, Line, UtteranceContent, WordCategory};
 
 /// Maximum expansion (ms) into a gap for a single edge filler.
@@ -27,7 +26,7 @@ const MAX_FILLER_EXPANSION_MS: u64 = 1500;
 /// different behaviour and a bare `true` at a call site says nothing about
 /// which question it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Edge {
+pub enum Edge {
     /// The word is a filler, so its audio is in the adjacent gap and the
     /// bullet should be expanded to reclaim it.
     Filler,
@@ -44,7 +43,7 @@ pub(crate) enum Edge {
 /// fact in the same shape as an observed one, which is the defect class this
 /// module's neighbours exist to make unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EdgeFillers {
+pub enum EdgeFillers {
     /// Nothing in this utterance reaches the Wor tier, so there is no first or
     /// last word to classify and nothing to expand around.
     NoAlignableWords,
@@ -180,19 +179,15 @@ pub fn expand_bullets_for_edge_fillers(chat_file: &mut ChatFile) {
 
 /// Detect whether the first and last alignable words are fillers.
 ///
-/// Uses domain-gated `walk_words` with `TierDomain::Wor` so only
-/// alignable words reach the closure, no redundant `counts_for_tier` check.
-pub(crate) fn detect_edge_fillers(content: &[UtteranceContent]) -> EdgeFillers {
+/// "Alignable" is the `%wor` occupant set of
+/// [`walk_wor_units`](super::extraction::walk_wor_units), so an `xxx`,
+/// fragment or nonword at an edge never stands in for the word FA aligns.
+pub fn detect_edge_fillers(content: &[UtteranceContent]) -> EdgeFillers {
     let mut first: Option<Edge> = None;
     let mut last: Option<Edge> = None;
 
-    walk_words(content, Some(TierDomain::Wor), &mut |leaf| {
-        let category = match leaf {
-            WordItem::Word(w) => w.category.as_ref(),
-            WordItem::ReplacedWord(r) => r.word.category.as_ref(),
-            WordItem::Separator(_) => return,
-        };
-        let edge = match category {
+    super::extraction::walk_wor_units(content, &mut |word| {
+        let edge = match word.category {
             Some(WordCategory::Filler) => Edge::Filler,
             _ => Edge::Ordinary,
         };
@@ -210,5 +205,67 @@ pub(crate) fn detect_edge_fillers(content: &[UtteranceContent]) -> EdgeFillers {
     match (first, last) {
         (Some(leading), Some(trailing)) => EdgeFillers::Edges { leading, trailing },
         _ => EdgeFillers::NoAlignableWords,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Edge, EdgeFillers, detect_edge_fillers};
+    use talkbank_model::model::Line;
+    use talkbank_parser_tests::test_error::ParseProductTestExt;
+
+    /// The edge classification of the one utterance in `main_tier`.
+    fn edges_of(main_tier: &str) -> EdgeFillers {
+        let chat = talkbank_parser::TreeSitterParser::new()
+            .expect("parser")
+            .parse_chat_file(&format!(
+                "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Child\n\
+                 @ID:\teng|test|CHI|||||Child|||\n*CHI:\t{main_tier}\n@End\n"
+            ))
+            .expect_built();
+        let utterance = chat
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line::Utterance(utterance) => Some(utterance),
+                _ => None,
+            })
+            .expect("one utterance");
+        detect_edge_fillers(&utterance.main.content.content)
+    }
+
+    /// Guards: The edge-filler pass classifies the first and last words that occupy a `%wor` slot, so an untranscribed word, a phonological fragment or a nonword at an utterance edge never hides a filler beside it from bullet expansion.
+    /// Kind: policy
+    /// Not a type: `walk_wor_units` is now the only walk the pass can use and owns the `%wor` predicate, so no caller can read a domain-gated walk as filtered; which word categories occupy `%wor` is chatter's `counts_for_tier` policy, and only classifying real parsed words shows the pass applies it.
+    /// State: None. Main tiers parsed in memory by chatter's parser; no audio, worker or file.
+    /// Concurrency: None. Each main tier is parsed into its own file value and its edges read once; nothing is shared between rows.
+    #[test]
+    fn non_wor_words_at_an_edge_do_not_hide_a_filler() {
+        for (main_tier, expected) in [
+            (
+                "xxx &-um hello .",
+                EdgeFillers::Edges {
+                    leading: Edge::Filler,
+                    trailing: Edge::Ordinary,
+                },
+            ),
+            (
+                "hello &-um &+fr .",
+                EdgeFillers::Edges {
+                    leading: Edge::Ordinary,
+                    trailing: Edge::Filler,
+                },
+            ),
+            (
+                "&~ah hello .",
+                EdgeFillers::Edges {
+                    leading: Edge::Ordinary,
+                    trailing: Edge::Ordinary,
+                },
+            ),
+            ("xxx .", EdgeFillers::NoAlignableWords),
+        ] {
+            assert_eq!(edges_of(main_tier), expected, "{main_tier}");
+        }
     }
 }

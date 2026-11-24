@@ -106,7 +106,7 @@ impl StanzaRegistryUnavailable {
     /// than "not installed" (which a worker serving no Stanza task reports
     /// too), and either says more than "no report"; between two of one kind
     /// the latest wins.
-    fn supersedes(&self, current: &Self) -> bool {
+    const fn supersedes(&self, current: &Self) -> bool {
         match (self, current) {
             (_, Self::NoReport) => true,
             (Self::NoReport, Self::NotInstalled { .. } | Self::ReportFailed { .. }) => false,
@@ -148,7 +148,8 @@ impl<R: Requirement> StanzaGap<R> {
     }
 
     /// What the entry lacks.
-    pub fn kind(&self) -> &GapKind {
+    #[must_use]
+    pub const fn kind(&self) -> &GapKind {
         &self.kind
     }
 }
@@ -210,7 +211,8 @@ pub struct Admitted<R: Requirement> {
 
 impl<R: Requirement> Admitted<R> {
     /// The admitted language.
-    pub fn language(&self) -> &LanguageCode3 {
+    #[must_use]
+    pub const fn language(&self) -> &LanguageCode3 {
         &self.language
     }
 
@@ -235,7 +237,7 @@ impl StanzaRegistry {
     /// The registry of a reported catalog. Keys and processors were parsed
     /// when the report was deserialized, so nothing here can fail. Reached
     /// only through the slot (and test doubles).
-    pub(crate) fn from_catalog(
+    pub(crate) const fn from_catalog(
         languages: BTreeMap<LanguageCode3, BTreeSet<StanzaProcessor>>,
     ) -> Self {
         Self { languages }
@@ -320,7 +322,7 @@ pub(crate) struct StanzaRegistrySlot {
 
 impl StanzaRegistrySlot {
     /// A slot no worker has reported to.
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             admitted: OnceLock::new(),
             unavailable: Mutex::new(StanzaRegistryUnavailable::NoReport),

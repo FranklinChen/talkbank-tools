@@ -31,7 +31,7 @@ pub(super) struct RunOptions<'a> {
 }
 
 impl<'a> RunOptions<'a> {
-    pub(super) fn new(
+    pub(super) const fn new(
         services: PipelineServices<'a>,
         params: &crate::params::MorphosyntaxParams<'a>,
     ) -> Self {
@@ -49,14 +49,14 @@ impl<'a> RunOptions<'a> {
 }
 
 /// CA pass-through never claims a language or an analysis admission.
-pub(crate) enum ParsedFile {
+pub enum ParsedFile {
     PassThrough(ValidChatFile),
     Analyze(Analysis<Admitted>),
 }
 
 /// A diagnosed generated document whose findings are confined to some
 /// utterances, read for morphosyntax.
-pub(crate) enum LocalizedParse {
+pub enum LocalizedParse {
     /// `@Options: CA` under a policy that honors it: morphosyntax declines
     /// the document, which is handed back unchanged.
     Declined(DiagnosedOutput),
@@ -96,7 +96,7 @@ impl FileLanguage {
 /// The document and per-file language survive each phase by ownership, with
 /// the scope that says which utterances are analyzed and how the finished
 /// document is judged.
-pub(crate) struct Analysis<S, D = WholeDocument> {
+pub struct Analysis<S, D = WholeDocument> {
     chat: ChatFile,
     language: FileLanguage,
     scope: D,
@@ -106,7 +106,7 @@ pub(crate) struct Analysis<S, D = WholeDocument> {
 /// Which utterances an analysis edits, and how its finished document is
 /// judged. The two belong together: a document analyzed outside some
 /// utterances cannot pass the strict gate those utterances already failed.
-pub(crate) trait AnalysisScope: Send {
+pub trait AnalysisScope: Send {
     /// What judging the finished document yields.
     type Judged: Send;
     /// Whether the utterance at this ordinal (among the file's utterances)
@@ -118,7 +118,7 @@ pub(crate) trait AnalysisScope: Send {
 
 /// An admitted document: every utterance is analyzed and the result must pass
 /// the strict gate, failing the stage otherwise.
-pub(crate) struct WholeDocument;
+pub struct WholeDocument;
 
 impl AnalysisScope for WholeDocument {
     type Judged = PostValidated;
@@ -138,7 +138,7 @@ impl AnalysisScope for WholeDocument {
 /// sent to a worker and keep their form, and the result is judged by
 /// [`PostValidated::produced_outside`], which refuses it only if the analysis
 /// added a finding of its own.
-pub(crate) struct OutsideHeldOut {
+pub struct OutsideHeldOut {
     held_out: crate::pipeline::post_validate::HeldOutUtterances,
 }
 
@@ -164,7 +164,7 @@ impl AnalysisScope for OutsideHeldOut {
     }
 }
 
-pub(crate) struct Admitted;
+pub struct Admitted;
 pub(super) struct Collected {
     items: Vec<CollectedUtterance>,
     hints: HintPlan,
@@ -350,7 +350,7 @@ fn declines_ca(chat: &ChatFile, policy: crate::options::CaMorphotagPolicy) -> bo
 }
 
 impl Analysis<Admitted> {
-    pub(crate) fn document(&self) -> &ChatFile {
+    pub(crate) const fn document(&self) -> &ChatFile {
         &self.chat
     }
 
@@ -364,7 +364,7 @@ impl Analysis<Admitted> {
     }
 }
 
-pub(crate) struct IncrementalInput {
+pub struct IncrementalInput {
     pub(crate) chat: ChatFile,
     pub(crate) language: LanguageCode,
     /// The file's admitted primary language.

@@ -117,6 +117,7 @@ pub use correspondence::{
 /// transcript comparison).
 ///
 /// Returns a list of `AlignResult` items in sequence order.
+#[must_use]
 pub fn align(payload: &[String], reference: &[String], mode: MatchMode) -> Vec<AlignResult> {
     uninterrupted(align_controlled(payload, reference, mode, &Uninterrupted))
 }
@@ -164,6 +165,7 @@ pub fn align_controlled<C: WorkControl + ?Sized>(
 /// Returns `AlignResult` with single-character `key` strings.
 ///
 /// Applies the same prefix/suffix stripping optimization as [`align`].
+#[must_use]
 pub fn align_chars(payload: &[char], reference: &[char], mode: MatchMode) -> Vec<AlignResult> {
     // Single-character fuzzy matching retains ASCII-insensitive semantics.
     let mode = match mode {

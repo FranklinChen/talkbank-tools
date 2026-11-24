@@ -68,6 +68,7 @@ pub struct EngineId(Cow<'static, str>);
 
 impl EngineId {
     /// Name an engine, borrowing a literal.
+    #[must_use]
     pub const fn new(name: &'static str) -> Self {
         Self(Cow::Borrowed(name))
     }
@@ -153,6 +154,7 @@ impl CharEdits {
     /// The alignment route is not that fact: a residue word whose characters
     /// all matched is exactly as well evidenced as a stitched one, and the
     /// count is what says so.
+    #[must_use]
     pub const fn is_exact(self) -> bool {
         self.transcript_only == 0 && self.label_only == 0
     }
@@ -362,7 +364,8 @@ impl Origin {
     ///
     /// Exhaustive on purpose: a new variant must be given a kind here, and both
     /// consumers then classify it correctly without being touched.
-    pub fn kind(&self) -> OriginKind {
+    #[must_use]
+    pub const fn kind(&self) -> OriginKind {
         match self {
             Self::EngineMeasured { .. } | Self::TranscriptBullet => OriginKind::Observed,
             Self::DerivedFromNextOnset
@@ -381,7 +384,8 @@ impl Origin {
     /// the one that could not be asked at all before provenance was carried.
     /// Only observations may be scored as evidence; derived numbers are our own
     /// arithmetic and scoring them measures us.
-    pub fn is_observation(&self) -> bool {
+    #[must_use]
+    pub const fn is_observation(&self) -> bool {
         matches!(self.kind(), OriginKind::Observed)
     }
 
@@ -418,6 +422,7 @@ impl Origin {
     /// "is this number still one?", which are different questions: the first
     /// decides whether re-running alignment could help, the second decides
     /// whether the number may be used as evidence.
+    #[must_use]
     pub fn underlying(&self) -> &Origin {
         // `fold` rather than `last`, because the chain always yields at least
         // `self`, and this way that fact needs no unwrapping to express.
@@ -436,6 +441,7 @@ impl Origin {
     ///
     /// Asks the whole chain, because a value clamped to the recording and then
     /// rebalanced against a neighbour must still report it.
+    #[must_use]
     pub fn overran_recording(&self) -> bool {
         self.chain().any(|origin| {
             matches!(
@@ -463,6 +469,7 @@ impl Origin {
     /// its invented magnitude REPLACED by a measurement, so that case is not
     /// this one. An attribution is not undone by a later adjustment, because
     /// which label belongs to which word is a question no clamp answers.
+    #[must_use]
     pub fn attributed_by_alignment(&self) -> bool {
         self.chain()
             .any(|origin| matches!(origin, Self::AttributedByCharAlignment { .. }))
@@ -761,12 +768,14 @@ impl ProvenanceTally {
     }
 
     /// How many timings were counted.
-    pub fn total(self) -> usize {
+    #[must_use]
+    pub const fn total(self) -> usize {
         self.observed + self.derived + self.assumed + self.adjusted
     }
 
     /// Whether anything here is not a straightforward observation.
-    pub fn any_not_observed(self) -> bool {
+    #[must_use]
+    pub const fn any_not_observed(self) -> bool {
         self.total() > self.observed
     }
 
@@ -789,7 +798,8 @@ impl ProvenanceTally {
     /// wraps an attributed start in a clamp or a rebalance. Reading the bucket
     /// alone reported "nothing to see" for precisely the words the DP had
     /// guessed at.
-    pub fn needs_review(self) -> bool {
+    #[must_use]
+    pub const fn needs_review(self) -> bool {
         self.assumed > 0 || self.attributed > 0 || self.overran_recording > 0
     }
 }

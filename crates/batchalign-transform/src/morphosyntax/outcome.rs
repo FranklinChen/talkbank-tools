@@ -76,6 +76,8 @@ pub enum NotApplicableReason {
     NonwordOnly,
     /// Every word in the utterance is untranscribed (`xxx`, `yyy`, `www`).
     UntranscribedOnly,
+    /// Every word in the utterance is an omission (`0is`, or a CA `(word)`).
+    OmissionOnly,
     /// The utterance has words, but all of them are inside retrace
     /// groups (`<...> [/]`, `<...> [//]`), which Mor excludes.
     AllRetraced,
@@ -87,13 +89,15 @@ pub enum NotApplicableReason {
 
 impl NotApplicableReason {
     /// Stable evidence label used after `not_applicable:`.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Empty => "empty",
             Self::FillerOnly => "filler_only",
             Self::FragmentOnly => "fragment_only",
             Self::NonwordOnly => "nonword_only",
             Self::UntranscribedOnly => "untranscribed_only",
+            Self::OmissionOnly => "omission_only",
             Self::AllRetraced => "all_retraced",
             Self::MixedNonLinguistic => "mixed_nonlinguistic",
         }
@@ -111,6 +115,7 @@ impl NotApplicableReason {
 /// Callers must only invoke this for utterances where
 /// `extract::collect_utterance_content(…, TierDomain::Mor, …)` returned
 /// an empty vector; otherwise the classification is meaningless.
+#[must_use]
 pub fn classify_not_applicable(utterance: &Utterance) -> NotApplicableReason {
     // Two walks: domain-free sees all content (including retrace);
     // Mor-domain sees everything except retrace. If Mor sees nothing
@@ -119,108 +124,103 @@ pub fn classify_not_applicable(utterance: &Utterance) -> NotApplicableReason {
     // expose retrace context to the closure, so a single-walk fusion
     // would require a custom walker; the per-call cost is tiny (invoked
     // only on empty-payload utterances, ~3K across a 54-file corpus).
-    let mut total = ContentCategories::default();
+    let mut total = ContentKinds::default();
     walk_words(&utterance.main.content.content, None, &mut |item| {
-        accumulate(&mut total, item)
+        total.observe(item)
     });
 
-    let mut mor_only = ContentCategories::default();
+    let mut mor_only = ContentKinds::default();
     walk_words(
         &utterance.main.content.content,
         Some(TierDomain::Mor),
-        &mut |item| accumulate(&mut mor_only, item),
+        &mut |item| mor_only.observe(item),
     );
 
-    if total.total_words == 0 {
-        return NotApplicableReason::Empty;
+    match (total.any_word(), mor_only.any_word()) {
+        (false, _) => NotApplicableReason::Empty,
+        // Domain-free saw words but the Mor walk saw none: all retraced.
+        (true, false) => NotApplicableReason::AllRetraced,
+        (true, true) => mor_only.reason_when_nothing_alignable(),
     }
-    if mor_only.total_words == 0 {
-        // domain-free saw content but Mor saw none → all retrace
-        return NotApplicableReason::AllRetraced;
-    }
-    mor_only.reason_when_nothing_alignable()
 }
 
+/// What one transcribed-as-written word is, for this classification.
+///
+/// Closed and matched exhaustively from `WordCategory`, so a category chatter
+/// adds breaks this match instead of being counted as linguistic, which is
+/// how omissions were once miscounted (a `_` arm sent them there).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum WordKind {
+    /// Ordinary speech: what `%mor` analyzes.
+    Linguistic,
+    Filler,
+    Fragment,
+    Nonword,
+    Untranscribed,
+    Omission,
+}
+
+impl WordKind {
+    fn of(word: &talkbank_model::model::Word) -> Self {
+        if word.untranscribed().is_some() {
+            return Self::Untranscribed;
+        }
+        match &word.category {
+            None => Self::Linguistic,
+            Some(WordCategory::Filler) => Self::Filler,
+            Some(WordCategory::PhonologicalFragment) => Self::Fragment,
+            Some(WordCategory::Nonword) => Self::Nonword,
+            Some(WordCategory::Omission | WordCategory::CAOmission) => Self::Omission,
+        }
+    }
+
+    /// The reason an utterance made only of this kind has no `%mor`.
+    const fn only_reason(self) -> NotApplicableReason {
+        match self {
+            // The caller's precondition (nothing Mor-alignable) is violated
+            // if a linguistic word is present; answer conservatively.
+            Self::Linguistic => NotApplicableReason::MixedNonLinguistic,
+            Self::Filler => NotApplicableReason::FillerOnly,
+            Self::Fragment => NotApplicableReason::FragmentOnly,
+            Self::Nonword => NotApplicableReason::NonwordOnly,
+            Self::Untranscribed => NotApplicableReason::UntranscribedOnly,
+            Self::Omission => NotApplicableReason::OmissionOnly,
+        }
+    }
+}
+
+/// The distinct word kinds one walk saw.
 #[derive(Default, Debug)]
-struct ContentCategories {
-    /// Total word-like leaves seen (excluding separators).
-    total_words: usize,
-    filler_count: usize,
-    fragment_count: usize,
-    nonword_count: usize,
-    untranscribed_count: usize,
-    /// Linguistic words that would have been Mor-alignable, their
-    /// presence means extraction would have returned non-empty, so
-    /// the caller's precondition (zero alignable words) was violated.
-    linguistic_count: usize,
-}
+struct ContentKinds(std::collections::BTreeSet<WordKind>);
 
-impl ContentCategories {
-    /// Pick the narrowest reason that explains "nothing alignable".
+impl ContentKinds {
+    /// Record one leaf. A replaced word is classified by what the
+    /// transcriber wrote; separators carry no kind (a tag-marker separator
+    /// would have made extraction non-empty, so classify would not run).
+    fn observe(&mut self, item: WordItem<'_>) {
+        let word = match item {
+            WordItem::Word(word) => word,
+            WordItem::ReplacedWord(replaced) => &replaced.word,
+            WordItem::Separator(_) => return,
+        };
+        if !word.cleaned_text().is_empty() {
+            self.0.insert(WordKind::of(word));
+        }
+    }
+
+    fn any_word(&self) -> bool {
+        !self.0.is_empty()
+    }
+
+    /// The narrowest reason that explains "nothing alignable": one kind
+    /// names its own reason; several are mixed.
     fn reason_when_nothing_alignable(&self) -> NotApplicableReason {
-        // If there are any linguistic words, the caller's precondition
-        // is violated: extraction would have returned non-empty. Fall
-        // through to MixedNonLinguistic conservatively.
-        if self.linguistic_count > 0 {
-            return NotApplicableReason::MixedNonLinguistic;
+        let mut kinds = self.0.iter();
+        match (kinds.next(), kinds.next()) {
+            (None, _) => NotApplicableReason::Empty,
+            (Some(only), None) => only.only_reason(),
+            (Some(_), Some(_)) => NotApplicableReason::MixedNonLinguistic,
         }
-
-        // Mutually-exclusive single-category cases.
-        let nonzero_cats = [
-            (self.filler_count > 0, NotApplicableReason::FillerOnly),
-            (self.fragment_count > 0, NotApplicableReason::FragmentOnly),
-            (self.nonword_count > 0, NotApplicableReason::NonwordOnly),
-            (
-                self.untranscribed_count > 0,
-                NotApplicableReason::UntranscribedOnly,
-            ),
-        ];
-        let active: Vec<NotApplicableReason> = nonzero_cats
-            .iter()
-            .filter_map(|(b, r)| b.then_some(*r))
-            .collect();
-
-        match active.as_slice() {
-            [] => NotApplicableReason::Empty,
-            [single] => *single,
-            _ => NotApplicableReason::MixedNonLinguistic,
-        }
-    }
-}
-
-fn accumulate(cats: &mut ContentCategories, item: WordItem<'_>) {
-    let word: &talkbank_model::model::Word = match item {
-        WordItem::Word(w) => w,
-        WordItem::ReplacedWord(rw) => {
-            // For Mor, the replacement words are what would be aligned;
-            // but for NotApplicable classification we care about what
-            // the transcriber actually wrote, so use the original word.
-            &rw.word
-        }
-        WordItem::Separator(_) => {
-            // Tag-marker separators (`,`, `„`, `‡`) contribute to the
-            // alignable count in the Mor domain. If they're present
-            // alongside non-linguistic content, the utterance would
-            // extract non-empty, so classify would not run. Ignore here.
-            return;
-        }
-    };
-
-    if word.cleaned_text().is_empty() {
-        return;
-    }
-    cats.total_words += 1;
-
-    if word.untranscribed().is_some() {
-        cats.untranscribed_count += 1;
-        return;
-    }
-
-    match &word.category {
-        Some(WordCategory::Filler) => cats.filler_count += 1,
-        Some(WordCategory::PhonologicalFragment) => cats.fragment_count += 1,
-        Some(WordCategory::Nonword) => cats.nonword_count += 1,
-        _ => cats.linguistic_count += 1,
     }
 }
 
@@ -233,6 +233,7 @@ impl MorOutcome {
     /// successfully-morphotagged utterance: noise, not signal.
     /// Callers that want to surface aligned counts should aggregate
     /// separately.
+    #[must_use]
     pub fn to_decision_record(&self) -> Option<DecisionRecord> {
         match &self.kind {
             MorOutcomeKind::Aligned { .. } => None,

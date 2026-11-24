@@ -1,6 +1,6 @@
-//! FunASR output admission: pairing FunASR's own units with its timestamps.
+//! `FunASR` output admission: pairing `FunASR`'s own units with its timestamps.
 //!
-//! FunASR reports timing as a flat `timestamp` array holding one
+//! `FunASR` reports timing as a flat `timestamp` array holding one
 //! `[start_ms, end_ms]` entry per recognized unit. Which list those units live
 //! in depends on the checkpoint:
 //!
@@ -9,14 +9,14 @@
 //!   units. The pre-punctuation surface `raw_text` (present when the recognizer
 //!   asks for `return_raw_text=True`) holds exactly one whitespace token per
 //!   timestamp, a Han character or a Latin word.
-//! - **SenseVoice**: `words` is built by FunASR in lockstep with `timestamp`
+//! - **`SenseVoice`**: `words` is built by `FunASR` in lockstep with `timestamp`
 //!   (`SenseVoiceSmall.post`), punctuation units included.
 //!
 //! The defect this module makes unrepresentable: batchalign3 used to
 //! re-tokenize `text` itself and pair the i-th token with the i-th timestamp.
 //! For Paraformer that paired punctuation-delimited CLAUSES with per-character
 //! timestamps, so a 437 s recording came out with every bullet inside its first
-//! 50 s. For SenseVoice, stripping punctuation from the text but not from the
+//! 50 s. For `SenseVoice`, stripping punctuation from the text but not from the
 //! timestamps shifted every later character by one entry per punctuation mark.
 //!
 //! The graph, each edge consuming the node before it:
@@ -30,7 +30,7 @@
 //!
 //! Only [`AdmittedSegment::admit`] builds [`Units`], and a timed one only after
 //! the unit and timestamp counts agree, so no later stage can pair by position.
-//! Display text is an untimed source only: timing must arrive with FunASR's own
+//! Display text is an untimed source only: timing must arrive with `FunASR`'s own
 //! unit list.
 //!
 //! Tokenizer boundary markers and closed model tags are decoded before a
@@ -52,16 +52,16 @@ use super::{
     push_admitted_word,
 };
 
-/// One FunASR result exactly as Python forwards it, before admission.
+/// One `FunASR` result exactly as Python forwards it, before admission.
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct FunasrSegmentWire {
     /// Display surface: punctuated and space-free for Paraformer, carrying
-    /// `<|...|>` markup for SenseVoice. A unit source only without timing.
+    /// `<|...|>` markup for `SenseVoice`. A unit source only without timing.
     text: String,
-    /// One `[start_ms, end_ms]` entry per unit, when FunASR produced timing.
+    /// One `[start_ms, end_ms]` entry per unit, when `FunASR` produced timing.
     #[serde(default)]
     timestamp: Vec<serde_json::Value>,
-    /// SenseVoice's unit list, parallel to `timestamp` by construction.
+    /// `SenseVoice`'s unit list, parallel to `timestamp` by construction.
     #[serde(default)]
     words: Option<Vec<String>>,
     /// Paraformer's pre-punctuation surface: one whitespace token per timestamp.
@@ -69,7 +69,7 @@ pub(super) struct FunasrSegmentWire {
     raw_text: Option<String>,
 }
 
-/// Why a FunASR segment could not be admitted.
+/// Why a `FunASR` segment could not be admitted.
 ///
 /// Not `Eq`: an inadmissible timing carries the owner's refusal, which names
 /// the offending bound as the float the provider actually sent.
@@ -81,7 +81,7 @@ pub(super) enum FunasrAdmissionError {
          timestamps belong to is ambiguous"
     )]
     AmbiguousUnits { segment: usize },
-    /// Timing arrived with only display text, which FunASR never pairs it with.
+    /// Timing arrived with only display text, which `FunASR` never pairs it with.
     #[error(
         "FunASR segment {segment} reported {timestamps} timestamps but no unit list \
          (`words` or `raw_text`) to pair them with"
@@ -113,12 +113,12 @@ pub(super) enum FunasrAdmissionError {
     },
 }
 
-/// Admit one raw FunASR timing entry through the one owner of interval
+/// Admit one raw `FunASR` timing entry through the one owner of interval
 /// rounding and range admission.
 ///
 /// This module used to admit the pair itself: it rounded with `as i64`, which
 /// is the cast [`AdmittedInterval`] exists to eliminate, and it enforced no
-/// upper bound, so a FunASR build reporting epoch milliseconds produced a
+/// upper bound, so a `FunASR` build reporting epoch milliseconds produced a
 /// plausible-looking time here while the same value was refused by name at
 /// every other provider.
 fn admit_timestamp(
@@ -142,11 +142,11 @@ fn admit_timestamp(
     })
 }
 
-/// The timing phase of a unit FunASR reported no timestamp for.
+/// The timing phase of a unit `FunASR` reported no timestamp for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NoTiming;
 
-/// One FunASR unit and its timing phase ([`UnitSpan`] or [`NoTiming`]).
+/// One `FunASR` unit and its timing phase ([`UnitSpan`] or [`NoTiming`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Unit<T> {
     surface: TokenizerPiece,
@@ -190,25 +190,25 @@ struct DecodedUnit<T> {
     timing: T,
 }
 
-/// Admitted FunASR units.
+/// Admitted `FunASR` units.
 ///
 /// The field is private and the only constructor is [`AdmittedSegment::admit`],
 /// which for timed units proves the unit and timestamp counts agree first.
 #[derive(Debug)]
 struct Units<T>(Vec<Unit<T>>);
 
-/// A FunASR segment after admission.
+/// A `FunASR` segment after admission.
 #[derive(Debug)]
 enum AdmittedSegment {
-    /// FunASR reported timing, and every unit has exactly one admitted span.
+    /// `FunASR` reported timing, and every unit has exactly one admitted span.
     Timed(Units<AdmittedInterval>),
-    /// FunASR reported no timing for this segment at all.
+    /// `FunASR` reported no timing for this segment at all.
     Untimed(Units<NoTiming>),
 }
 
 /// Where a segment's units come from, decided before timing is considered.
 enum UnitSource {
-    /// SenseVoice's own unit list, parallel to its timestamps.
+    /// `SenseVoice`'s own unit list, parallel to its timestamps.
     Words(Vec<String>),
     /// Paraformer's pre-punctuation surface: one whitespace token per timestamp.
     RawText(String),
@@ -217,7 +217,7 @@ enum UnitSource {
 }
 
 impl UnitSource {
-    /// Choose the unit list FunASR sent, refusing two at once.
+    /// Choose the unit list `FunASR` sent, refusing two at once.
     fn select(
         segment: usize,
         text: String,
@@ -232,7 +232,7 @@ impl UnitSource {
         }
     }
 
-    /// Unit surfaces in FunASR's own granularity, for an untimed segment.
+    /// Unit surfaces in `FunASR`'s own granularity, for an untimed segment.
     fn into_surfaces(self) -> Vec<String> {
         match self {
             Self::Words(words) => words,
@@ -325,13 +325,13 @@ fn strip_markup(text: &str) -> String {
 /// Characters that end a display-text run: whitespace, CJK punctuation, and
 /// ASCII punctuation other than the apostrophe and hyphen that occur inside
 /// words such as `don't` and `well-known`.
-fn is_display_separator(ch: char) -> bool {
+const fn is_display_separator(ch: char) -> bool {
     ch.is_whitespace()
         || cantonese_ops::is_cjk_punctuation(ch)
         || (ch.is_ascii_punctuation() && !matches!(ch, '\'' | '-'))
 }
 
-/// Split display text the way FunASR tokenizes: each Han character is a unit,
+/// Split display text the way `FunASR` tokenizes: each Han character is a unit,
 /// other runs stay whole, and markup, punctuation and whitespace separate.
 fn display_text_surfaces(text: &str) -> Vec<String> {
     fn flush(run: &mut String, surfaces: &mut Vec<String>) {
@@ -394,7 +394,7 @@ impl LexicalUnits<AdmittedInterval> {
     /// The zero-width rule is NOT decided here: [`WordTiming::from_admitted`]
     /// owns it, and it reports such a unit as untimed, so the element carries
     /// no timestamp. This module used to decide it a second time and keep the
-    /// zero on the element, which made a zero-width FunASR unit claim a time
+    /// zero on the element, which made a zero-width `FunASR` unit claim a time
     /// where the same unit from Tencent or Aliyun carried none.
     fn into_elements_and_timed_words(self) -> (Vec<HkAsrElement>, Vec<HkTimedWord>) {
         let mut elements = Vec::with_capacity(self.0.len());
@@ -427,11 +427,11 @@ impl LexicalUnits<NoTiming> {
     }
 }
 
-/// Admit and project FunASR segments into the shared HK ASR projection.
+/// Admit and project `FunASR` segments into the shared HK ASR projection.
 ///
 /// Each segment becomes one UNATTRIBUTED monologue: this path performs no
 /// diarization, so there is no speaker label to carry and none is invented.
-/// (The FunASR recognizer passes `spk_model="cam++"` to `generate`, but funasr
+/// (The `FunASR` recognizer passes `spk_model="cam++"` to `generate`, but funasr
 /// builds its speaker model in `AutoModel.__init__` and only ever consults
 /// `self.spk_model`; a `spk_model` given to `generate` is inert, and no
 /// `sentence_info` with `spk` labels is produced. Verified against the
@@ -489,7 +489,7 @@ mod tests {
         }
     }
 
-    /// FunASR timing entries from `(start_ms, end_ms)` pairs.
+    /// `FunASR` timing entries from `(start_ms, end_ms)` pairs.
     fn spans(pairs: &[(i64, i64)]) -> Vec<Value> {
         pairs
             .iter()
@@ -543,7 +543,7 @@ mod tests {
         Ok(())
     }
 
-    /// SenseVoice reports punctuation as units with spans of their own. They
+    /// `SenseVoice` reports punctuation as units with spans of their own. They
     /// must leave together with those spans, or every later unit shifts.
     #[test]
     fn sensevoice_punctuation_units_leave_with_their_own_spans() -> Result<(), FunasrAdmissionError>
@@ -757,7 +757,7 @@ mod tests {
         }
     }
 
-    /// Untimed display text is split the way FunASR tokenizes, and goes
+    /// Untimed display text is split the way `FunASR` tokenizes, and goes
     /// through the same lexical stage as timed units.
     #[test]
     fn untimed_display_text_splits_like_funasr() -> Result<(), FunasrAdmissionError> {

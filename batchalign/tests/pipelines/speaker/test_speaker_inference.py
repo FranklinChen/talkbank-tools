@@ -17,15 +17,26 @@ from batchalign.inference.speaker import (
     infer_pyannote_ai_prepared_audio,
     infer_pyannote_speaker_prepared_audio,
 )
+from batchalign.tests._loaded_hosts import TEST_LOCAL_SPEAKER_GRAPH
 
 
 def _loaded(pipe: object) -> LoadedPyannotePipeline:
     """A loaded-pipeline handle around a fake pipeline, as the speaker task
     load would hold it (its private model files are an empty directory)."""
-    return LoadedPyannotePipeline(pipe, tempfile.TemporaryDirectory())
+    return LoadedPyannotePipeline(
+        pipe,
+        tempfile.TemporaryDirectory(),
+        TEST_LOCAL_SPEAKER_GRAPH,
+    )
 
 
 def test_local_pyannote_runs_on_the_loaded_pipeline() -> None:
+    """Guards: Local PCM inference returns segments with the exact loaded graph object from its owning pipeline.
+    Kind: contract
+    Not a type: The runtime call can lose the loaded handle or substitute a different graph when projecting results.
+    State: A synthetic graph and fake native pipeline consume an in-memory NumPy waveform.
+    Concurrency: Each call owns its fake pipeline and temporary files.
+    """
     """The local entry point takes the loaded handle and runs it, loading
     nothing; its segments become local evidence."""
 
@@ -40,15 +51,17 @@ def test_local_pyannote_runs_on_the_loaded_pipeline() -> None:
                 )
             )
 
+    handle = _loaded(_Pipe())
     response = infer_local_pyannote_prepared_audio(
         np.asarray([0.1, 0.2, 0.3], dtype=np.float32),
         22050,
         3,
-        pipeline=_loaded(_Pipe()),
+        pipeline=handle,
     )
 
     assert isinstance(response.evidence, LocalPyannoteSpeakerEvidence)
     assert response.evidence.segments[0].speaker == "SPEAKER_0"
+    assert response.evidence.loaded_graph is handle.loaded_graph
     assert seen == [3]
 
 

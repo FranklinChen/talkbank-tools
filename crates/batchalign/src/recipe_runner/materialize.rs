@@ -6,7 +6,7 @@ use crate::api::{ContentType, DisplayPath};
 
 /// Stem rewrite used by commands whose outputs are not a simple extension swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StemRewrite {
+pub struct StemRewrite {
     /// Optional suffix to strip from the stem before appending a new one.
     pub strip_suffix: Option<&'static str>,
     /// Suffix to append to the stem before writing the final extension.
@@ -17,7 +17,7 @@ pub(crate) struct StemRewrite {
 
 /// Filename policy for primary outputs and sidecars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileNamingPolicy {
+pub enum FileNamingPolicy {
     /// Keep the source-relative display path unchanged.
     PreserveInput,
     /// Replace the final extension while keeping directories and stem.
@@ -28,7 +28,7 @@ pub(crate) enum FileNamingPolicy {
 
 /// Output policy for a released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputPolicy {
+pub enum OutputPolicy {
     /// Source-independent output contract.
     Fixed {
         /// Primary output naming policy.
@@ -49,7 +49,7 @@ pub(crate) enum OutputPolicy {
 /// Catalog declaration: fixed/source-selected outputs or required encoding.
 /// A declaration is not an output plan until command options are admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputDeclaration {
+pub enum OutputDeclaration {
     /// Existing source-aware text/analysis policy.
     Source(OutputPolicy),
     /// Native export must select its format from submitted typed options.
@@ -57,7 +57,7 @@ pub(crate) enum OutputDeclaration {
 }
 
 impl OutputDeclaration {
-    pub(super) fn select(
+    pub(super) const fn select(
         self,
         options: &crate::options::CommandOptions,
     ) -> Result<OutputPolicy, super::planner::PlanningError> {
@@ -143,7 +143,7 @@ impl OutputPolicy {
 
 /// Role of one materialized output artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MaterializedArtifactRole {
+pub enum MaterializedArtifactRole {
     /// Main user-facing output.
     Primary,
     /// Sidecar derived from the same source work unit.
@@ -152,7 +152,7 @@ pub(crate) enum MaterializedArtifactRole {
 
 /// Planned output artifact derived from one source work unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedMaterializedFile {
+pub struct PlannedMaterializedFile {
     /// Relative output path.
     pub display_path: DisplayPath,
     /// Content type surfaced through the result APIs.
@@ -163,7 +163,7 @@ pub(crate) struct PlannedMaterializedFile {
 
 /// A primary result. Transport roles are derived from its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrimaryArtifact {
+pub struct PrimaryArtifact {
     display_path: DisplayPath,
     content_type: ContentType,
 }
@@ -180,10 +180,10 @@ impl PrimaryArtifact {
         }
     }
 
-    pub(crate) fn display_path(&self) -> &DisplayPath {
+    pub(crate) const fn display_path(&self) -> &DisplayPath {
         &self.display_path
     }
-    pub(crate) fn content_type(&self) -> ContentType {
+    pub(crate) const fn content_type(&self) -> ContentType {
         self.content_type
     }
     pub(crate) fn into_materialized(self) -> PlannedMaterializedFile {
@@ -197,15 +197,15 @@ impl PrimaryArtifact {
 
 /// CSV metrics have a fixed sidecar role and content type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MetricsArtifact {
+pub struct MetricsArtifact {
     display_path: DisplayPath,
 }
 
 impl MetricsArtifact {
-    pub(crate) fn display_path(&self) -> &DisplayPath {
+    pub(crate) const fn display_path(&self) -> &DisplayPath {
         &self.display_path
     }
-    pub(crate) fn content_type(&self) -> ContentType {
+    pub(crate) const fn content_type(&self) -> ContentType {
         ContentType::Csv
     }
     fn into_materialized(self) -> PlannedMaterializedFile {
@@ -221,20 +221,20 @@ impl MetricsArtifact {
 /// Named comparison outputs derived together from the same source.
 /// Fields remain private to the naming producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChatMetricsArtifacts {
+pub struct ChatMetricsArtifacts {
     source: DisplayPath,
     primary: PrimaryArtifact,
     metrics: MetricsArtifact,
 }
 
 impl ChatMetricsArtifacts {
-    pub(crate) fn source(&self) -> &DisplayPath {
+    pub(crate) const fn source(&self) -> &DisplayPath {
         &self.source
     }
-    pub(crate) fn primary(&self) -> &PrimaryArtifact {
+    pub(crate) const fn primary(&self) -> &PrimaryArtifact {
         &self.primary
     }
-    pub(crate) fn metrics(&self) -> &MetricsArtifact {
+    pub(crate) const fn metrics(&self) -> &MetricsArtifact {
         &self.metrics
     }
     pub(crate) fn into_primary(self) -> PrimaryArtifact {
@@ -244,7 +244,7 @@ impl ChatMetricsArtifacts {
 
 /// Source-bound output layout. Every variant owns exactly one primary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedArtifactSet {
+pub struct PlannedArtifactSet {
     layout: ArtifactLayout,
 }
 
@@ -258,28 +258,28 @@ enum ArtifactLayout {
 }
 
 impl PlannedArtifactSet {
-    pub(crate) fn source(&self) -> &DisplayPath {
+    pub(crate) const fn source(&self) -> &DisplayPath {
         match &self.layout {
             ArtifactLayout::Primary { source, .. } => source,
             ArtifactLayout::ChatMetrics(pair) => pair.source(),
         }
     }
 
-    pub(crate) fn primary(&self) -> &PrimaryArtifact {
+    pub(crate) const fn primary(&self) -> &PrimaryArtifact {
         match &self.layout {
             ArtifactLayout::Primary { primary, .. } => primary,
             ArtifactLayout::ChatMetrics(pair) => pair.primary(),
         }
     }
 
-    pub(crate) fn single(&self) -> Option<&PrimaryArtifact> {
+    pub(crate) const fn single(&self) -> Option<&PrimaryArtifact> {
         match &self.layout {
             ArtifactLayout::Primary { primary, .. } => Some(primary),
             ArtifactLayout::ChatMetrics(_) => None,
         }
     }
 
-    pub(crate) fn chat_metrics(&self) -> Option<&ChatMetricsArtifacts> {
+    pub(crate) const fn chat_metrics(&self) -> Option<&ChatMetricsArtifacts> {
         match &self.layout {
             ArtifactLayout::Primary { .. } => None,
             ArtifactLayout::ChatMetrics(pair) => Some(pair),
@@ -318,10 +318,7 @@ impl IntoIterator for PlannedArtifactSet {
 }
 
 /// Derive the supported output layout once, retaining its source and roles.
-pub(crate) fn plan_materialized_files(
-    source: &DisplayPath,
-    policy: OutputPolicy,
-) -> PlannedArtifactSet {
+pub fn plan_materialized_files(source: &DisplayPath, policy: OutputPolicy) -> PlannedArtifactSet {
     let layout = match policy.for_source(source) {
         SelectedOutputPolicy::Primary {
             naming,

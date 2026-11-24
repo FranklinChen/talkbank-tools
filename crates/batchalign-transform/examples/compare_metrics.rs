@@ -1,6 +1,6 @@
 //! Score validated hypothesis/gold CHAT pairs without running inference.
 //!
-//! Usage: compare_metrics main1.cha gold1.cha [main2.cha gold2.cha ...]
+//! Usage: `compare_metrics` main1.cha gold1.cha [main2.cha gold2.cha ...]
 //! Output is `pair,metric,value` CSV, followed by `ALL` count totals. Rates
 //! are not summed. Every input must pass parsing and model validation before
 //! any comparison runs; the complete report is prepared before bytes are written.

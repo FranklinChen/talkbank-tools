@@ -2,7 +2,7 @@
 //!
 //! These records mirror the subset of the Rev.AI Speech-to-Text v1 API used by
 //! batchalign3. They intentionally model the wire format closely so that the
-//! shared client can be reused by both the server control plane and the PyO3
+//! shared client can be reused by both the server control plane and the `PyO3`
 //! bridge without a second translation layer.
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,7 @@ pub struct Transcript {
 /// Fidelity of the provider transcript retained as reusable evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RevTranscriptFidelity {
+pub enum RevTranscriptFidelity {
     /// Exact JSON response bytes returned by the transcript endpoint.
     ExactProviderJson,
     /// Typed projection migrated from the earlier cache schema.
@@ -98,7 +98,7 @@ pub(crate) enum RevTranscriptFidelity {
 /// once at the HTTP boundary. Cache deserialization repeats that validation
 /// before the value can re-enter the pipeline.
 #[derive(Debug, Clone)]
-pub(crate) struct RevTranscriptEvidence {
+pub struct RevTranscriptEvidence {
     retained: RetainedRevTranscript,
     transcript: Transcript,
 }
@@ -118,18 +118,18 @@ impl RevTranscriptEvidence {
         })
     }
 
-    pub(crate) fn from_legacy_transcript(transcript: Transcript) -> Self {
+    pub(crate) const fn from_legacy_transcript(transcript: Transcript) -> Self {
         Self {
             retained: RetainedRevTranscript::LegacyTypedProjection,
             transcript,
         }
     }
 
-    pub(crate) fn transcript(&self) -> &Transcript {
+    pub(crate) const fn transcript(&self) -> &Transcript {
         &self.transcript
     }
 
-    pub(crate) fn fidelity(&self) -> RevTranscriptFidelity {
+    pub(crate) const fn fidelity(&self) -> RevTranscriptFidelity {
         match self.retained {
             RetainedRevTranscript::ExactProviderJson(_) => RevTranscriptFidelity::ExactProviderJson,
             RetainedRevTranscript::LegacyTypedProjection => {

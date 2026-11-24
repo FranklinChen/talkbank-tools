@@ -28,7 +28,7 @@ pub struct LiveServerJobClient<'a> {
 }
 
 impl<'a> LiveServerJobClient<'a> {
-    pub fn new(client: &'a reqwest::Client, base_url: &'a str) -> Self {
+    pub const fn new(client: &'a reqwest::Client, base_url: &'a str) -> Self {
         Self { client, base_url }
     }
 

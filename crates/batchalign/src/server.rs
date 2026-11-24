@@ -404,16 +404,13 @@ pub async fn serve_with_runtime(
             "{warning}",
         );
     }
-    if validation.has_errors() {
-        let detail = validation
-            .errors
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(error::ServerError::Validation(format!(
-            "host-facts validation refused startup: {detail}"
-        )));
+    match validation.verdict {
+        crate::host_facts::StartupVerdict::Admitted => {}
+        crate::host_facts::StartupVerdict::Refused(error) => {
+            return Err(error::ServerError::Validation(format!(
+                "host-facts validation refused startup: {error}"
+            )));
+        }
     }
 
     let (router, state) = create_app_with_runtime(

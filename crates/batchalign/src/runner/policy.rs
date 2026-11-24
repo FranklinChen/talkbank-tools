@@ -14,7 +14,7 @@ use crate::command_model::{RunnerDispatchKind, command_runner_dispatch_kind};
 /// commands like `opensmile` and `avqi` also dispatch to workers, but they do
 /// not require `all_chat=true` and therefore must not go through the generic
 /// CHAT-infer admission gate in `routing.rs`.
-pub(crate) fn command_requires_chat_infer(command: ReleasedCommand) -> bool {
+pub fn command_requires_chat_infer(command: ReleasedCommand) -> bool {
     matches!(
         command_runner_dispatch_kind(command),
         RunnerDispatchKind::BatchedTextInfer | RunnerDispatchKind::ForcedAlignment

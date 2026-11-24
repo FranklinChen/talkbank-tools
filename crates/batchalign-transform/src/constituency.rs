@@ -17,7 +17,8 @@ pub struct Tree {
 
 impl Tree {
     /// Returns `true` if this node is a leaf (terminal) node.
-    pub fn is_leaf(&self) -> bool {
+    #[must_use]
+    pub const fn is_leaf(&self) -> bool {
         self.children.is_empty() && self.leaf_text.is_some()
     }
 }
@@ -56,6 +57,7 @@ pub fn parse_bracket_notation(s: &str) -> Result<Tree, ParseError> {
 /// This mirrors the Python `_parse_tree_indices()` function. It walks the tree
 /// looking for coordination structures (siblings with CC or CONJ labels) and
 /// extracts leaf ranges for S nodes within those coordinations.
+#[must_use]
 pub fn parse_tree_indices(subtree: &Tree, offset: usize) -> Vec<Vec<usize>> {
     if subtree.is_leaf() {
         return Vec::new();

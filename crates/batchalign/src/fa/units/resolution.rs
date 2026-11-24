@@ -24,7 +24,7 @@ pub(in crate::fa) struct UnitAnswer {
 
 impl UnitAnswer {
     /// An answer read from admitted cache evidence (or a test fixture).
-    pub(in crate::fa) fn new(
+    pub(in crate::fa) const fn new(
         timings: Vec<Option<WordTiming>>,
         source: FaEvidenceSourceTrace,
     ) -> Self {

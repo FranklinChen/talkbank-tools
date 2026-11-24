@@ -119,7 +119,7 @@ impl ServerTarget {
     }
 
     /// How a submission to this target travels.
-    pub(super) fn transport(&self) -> ServerTransport {
+    pub(super) const fn transport(&self) -> ServerTransport {
         self.transport
     }
 }

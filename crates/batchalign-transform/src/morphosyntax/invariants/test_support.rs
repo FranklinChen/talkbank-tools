@@ -9,7 +9,7 @@ use crate::morphosyntax::{
 };
 
 /// A word with the given UD id, as the analysis returns it.
-pub(crate) fn word(
+pub fn word(
     id: usize,
     text: &str,
     lemma: &str,
@@ -34,14 +34,14 @@ pub(crate) fn word(
 }
 
 /// A punctuation token with the given UD id.
-pub(crate) fn punct(id: usize, text: &str, head: usize) -> UdWord {
+pub fn punct(id: usize, text: &str, head: usize) -> UdWord {
     let mut w = word(id, text, text, UniversalPos::Punct, None, head, "punct");
     w.upos = UdPunctable::Punct(text.to_string());
     w
 }
 
 /// The English mapping context.
-pub(crate) fn english() -> MappingContext {
+pub fn english() -> MappingContext {
     MappingContext {
         lang: talkbank_model::model::LanguageCode::new("eng").expect("valid language code"),
     }
@@ -49,7 +49,7 @@ pub(crate) fn english() -> MappingContext {
 
 /// Run the production invariant dispatcher and mapping for English and
 /// render each `%mor` item.
-pub(crate) fn mor_texts(sentence: &UdSentence, evidence: UtteranceEvidence) -> Vec<String> {
+pub fn mor_texts(sentence: &UdSentence, evidence: UtteranceEvidence) -> Vec<String> {
     let ctx = english();
     let rewritten = apply_grammatical_invariants(sentence, &ctx, || evidence);
     let (mors, _gras) = map_ud_sentence(&rewritten, &ctx).expect("mapping succeeds");

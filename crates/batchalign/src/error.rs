@@ -1,6 +1,6 @@
 //! Server error types: maps to HTTP status codes.
 //!
-//! Error responses use `{"detail": "..."}` to match FastAPI's `HTTPException`.
+//! Error responses use `{"detail": "..."}` to match `FastAPI`'s `HTTPException`.
 
 #[cfg(feature = "server")]
 use axum::http::StatusCode;
@@ -9,7 +9,6 @@ use axum::response::{IntoResponse, Response};
 
 use crate::api::JobId;
 use crate::chat_ops::CacheKey;
-use crate::chat_ops::fa::coordinates::WindowFault;
 use crate::media::probe::ProbeError;
 use crate::media::window::EmptySegment;
 pub use crate::recipe_runner::planner::PlanningError;
@@ -25,16 +24,8 @@ pub use crate::revai::RetainedRevLanguageRejection;
 /// audio files told its owner to restart the job, and each restart failed the
 /// same way.
 #[derive(Debug, thiserror::Error)]
-pub enum RecordingDurationError {
-    /// ffprobe could not answer for this file. Whose problem that is belongs
-    /// to the probe error's own variant; its message already names the file.
-    #[error(transparent)]
-    Probe(ProbeError),
-    /// The whole recording is not a valid window over itself, which a
-    /// recording of positive length always is: an internal invariant.
-    #[error("the whole recording is not a valid window over itself: {0}")]
-    WholeFileWindow(WindowFault),
-}
+#[error(transparent)]
+pub struct RecordingDurationError(pub std::sync::Arc<ProbeError>);
 
 /// Whose problem a [`RecordingDurationError`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,18 +42,17 @@ impl RecordingDurationError {
     /// The one question classification asks, answered by an exhaustive match
     /// so a new probe failure has to take a side.
     pub(crate) fn fault(&self) -> RecordingDurationFault {
-        match self {
-            Self::Probe(
-                ProbeError::Refused { .. }
-                | ProbeError::Unreadable { .. }
-                | ProbeError::NoAudioStream { .. }
-                | ProbeError::UnmeasuredContainer { .. }
-                | ProbeError::LengthNotStated { .. }
-                | ProbeError::PacketsWithoutDuration { .. }
-                | ProbeError::EmptyAudio { .. },
-            ) => RecordingDurationFault::Media,
-            Self::Probe(ProbeError::FfprobeMissing { .. } | ProbeError::Spawn { .. })
-            | Self::WholeFileWindow(_) => RecordingDurationFault::Host,
+        match self.0.as_ref() {
+            ProbeError::Refused { .. }
+            | ProbeError::Unreadable { .. }
+            | ProbeError::NoAudioStream { .. }
+            | ProbeError::UnmeasuredContainer { .. }
+            | ProbeError::LengthNotStated { .. }
+            | ProbeError::PacketsWithoutDuration { .. }
+            | ProbeError::EmptyAudio { .. } => RecordingDurationFault::Media,
+            ProbeError::FfprobeMissing { .. } | ProbeError::Spawn { .. } => {
+                RecordingDurationFault::Host
+            }
         }
     }
 }
@@ -87,6 +77,7 @@ impl MissingForcedAlignmentEvidence {
     }
 
     /// FA request ordinals whose evidence was absent from the reusable cache.
+    #[must_use]
     pub fn request_indices(&self) -> &[usize] {
         &self.request_indices
     }
@@ -120,12 +111,13 @@ pub struct MissingRevAsrEvidence {
 }
 
 impl MissingRevAsrEvidence {
-    pub(crate) fn new(cache_key: CacheKey) -> Self {
+    pub(crate) const fn new(cache_key: CacheKey) -> Self {
         Self { cache_key }
     }
 
     /// Content identity whose reusable Rev.AI response was absent.
-    pub fn cache_key(&self) -> &CacheKey {
+    #[must_use]
+    pub const fn cache_key(&self) -> &CacheKey {
         &self.cache_key
     }
 }
@@ -142,12 +134,13 @@ impl std::fmt::Display for MissingRevAsrEvidence {
 }
 
 impl MissingSpeakerEvidence {
-    pub(crate) fn new(cache_key: CacheKey) -> Self {
+    pub(crate) const fn new(cache_key: CacheKey) -> Self {
         Self { cache_key }
     }
 
     /// Content identity whose reusable speaker evidence was absent.
-    pub fn cache_key(&self) -> &CacheKey {
+    #[must_use]
+    pub const fn cache_key(&self) -> &CacheKey {
         &self.cache_key
     }
 }
@@ -211,7 +204,7 @@ pub enum OffRecordTiming {
 
 impl OffRecordTiming {
     /// What the notes carried and what became of it, for the message.
-    fn account(self) -> &'static str {
+    const fn account(self) -> &'static str {
         match self {
             Self::BulletNotKept => {
                 "the transcript's only timing was the bullet on an utterance marked as not in the \
@@ -226,7 +219,7 @@ impl OffRecordTiming {
     }
 
     /// The changes that would let the file be written.
-    fn remedy(self) -> &'static str {
+    const fn remedy(self) -> &'static str {
         match self {
             Self::BulletNotKept => {
                 "run with `--main-bullets keep` to write the note's bullet as given, recover \
@@ -255,7 +248,8 @@ enum TimingRegenerationFailure {
 
 impl MissingTimingRegenerationEvidence {
     /// Location of the source declaration whose obligation remains outstanding.
-    pub fn header_location(&self) -> talkbank_model::Location {
+    #[must_use]
+    pub const fn header_location(&self) -> talkbank_model::Location {
         self.header_location
     }
 
@@ -772,7 +766,7 @@ impl std::fmt::Display for AsrProviderDisposition {
 /// All errors that can occur in the server.
 ///
 /// Each variant maps to an HTTP status code via [`IntoResponse`]. The response
-/// body is always `{"detail": "..."}` (matching FastAPI's `HTTPException`
+/// body is always `{"detail": "..."}` (matching `FastAPI`'s `HTTPException`
 /// convention), except for [`JobConflict`](Self::JobConflict) which includes
 /// a structured `conflicts` array.
 #[derive(Debug, thiserror::Error)]
@@ -1300,7 +1294,7 @@ pub struct ProviderBillingRefusal {
 
 impl ProviderBillingRefusal {
     /// The refusal a worker reported, for the product the request named.
-    pub(crate) fn new(billed: BilledProduct, provider_detail: String) -> Self {
+    pub(crate) const fn new(billed: BilledProduct, provider_detail: String) -> Self {
         Self {
             billed,
             provider_detail,
@@ -1555,7 +1549,7 @@ impl<E: AdmissionFailure> SourceRefusal<E> {
 
     /// The refusal as Chatter returned it, for tests that inspect its findings.
     #[cfg(test)]
-    pub(crate) fn error(&self) -> &E {
+    pub(crate) const fn error(&self) -> &E {
         &self.error
     }
 }
@@ -1617,7 +1611,7 @@ fn located_findings(findings: &[talkbank_model::SourceDiagnostic]) -> String {
 /// The HTTP status of a refusal: the client's error when the input is at
 /// fault, the server's when a tool failed.
 #[cfg(feature = "server")]
-fn refusal_status(fault: RefusalFault) -> StatusCode {
+const fn refusal_status(fault: RefusalFault) -> StatusCode {
     match fault {
         RefusalFault::InvalidInput => StatusCode::BAD_REQUEST,
         RefusalFault::ToolFailure => StatusCode::INTERNAL_SERVER_ERROR,

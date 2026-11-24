@@ -41,7 +41,7 @@ struct PosHintLineEvidence {
 
 /// A hint attached to a position admitted by Chatter's morphology traversal.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PosHint {
+pub struct PosHint {
     source: MainWordIndex,
     clan_tag: String,
 }
@@ -61,6 +61,7 @@ impl PosHint {
 }
 
 /// Capture `$POS` hints before any retokenization can rewrite main-tier words.
+#[must_use]
 pub fn collect_pos_hints(chat_file: &talkbank_model::model::ChatFile) -> PosHintEvidence {
     let mut by_line = Vec::new();
     let mut utterance_ordinal = 0usize;
@@ -82,7 +83,7 @@ pub fn collect_pos_hints(chat_file: &talkbank_model::model::ChatFile) -> PosHint
 }
 
 /// One owner for the typed hint inputs to application and reuse compatibility.
-pub(crate) fn utterance_pos_hints(utt: &Utterance) -> Vec<PosHint> {
+pub fn utterance_pos_hints(utt: &Utterance) -> Vec<PosHint> {
     let mut hints = Vec::new();
     visit_mor_positions(&utt.main.content.content, &mut |position| {
         if let Some(word) = position.word()

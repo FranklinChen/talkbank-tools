@@ -50,11 +50,12 @@ publication; it does not retry inference to repair a plan.
 
 The shared text pipeline in `crates/batchalign/src/pipeline/text_infer.rs`
 uses Chatter's source-bound admission with model rules and dependent-tier
-alignment enabled. This covers the single-file and cross-file `utseg` paths
-and the cross-file `translate` path. Batch inputs carry their actual transcript
-name for filename-dependent checks. String-only entry points are explicitly
-anonymous. Parse recovery and internal producer failures cannot create a
-`ValidChatFile` capability.
+alignment enabled. This covers named `utseg` and `translate` inputs. Named
+inputs carry their actual transcript name for filename-dependent checks.
+Translation takes its source language from the admitted model and moves that
+same model into collection. String-only entry points use an anonymous name.
+Parse recovery and internal producer failures cannot create a `ValidChatFile`
+capability.
 
 Admission precedes payload collection and the dummy/no-payload pass-through
 branches. Batch refusal keeps the producing failure category even if another

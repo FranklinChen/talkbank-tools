@@ -1,10 +1,10 @@
 //! Small public types that surface at the morphosyntax mapping API
 //! boundary: language-code helpers, the typed mapping error, and the
-//! two policy enums that callers (`batchalign`, CLI, PyO3) drive
+//! two policy enums that callers (`batchalign`, CLI, `PyO3`) drive
 //! the pipeline with.
 //!
 //! Sized to read in one sitting. The richer UD value types (UPOS,
-//! DepRel, VerbForm, UdWord) live in [`super::ud_types`]; the
+//! `DepRel`, `VerbForm`, `UdWord`) live in [`super::ud_types`]; the
 //! payload-collection types in [`super::payload`].
 
 use std::collections::BTreeMap;
@@ -25,6 +25,7 @@ pub struct MappingContext {
 /// The pipeline passes 3-letter ISO 639-3 codes ("eng", "fra", "jpn"), but
 /// some language-specific logic is keyed by 2-letter ISO 639-1 codes ("en",
 /// "fr", "ja"). Unknown codes are returned unchanged.
+#[must_use]
 pub fn lang2(code: &str) -> &str {
     match code {
         "eng" => "en",
@@ -144,8 +145,9 @@ pub enum MultilingualPolicy {
 }
 
 impl MultilingualPolicy {
-    /// Convert from the legacy boolean flag used at CLI and PyO3 boundaries.
-    pub fn from_skip_flag(skip: bool) -> Self {
+    /// Convert from the legacy boolean flag used at CLI and `PyO3` boundaries.
+    #[must_use]
+    pub const fn from_skip_flag(skip: bool) -> Self {
         if skip {
             Self::SkipNonPrimary
         } else {
@@ -154,7 +156,8 @@ impl MultilingualPolicy {
     }
 
     /// Whether non-primary-language utterances should be skipped.
-    pub fn should_skip_non_primary(self) -> bool {
+    #[must_use]
+    pub const fn should_skip_non_primary(self) -> bool {
         matches!(self, Self::SkipNonPrimary)
     }
 }

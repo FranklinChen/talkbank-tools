@@ -8,11 +8,9 @@ mod clock;
 mod inputs;
 mod scenario;
 
-pub(crate) use clock::ManualClockStore;
-pub(crate) use inputs::{
-    PathsFixture, admitted, only_file, paths_inputs, pending_files, with_pending,
-};
-pub(crate) use scenario::{ChatFileFixture, JobFixture};
+pub use clock::ManualClockStore;
+pub use inputs::{PathsFixture, admitted, only_file, paths_inputs, pending_files, with_pending};
+pub use scenario::{ChatFileFixture, JobFixture};
 
 use std::collections::BTreeMap;
 
@@ -28,7 +26,7 @@ use crate::store::{
 
 /// One admitted content input, queued and unclaimed. The same construction
 /// serves runner tests and the consuming transition to the running fixture.
-pub(crate) fn queued_morphotag_job_fixture(input: crate::store::ContentInput) -> Job {
+pub fn queued_morphotag_job_fixture(input: crate::store::ContentInput) -> Job {
     morphotag_job_fixture(crate::store::JobInputs::Content(vec![input]))
 }
 
@@ -105,7 +103,7 @@ pub(in crate::store) async fn claim_registry_runner(
 }
 
 /// A queued paths job uses the same admitted input set and lifecycle factory.
-pub(crate) fn queued_paths_morphotag_job_fixture(files: crate::store::PathsFiles) -> Job {
+pub fn queued_paths_morphotag_job_fixture(files: crate::store::PathsFiles) -> Job {
     morphotag_job_fixture(crate::store::JobInputs::Paths {
         files,
         source_dir: None,
@@ -113,7 +111,7 @@ pub(crate) fn queued_paths_morphotag_job_fixture(files: crate::store::PathsFiles
 }
 
 /// Admit through the production composition edge and retain its actual store.
-pub(crate) async fn claim_runner(
+pub async fn claim_runner(
     store: &std::sync::Arc<crate::store::JobStore>,
     id: &crate::api::JobId,
 ) -> crate::store::AdmittedRun {

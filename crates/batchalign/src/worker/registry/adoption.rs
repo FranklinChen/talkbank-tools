@@ -51,7 +51,7 @@ impl Drop for RegistryLease {
     }
 }
 impl ConnectionOwnership {
-    pub(in crate::worker) fn independent() -> Self {
+    pub(in crate::worker) const fn independent() -> Self {
         Self {
             _origin: Origin::Independent,
         }
@@ -174,7 +174,11 @@ pub(super) struct RejectedRegistryWorker {
     _ownership: ConnectionOwnership,
 }
 impl RejectedRegistryWorker {
-    fn new(source: RegistryEntry, error: WorkerError, ownership: ConnectionOwnership) -> Self {
+    const fn new(
+        source: RegistryEntry,
+        error: WorkerError,
+        ownership: ConnectionOwnership,
+    ) -> Self {
         Self {
             source,
             error,
@@ -182,11 +186,11 @@ impl RejectedRegistryWorker {
         }
     }
 
-    pub(super) fn source(&self) -> &RegistryEntry {
+    pub(super) const fn source(&self) -> &RegistryEntry {
         &self.source
     }
 
-    pub(super) fn error(&self) -> &WorkerError {
+    pub(super) const fn error(&self) -> &WorkerError {
         &self.error
     }
 }
@@ -248,7 +252,7 @@ impl ProbedRegistryWorker {
             report,
         })
     }
-    pub(super) fn defer_report(self) -> ReportReadyRegistryWorker {
+    pub(super) const fn defer_report(self) -> ReportReadyRegistryWorker {
         ReportReadyRegistryWorker {
             probed: self,
             report: ReportEvidence::Deferred,
@@ -256,7 +260,7 @@ impl ProbedRegistryWorker {
     }
 }
 impl ReportReadyRegistryWorker {
-    pub(super) fn observed_report(&self) -> bool {
+    pub(super) const fn observed_report(&self) -> bool {
         matches!(&self.report, ReportEvidence::Observed(_))
     }
     pub(in crate::worker) fn admit(
@@ -292,16 +296,16 @@ pub(in crate::worker) struct AdmittedRegistryWorker {
     handle: TcpWorkerHandle,
 }
 impl AdmittedRegistryWorker {
-    pub(in crate::worker) fn key(&self) -> &WorkerKey {
+    pub(in crate::worker) const fn key(&self) -> &WorkerKey {
         &self.key
     }
-    pub(in crate::worker) fn info(&self) -> &TcpWorkerInfo {
+    pub(in crate::worker) const fn info(&self) -> &TcpWorkerInfo {
         self.handle.info()
     }
     pub(in crate::worker) fn into_sequential(self) -> (WorkerKey, TcpWorkerHandle) {
         (self.key, self.handle)
     }
-    pub(in crate::worker) fn source(&self) -> &RegistryEntry {
+    pub(in crate::worker) const fn source(&self) -> &RegistryEntry {
         &self.source
     }
 }

@@ -28,7 +28,7 @@ use crate::error::ServerError;
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn get_job(
+pub async fn get_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobInfo>, ServerError> {
@@ -62,7 +62,7 @@ pub(crate) async fn get_job(
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn get_results(
+pub async fn get_results(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobResultResponse>, ServerError> {
@@ -131,7 +131,7 @@ pub(crate) async fn get_results(
         (status = 404, description = "File not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn get_single_result(
+pub async fn get_single_result(
     State(state): State<Arc<AppState>>,
     Path((job_id, filename)): Path<(String, String)>,
 ) -> Result<Json<FileResult>, ServerError> {

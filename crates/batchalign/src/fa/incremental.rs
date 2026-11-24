@@ -28,7 +28,7 @@ use crate::chat_ops::fa::Grouping;
 
 /// Completely admitted prior CHAT. Its timing may be reused only after this
 /// source-admission capability has been produced, before any UTR inference.
-pub(crate) struct RetainedFaPrior {
+pub struct RetainedFaPrior {
     file: Box<talkbank_model::validation::ValidChatFile>,
 }
 
@@ -67,7 +67,7 @@ impl RetainedFaPrior {
 /// The attempt carries its source admission through UTR. A declared no-op and
 /// a complete-`%wor` file never reach this entry: `AlignRoute::decide` sends
 /// them to the no-recording route at admission, prior or no prior.
-pub(crate) fn process_fa_incremental<'run>(
+pub fn process_fa_incremental<'run>(
     before: &'run RetainedFaPrior,
     active: super::ActiveFaInput<'run>,
     audio: &'run AudioContext<'run>,
@@ -138,7 +138,7 @@ pub(crate) fn process_fa_incremental<'run>(
         // checks on what the engine returns. Grouping used to take an
         // `Option<u64>` and invent its own behaviour when it was absent; there is
         // one recording and one answer.
-        let recording = audio.recording().await?;
+        let recording = audio.recording()?;
         // The anchors describe the "after" document's words, which the reuse
         // above copied `%wor` onto without changing a word.
         let grouping = chat_file.group(fa_params.aggregation_target(), &recording, anchors)?;
@@ -444,6 +444,11 @@ mod tests {
         )
     }
 
+    /// Guards: Incremental reuse preserves the after-document's completed recovery evidence through persistence.
+    /// Kind: journey
+    /// Not a type: Actual JSON writes can drop an admitted recovery result when prior timings are reused.
+    /// State: Admitted before and after CHAT, recording observation, cache and debug artifact.
+    /// Concurrency: A private directory owns the file, cache and evidence.
     #[tokio::test]
     async fn incremental_reuse_retains_the_after_sources_recovery_evidence() {
         use crate::api::LanguageCode3;
@@ -506,23 +511,19 @@ mod tests {
         let audio_path = directory.path().join("sample.mp3");
         crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
         let identity = AudioIdentity::from_metadata("sample.mp3", 0, 0);
-        let audio = AudioContext {
-            audio_path: &audio_path,
-            audio_identity: &identity,
-            audio_duration: None,
-        };
+        let measured = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+        let audio = AudioContext::new(&measured, &identity);
         let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))
             .await
             .unwrap();
         let namespace = crate::engine_reports::FaCacheNamespace::for_test("test-fa");
         let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-        let services = super::super::FaServices {
-            pipeline: PipelineServices::new(&pool, &cache),
-            cache_namespace: &namespace,
-            gpu: &gpu,
-            attention_capture_dir: None,
-        };
+        let services = super::super::FaServices::for_tests(
+            PipelineServices::new(&pool, &cache),
+            &namespace,
+            &gpu,
+        );
         let params = FaParams {
             gap_healing: WordGapHealing::PreserveMeasured,
             whisper_text: WhisperTextMode::SpaceJoined,
@@ -565,6 +566,11 @@ mod tests {
         pool.shutdown().await;
     }
 
+    /// Guards: Prior admission preserves legitimate word timing and refuses broken retained tiers.
+    /// Kind: transcript
+    /// Not a type: Existing CHAT bytes may contain usable timing or a structurally corrupt dependent tier.
+    /// State: Two synthetic prior sources reach full CHAT admission.
+    /// Concurrency: No external mutable data.
     #[test]
     fn prior_admission_retains_valid_timing_and_refuses_corrupt_tiers() {
         let valid = chat_with_wor("hello world .", "goodbye .").replacen(
@@ -593,6 +599,11 @@ mod tests {
     /// file and refreshes the bullet from it. Under `--main-bullets keep` the
     /// EDITED file's bullets are the given ones: a person narrowed the first
     /// bullet, and the refreshed `%wor` hull must not undo that.
+    /// Guards: Incremental reuse preserves the edited source's given main bullets and writes its word timings.
+    /// Kind: transcript
+    /// Not a type: Equal lexical content can still carry different supplied timing in the two documents.
+    /// State: Admitted prior and edited source with timed word material.
+    /// Concurrency: The test owns the models and projection.
     #[test]
     fn incremental_reuse_keeps_the_edited_files_given_bullets() {
         use crate::chat_ops::fa::{
@@ -677,6 +688,11 @@ mod tests {
         assert_eq!(timings, vec![Some((300, 500)), Some((600, 900))]);
     }
 
+    /// Guards: Prior timing is reused only for the unchanged utterance.
+    /// Kind: transcript
+    /// Not a type: Two valid CHAT versions can share only a subset of their lexical utterances.
+    /// State: A before-after lexical edit and a real retained word tier.
+    /// Concurrency: All source and destination models are private.
     #[test]
     fn reuse_stable_wor_timing_from_before_only_marks_unchanged_utterances() {
         let before = parse_chat(&chat_with_wor("hello world .", "goodbye ."));
@@ -692,6 +708,11 @@ mod tests {
         assert!(utt0.main.content.bullet.is_some());
     }
 
+    /// Guards: Preserved group timings use the refreshed main tier and complete group word population.
+    /// Kind: transcript
+    /// Not a type: Existing dependencies can represent a different timing population from the newly grouped source.
+    /// State: Two owned models and their admitted group projection.
+    /// Concurrency: The timing fixture is in memory.
     #[test]
     fn collect_preserved_group_timings_reads_refreshed_main_tier_timing() {
         let before = parse_chat(&chat_with_wor("hello world .", "goodbye ."));
@@ -716,6 +737,11 @@ mod tests {
         assert!(timings.iter().all(|timing| timing.is_some()));
     }
 
+    /// Guards: Reuse detects timing-only changes even when words remain stable.
+    /// Kind: transcript
+    /// Not a type: A lexical match alone cannot express that timing changed between actual CHAT documents.
+    /// State: A prior with refreshed alignment and an after document with changed timing.
+    /// Concurrency: The test owns both versions.
     #[test]
     fn reuse_stable_wor_timing_from_before_marks_timing_only_utterances() {
         let mut before = parse_chat(&chat_with_wor("hello world .", "goodbye ."));
@@ -781,6 +807,11 @@ mod tests {
     /// the backward 639095 ms bullet persists and produces E362/E704 violations.
     ///
     /// This regression test verifies the fix added to `process_fa_incremental`.
+    /// Guards: Incremental monotonicity removes a backward main timestamp and keeps forward timing.
+    /// Kind: transcript
+    /// Not a type: Individual valid timestamps can violate chronological ordering when adjacent in a transcript.
+    /// State: One actual CHAT model with two locally plausible timing positions.
+    /// Concurrency: A private model owns the projection and repair.
     #[test]
     fn test_incremental_path_enforce_monotonicity_strips_backward_timestamp() {
         let chat_text = concat!(

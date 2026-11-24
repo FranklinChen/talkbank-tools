@@ -464,28 +464,25 @@ fn model(case: &Case) -> Written {
         let new = block_item_chunks
             .get(offset)
             .ok_or(Refusal::NoCounterpart)?;
-        match old.len() == new.len() {
-            true => {
-                for (chunk, counterpart) in old.iter().zip(new) {
-                    redirect.insert(*chunk, Some(*counterpart));
-                }
+        if old.len() == new.len() {
+            for (chunk, counterpart) in old.iter().zip(new) {
+                redirect.insert(*chunk, Some(*counterpart));
             }
-            false => {
-                let outside: Vec<Node> = new
-                    .iter()
-                    .copied()
-                    .filter(|chunk| match block[chunk] {
-                        None => true,
-                        Some(head) => !new.contains(&head),
-                    })
-                    .collect();
-                let target = match outside[..] {
-                    [one] => Some(one),
-                    _ => None,
-                };
-                for chunk in old {
-                    redirect.insert(*chunk, target);
-                }
+        } else {
+            let outside: Vec<Node> = new
+                .iter()
+                .copied()
+                .filter(|chunk| match block[chunk] {
+                    None => true,
+                    Some(head) => !new.contains(&head),
+                })
+                .collect();
+            let target = match outside[..] {
+                [one] => Some(one),
+                _ => None,
+            };
+            for chunk in old {
+                redirect.insert(*chunk, target);
             }
         }
     }
@@ -507,9 +504,10 @@ fn model(case: &Case) -> Written {
             }
             continue;
         }
-        let head = match is_replaced(*head) {
-            true => redirect[head].ok_or(Refusal::NoUniqueHeadChunk)?,
-            false => *head,
+        let head = if is_replaced(*head) {
+            redirect[head].ok_or(Refusal::NoUniqueHeadChunk)?
+        } else {
+            *head
         };
         edges.push((*node, head, relation.clone()));
     }

@@ -24,7 +24,7 @@ use super::channel::SharedGpuChannel;
 ///
 /// Created from a [`WorkerHandle`] by taking its stdio; the worker process
 /// runs Python's `_serve_stdio_concurrent()`.
-pub(crate) struct SharedGpuWorker {
+pub struct SharedGpuWorker {
     /// Owned child process: this wrapper supervises shutdown and kill.
     child: tokio::sync::Mutex<Option<Child>>,
 
@@ -113,7 +113,7 @@ impl SharedGpuWorker {
     }
 
     /// The worker process ID.
-    pub(in crate::worker::pool) fn pid(&self) -> WorkerPid {
+    pub(in crate::worker::pool) const fn pid(&self) -> WorkerPid {
         self.channel.pid()
     }
 

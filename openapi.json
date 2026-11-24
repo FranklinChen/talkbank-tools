@@ -344,7 +344,7 @@
         ]
       },
       "ErrorResponse": {
-        "description": "Standard error response body, matching FastAPI's `HTTPException` format.\n\nAll non-2xx responses from the server use this shape so that clients\ncan parse errors uniformly. The one exception is\n[`ServerError::JobConflict`](crate::error::ServerError::JobConflict),\nwhich nests a `conflicts` array inside `detail`.",
+        "description": "Standard error response body, matching `FastAPI`'s `HTTPException` format.\n\nAll non-2xx responses from the server use this shape so that clients\ncan parse errors uniformly. The one exception is\n[`ServerError::JobConflict`](crate::error::ServerError::JobConflict),\nwhich nests a `conflicts` array inside `detail`.",
         "properties": {
           "detail": {
             "description": "Human-readable description of what went wrong. For validation\nerrors this includes the specific field or constraint that failed.",
@@ -694,7 +694,7 @@
           },
           "filename": {
             "$ref": "#/components/schemas/DisplayPath",
-            "description": "Original filename (e.g. \"01DM_18.cha\")."
+            "description": "Original filename (e.g. \"`01DM_18.cha`\")."
           }
         },
         "required": [
@@ -1805,7 +1805,7 @@
         "description": "`POST /jobs` request body.",
         "properties": {
           "before_paths": {
-            "description": "Absolute paths to \"before\" files for incremental processing\n(paths_mode only). When non-empty, the diff engine compares each\nbefore file against its corresponding source_path and only\nreprocesses changed utterances.\n\nMust be the same length as `source_paths` when non-empty. A null entry\nselects fresh processing for that source only; it never shifts later priors.",
+            "description": "Absolute paths to \"before\" files for incremental processing\n(`paths_mode` only). When non-empty, the diff engine compares each\nbefore file against its corresponding `source_path` and only\nreprocesses changed utterances.\n\nMust be the same length as `source_paths` when non-empty. A null entry\nselects fresh processing for that source only; it never shifts later priors.",
             "items": {
               "oneOf": [
                 {
@@ -1827,7 +1827,7 @@
             "type": "boolean"
           },
           "display_names": {
-            "description": "Human-readable filenames for display (paths_mode only, optional).",
+            "description": "Human-readable filenames for display (`paths_mode` only, optional).",
             "items": {
               "type": "string"
             },
@@ -1845,7 +1845,7 @@
             "description": "Job language: a 3-letter ISO code, `\"auto\"` for ASR-driven detection,\n`\"per-file\"`, or a code-switched pair such as `\"eng,spa\"`.\n\nRequired. A submission that omits it is refused at deserialization\n(serde names the missing field) rather than run as English: the field\ndefaulted to `eng` until 2026-11-03, so a client that forgot it had its\nrecording transcribed, or its workers selected, as English with nothing\nsaid. Every client sends one: the CLI requires `--lang` on the commands\nthat take it and writes `per-file` for the rest\n(`cli::args::CommandProfile`), and the dashboard does the same\n(`frontend/src/components/process/jobPlan.ts`)."
           },
           "media_files": {
-            "description": "Media filenames for the server to resolve from media_roots (transcribe only).",
+            "description": "Media filenames for the server to resolve from `media_roots` (transcribe only).",
             "items": {
               "type": "string"
             },
@@ -1853,7 +1853,7 @@
           },
           "media_mapping": {
             "$ref": "#/components/schemas/MediaMappingKey",
-            "description": "Key into server's media_mappings config (e.g. \"childes-data\")."
+            "description": "Key into server's `media_mappings` config (e.g. \"childes-data\")."
           },
           "media_subdir": {
             "$ref": "#/components/schemas/RepoRelativePath",
@@ -1867,14 +1867,14 @@
             "description": "Typed command options (engine selections, processing flags, etc.)."
           },
           "output_paths": {
-            "description": "Absolute paths to write output files to (paths_mode only).",
+            "description": "Absolute paths to write output files to (`paths_mode` only).",
             "items": {
               "$ref": "#/components/schemas/ClientPath"
             },
             "type": "array"
           },
           "paths_mode": {
-            "description": "When true, server reads/writes files directly via source_paths/output_paths.",
+            "description": "When true, server reads/writes files directly via `source_paths/output_paths`.",
             "type": "boolean"
           },
           "source_dir": {
@@ -1882,7 +1882,7 @@
             "description": "Client's input directory path (for dashboard display)."
           },
           "source_paths": {
-            "description": "Absolute paths to read input files from (paths_mode only).",
+            "description": "Absolute paths to read input files from (`paths_mode` only).",
             "items": {
               "$ref": "#/components/schemas/ClientPath"
             },
@@ -2010,7 +2010,7 @@
             "type": "object"
           },
           {
-            "description": "Every entry is the parent of a recorded output path, never source_dir.",
+            "description": "Every entry is the parent of a recorded output path, never `source_dir`.",
             "properties": {
               "directories": {
                 "description": "Nonempty destinations admitted together from the stored mapping.",
@@ -4464,7 +4464,7 @@
     },
     "/media/list": {
       "get": {
-        "description": "The CLI uses this to let users browse remote media before submitting a job\nthat references files by name (media_files field in `JobSubmission`). Results\ncome from the `MediaResolver` walk cache (60 s TTL) so repeated calls are\ncheap even over NFS mounts.",
+        "description": "The CLI uses this to let users browse remote media before submitting a job\nthat references files by name (`media_files` field in `JobSubmission`). Results\ncome from the `MediaResolver` walk cache (60 s TTL) so repeated calls are\ncheap even over NFS mounts.",
         "operationId": "list_media",
         "parameters": [
           {

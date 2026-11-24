@@ -74,7 +74,7 @@ pub fn strip_dependent_tiers(chat: &str) -> String {
     result
 }
 
-/// Prepare multi-speaker audio fixtures (eng_multi_speaker.mp3).
+/// Prepare multi-speaker audio fixtures (`eng_multi_speaker.mp3`).
 pub fn prepare_multi_speaker_audio(session_dir: &Path) -> AudioFixtures {
     let repo_root = crate::prerequisite::repo_root();
     let source_mp3 = repo_root.join("batchalign/tests/support/eng_multi_speaker.mp3");

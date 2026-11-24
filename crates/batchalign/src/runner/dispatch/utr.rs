@@ -16,10 +16,9 @@ use crate::cache::{
     InferenceLease, UtrAsrCacheEligibility, UtrAsrCacheNamespace, UtteranceCache, tasks,
 };
 use crate::chat_ops::CacheKey;
-use crate::chat_ops::fa::coordinates::{FaWindow, FileMs, Recording, WindowMs};
+use crate::chat_ops::fa::coordinates::{FaWindow, Recording, WindowMs};
 use crate::chat_ops::fa::origin::EngineId;
 use crate::chat_ops::fa::timing::{SpanRejections, WordSpan};
-use crate::media::probe::AudioDuration;
 use crate::options::UtrEngine;
 use crate::params::CachePolicy;
 use crate::provenance::{
@@ -36,14 +35,14 @@ mod full;
 mod partial;
 #[path = "utr_work.rs"]
 mod work;
-pub(crate) use work::CompletedRecognition;
+pub use work::CompletedRecognition;
 #[cfg(test)]
-pub(crate) use work::PreparedRecognition;
+pub use work::PreparedRecognition;
 
 /// How the recognizer inputs for a completed correspondence were obtained.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum UtrRecognitionRoute {
+pub enum UtrRecognitionRoute {
     Full,
     Partial,
     FullAfterPartial {
@@ -76,7 +75,7 @@ impl From<UtrFullRoute> for UtrRecognitionRoute {
 
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum AbandonedPartialAttempt {
+pub enum AbandonedPartialAttempt {
     PlanRefused {
         reason: PartialPlanRefusal,
     },
@@ -88,21 +87,20 @@ pub(crate) enum AbandonedPartialAttempt {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct AbandonedRecognitionWindow {
+pub struct AbandonedRecognitionWindow {
     accepted_tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
     evidence: UtrRecognitionWindow,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum PartialPlanRefusal {
-    Recording { error: String },
+pub enum PartialPlanRefusal {
     WindowPlanning { error: String },
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum PartialExecutionStop {
+pub enum PartialExecutionStop {
     NoWindows,
     SegmentExtraction {
         window: UtrWindowBounds,
@@ -115,7 +113,7 @@ pub(crate) enum PartialExecutionStop {
 }
 
 #[derive(Debug)]
-pub(crate) struct UtrWindowBounds(FaWindow);
+pub struct UtrWindowBounds(FaWindow);
 
 impl From<FaWindow> for UtrWindowBounds {
     fn from(window: FaWindow) -> Self {
@@ -138,32 +136,71 @@ impl serde::Serialize for UtrWindowBounds {
 pub(in crate::runner) struct UtrPassContext<'a> {
     /// Which source recovery transition owns this attempt.
     pub pass: crate::api::UtrPass,
-    /// Audio file used to recover utterance timing.
-    pub audio_path: &'a Path,
+    /// The engine and the input it reads, derived together.
+    pub recognizer: UtrRecognizer<'a>,
     /// CHAT language for ASR/UTR normalization.
     pub lang: &'a LanguageCode3,
     /// The align job's services: worker pool and cache, plus the job's GPU
     /// model plan, by which worker-hosted UTR requests are routed to the
     /// worker the job's FA requests also reach.
     pub services: crate::fa::FaServices<'a>,
-    /// Audio identity used to key UTR cache entries.
-    pub audio_identity: &'a crate::chat_ops::fa::AudioIdentity,
+    /// The measured alignment timeline and its cache identity. A provider may
+    /// read the original encoding through the separate inference path.
+    pub audio: crate::params::AudioContext<'a>,
     /// Cache policy selected for the current job.
     pub cache_policy: crate::params::UtrCachePolicies,
-    /// How long the audio runs, when the pipeline already probed it.
-    pub audio_duration: Option<AudioDuration>,
     /// FA aggregation preference. Used by the two-pass UTR
     /// strategy to compare FA grouping outcomes and detect the wider-window
     /// regression on non-English files.
     pub aggregation_target: Option<crate::types::engines::FaAggregationTarget>,
     /// Display filename for logging.
     pub filename: &'a str,
-    /// Selected UTR backend.
-    pub engine: &'a UtrEngine,
     /// Resolved strategy and its submitted tuning, shared by both recovery paths.
     pub strategy: &'a ResolvedUtrStrategy,
     /// Debug artifact writer for offline replay.
     pub dumper: &'a DebugDumper,
+}
+
+/// A UTR engine together with what it reads, derived from the engine once.
+///
+/// Rev.AI uploads the recording as found (its paid evidence is keyed by the
+/// uploaded bytes, so every pass must hand it the same file); a worker-hosted
+/// engine reads the prepared WAV, or windows cut from it. The fields are
+/// private and [`Self::new`] derives the input from the engine, so a context
+/// cannot pair an engine with the other engine's input, and no route needs
+/// to ask the engine again which file to read.
+#[derive(Clone, Copy)]
+pub(in crate::runner) struct UtrRecognizer<'a> {
+    engine: &'a UtrEngine,
+    input: UtrInput<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum UtrInput<'a> {
+    /// Rev.AI: the whole recording as found, never windows.
+    RevAi(super::fa_pipeline::OriginalRecording<'a>),
+    /// A worker-hosted engine: the prepared WAV in the pass's `audio`, or
+    /// windows cut from it.
+    Worker(crate::transcribe::NonRevAsrBackend),
+}
+
+impl<'a> UtrRecognizer<'a> {
+    /// `engine`, reading what it reads of this recording.
+    pub(in crate::runner) fn new(
+        engine: &'a UtrEngine,
+        original: super::fa_pipeline::OriginalRecording<'a>,
+    ) -> Self {
+        let input = match crate::transcribe::AsrBackend::from(engine).as_non_rev() {
+            None => UtrInput::RevAi(original),
+            Some(backend) => UtrInput::Worker(backend),
+        };
+        Self { engine, input }
+    }
+
+    /// The selected engine, for keys, provenance and logs.
+    pub(in crate::runner) const fn engine(&self) -> &'a UtrEngine {
+        self.engine
+    }
 }
 
 impl<'a> UtrPassContext<'a> {
@@ -172,23 +209,6 @@ impl<'a> UtrPassContext<'a> {
     /// spawned with) and the UTR cache namespace are derived from.
     fn asr_language(&self) -> crate::transcribe::SingleAsrLanguage {
         crate::transcribe::SingleAsrLanguage::One(self.lang.clone())
-    }
-
-    /// The recording this pass is working against.
-    ///
-    /// Delegates to [`AudioContext::recording`] rather than repeating its
-    /// probe-or-use logic. This context carries the same two facts an
-    /// `AudioContext` does (`audio_path`, `audio_duration`), so a second
-    /// derivation here would be the duplication that method exists to end, with
-    /// its own divergent error message. One question, one owner.
-    async fn recording(&self) -> Result<Recording, crate::error::ServerError> {
-        crate::params::AudioContext {
-            audio_path: self.audio_path,
-            audio_identity: self.audio_identity,
-            audio_duration: self.audio_duration,
-        }
-        .recording()
-        .await
     }
 }
 
@@ -252,9 +272,15 @@ pub(in crate::runner) async fn run_utr_pass(
         context.filename,
         timed,
         untimed,
-        engine = context.engine.as_wire_name(),
+        engine = context.recognizer.engine().as_wire_name(),
         "UTR pass: running timing recovery"
     );
+
+    // The recording bound every recovery route needs. Read once, here: a
+    // refusal stops the pass before any cache lookup or provider request,
+    // instead of being dropped by the partial route and asked again by the
+    // full one.
+    let recording = context.audio.recording()?;
 
     // Partial-window UTR is useful for worker-hosted ASR because it can avoid
     // sending already-timed regions through local model inference. For the
@@ -265,50 +291,16 @@ pub(in crate::runner) async fn run_utr_pass(
     } else {
         1.0
     };
-    let use_partial = context.engine.supports_partial_windows()
-        && untimed_ratio < 0.5
-        && context
-            .audio_duration
-            .is_some_and(|duration| duration.length().0 > 60_000);
+    // Only a worker-hosted engine recognizes windows, and the route carries
+    // its backend, proven not to be Rev.AI, so no segment can reach Rev.AI.
+    let partial_backend = match context.recognizer.input {
+        UtrInput::Worker(backend) if untimed_ratio < 0.5 && recording.duration().get() > 60_000 => {
+            Some(backend)
+        }
+        UtrInput::Worker(_) | UtrInput::RevAi(_) => None,
+    };
 
-    if use_partial {
-        // The recording every window and every recovered token is checked
-        // against. Asked of the context so this path shares the crate's single
-        // derivation; a zero-length or unprobeable recording degrades to
-        // full-file recovery rather than failing, because partial UTR is an
-        // optimisation and the full path does not need the bound.
-        let recording = match context.recording().await {
-            Ok(recording) => recording,
-            Err(why) => {
-                warn!(
-                    context.filename,
-                    error = %why,
-                    "Partial UTR needs a non-empty recording, falling back to full-file recovery"
-                );
-                let route = UtrFullRoute::AfterPartial(std::sync::Arc::new(
-                    AbandonedPartialAttempt::PlanRefused {
-                        reason: PartialPlanRefusal::Recording {
-                            error: why.to_string(),
-                        },
-                    },
-                ));
-                return run_utr_pass_full(source, context, progress, route).await;
-            }
-        };
-        // The recording built above is the single derivation of the audio's
-        // length on this path. It used to be derived a SECOND time three lines
-        // later, from the context's raw milliseconds through an `expect` whose
-        // safety rested on a control-flow invariant argued in a four-line
-        // comment.
-        // Passing the recording deletes the second derivation, the panic and
-        // the argument together.
-        //
-        // The windows come back as `FaWindow`s, proven inside this recording,
-        // and stay that way through the segment extraction (whose transcode
-        // then needs no probe of the source to bound a damaged decode) and the
-        // token conversion below. Partial UTR is an optimisation, so a window
-        // that is somehow not inside the recording degrades to full-file
-        // recovery like the other failures here.
+    if let Some(backend) = partial_backend {
         let windows = match crate::chat_ops::fa::find_untimed_windows(chat_file, &recording, 500) {
             Ok(windows) => windows,
             Err(why) => {
@@ -324,12 +316,12 @@ pub(in crate::runner) async fn run_utr_pass(
                         },
                     },
                 ));
-                return run_utr_pass_full(source, context, progress, route).await;
+                return run_utr_pass_full(source, context, recording, progress, route).await;
             }
         };
 
         let total_windows = windows.len() as i64;
-        let mut pending = match partial::PendingWindow::start(windows, context) {
+        let mut pending = match partial::PendingWindow::start(windows, context, backend) {
             Ok(pending) => pending,
             Err(route) => {
                 info!(
@@ -344,7 +336,7 @@ pub(in crate::runner) async fn run_utr_pass(
                         Some(1),
                     ));
                 }
-                return run_utr_pass_full(source, context, progress, route).await;
+                return run_utr_pass_full(source, context, recording, progress, route).await;
             }
         };
         info!(
@@ -357,7 +349,7 @@ pub(in crate::runner) async fn run_utr_pass(
         let completed = loop {
             let step = match pending.run().await? {
                 partial::WindowResult::Abandoned(route) => {
-                    return run_utr_pass_full(source, context, progress, route).await;
+                    return run_utr_pass_full(source, context, recording, progress, route).await;
                 }
                 partial::WindowResult::Recognized(step) => step,
             };
@@ -415,23 +407,24 @@ pub(in crate::runner) async fn run_utr_pass(
         ));
     }
 
-    run_utr_pass_full(source, context, progress, UtrFullRoute::Direct).await
+    run_utr_pass_full(source, context, recording, progress, UtrFullRoute::Direct).await
 }
 
 /// Run the full-file UTR path with cache reuse.
 async fn run_utr_pass_full(
     source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
     context: UtrPassContext<'_>,
+    recording: Recording,
     progress: Option<&super::super::util::ProgressSender>,
     route: UtrFullRoute,
 ) -> Result<UtrPassOutcome, crate::error::ServerError> {
-    let result = run_utr_pass_full_inner(source, context, progress, route.clone()).await;
+    let result = run_utr_pass_full_inner(source, context, recording, progress, route.clone()).await;
     match (result, route) {
         (Err(cause), UtrFullRoute::AfterPartial(abandoned)) => {
             match context.dumper.dump_utr_failed_fallback(
                 context.filename,
                 context.pass,
-                context.engine,
+                context.recognizer.engine(),
                 &abandoned,
                 &cause,
             ) {
@@ -450,12 +443,12 @@ async fn run_utr_pass_full(
 async fn run_utr_pass_full_inner(
     source: &crate::chat_ops::fa::SourceBoundUtrInput<'_>,
     context: UtrPassContext<'_>,
+    recording: Recording,
     progress: Option<&super::super::util::ProgressSender>,
     route: UtrFullRoute,
 ) -> Result<UtrPassOutcome, crate::error::ServerError> {
     let chat_file = source.document();
-    let recognition = full::FullRecognition::run(context, route).await?;
-    let recording = recognition.recording();
+    let recognition = full::FullRecognition::run(context, recording, route).await?;
     let prepared = work::PreparedRecognition::full(recognition)?;
 
     if context.dumper.is_enabled() {
@@ -486,10 +479,10 @@ async fn run_utr_pass_full_inner(
     Ok(UtrPassOutcome::Recovered(completed))
 }
 
-/// Fetch one UTR ASR response from the selected backend and map it into the
-/// shared `AsrResponse` cache format.
-fn infer_utr_asr_response<'run>(
-    audio_path: &'run Path,
+/// Recognize the whole recording with the pass's engine, reading what that
+/// engine reads: Rev.AI uploads the recording as found, a worker-hosted
+/// engine the prepared WAV.
+fn infer_whole_recording<'run>(
     decode_budget: Option<DecodeBudgetSeconds>,
     context: UtrPassContext<'run>,
 ) -> futures::future::BoxFuture<
@@ -497,8 +490,9 @@ fn infer_utr_asr_response<'run>(
     Result<crate::transcribe::AsrResponse, crate::error::ServerError>,
 > {
     Box::pin(async move {
-        match crate::transcribe::AsrBackend::from(context.engine).as_non_rev() {
-            None => {
+        match context.recognizer.input {
+            UtrInput::RevAi(original) => {
+                let audio_path = original.path();
                 let lang = crate::types::revai_language::RevLanguage::admit(
                     &crate::api::AsrLanguageRequest::One(context.lang.clone()),
                 )
@@ -531,92 +525,149 @@ fn infer_utr_asr_response<'run>(
                 )
                 .await
             }
-            Some(backend) => {
-                // UTR runs each engine's default configuration: no extras.
-                // `GpuModelPlan::alignment` plans the same, and the route check
-                // refuses a UTR request whose extras differ from the plan's.
-                let no_extras = std::collections::BTreeMap::new();
-                crate::transcribe::infer_asr(
-                    context.services.pipeline.pool,
-                    &crate::transcribe::AsrInferParams {
-                        backend,
-                        audio_path,
-                        lang: &context.asr_language(),
-                        // UTR never asks a provider to separate speakers: the
-                        // count of one it used to pass meant exactly this.
-                        diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
-                        extras: &no_extras,
-                        gpu: context.services.gpu,
-                        decode_budget,
-                    },
-                )
-                .await
+            UtrInput::Worker(backend) => {
+                infer_worker_utr(backend, context.audio.audio_path(), decode_budget, context).await
             }
         }
     })
+}
+
+/// Recognize `audio_path` (the prepared WAV, or one window cut from it) with
+/// a worker-hosted backend. Taking the backend proven not to be Rev.AI is
+/// what keeps segments and the prepared WAV away from Rev.AI.
+fn infer_worker_utr<'run>(
+    backend: crate::transcribe::NonRevAsrBackend,
+    audio_path: &'run Path,
+    decode_budget: Option<DecodeBudgetSeconds>,
+    context: UtrPassContext<'run>,
+) -> futures::future::BoxFuture<
+    'run,
+    Result<crate::transcribe::AsrResponse, crate::error::ServerError>,
+> {
+    Box::pin(async move {
+        // UTR runs each engine's default configuration: no extras.
+        // `GpuModelPlan::alignment` plans the same, and the route check
+        // refuses a UTR request whose extras differ from the plan's.
+        let no_extras = std::collections::BTreeMap::new();
+        crate::transcribe::infer_asr(
+            context.services.pipeline.pool,
+            &crate::transcribe::AsrInferParams {
+                backend,
+                audio_path,
+                lang: &context.asr_language(),
+                // UTR never asks a provider to separate speakers: the
+                // count of one it used to pass meant exactly this.
+                diarization: crate::types::worker_v2::ProviderDiarizationV2::NotRequested,
+                extras: &no_extras,
+                gpu: context.services.gpu,
+                decode_budget,
+            },
+        )
+        .await
+    })
+}
+
+/// Under a required cache, a worker-hosted engine may not infer on a miss.
+/// Rev.AI may: its normalized entry is derived, and it can be rebuilt from
+/// the separately retained raw transcript, whose own required-cache gate
+/// still refuses a provider call on a raw miss.
+fn refuse_required_worker_inference(
+    context: UtrPassContext<'_>,
+) -> Result<(), crate::error::ServerError> {
+    match (context.cache_policy.response(), context.recognizer.input) {
+        (CachePolicy::RequireCache, UtrInput::Worker(_)) => {
+            Err(crate::error::ServerError::Persistence(
+                "required UTR ASR evidence is missing for the selected ASR backend".to_owned(),
+            ))
+        }
+        (CachePolicy::RequireCache, UtrInput::RevAi(_))
+        | (CachePolicy::UseCache | CachePolicy::SkipCache, _) => Ok(()),
+    }
 }
 
 /// A normalized UTR cache read has exactly two safe outcomes: replay a valid
 /// response, or authorize inference. Storage errors and malformed values are
 /// neither, so they fail closed instead of silently becoming paid work.
 #[derive(Debug)]
-enum UtrAsrCacheLookup {
+enum UtrAsrCacheLookup<'c> {
     /// Boxed: a stored response dwarfs the miss arm, so an unboxed enum would
     /// make every cache miss pay the size of a hit it did not get.
     Hit(Box<crate::transcribe::AsrResponse>),
-    Miss(UtrAsrCacheMiss),
+    Miss(UtrAsrCacheMiss<'c>),
 }
 
 /// Proof that the normalized UTR cache was safely absent or explicitly
 /// bypassed. Consuming it is the only route to inference, and inference is the
 /// only route to [`UtrAsrInferred`], whose commit is the only write.
 #[derive(Debug)]
-struct UtrAsrCacheMiss {
+struct UtrAsrCacheMiss<'c> {
     /// Whether, and how, the result may be stored and shared.
-    authority: UtrAsrWriteAuthority,
+    authority: UtrAsrWriteAuthority<'c>,
 }
 
 /// What a miss is allowed to do with the response it produces.
 ///
 /// A sum rather than an `Option<namespace>`: the two arms are different facts
 /// about the run, and the store path must say which one it is in.
-#[derive(Debug)]
-enum UtrAsrWriteAuthority {
+enum UtrAsrWriteAuthority<'c> {
     /// Every model is pinned: the response is stored under `namespace`, and
     /// `lease` makes this the ONE inference for the cache key in this process.
     /// A concurrent identical request waits on the lease and then replays
     /// what this one stores, rather than running the same inference again.
     Shared {
+        /// The cache the lookup opened for this recording; the store writes
+        /// to it and to nothing else.
+        cache: &'c UtteranceCache,
         namespace: UtrAsrCacheNamespace,
         lease: InferenceLease,
     },
-    /// A floating plan: nothing is stored, because no later run could prove a
-    /// stored row came from the same weights.
+    /// A floating plan or an unidentified recording: nothing is stored,
+    /// because no later run could prove a stored row came from the same
+    /// weights, or from the same version of the file.
     Unshared,
 }
 
-impl UtrAsrCacheMiss {
-    async fn infer(
+/// The cache handle has no `Debug`; the namespace and lease say which
+/// authority this is.
+impl std::fmt::Debug for UtrAsrWriteAuthority<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Shared {
+                namespace, lease, ..
+            } => f
+                .debug_struct("Shared")
+                .field("namespace", namespace)
+                .field("lease", lease)
+                .finish_non_exhaustive(),
+            Self::Unshared => f.write_str("Unshared"),
+        }
+    }
+}
+
+impl<'c> UtrAsrCacheMiss<'c> {
+    /// Recognize the whole recording under this miss's authority.
+    async fn infer_whole(
         self,
-        audio_path: &Path,
         decode_budget: Option<DecodeBudgetSeconds>,
         context: UtrPassContext<'_>,
-    ) -> Result<UtrAsrInferred, crate::error::ServerError> {
-        match (context.cache_policy.response(), context.engine) {
-            (CachePolicy::RequireCache, UtrEngine::Whisper | UtrEngine::HkTencent) => {
-                Err(crate::error::ServerError::Persistence(
-                    "required UTR ASR evidence is missing for the selected ASR backend".to_owned(),
-                ))
-            }
-            // The normalized UTR entry is derived. Rev may rebuild it from the
-            // separately retained raw transcript, whose own required-cache
-            // gate still refuses a provider call on a raw miss.
-            (CachePolicy::RequireCache, UtrEngine::RevAi)
-            | (CachePolicy::UseCache | CachePolicy::SkipCache, _) => {
-                self.run(infer_utr_asr_response(audio_path, decode_budget, context))
-                    .await
-            }
-        }
+    ) -> Result<UtrAsrInferred<'c>, crate::error::ServerError> {
+        refuse_required_worker_inference(context)?;
+        self.run(infer_whole_recording(decode_budget, context))
+            .await
+    }
+
+    /// Recognize one window, already cut from the prepared WAV, with the
+    /// worker-hosted backend the partial route was admitted with.
+    async fn infer_segment(
+        self,
+        backend: crate::transcribe::NonRevAsrBackend,
+        segment: &Path,
+        decode_budget: Option<DecodeBudgetSeconds>,
+        context: UtrPassContext<'_>,
+    ) -> Result<UtrAsrInferred<'c>, crate::error::ServerError> {
+        refuse_required_worker_inference(context)?;
+        self.run(infer_worker_utr(backend, segment, decode_budget, context))
+            .await
     }
 
     /// Run one inference under this miss's authority.
@@ -628,7 +679,7 @@ impl UtrAsrCacheMiss {
         inference: impl Future<
             Output = Result<crate::transcribe::AsrResponse, crate::error::ServerError>,
         >,
-    ) -> Result<UtrAsrInferred, crate::error::ServerError> {
+    ) -> Result<UtrAsrInferred<'c>, crate::error::ServerError> {
         let response = inference.await?;
         Ok(UtrAsrInferred {
             response,
@@ -639,29 +690,29 @@ impl UtrAsrCacheMiss {
 
 /// A response produced under a miss's authority, not yet stored.
 #[derive(Debug)]
-struct UtrAsrInferred {
+struct UtrAsrInferred<'c> {
     response: crate::transcribe::AsrResponse,
-    authority: UtrAsrWriteAuthority,
+    authority: UtrAsrWriteAuthority<'c>,
 }
 
-impl UtrAsrInferred {
+impl UtrAsrInferred<'_> {
     /// Store the response (when the plan is pinned) and hand it back.
     ///
     /// The one write both recovery paths use. A failed write (or a response
     /// that does not serialize) is logged and otherwise ignored: the response
     /// is still used for this run, and a later run recomputes what was not
     /// stored.
-    async fn commit(
-        self,
-        cache: &UtteranceCache,
-        cache_key: &CacheKey,
-        filename: &str,
-    ) -> crate::transcribe::AsrResponse {
+    async fn commit(self, cache_key: &CacheKey, filename: &str) -> crate::transcribe::AsrResponse {
         match self.authority {
-            // Nothing is written for a floating plan. A row whose models
-            // cannot be named would be unreadable by construction anyway.
+            // Nothing is written for a floating plan or an unidentified
+            // recording: no later run could prove the row came from the same
+            // weights, or from the same version of the file.
             UtrAsrWriteAuthority::Unshared => {}
-            UtrAsrWriteAuthority::Shared { namespace, lease } => {
+            UtrAsrWriteAuthority::Shared {
+                cache,
+                namespace,
+                lease,
+            } => {
                 let stored = match serde_json::to_value(&self.response) {
                     Ok(value) => cache
                         .put(cache_key.as_str(), tasks::UTR_ASR, &namespace, &value)
@@ -696,7 +747,7 @@ impl UtrAsrInferred {
 /// come from other weights.
 fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility {
     let models = match crate::model_manifest::utr_pinned_models(
-        context.engine,
+        context.recognizer.engine(),
         context.lang,
         context.services.pipeline.pool.tencent_engine(),
     ) {
@@ -704,19 +755,23 @@ fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility 
         Err(error) => {
             warn!(
                 context.filename,
-                engine = context.engine.as_wire_name(),
+                engine = context.recognizer.engine().as_wire_name(),
                 %error,
                 "UTR ASR models could not be resolved; running without cache reuse"
             );
             return UtrAsrCacheEligibility::Floating;
         }
     };
-    match UtrAsrCacheNamespace::for_pinned_plan(context.engine, &models, &context.asr_language()) {
+    match UtrAsrCacheNamespace::for_pinned_plan(
+        context.recognizer.engine(),
+        &models,
+        &context.asr_language(),
+    ) {
         Ok(eligibility) => eligibility,
         Err(error) => {
             warn!(
                 context.filename,
-                engine = context.engine.as_wire_name(),
+                engine = context.recognizer.engine().as_wire_name(),
                 %error,
                 "UTR ASR producer could not be named; running without cache reuse"
             );
@@ -732,20 +787,27 @@ fn utr_cache_eligibility(context: UtrPassContext<'_>) -> UtrAsrCacheEligibility 
 /// engine, the audio and the language, which determine the namespace). A
 /// second identical request therefore waits for the first to commit and then
 /// replays its row, instead of each running the same inference.
-async fn lookup_utr_asr_cache(
-    cache: &UtteranceCache,
+///
+/// An unidentified recording is treated as a floating plan: its key could
+/// match an earlier version of the file, so nothing is read or stored.
+async fn lookup_utr_asr_cache<'c>(
+    recording_cache: crate::fa::RecordingCache<'c>,
     cache_key: &CacheKey,
     eligibility: &UtrAsrCacheEligibility,
     policy: CachePolicy,
-) -> Result<UtrAsrCacheLookup, crate::error::ServerError> {
+) -> Result<UtrAsrCacheLookup<'c>, crate::error::ServerError> {
+    let unshared = || {
+        Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
+            authority: UtrAsrWriteAuthority::Unshared,
+        }))
+    };
+    let Some(cache) = recording_cache.keyed() else {
+        return unshared();
+    };
     let namespace = match eligibility {
         // A floating plan cannot promise a stored row came from the same
         // weights, so there is nothing safe to read and nothing to share.
-        UtrAsrCacheEligibility::Floating => {
-            return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
-                authority: UtrAsrWriteAuthority::Unshared,
-            }));
-        }
+        UtrAsrCacheEligibility::Floating => return unshared(),
         UtrAsrCacheEligibility::Pinned(namespace) => namespace.clone(),
     };
     // A warm row needs no lease: hits stay lock-free, and only a miss pays
@@ -764,7 +826,11 @@ async fn lookup_utr_asr_cache(
         // while this one waited: that result is exactly as fresh.
         CachePolicy::SkipCache if !lease.observed_commit_while_waiting() => {
             return Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
-                authority: UtrAsrWriteAuthority::Shared { namespace, lease },
+                authority: UtrAsrWriteAuthority::Shared {
+                    cache,
+                    namespace,
+                    lease,
+                },
             }));
         }
         CachePolicy::UseCache | CachePolicy::RequireCache | CachePolicy::SkipCache => {}
@@ -772,7 +838,11 @@ async fn lookup_utr_asr_cache(
     match read_utr_asr_cache(cache, cache_key, &namespace).await? {
         Some(response) => Ok(UtrAsrCacheLookup::Hit(Box::new(response))),
         None => Ok(UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
-            authority: UtrAsrWriteAuthority::Shared { namespace, lease },
+            authority: UtrAsrWriteAuthority::Shared {
+                cache,
+                namespace,
+                lease,
+            },
         })),
     }
 }
@@ -832,7 +902,7 @@ fn rev_utr_evidence_identity(filename: &str, cache_key: &CacheKey) -> String {
 /// The two discard reasons are different facts about the run: an engine that
 /// reports no word timings and an engine whose timings all collapsed both
 /// leave UTR with nothing to inject, and a bare token list cannot say which.
-pub(crate) struct UtrTokenConversion {
+pub struct UtrTokenConversion {
     window: FaWindow,
     response: crate::transcribe::AsrResponse,
     tokens: Vec<crate::chat_ops::fa::utr::AsrTimingToken>,
@@ -899,7 +969,7 @@ impl UtrTokenConversion {
         // rejections did this file have" is one query rather than two.
         tracing::warn!(
             filename = context.filename,
-            engine = context.engine.as_wire_name(),
+            engine = context.recognizer.engine().as_wire_name(),
             total = self.tokens.len() + discarded,
             dropped_untimed,
             no_extent = rejected.no_extent,
@@ -1047,7 +1117,7 @@ fn asr_response_to_utr_tokens(
 }
 
 #[cfg(test)]
-pub(crate) fn convert_utr_for_test(
+pub fn convert_utr_for_test(
     response: crate::transcribe::AsrResponse,
     window: FaWindow,
 ) -> UtrTokenConversion {
@@ -1055,7 +1125,7 @@ pub(crate) fn convert_utr_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn prepare_after_partial_failure_for_test(
+pub fn prepare_after_partial_failure_for_test(
     windows: &[FaWindow],
     completed: UtrTokenConversion,
     failed_window: FaWindow,
@@ -1095,7 +1165,7 @@ fn normalize_utr_tokens(
 mod utr_token_conversion_tests {
     use super::*;
     use crate::api::AudioPositionSeconds;
-    use crate::chat_ops::fa::coordinates::Ms;
+    use crate::chat_ops::fa::coordinates::{FileMs, Ms};
     use crate::transcribe::{AsrResponse, AsrToken};
 
     fn response(tokens: Vec<AsrToken>) -> AsrResponse {
@@ -1112,6 +1182,11 @@ mod utr_token_conversion_tests {
     /// traditional-script transcript, so they are converted, each token
     /// keeping its own interval. A language without a normalization is left
     /// exactly as recognized.
+    /// Guards: UTR normalizes Traditional Chinese text without changing recognition intervals.
+    /// Kind: transcript
+    /// Not a type: Real provider token spelling and timing can change independently during normalization.
+    /// State: Synthetic recognized tokens in Taiwanese and English language modes.
+    /// Concurrency: The token populations are owned and transformation is pure.
     #[test]
     fn utr_tokens_take_the_transcript_script_and_keep_their_timing() {
         let timed = |text: &str, start_ms: u64| crate::chat_ops::fa::utr::AsrTimingToken {
@@ -1163,6 +1238,11 @@ mod utr_token_conversion_tests {
         EngineId::new("test-asr")
     }
 
+    /// Guards: Missing, degenerate and inverted recognition spans retain distinct evidence reasons.
+    /// Kind: wire
+    /// Not a type: Provider token coordinates can omit ends or disagree in several distinct ways.
+    /// State: Synthetic recognized token list and exact retained JSON reasons.
+    /// Concurrency: No external provider is called.
     #[test]
     fn untimed_and_degenerate_discards_are_counted_apart() {
         let (_rec, window) = wide_window(0, 60_000);
@@ -1212,6 +1292,11 @@ mod utr_token_conversion_tests {
     /// in seconds) is refused as an interval and counted as inadmissible. Its
     /// ends used to saturate into millisecond counts and be counted as a
     /// report outside the window.
+    /// Guards: Epoch-like token positions refuse before classification as window overshoot.
+    /// Kind: wire
+    /// Not a type: A provider can report locally parseable seconds that exceed the interval domain.
+    /// State: Synthetic coordinate reports and a measured test window.
+    /// Concurrency: Each value is local to the test.
     #[test]
     fn a_token_past_the_admissible_range_is_inadmissible() {
         let (_rec, window) = wide_window(0, 60_000);
@@ -1230,9 +1315,14 @@ mod utr_token_conversion_tests {
         assert_eq!(rejected.outside_window, 0);
     }
 
+    /// Guards: Clean window-relative tokens offset both ends and report no losses.
+    /// Kind: wire
+    /// Not a type: Valid provider token spans still require coordinate conversion and honest loss counters.
+    /// State: Two raw tokens over a nonzero-start window.
+    /// Concurrency: Pure projection from test-owned coordinates.
     #[test]
     fn a_clean_response_reports_no_losses() {
-        let (_rec, window) = wide_window(0, 60_000);
+        let (_rec, window) = wide_window(10_000, 70_000);
         let converted = asr_response_to_utr_tokens(
             response(vec![
                 token("one", Some(0.0), Some(0.5)),
@@ -1242,22 +1332,18 @@ mod utr_token_conversion_tests {
             &test_engine(),
         );
         assert_eq!(converted.tokens.len(), 2);
+        assert_eq!(
+            (converted.tokens[0].start_ms, converted.tokens[0].end_ms),
+            (10_000, 10_500)
+        );
+        assert_eq!(
+            (converted.tokens[1].start_ms, converted.tokens[1].end_ms),
+            (10_500, 11_000)
+        );
         let (untimed, rejected) = converted.summary();
         assert_eq!(untimed, 0);
         assert_eq!(rejected.no_extent, 0);
         assert_eq!(rejected.outside_window, 0);
-    }
-
-    #[test]
-    fn the_offset_applies_to_both_ends() {
-        let (_rec, window) = wide_window(10_000, 70_000);
-        let converted = asr_response_to_utr_tokens(
-            response(vec![token("w", Some(1.0), Some(2.0))]),
-            window,
-            &test_engine(),
-        );
-        assert_eq!(converted.tokens[0].start_ms, 11_000);
-        assert_eq!(converted.tokens[0].end_ms, 12_000);
     }
 
     /// The defect this signature change exists to prevent.
@@ -1272,6 +1358,11 @@ mod utr_token_conversion_tests {
     /// The numbers here are the real ones: a 4.803 second window at the very
     /// end of a 1259.968 second recording, and an engine reporting 33.02
     /// seconds into it.
+    /// Guards: An overshooting recognition cannot be offset into the transcript.
+    /// Kind: wire
+    /// Not a type: A real engine may return plausible offsets beyond the particular extracted segment.
+    /// State: Exact failing final-window coordinates and valid observations from another span.
+    /// Concurrency: Each recorded token retains its test window.
     #[test]
     fn a_token_past_the_end_of_its_own_segment_is_refused_not_offset() {
         let recording = Recording::of_duration(Ms(1_259_968)).expect("non-zero");
@@ -1337,9 +1428,8 @@ mod utr_evidence_cache_tests {
         let directory = tempfile::tempdir().unwrap();
         let audio_path = directory.path().join("recording.mp3");
         crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
-        let duration = crate::runner::util::probe_audio_duration(&audio_path)
-            .await
-            .expect("fixture has a proven duration");
+        let measured = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+        let duration = measured.duration().expect("fixture has a proven duration");
         std::fs::remove_file(&audio_path).unwrap();
         let mut chat = TreeSitterParser::new()
             .unwrap()
@@ -1468,25 +1558,30 @@ mod utr_evidence_cache_tests {
                 ..Default::default()
             })
             .unwrap();
+        let failed_measurement;
+        let prepared = if matches!(case, FullFallbackCase::DirectUnprobeable) {
+            failed_measurement = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+            crate::media::probe::fixtures::write_pcm_wav(&audio_path, 1);
+            &failed_measurement
+        } else {
+            &measured
+        };
         let context = UtrPassContext {
             pass: crate::api::UtrPass::Initial,
-            audio_path: &audio_path,
+            recognizer: UtrRecognizer::new(
+                &engine,
+                super::super::fa_pipeline::OriginalRecording::for_tests(&audio_path),
+            ),
             lang: &language,
-            services: crate::fa::FaServices {
-                pipeline: PipelineServices::new(&pool, &cache),
-                cache_namespace: &fa_namespace,
-                gpu: &gpu,
-                attention_capture_dir: None,
-            },
-            audio_identity: &identity,
+            services: crate::fa::FaServices::for_tests(
+                PipelineServices::new(&pool, &cache),
+                &fa_namespace,
+                &gpu,
+            ),
+            audio: crate::params::AudioContext::new(prepared, &identity),
             cache_policy: crate::params::UtrCachePolicies::from_overrides(&overrides),
-            audio_duration: match case {
-                FullFallbackCase::DirectUnprobeable => None,
-                _ => Some(duration),
-            },
             aggregation_target: None,
             filename: "sample.cha",
-            engine: &engine,
             strategy: &strategy,
             dumper: &dumper,
         };
@@ -1503,11 +1598,14 @@ mod utr_evidence_cache_tests {
         let source = crate::chat_ops::fa::SourceBoundUtrInput::for_test(&chat);
         let result = run_utr_pass(&source, context, None).await;
         if matches!(case, FullFallbackCase::DirectUnprobeable) {
-            assert!(matches!(
-                result,
-                Err(ServerError::RecordingDuration(
-                    crate::error::RecordingDurationError::Probe(_)
-                ))
+            let Err(ServerError::RecordingDuration(crate::error::RecordingDurationError(replayed))) =
+                result
+            else {
+                panic!("the retained failure must reach UTR before any cache lookup");
+            };
+            assert!(std::sync::Arc::ptr_eq(
+                &replayed,
+                prepared.duration().unwrap_err()
             ));
             return;
         }
@@ -1598,26 +1696,51 @@ mod utr_evidence_cache_tests {
         assert_eq!(observation.tokens().tokens()[0].start_ms, 6000);
     }
 
+    /// Guards: Full cache hit retains the response and recording window used by the projection.
+    /// Kind: journey
+    /// Not a type: A persisted response may be paired with the wrong request extent after retrieval.
+    /// State: Private cache, measured synthetic media and admitted full-route CHAT.
+    /// Concurrency: All files and cache operations belong to the case.
     #[tokio::test]
     async fn full_cached_request_owns_its_response_and_recording_window() {
         partial_cache_hit_then_extraction_failure(FullFallbackCase::DirectSuccess).await;
     }
 
+    /// Guards: Full UTR returns the original duration refusal before consulting cache even after media appears.
+    /// Kind: contract
+    /// Not a type: A real filesystem repair can make a second probe succeed while the already prepared attempt failed.
+    /// State: A retained failed probe, replacement WAV and a private UTR context.
+    /// Concurrency: Replacement comes before UTR; error identity must still be shared.
     #[tokio::test]
     async fn full_request_requires_recording_before_reading_cache() {
         partial_cache_hit_then_extraction_failure(FullFallbackCase::DirectUnprobeable).await;
     }
 
+    /// Guards: Partial cached responses remain paired with their original windows.
+    /// Kind: journey
+    /// Not a type: Independent cache hits can be returned to the wrong request and thereby misplace actual words.
+    /// State: Two known windows, retained responses and private cache fixtures.
+    /// Concurrency: The single partial dispatcher carries each logical request.
     #[tokio::test]
     async fn partial_cached_windows_keep_each_response_with_its_request() {
         partial_cache_hit_then_extraction_failure(FullFallbackCase::PartialSuccess).await;
     }
 
+    /// Guards: Failed second extraction retains earlier recognition evidence through the successful full fallback.
+    /// Kind: journey
+    /// Not a type: A live extraction failure can occur after some cache-backed windows already completed.
+    /// State: One removed recorded source, a partial hit and full cached response.
+    /// Concurrency: Case-owned paths stage the failure before fallback.
     #[tokio::test]
     async fn partial_cache_hit_then_extraction_failure_retains_the_attempt() {
         partial_cache_hit_then_extraction_failure(FullFallbackCase::CachedSuccess).await;
     }
 
+    /// Guards: Failed full fallback preserves partial evidence or identifies a genuine write refusal.
+    /// Kind: journey
+    /// Not a type: The persistence adapter can fail while reporting an independently failed fallback.
+    /// State: Private cache fixture and alternate writable/unwritable evidence paths.
+    /// Concurrency: One test controls both transitions and their directories.
     #[tokio::test]
     async fn failed_full_fallback_retains_partial_evidence_or_reports_write_failure() {
         partial_cache_hit_then_extraction_failure(FullFallbackCase::CacheMiss).await;
@@ -1647,6 +1770,11 @@ mod utr_evidence_cache_tests {
 
     /// Real evidence resolution and the admitted-document recovery transition,
     /// with a controlled failing provider rather than a paid network call.
+    /// Guards: Unavailable ASR provider preserves admitted source and records its actual failure.
+    /// Kind: contract
+    /// Not a type: A provider can refuse after media and source admission and must preserve that boundary result.
+    /// State: Local synthetic audio, explicit provider failure double and private cache.
+    /// Concurrency: The injected provider cannot make a paid request.
     #[tokio::test]
     async fn unavailable_provider_retains_admitted_document_and_records_the_cause() {
         let temp = tempfile::tempdir().unwrap();
@@ -1743,6 +1871,11 @@ mod utr_evidence_cache_tests {
         }
     }
 
+    /// Guards: Rev.AI UTR replay uses persisted raw evidence without a second provider call.
+    /// Kind: journey
+    /// Not a type: A later cache hit can still invoke the provider if the actual evidence handoff loses identity.
+    /// State: Private cache, paid-effect counting double and exact retained raw response.
+    /// Concurrency: The two calls share only case-owned cache storage and counter.
     #[tokio::test]
     async fn rev_utr_replays_raw_evidence_without_a_second_paid_call() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1821,6 +1954,11 @@ mod utr_evidence_cache_tests {
         );
     }
 
+    /// Guards: Required cold ASR evidence refuses without authorizing a provider effect.
+    /// Kind: contract
+    /// Not a type: A real cache may have no evidence for an otherwise admitted ASR request.
+    /// State: Private SQLite cache, synthetic media and refusing provider double.
+    /// Concurrency: All mutable account-free state belongs to the test.
     #[tokio::test]
     async fn task_scoped_required_asr_cold_miss_never_calls_provider() {
         let root = tempfile::tempdir().unwrap();
@@ -1869,6 +2007,14 @@ mod utr_evidence_cache_tests {
         );
     }
 
+    /// The cache as a recording with a stable identity opens it.
+    fn stable(cache: &UtteranceCache) -> crate::fa::RecordingCache<'_> {
+        crate::fa::RecordingCache::for_recording(
+            cache,
+            &crate::chat_ops::fa::RecordingIdentity::stable_for_tests(),
+        )
+    }
+
     /// The cache eligibility one engine resolves for a test, which must be the
     /// pinned arm: every UTR engine's composition is fully pinned in this
     /// build, and a test that silently ran against `Floating` would exercise
@@ -1894,6 +2040,11 @@ mod utr_evidence_cache_tests {
         eligibility
     }
 
+    /// Guards: Corrupt derived UTR cache is a hard persistence error.
+    /// Kind: wire
+    /// Not a type: The stored JSON can fail decoding despite a valid cache key and declared type.
+    /// State: A private SQLite database containing corrupt derived evidence.
+    /// Concurrency: No other readers, writers or providers are active.
     #[tokio::test]
     async fn corrupt_derived_utr_cache_fails_closed() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1919,7 +2070,7 @@ mod utr_evidence_cache_tests {
             .await
             .expect("seed corrupt cache value");
 
-        let error = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache)
+        let error = lookup_utr_asr_cache(stable(&cache), &key, &eligibility, CachePolicy::UseCache)
             .await
             .expect_err("corrupt cache must not become an inference-authorizing miss");
         assert!(matches!(error, ServerError::Persistence(_)));
@@ -1935,6 +2086,11 @@ mod utr_evidence_cache_tests {
     /// inference, and must then replay what the leader stored. The wait is
     /// observed through the lease registry, never a clock: before the fix the
     /// second lookup finishes on its own with a miss, which ends the loop.
+    /// Guards: Concurrent identical UTR lookups share an inference lease and committed response.
+    /// Kind: contract
+    /// Not a type: Two async callers can interleave cache misses before either publishes the value.
+    /// State: Private SQLite and counted materialization on one shared evidence key.
+    /// Concurrency: Both tasks join before the cache is checked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_identical_utr_lookups_share_one_inference() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -1946,17 +2102,25 @@ mod utr_evidence_cache_tests {
         let key = CacheKey::from_content("single-flight UTR ASR lookup");
         let eligibility = std::sync::Arc::new(test_eligibility(&UtrEngine::Whisper));
 
-        let leader = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache)
-            .await
-            .expect("cold lookup");
+        let leader =
+            lookup_utr_asr_cache(stable(&cache), &key, &eligibility, CachePolicy::UseCache)
+                .await
+                .expect("cold lookup");
         let UtrAsrCacheLookup::Miss(leader) = leader else {
             panic!("an empty cache must authorize the first inference")
         };
 
         let follower = {
             let (cache, key, eligibility) = (cache.clone(), key.clone(), eligibility.clone());
+            // The lookup borrows the task's own cache handle, so the task
+            // returns only what it replayed: the response on a hit.
             tokio::spawn(async move {
-                lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::UseCache).await
+                lookup_utr_asr_cache(stable(&cache), &key, &eligibility, CachePolicy::UseCache)
+                    .await
+                    .map(|lookup| match lookup {
+                        UtrAsrCacheLookup::Hit(response) => Some(*response),
+                        UtrAsrCacheLookup::Miss(_) => None,
+                    })
             })
         };
         // Either the follower parks behind the leader's lease (two contenders),
@@ -1983,7 +2147,7 @@ mod utr_evidence_cache_tests {
             .run(async { Ok(response.clone()) })
             .await
             .expect("leader inference")
-            .commit(&cache, &key, "leader.cha")
+            .commit(&key, "leader.cha")
             .await;
         assert_eq!(
             serde_json::to_value(&stored).expect("stored JSON"),
@@ -1994,15 +2158,39 @@ mod utr_evidence_cache_tests {
             .await
             .expect("follower task")
             .expect("follower lookup");
-        let UtrAsrCacheLookup::Hit(replayed) = replay else {
+        let Some(replayed) = replay else {
             panic!("the follower must replay the leader's result, not infer again")
         };
         assert_eq!(
-            serde_json::to_value(*replayed).expect("replayed JSON"),
+            serde_json::to_value(replayed).expect("replayed JSON"),
             serde_json::to_value(&response).expect("response JSON")
         );
+
+        // The same row is invisible to a recording whose identity could not
+        // be read: its lookup misses, and its miss may store nothing.
+        let withheld = crate::fa::RecordingCache::for_recording(
+            &cache,
+            &crate::chat_ops::fa::RecordingIdentity::read(std::path::Path::new(
+                "/nonexistent/unidentified.wav",
+            ))
+            .await,
+        );
+        let lookup = lookup_utr_asr_cache(withheld, &key, &eligibility, CachePolicy::UseCache)
+            .await
+            .expect("withheld lookup");
+        assert!(matches!(
+            lookup,
+            UtrAsrCacheLookup::Miss(UtrAsrCacheMiss {
+                authority: UtrAsrWriteAuthority::Unshared
+            })
+        ));
     }
 
+    /// Guards: A derived cache miss in cache-only mode can reach raw evidence admission.
+    /// Kind: policy
+    /// Not a type: Derived and raw evidence are independently present and require a distinct refusal boundary.
+    /// State: Private cache with no derived row and a declared eligibility policy.
+    /// Concurrency: One owned cache and no provider effect.
     #[tokio::test]
     async fn required_utr_derived_cache_miss_can_reach_raw_evidence_resolution() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2012,9 +2200,14 @@ mod utr_evidence_cache_tests {
         let key = CacheKey::from_content("required UTR cache test");
         let eligibility = test_eligibility(&UtrEngine::RevAi);
 
-        let lookup = lookup_utr_asr_cache(&cache, &key, &eligibility, CachePolicy::RequireCache)
-            .await
-            .expect("a derived miss must remain distinguishable from a raw evidence miss");
+        let lookup = lookup_utr_asr_cache(
+            stable(&cache),
+            &key,
+            &eligibility,
+            CachePolicy::RequireCache,
+        )
+        .await
+        .expect("a derived miss must remain distinguishable from a raw evidence miss");
 
         assert!(matches!(lookup, UtrAsrCacheLookup::Miss(_)));
     }

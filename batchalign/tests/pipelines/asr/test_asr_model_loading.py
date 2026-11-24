@@ -30,7 +30,6 @@ from batchalign.worker._model_loading.asr import (
 )
 from batchalign.worker._types import (
     AsrEngine,
-    InferTask,
     WorkerBootstrapRuntime,
 )
 from batchalign.worker._types_v2 import (
@@ -166,19 +165,16 @@ def _refuse_every_loader(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_an_asr_load_naming_no_engine_loads_no_model(
     monkeypatch: pytest.MonkeyPatch, revai_api_key: str | None, lang: str
 ) -> None:
-    """The capability probe of a job whose ASR runs in Rust (Rev.AI) prepares
-    the ASR task naming no engine. That load builds nothing, with or without
-    a Rev.AI key in the worker's environment and whatever the language.
-
-    It used to fall through to Rev.AI when a key was present and otherwise to
-    a guessed engine (FunAudio for Cantonese, Whisper for anything else),
-    loading a multi-gigabyte model the job never used.
+    """Guards: A Rust-owned ASR request prepares no Python model even when a key exists.
+    Kind: policy
+    Not a type: Correct bootstrap settings still leave the engine-selection policy free to call a loader.
+    State: Refusing loader spies, synthetic options and optional fake credentials.
+    Concurrency: Monkeypatch restores loader entry points after each case.
     """
     called = _refuse_every_loader(monkeypatch)
 
     host = load_asr_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.ASR,
             lang=lang,
             num_speakers=1,
             engine_overrides=_ENGLISH_SPAWN if lang == "eng" else {},
@@ -191,7 +187,12 @@ def test_an_asr_load_naming_no_engine_loads_no_model(
 
 
 def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
-    """Whisper bootstrap should not touch legacy config-discovery paths."""
+    """Guards: Stock Whisper receives the resolved artifact, decoder, device and default precision.
+    Kind: contract
+    Not a type: A valid local host can still be built from a different backend or device.
+    State: A fake Whisper loader observes the real bootstrap projection.
+    Concurrency: The patch and supplied arguments are local to the test.
+    """
 
     def fake_load_whisper_asr(snapshot, *, decoding, device_policy, cpu_precision):
         assert decoding == _ENGLISH_DECODING
@@ -210,7 +211,6 @@ def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
 
     host = load_asr_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.ASR,
             lang="eng",
             num_speakers=1,
             engine_overrides={"asr": "whisper", **_ENGLISH_SPAWN},
@@ -226,7 +226,12 @@ def test_whisper_override_does_not_require_legacy_config(monkeypatch) -> None:
 
 
 def test_whisper_hub_override_dispatches_to_whisper_hub_loader(monkeypatch) -> None:
-    """Worker dispatch must route asr=whisper_hub to the fine-tune loader."""
+    """Guards: Malayalam selects its named Whisper Hub snapshot and the requested device.
+    Kind: contract
+    Not a type: The public engine name and language still require selecting the intended snapshot.
+    State: A fake Whisper Hub loader captures the admitted artifact and device policy.
+    Concurrency: The test owns its capture and restores the patched loader.
+    """
 
     captured: dict[str, object] = {}
 
@@ -242,7 +247,6 @@ def test_whisper_hub_override_dispatches_to_whisper_hub_loader(monkeypatch) -> N
 
     host = load_asr_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.ASR,
             lang="mal",
             num_speakers=1,
             engine_overrides={"asr": "whisper_hub"},
@@ -259,12 +263,15 @@ def test_whisper_hub_override_dispatches_to_whisper_hub_loader(monkeypatch) -> N
 
 
 def test_a_stock_whisper_load_without_a_decode_language_is_refused() -> None:
-    """A stock Whisper load whose spawn carried no decode language refuses at
-    load, naming the key, rather than deciding a language itself."""
+    """Guards: Stock Whisper rejects an absent decode-language key with that key in the message.
+    Kind: wire
+    Not a type: The worker receives arbitrary engine override bytes that can omit a required key.
+    State: Synthetic bootstrap options with a missing producer field, with no inference.
+    Concurrency: The input and refusal are local to this test.
+    """
     with pytest.raises(ValueError, match=WHISPER_DECODE_LANGUAGE_KEY):
         load_asr_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.ASR,
                 lang="nan",
                 num_speakers=1,
                 engine_overrides={"asr": "whisper"},
@@ -273,7 +280,12 @@ def test_a_stock_whisper_load_without_a_decode_language_is_refused() -> None:
 
 
 def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> None:
-    """HK bootstrap should delegate credential discovery to the Rust boundary."""
+    """Guards: Tencent bootstrap uses the injected account and selected speaker-independent model parameter.
+    Kind: contract
+    Not a type: Resolved settings can still be projected to the SDK loader using the wrong source or parameter.
+    State: A fake SDK loader and explicitly injected synthetic credentials produce the observed host.
+    Concurrency: Monkeypatch restores the process environment and loader.
+    """
 
     captured: dict[str, object] = {}
 
@@ -314,7 +326,6 @@ def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> Non
 
     host = load_asr_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.ASR,
             lang="yue",
             num_speakers=1,
             engine_overrides=overrides,
@@ -343,9 +354,12 @@ def test_tencent_override_uses_injected_boundary_credentials(monkeypatch) -> Non
 
 
 def test_a_pin_for_another_engine_is_refused_at_load(monkeypatch) -> None:
-    """The pin is a load input checked against the engine being loaded: a
-    Tencent pin on a Qwen load means the two sides disagree, and nothing
-    loads."""
+    """Guards: A Tencent pin on Qwen input fails before invoking any engine loader.
+    Kind: wire
+    Not a type: The source engine name and serialized pin can disagree before their joint admission.
+    State: Synthetic mismatched pin plus refusing loader spies.
+    Concurrency: Monkeypatch restores all loader entry points.
+    """
     called = _refuse_every_loader(monkeypatch)
     pinned = TencentModelsV2(
         engine_model_type=RequestedModelV2(
@@ -356,7 +370,6 @@ def test_a_pin_for_another_engine_is_refused_at_load(monkeypatch) -> None:
     with pytest.raises(ValueError, match="pinned a 'tencent' ASR composition"):
         load_asr_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.ASR,
                 lang="yue",
                 num_speakers=1,
                 engine_overrides={

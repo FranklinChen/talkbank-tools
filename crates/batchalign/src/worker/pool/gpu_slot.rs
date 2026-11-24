@@ -31,7 +31,7 @@
 //!
 //! A failed or cancelled initializer leaves the slot empty, so the next caller
 //! can try again. A dead worker is retired before a new generation is spawned.
-//! The former OnceCell retained its first successful worker forever, including
+//! The former `OnceCell` retained its first successful worker forever, including
 //! after the reader died, poisoning every later FA group. Removing the slot
 //! from the map on failure would be actively wrong: another caller may already
 //! hold a clone of that slot and be initializing through it, and its worker

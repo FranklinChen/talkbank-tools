@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::{Notify, oneshot};
 
-pub(crate) const MEDIA_ACCESS_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MEDIA_ACCESS_TIMEOUT: Duration = Duration::from_secs(5);
 static ACCESS: LazyLock<Arc<MediaAccess>> = LazyLock::new(|| Arc::new(MediaAccess::new(4)));
 
 /// Owns admission and outstanding operations, including timed-out OS threads.
@@ -115,7 +115,7 @@ impl Drop for AccessPermit {
 }
 
 /// A root admitted as a directory, only constructible on the filesystem thread.
-pub(crate) struct AvailableMediaRoot(PathBuf);
+pub struct AvailableMediaRoot(PathBuf);
 
 impl AvailableMediaRoot {
     pub(crate) fn path(&self) -> &Path {
@@ -124,7 +124,7 @@ impl AvailableMediaRoot {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum MediaAccessError {
+pub enum MediaAccessError {
     #[error("media root '{}' is missing or is not a directory", root.display())]
     Missing { root: PathBuf },
     #[error("media access capacity was unavailable for '{}' for {waited:?}; the root was not inspected", root.display())]
@@ -135,7 +135,7 @@ pub(crate) enum MediaAccessError {
     Unavailable { root: PathBuf, message: String },
 }
 
-pub(crate) async fn access<T: Send + 'static>(
+pub async fn access<T: Send + 'static>(
     root: PathBuf,
     operation: impl FnOnce(AvailableMediaRoot) -> T + Send + 'static,
 ) -> Result<T, MediaAccessError> {
@@ -192,6 +192,11 @@ async fn bounded<T: Send + 'static>(
 mod tests {
     use super::*;
 
+    /// Guards: A timed-out root retains its native permit while an unrelated root runs and the original later becomes available.
+    /// Kind: contract
+    /// Not a type: A blocking filesystem call may outlive the async wait and still hold actual process capacity.
+    /// State: Private root directories, a blocking callback and its entered/release channels.
+    /// Concurrency: The callback stays blocked until normalized aliases and an independent root have been tried.
     #[tokio::test]
     async fn stalled_root_cannot_consume_capacity_for_an_independent_root() {
         let stalled = tempfile::tempdir().unwrap();
@@ -245,6 +250,11 @@ mod tests {
         );
     }
 
+    /// Guards: Capacity rejection identifies a lookup that never reached the filesystem.
+    /// Kind: policy
+    /// Not a type: A root with no available permit is a different runtime outcome from a stalled inspection.
+    /// State: A private one-slot owner with an admitted first root and a refusing callback for the second.
+    /// Concurrency: The first lease is held throughout the second attempted admission.
     #[tokio::test]
     async fn capacity_exhaustion_does_not_claim_the_uninspected_root_is_unresponsive() {
         let owner = Arc::new(MediaAccess::new(1));
@@ -266,6 +276,11 @@ mod tests {
         ));
     }
 
+    /// Guards: The filesystem adapter distinguishes an accessible directory from a missing root.
+    /// Kind: contract
+    /// Not a type: The same valid path representation can name an existing directory or an absent entry.
+    /// State: One temporary directory and an absent child exercise actual metadata.
+    /// Concurrency: Both paths belong to the test.
     #[tokio::test]
     async fn available_and_missing_are_distinct() {
         let dir = tempfile::tempdir().unwrap();

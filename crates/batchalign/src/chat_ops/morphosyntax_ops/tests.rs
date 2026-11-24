@@ -176,7 +176,7 @@ fn code_switch(word: &BatchWord) -> Option<&talkbank_model::validation::Language
 
 // -----------------------------------------------------------------------
 
-/// Verify MorphosyntaxBatchItem serializes to the JSON shape Python expects.
+/// Verify `MorphosyntaxBatchItem` serializes to the JSON shape Python expects.
 #[test]
 fn snapshot_morphosyntax_batch_item() {
     // Fixtures go through the parser; see `crate::parsed_word_text_cleaned`.
@@ -194,7 +194,7 @@ fn snapshot_morphosyntax_batch_item() {
     insta::assert_json_snapshot!("morphosyntax_batch_item", item);
 }
 
-/// Verify UdResponse from Python deserializes correctly in Rust.
+/// Verify `UdResponse` from Python deserializes correctly in Rust.
 #[test]
 fn snapshot_ud_response_from_python() {
     // This is the exact shape Python's Stanza inference returns
@@ -261,7 +261,7 @@ fn snapshot_ud_response_from_python() {
     );
 }
 
-/// Verify collect_payloads produces the expected shape for a simple CHAT.
+/// Verify `collect_payloads` produces the expected shape for a simple CHAT.
 #[test]
 fn snapshot_collected_payloads() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
@@ -300,7 +300,7 @@ fn snapshot_collected_payloads() {
 // instead of "spa". This caused Stanza to use the wrong model.
 // -----------------------------------------------------------------------
 
-/// When @Languages declares "spa" but primary_lang is "eng" (batch default),
+/// When @Languages declares "spa" but `primary_lang` is "eng" (batch default),
 /// the batch item must carry lang="spa" from the file header.
 #[test]
 fn collect_payloads_uses_file_language_not_batch_default_spa() {
@@ -428,7 +428,7 @@ fn collect_payloads_uses_file_language_not_batch_default_fra() {
     );
 }
 
-/// When @Languages matches primary_lang, lang should still be correct.
+/// When @Languages matches `primary_lang`, lang should still be correct.
 /// (Control case: ensures fix doesn't regress the happy path.)
 #[test]
 fn collect_payloads_lang_correct_when_primary_matches_header() {
@@ -457,7 +457,7 @@ fn collect_payloads_lang_correct_when_primary_matches_header() {
 }
 
 /// When @Languages has multiple languages, the first declared language
-/// should be used as the utterance default (not the batch primary_lang).
+/// should be used as the utterance default (not the batch `primary_lang`).
 #[test]
 fn collect_payloads_uses_first_declared_language_for_multilingual() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
@@ -491,7 +491,7 @@ fn collect_payloads_uses_first_declared_language_for_multilingual() {
     );
 }
 
-/// Regression: inject_results with retokenize on Cantonese retrace utterance.
+/// Regression: `inject_results` with retokenize on Cantonese retrace utterance.
 ///
 /// The full pipeline: parse CHAT → extract words → construct UD response →
 /// inject with retokenize mode. This should succeed but fails with
@@ -664,7 +664,7 @@ fn test_french_elision_in_quoted_context() {
 // @s (code-switching) payload collection tests
 // -----------------------------------------------------------------------
 
-/// Verify collect_payloads identifies @s:spa word positions in special_forms.
+/// Verify `collect_payloads` identifies @s:spa word positions in `special_forms`.
 #[test]
 fn collect_payloads_identifies_at_s_positions_single() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
@@ -721,7 +721,7 @@ fn collect_payloads_identifies_at_s_positions_single() {
     }
 }
 
-/// Verify contiguous @s:spa span in special_forms.
+/// Verify contiguous @s:spa span in `special_forms`.
 #[test]
 fn collect_payloads_identifies_contiguous_at_s_span() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
@@ -961,7 +961,7 @@ fn l2_pipeline_contiguous_span_replaces_placeholders_and_preserves_valid_gra() {
 // only 4 MOR items (the Range is merged into verb|go~part|to).
 // -----------------------------------------------------------------------
 
-/// inject_results with StanzaRetokenize must handle MWT Range tokens
+/// `inject_results` with `StanzaRetokenize` must handle MWT Range tokens
 /// without failing on token/MOR count mismatch.
 #[test]
 fn inject_results_retokenize_mwt_range_tokens_no_failure() {
@@ -1835,7 +1835,7 @@ fn mid_utterance_comma_end_to_end_injects_cm_mor() {
 // Do not modify the asserts to make them pass, modify the bug.
 // ============================================================================
 
-/// Helper: pull the GraTier relations from the first utterance.
+/// Helper: pull the `GraTier` relations from the first utterance.
 fn first_utt_gra_relations(
     chat_file: &talkbank_model::model::ChatFile,
 ) -> Vec<talkbank_model::model::GrammaticalRelation> {
@@ -1858,7 +1858,7 @@ fn first_utt_gra_relations(
     gra.relations().to_vec()
 }
 
-/// Format a GraTier's relations as the CHAT %gra body, e.g.
+/// Format a `GraTier`'s relations as the CHAT %gra body, e.g.
 /// `1|0|ROOT 2|1|PUNCT`. Used for diagnostic-friendly assert messages.
 fn fmt_gra(rels: &[talkbank_model::model::GrammaticalRelation]) -> String {
     rels.iter()
@@ -3429,7 +3429,7 @@ fn synthesis_at_i_interjection_root_keeps_root_deprel() {
 /// post-injection `%mor[0]` carries the expected POS+surface and
 /// `%gra[1]` is `head=0/ROOT`. This is the path that Stanza skips
 /// in production for special-form-only utterances; the fix
-/// synthesizes morphology in-place from the FormType.
+/// synthesizes morphology in-place from the `FormType`.
 fn assert_empty_stanza_synthesizes_root(form_marker: &str, surface: &str, expected_pos: &str) {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};
 
@@ -3619,7 +3619,7 @@ fn synthesis_stanza_tokenizes_xbxxx_into_two_at_q_root_keeps_root_deprel() {
 /// Production reproducer using the actual `tele61b.cha` file content
 /// embedded as a slice. After all fixes, this should produce
 /// `1|0|ROOT 2|1|PUNCT` for the `*INV: poker@q .` utterance.
-/// Specifically exercises the at-top all_synthesizable bypass added
+/// Specifically exercises the at-top `all_synthesizable` bypass added
 /// in 2026-05-07's fix #2.
 #[test]
 fn synthesis_at_top_bypass_runs_for_poker_q_with_synthetic_stanza() {
@@ -3727,9 +3727,9 @@ fn synthesis_at_top_bypass_runs_for_poker_q_with_synthetic_stanza() {
 /// The OBSERVED production failure shape: post-inject output is
 /// `1|0|DEP 2|1|PUNCT`. We don't yet know which Stanza response
 /// produces it. This test scans plausible Stanza responses; the
-/// harness asserts NONE produce that shape via the inject_results
+/// harness asserts NONE produce that shape via the `inject_results`
 /// path. If the test passes, the bug must be downstream of
-/// inject_results (orchestration / cache / serialization).
+/// `inject_results` (orchestration / cache / serialization).
 #[test]
 fn no_stanza_response_through_inject_should_produce_observed_failure_shape() {
     use batchalign_transform::parse::{TreeSitterParser, parse_lenient};

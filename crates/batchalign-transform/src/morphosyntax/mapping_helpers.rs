@@ -38,10 +38,7 @@ pub fn provenance_for_ud_word(ud: &UdWord) -> Result<ChunkProvenance, MappingErr
 /// [`TagMarker::mor`], every other token by the generic word path, which
 /// takes only the `Lexical` the classifier minted. The marker keeps the
 /// relation the model gave it, so its `%gra` is unchanged.
-pub(crate) fn map_ud_word_item(
-    ud: &UdWord,
-    ctx: &MappingContext,
-) -> Result<MappedItem, MappingError> {
+pub fn map_ud_word_item(ud: &UdWord, ctx: &MappingContext) -> Result<MappedItem, MappingError> {
     let mor = match TagMarker::classify(ud) {
         Classified::Marker(marker) => marker.mor(ctx),
         Classified::Lexical(word) => map_ud_mor_word(word, ctx)?,

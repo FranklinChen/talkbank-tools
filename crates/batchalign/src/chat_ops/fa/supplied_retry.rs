@@ -16,7 +16,7 @@ use super::{
 };
 
 /// A terminal result. No result has a transition back to a request.
-pub(crate) enum SuppliedRetryAnswer {
+pub enum SuppliedRetryAnswer {
     Timings {
         timings: Vec<Option<WordTiming>>,
         source: String,
@@ -40,14 +40,14 @@ struct MissingUtterance {
 
 /// The exclusive document borrow keeps admitted slot addresses stable across
 /// async inference and binds finalization to that same document.
-pub(crate) struct SuppliedRetrySession<'a, P> {
+pub struct SuppliedRetrySession<'a, P> {
     imposed: FaImposed,
     chat: &'a mut ChatFile,
     pending: std::vec::IntoIter<(MissingUtterance, P)>,
     resolved: Vec<ResolvedSuppliedRetry>,
 }
 
-pub(crate) enum SuppliedRetryStep<'a, P> {
+pub enum SuppliedRetryStep<'a, P> {
     Complete(CompletedSuppliedRetries<'a>),
     Pending(PendingSuppliedRetry<'a, P>),
 }
@@ -57,13 +57,13 @@ struct ResolvedSuppliedRetry {
     answer: SuppliedRetryAnswer,
 }
 
-pub(crate) struct CompletedSuppliedRetries<'a> {
+pub struct CompletedSuppliedRetries<'a> {
     imposed: FaImposed,
     chat: &'a mut ChatFile,
     resolved: Vec<ResolvedSuppliedRetry>,
 }
 
-pub(crate) struct PendingSuppliedRetry<'a, P> {
+pub struct PendingSuppliedRetry<'a, P> {
     preparation: P,
     current: MissingUtterance,
     session: SuppliedRetrySession<'a, P>,
@@ -164,13 +164,13 @@ impl<'a, P> PendingSuppliedRetry<'a, P> {
     }
 }
 
-pub(crate) struct AwaitingSuppliedRetry<'a, P> {
+pub struct AwaitingSuppliedRetry<'a, P> {
     current: MissingUtterance,
     session: SuppliedRetrySession<'a, P>,
 }
 
 impl<'a, P> AwaitingSuppliedRetry<'a, P> {
-    pub(crate) fn source(&self) -> &SuppliedRetrySource {
+    pub(crate) const fn source(&self) -> &SuppliedRetrySource {
         &self.current.source
     }
 

@@ -137,7 +137,8 @@ impl ProviderAccounts {
 
     /// No provider account: what a test or an offline replay runs as, which
     /// reads no credentials from the machine running it.
-    pub fn none() -> Self {
+    #[must_use]
+    pub const fn none() -> Self {
         Self {
             revai: None,
             tencent: None,
@@ -147,7 +148,8 @@ impl ProviderAccounts {
     }
 
     /// The Rev.AI key, handed to every worker.
-    pub fn revai_api_key(&self) -> Option<&crate::revai::RevAiApiKey> {
+    #[must_use]
+    pub const fn revai_api_key(&self) -> Option<&crate::revai::RevAiApiKey> {
         self.revai.as_ref()
     }
 
@@ -161,7 +163,7 @@ impl ProviderAccounts {
     }
 
     /// The Tencent engine the account chose.
-    pub(crate) fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
+    pub(crate) const fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
         &self.tencent_engine
     }
 
@@ -184,16 +186,10 @@ impl ProviderAccounts {
 
 /// Ambient sources Rust may use to resolve HK provider credentials before
 /// spawning a Python worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HkAsrCredentialSources {
+pub struct HkAsrCredentialSources {
     legacy_ini_path: PathBuf,
-    tencent_id: Option<String>,
-    tencent_key: Option<String>,
-    tencent_region: Option<String>,
-    tencent_bucket: Option<String>,
-    aliyun_ak_id: Option<String>,
-    aliyun_ak_secret: Option<String>,
-    aliyun_ak_appkey: Option<String>,
+    tencent: Option<TencentAsrCredentials>,
+    aliyun: Option<AliyunAsrCredentials>,
 }
 
 impl HkAsrCredentialSources {
@@ -227,13 +223,8 @@ impl HkAsrCredentialSources {
         let home = home_env.unwrap_or(".");
         Self {
             legacy_ini_path: PathBuf::from(home).join(".batchalign.ini"),
-            tencent_id: normalize_value(tencent_id),
-            tencent_key: normalize_value(tencent_key),
-            tencent_region: normalize_value(tencent_region),
-            tencent_bucket: normalize_value(tencent_bucket),
-            aliyun_ak_id: normalize_value(aliyun_ak_id),
-            aliyun_ak_secret: normalize_value(aliyun_ak_secret),
-            aliyun_ak_appkey: normalize_value(aliyun_ak_appkey),
+            tencent: complete_tencent(tencent_id, tencent_key, tencent_region, tencent_bucket),
+            aliyun: complete_aliyun(aliyun_ak_id, aliyun_ak_secret, aliyun_ak_appkey),
         }
     }
 
@@ -264,13 +255,7 @@ impl HkAsrCredentialSources {
         &self,
         section: Option<&BTreeMap<String, String>>,
     ) -> Option<TencentAsrCredentials> {
-        complete_tencent(
-            self.tencent_id.as_deref(),
-            self.tencent_key.as_deref(),
-            self.tencent_region.as_deref(),
-            self.tencent_bucket.as_deref(),
-        )
-        .or_else(|| {
+        self.tencent.clone().or_else(|| {
             let section = section?;
             complete_tencent(
                 section.get(ENGINE_TENCENT_ID).map(String::as_str),
@@ -285,12 +270,7 @@ impl HkAsrCredentialSources {
         &self,
         section: Option<&BTreeMap<String, String>>,
     ) -> Option<AliyunAsrCredentials> {
-        complete_aliyun(
-            self.aliyun_ak_id.as_deref(),
-            self.aliyun_ak_secret.as_deref(),
-            self.aliyun_ak_appkey.as_deref(),
-        )
-        .or_else(|| {
+        self.aliyun.clone().or_else(|| {
             let section = section?;
             complete_aliyun(
                 section.get(ENGINE_ALIYUN_AK_ID).map(String::as_str),
@@ -378,167 +358,115 @@ fn parse_legacy_ini_asr_section(contents: &str) -> BTreeMap<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BATCHALIGN_ALIYUN_AK_APPKEY, BATCHALIGN_ALIYUN_AK_ID, BATCHALIGN_ALIYUN_AK_SECRET,
-        BATCHALIGN_TENCENT_BUCKET, BATCHALIGN_TENCENT_ID, BATCHALIGN_TENCENT_KEY,
-        BATCHALIGN_TENCENT_REGION, HkAsrCredentialSources, ProviderAccounts,
-    };
+    use super::*;
+    use crate::model_manifest::{TencentEngine, TencentEngineSetting};
 
-    #[test]
-    fn provider_envs_prefer_explicit_tencent_env() {
-        let sources = HkAsrCredentialSources::from_sources(
-            Some(" env-id "),
-            Some(" env-key "),
-            Some(" ap-hongkong "),
-            Some(" env-bucket "),
-            None,
-            None,
-            None,
-            Some("/tmp/unused-home"),
-        );
+    /// The fixture owns the parsed on-disk section used for every case.
+    /// Each case admits synthetic environment values without reading real keys.
+    struct IniAccountFixture(Option<BTreeMap<String, String>>);
 
-        let envs = ProviderAccounts::read(&sources).worker_envs(Some("tencent"));
+    impl IniAccountFixture {
+        fn observe(file: &str) -> Self {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join(".batchalign.ini"), file).unwrap();
+            Self(Self::sources(None, None, home.path().to_str()).read_legacy_ini_asr_section())
+        }
 
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_ID).map(String::as_str),
-            Some("env-id")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_KEY).map(String::as_str),
-            Some("env-key")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_REGION).map(String::as_str),
-            Some("ap-hongkong")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_BUCKET).map(String::as_str),
-            Some("env-bucket")
-        );
+        fn sources(
+            id: Option<&str>,
+            key: Option<&str>,
+            home: Option<&str>,
+        ) -> HkAsrCredentialSources {
+            HkAsrCredentialSources::from_sources(
+                id,
+                key,
+                Some(" ap-hongkong "),
+                Some(" env-bucket "),
+                None,
+                None,
+                None,
+                home,
+            )
+        }
+
+        fn admit(&self, id: Option<&str>, key: Option<&str>) -> ProviderAccounts {
+            ProviderAccounts::admit_sources(&Self::sources(id, key, None), self.0.as_ref(), None)
+        }
     }
 
-    /// The snapshot's `Debug` says which accounts are configured, never a
-    /// secret: it lives in the worker runtime, whose `Debug` can reach a log.
+    /// Guards: A complete environment account takes precedence, an incomplete
+    /// one falls back as a unit, and only the selected provider's keys cross
+    /// the worker boundary. The engine comes from the INI file's ASR section.
+    /// Kind: contract
+    /// Not a type: External environment and INI bytes must normalize into
+    /// the intended account, and their precedence remains a policy decision.
+    /// State: A temporary INI and explicit fake accounts enter the production readers.
+    /// Concurrency: All values are owned; no process environment or credentials are read.
+    #[test]
+    fn worker_provider_accounts_follow_source_and_provider_precedence() {
+        let legacy = IniAccountFixture::observe(
+            "[other]\nengine.tencent.model=16k_yue\n[asr]\n             engine.tencent.model=16k_zh_en_2.0\nengine.tencent.id=legacy-id\n             engine.tencent.key=legacy-key\nengine.tencent.region=ap-guangzhou\n             engine.tencent.bucket=legacy-bucket\nengine.aliyun.ak_id=legacy-aliyun\n             engine.aliyun.ak_secret=legacy-secret\nengine.aliyun.ak_appkey=legacy-app\n",
+        );
+        let explicit = legacy.admit(Some(" env-id "), Some(" env-key "));
+        assert_eq!(
+            explicit.worker_envs(Some("tencent")),
+            BTreeMap::from([
+                (BATCHALIGN_TENCENT_ID.into(), "env-id".into()),
+                (BATCHALIGN_TENCENT_KEY.into(), "env-key".into()),
+                (BATCHALIGN_TENCENT_REGION.into(), "ap-hongkong".into()),
+                (BATCHALIGN_TENCENT_BUCKET.into(), "env-bucket".into()),
+            ]),
+        );
+        let partial = legacy.admit(Some("partial-only"), None);
+        assert_eq!(
+            partial.worker_envs(Some("tencent")),
+            BTreeMap::from([
+                (BATCHALIGN_TENCENT_ID.into(), "legacy-id".into()),
+                (BATCHALIGN_TENCENT_KEY.into(), "legacy-key".into()),
+                (BATCHALIGN_TENCENT_REGION.into(), "ap-guangzhou".into()),
+                (BATCHALIGN_TENCENT_BUCKET.into(), "legacy-bucket".into()),
+            ]),
+        );
+        assert_eq!(
+            partial.worker_envs(Some("aliyun")),
+            BTreeMap::from([
+                (BATCHALIGN_ALIYUN_AK_ID.into(), "legacy-aliyun".into()),
+                (BATCHALIGN_ALIYUN_AK_SECRET.into(), "legacy-secret".into()),
+                (BATCHALIGN_ALIYUN_AK_APPKEY.into(), "legacy-app".into()),
+            ]),
+        );
+        assert!(partial.worker_envs(Some("whisper")).is_empty());
+        assert_eq!(
+            partial.tencent_engine(),
+            &TencentEngineSetting::Chosen(TencentEngine::ZhEn2_0)
+        );
+        let unset = IniAccountFixture::observe("[asr]\nengine.tencent.id=id\n").admit(None, None);
+        assert_eq!(unset.tencent_engine(), &TencentEngineSetting::Unset);
+    }
+
+    /// Guards: Account diagnostics report configuration status without secret text.
+    /// Kind: contract
+    /// Not a type: The runtime Debug formatter can expose any field it reads,
+    /// so the real rendered text must exclude even complete credentials.
+    /// State: Synthetic in-memory keys and the production Debug implementation.
+    /// Concurrency: No environment or credential files are used.
     #[test]
     fn provider_accounts_debug_never_prints_a_secret() {
-        let accounts = ProviderAccounts::read(&HkAsrCredentialSources::from_sources(
-            Some("SECRET_ID"),
-            Some("SECRET_KEY"),
-            Some("ap-guangzhou"),
-            Some("SECRET_BUCKET"),
-            Some("ALIYUN_ID"),
-            Some("ALIYUN_SECRET"),
-            Some("ALIYUN_APP"),
-            Some("/tmp/unused-home"),
-        ));
+        let accounts =
+            ProviderAccounts::from_explicit_hk_sources(&HkAsrCredentialSources::from_sources(
+                Some("SECRET_ID"),
+                Some("SECRET_KEY"),
+                Some("ap-guangzhou"),
+                Some("SECRET_BUCKET"),
+                Some("ALIYUN_ID"),
+                Some("ALIYUN_SECRET"),
+                Some("ALIYUN_APP"),
+                None,
+            ));
         let rendered = format!("{accounts:?}");
         for secret in ["SECRET", "ALIYUN"] {
             assert!(!rendered.contains(secret), "{rendered}");
         }
         assert!(rendered.contains("configured"), "{rendered}");
-    }
-
-    /// The engine is read from the `[asr]` section beside the keys; a file
-    /// without the line is `Unset`, never a default engine.
-    #[test]
-    fn the_tencent_engine_is_read_from_the_asr_section() {
-        use crate::model_manifest::{TencentEngine, TencentEngineSetting};
-        let tempdir = tempfile::tempdir().unwrap();
-        let home = tempdir.path().to_str().unwrap();
-        let sources = || {
-            HkAsrCredentialSources::from_sources(
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(home),
-            )
-        };
-        std::fs::write(
-            tempdir.path().join(".batchalign.ini"),
-            "[asr]\nengine.tencent.id = id\n",
-        )
-        .unwrap();
-        assert_eq!(sources().read_tencent_engine(), TencentEngineSetting::Unset);
-        std::fs::write(
-            tempdir.path().join(".batchalign.ini"),
-            "[other]\nengine.tencent.model = 16k_yue\n[asr]\nengine.tencent.model = 16k_zh_en_2.0\n",
-        )
-        .unwrap();
-        assert_eq!(
-            sources().read_tencent_engine(),
-            TencentEngineSetting::Chosen(TencentEngine::ZhEn2_0)
-        );
-    }
-
-    #[test]
-    fn provider_envs_fall_back_to_legacy_ini() {
-        let tempdir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tempdir.path().join(".batchalign.ini"),
-            "[asr]\nengine.aliyun.ak_id = legacy-id\nengine.aliyun.ak_secret = legacy-secret\nengine.aliyun.ak_appkey = legacy-appkey\n",
-        )
-        .unwrap();
-        let sources = HkAsrCredentialSources::from_sources(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            tempdir.path().to_str(),
-        );
-
-        let envs = ProviderAccounts::read(&sources).worker_envs(Some("aliyun"));
-
-        assert_eq!(
-            envs.get(BATCHALIGN_ALIYUN_AK_ID).map(String::as_str),
-            Some("legacy-id")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_ALIYUN_AK_SECRET).map(String::as_str),
-            Some("legacy-secret")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_ALIYUN_AK_APPKEY).map(String::as_str),
-            Some("legacy-appkey")
-        );
-    }
-
-    #[test]
-    fn provider_envs_ignore_incomplete_env_and_other_overrides() {
-        let tempdir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tempdir.path().join(".batchalign.ini"),
-            "[asr]\nengine.tencent.id = legacy-id\nengine.tencent.key = legacy-key\nengine.tencent.region = ap-guangzhou\nengine.tencent.bucket = legacy-bucket\n",
-        )
-        .unwrap();
-        let sources = HkAsrCredentialSources::from_sources(
-            Some("partial-only"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            tempdir.path().to_str(),
-        );
-
-        let envs = ProviderAccounts::read(&sources).worker_envs(Some("tencent"));
-        let empty_envs = ProviderAccounts::read(&sources).worker_envs(Some("whisper"));
-
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_ID).map(String::as_str),
-            Some("legacy-id")
-        );
-        assert_eq!(
-            envs.get(BATCHALIGN_TENCENT_BUCKET).map(String::as_str),
-            Some("legacy-bucket")
-        );
-        assert!(empty_envs.is_empty());
     }
 }

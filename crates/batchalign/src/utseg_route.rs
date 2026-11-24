@@ -2,7 +2,7 @@
 //!
 //! Utterance segmentation has two segmenters and they are not interchangeable:
 //!
-//! - A **TalkBank boundary model**, a per-word BERT classifier, which exists
+//! - A **`TalkBank` boundary model**, a per-word BERT classifier, which exists
 //!   for a few languages only.
 //! - **Stanza constituency parsing**, the legacy segmenter, which covers more
 //!   languages at varying quality and is therefore an explicit operator opt-in
@@ -35,7 +35,7 @@ use crate::stanza_registry::{
 };
 use crate::types::worker_v2::UtsegSegmenterV2;
 
-/// Whether one language has a TalkBank utterance-boundary model.
+/// Whether one language has a `TalkBank` utterance-boundary model.
 ///
 /// **There is one table, and it is the manifest's.** This fact used to live in
 /// three places: a `matches!` in `pipeline/transcribe.rs`, a `&[&str]` list
@@ -64,7 +64,7 @@ fn has_boundary_model(lang: &LanguageCode3) -> bool {
 /// every consumer had to remember to reject, which is the shape that let the
 /// old refusal be skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UtsegRoute {
+pub struct UtsegRoute {
     language: LanguageCode3,
     kind: RouteKind,
 }
@@ -86,7 +86,7 @@ enum RouteKind {
      varies by language): `--utseg-fallback-stanza` on the command line, or \
      `\"utseg_fallback\": true` in a job request's options."
 )]
-pub(crate) struct UtsegUnavailable {
+pub struct UtsegUnavailable {
     /// The language that has no segmenter.
     lang: LanguageCode3,
 }
@@ -101,7 +101,7 @@ pub(crate) struct UtsegUnavailable {
 /// segmenter the worker runs, so the worker never re-derives a route from
 /// what it happens to have loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ServableUtsegRoute(ServableSegmenter);
+pub struct ServableUtsegRoute(ServableSegmenter);
 
 /// The servable segmenter, with what proves it: a boundary-model language
 /// needs no Stanza proof; the Stanza route carries the registry's admission.
@@ -113,7 +113,7 @@ enum ServableSegmenter {
 
 impl ServableUtsegRoute {
     /// The language this route segments.
-    pub(crate) fn language(&self) -> &LanguageCode3 {
+    pub(crate) const fn language(&self) -> &LanguageCode3 {
         match &self.0 {
             ServableSegmenter::BoundaryModel(language) => language,
             ServableSegmenter::StanzaConstituency(admitted) => admitted.language(),
@@ -121,7 +121,7 @@ impl ServableUtsegRoute {
     }
 
     /// The segmenter the worker request names.
-    pub(crate) fn segmenter(&self) -> UtsegSegmenterV2 {
+    pub(crate) const fn segmenter(&self) -> UtsegSegmenterV2 {
         match &self.0 {
             ServableSegmenter::BoundaryModel(_) => UtsegSegmenterV2::BoundaryModel,
             ServableSegmenter::StanzaConstituency(_) => UtsegSegmenterV2::StanzaConstituency,
@@ -136,7 +136,7 @@ impl ServableUtsegRoute {
     "utterance segmentation for language '{lang}' takes the Stanza constituency route, which \
      this runtime cannot serve: {reason}"
 )]
-pub(crate) struct UtsegStanzaUnservable {
+pub struct UtsegStanzaUnservable {
     lang: LanguageCode3,
     reason: StanzaRefusal<UtteranceSegmentation>,
 }
@@ -201,7 +201,7 @@ impl UtsegRoute {
     }
 
     /// The language whose segmentation capability this value proves.
-    pub(crate) fn language(&self) -> &LanguageCode3 {
+    pub(crate) const fn language(&self) -> &LanguageCode3 {
         &self.language
     }
 
@@ -243,7 +243,7 @@ mod tests {
     /// under either policy: an available model is never substituted.
     /// Guards: Available boundary-model languages retain their model under either fallback policy.
     /// Kind: policy
-    /// Not a type: LanguageCode3 proves the code shape. The mapping of eng, cmn, zho and yue to the packaged boundary model under both policy values is a semantic choice.
+    /// Not a type: `LanguageCode3` proves the code shape. The mapping of eng, cmn, zho and yue to the packaged boundary model under both policy values is a semantic choice.
     /// State: None
     /// Concurrency: None
     #[test]
@@ -268,7 +268,7 @@ mod tests {
     /// pass, and the message names the language instead of the wire format.
     /// Guards: Spanish without fallback produces a refusal naming its language, CLI flag and request field.
     /// Kind: policy
-    /// Not a type: UtsegUnavailable retains the refused language. Its rendered flag, JSON field and explanation remain external diagnostic bytes.
+    /// Not a type: `UtsegUnavailable` retains the refused language. Its rendered flag, JSON field and explanation remain external diagnostic bytes.
     /// State: None
     /// Concurrency: None
     #[test]
@@ -308,7 +308,7 @@ mod tests {
     /// boundary-model route needs no Stanza, registry or not.
     /// Guards: Stanza segmentation requires constituency admission, while a boundary-model route remains servable independently of a registry report.
     /// Kind: policy
-    /// Not a type: ServableUtsegRoute retains admission. Its constructor must interpret the actual reported language and processor inventory, including missing Constituency and an unavailable report.
+    /// Not a type: `ServableUtsegRoute` retains admission. Its constructor must interpret the actual reported language and processor inventory, including missing Constituency and an unavailable report.
     /// State: None
     /// Concurrency: None
     #[test]

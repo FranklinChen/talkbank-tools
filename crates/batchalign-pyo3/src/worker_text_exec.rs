@@ -16,7 +16,7 @@
 //! Word segmentation joined later, on the same control plane, with a runner
 //! that holds no model: see `run_word_segmentation`.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section
 //! "7. Text Task Result Normalization" for the shared result contracts.
 
 use batchalign_types::worker::BatchInferResponse;
@@ -268,7 +268,7 @@ fn run_word_segmentation(
 // refuses an absent load there as `model_unavailable`.
 
 #[pyfunction]
-pub(crate) fn execute_word_segmentation_request_v2(
+pub fn execute_word_segmentation_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     runner: Py<PyAny>,
@@ -280,7 +280,7 @@ pub(crate) fn execute_word_segmentation_request_v2(
 }
 
 #[pyfunction]
-pub(crate) fn execute_morphosyntax_request_v2(
+pub fn execute_morphosyntax_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     runner: Py<PyAny>,
@@ -290,7 +290,7 @@ pub(crate) fn execute_morphosyntax_request_v2(
 }
 
 #[pyfunction]
-pub(crate) fn execute_utseg_request_v2(
+pub fn execute_utseg_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     runner: Py<PyAny>,
@@ -300,7 +300,7 @@ pub(crate) fn execute_utseg_request_v2(
 }
 
 #[pyfunction]
-pub(crate) fn execute_translate_request_v2(
+pub fn execute_translate_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     runner: Py<PyAny>,
@@ -310,7 +310,7 @@ pub(crate) fn execute_translate_request_v2(
 }
 
 #[pyfunction]
-pub(crate) fn execute_coref_request_v2(
+pub fn execute_coref_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     runner: Py<PyAny>,

@@ -24,7 +24,8 @@ pub use plan::{PlannedServerInput, ServerInputPlan, plan_server_inputs};
 /// not processed.
 ///
 /// Reads the first 512 bytes and checks for the `@Options:\tdummy` header or
-/// the standard TalkBank dummy-file text.
+/// the standard `TalkBank` dummy-file text.
+#[must_use]
 pub fn is_dummy_chat(path: &Path) -> bool {
     let Ok(mut f) = fs::File::open(path) else {
         return false;

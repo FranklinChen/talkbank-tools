@@ -98,12 +98,14 @@ impl HostCeiling {
     }
 
     /// The bound in MB.
-    pub fn mb(self) -> MemoryMb {
+    #[must_use]
+    pub const fn mb(self) -> MemoryMb {
         self.0
     }
 
     /// Whether `needed` can ever be granted here with `reserve` kept free.
-    pub fn admits(self, needed: MemoryMb, reserve: MemoryMb) -> bool {
+    #[must_use]
+    pub const fn admits(self, needed: MemoryMb, reserve: MemoryMb) -> bool {
         needed.0.saturating_add(reserve.0) <= self.0.0
     }
 }
@@ -115,7 +117,8 @@ impl HostReadings {
     ///
     /// Taken from the same reading the decision uses, so the ceiling and the
     /// available figure beside it describe one moment.
-    pub fn ceiling_of(&self, memory: SystemMemory) -> HostCeiling {
+    #[must_use]
+    pub const fn ceiling_of(&self, memory: SystemMemory) -> HostCeiling {
         HostCeiling(match self {
             Self::Live => memory.total_mb,
             Self::Declared(_) => memory.available_mb,
@@ -139,6 +142,7 @@ impl HostReadings {
     }
 
     /// Logical CPUs: the CPU gate's saturation threshold.
+    #[must_use]
     pub fn logical_cpus(&self) -> u32 {
         match self {
             // One CPU when the count is unreadable: a daemon that cannot
@@ -163,7 +167,8 @@ pub struct DeclaredHost {
 
 impl DeclaredHost {
     /// The host the facts describe.
-    pub fn from_facts(facts: &crate::host_facts::HostFacts) -> Self {
+    #[must_use]
+    pub const fn from_facts(facts: &crate::host_facts::HostFacts) -> Self {
         Self {
             memory: SystemMemory {
                 total_mb: MemoryMb(facts.ram_total_mb),
@@ -192,6 +197,7 @@ pub struct HostMemoryRuntimeConfig {
 
 impl HostMemoryRuntimeConfig {
     /// Build runtime config from server-level settings.
+    #[must_use]
     pub fn from_server_config(config: &ServerConfig) -> Self {
         Self {
             coordinator_path: default_host_memory_ledger_path(),
@@ -201,7 +207,8 @@ impl HostMemoryRuntimeConfig {
     }
 
     /// Build runtime config from explicit sources.
-    pub fn from_sources(
+    #[must_use]
+    pub const fn from_sources(
         coordinator_path: PathBuf,
         reserve_mb: MemoryMb,
         max_concurrent_worker_startups: WorkerStartupLimit,
@@ -224,6 +231,7 @@ pub const HOST_MEMORY_LEDGER_ENV: &str = "BATCHALIGN_HOST_MEMORY_LEDGER";
 /// Default machine-local ledger path for host memory coordination: the
 /// file every batchalign3 process on this machine shares, unless
 /// [`HOST_MEMORY_LEDGER_ENV`] names another.
+#[must_use]
 pub fn default_host_memory_ledger_path() -> PathBuf {
     if let Some(explicit) = std::env::var_os(HOST_MEMORY_LEDGER_ENV) {
         return PathBuf::from(explicit);
@@ -319,7 +327,7 @@ pub struct HostMemoryLease {
 }
 
 impl HostMemoryLease {
-    fn new(ledger_path: PathBuf, lease_id: String) -> Self {
+    const fn new(ledger_path: PathBuf, lease_id: String) -> Self {
         Self {
             ledger_path,
             lease_id,
@@ -370,6 +378,7 @@ impl HostMemoryLease {
     /// yet to use), see the module docs. Detached so the blocking pool can
     /// run it while the lease stays with its owner, and a settle that never
     /// runs cannot take the lease with it.
+    #[must_use]
     pub fn settler(&self) -> LeaseSettler {
         LeaseSettler {
             ledger_path: self.ledger_path.clone(),
@@ -631,7 +640,7 @@ impl MemoryLeaseKind {
     /// second field to keep in agreement with it. A model load does not: its
     /// memory is reserved by its own lease, and a slot held through a first
     /// download would stall every other startup on the host for its length.
-    fn holds_startup_slot(self) -> bool {
+    const fn holds_startup_slot(self) -> bool {
         match self {
             Self::WorkerStartup => true,
             Self::JobExecution
@@ -647,7 +656,7 @@ impl MemoryLeaseKind {
     /// go, while a startup ends at ready and a batch or request lease ends
     /// with its own work. Only these count against a request as memory that
     /// can never be freed for it ([`HostMemoryError::NeverFits`]).
-    fn held_while_worker_waits(self) -> bool {
+    const fn held_while_worker_waits(self) -> bool {
         match self {
             Self::ModelLoad => true,
             Self::WorkerStartup
@@ -660,7 +669,7 @@ impl MemoryLeaseKind {
 
     /// Which half of an owner's demand a lease of this kind counts on
     /// ([`effective_reserved_mb`]).
-    fn demand_side(self) -> DemandSide {
+    const fn demand_side(self) -> DemandSide {
         match self {
             Self::JobExecution | Self::MlTestExclusive => DemandSide::Job,
             Self::WorkerStartup | Self::ModelLoad | Self::ModelBatch | Self::ModelRequest => {
@@ -703,7 +712,7 @@ struct MemoryLeaseRecord {
     /// Liveness-checked when `worker_pid` is `None`.
     owner_pid: WorkerPid,
     /// Optional PID of the worker subprocess whose memory the lease
-    /// represents. When `Some`, prune_stale_leases checks THIS PID's
+    /// represents. When `Some`, `prune_stale_leases` checks THIS PID's
     /// liveness instead of `owner_pid`. The daemon spawns workers in
     /// their own process group, so a worker can die independently of
     /// the daemon: Bug 2 (ghost slots) was the daemon's reservation
@@ -780,7 +789,7 @@ struct Reservation {
 }
 
 impl MemoryLeaseRecord {
-    fn reservation(&self) -> Reservation {
+    const fn reservation(&self) -> Reservation {
         Reservation {
             owner: self.owner_pid,
             kind: self.kind,
@@ -873,6 +882,7 @@ impl WorkerLeaseRequest {
     /// A worker process starting, before it exists: its baseline
     /// ([`crate::worker::residency::WORKER_BASELINE`]), the same for every
     /// worker since none loads a model at startup.
+    #[must_use]
     pub fn worker_startup(
         profile: WorkerProfile,
         lang: &WorkerLanguage,
@@ -892,6 +902,7 @@ impl WorkerLeaseRequest {
     }
 
     /// One model `worker` is about to load, `what` naming it (task and model).
+    #[must_use]
     pub fn model_load(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
         Self(MemoryLeaseRequest {
             kind: MemoryLeaseKind::ModelLoad,
@@ -902,6 +913,7 @@ impl WorkerLeaseRequest {
     }
 
     /// One batch of a per-batch model `worker` is about to build.
+    #[must_use]
     pub fn model_batch(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
         Self(MemoryLeaseRequest {
             kind: MemoryLeaseKind::ModelBatch,
@@ -912,6 +924,7 @@ impl WorkerLeaseRequest {
     }
 
     /// Additional workspace of one prepared request on a resident model.
+    #[must_use]
     pub fn model_request(worker: WorkerPid, what: &str, reserved: MemoryMb) -> Self {
         Self(MemoryLeaseRequest {
             kind: MemoryLeaseKind::ModelRequest,
@@ -922,6 +935,7 @@ impl WorkerLeaseRequest {
     }
 
     /// The ledger label, which names what the lease is for.
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.0.label
     }
@@ -1005,7 +1019,8 @@ pub struct SystemMemory {
 
 impl SystemMemory {
     /// RAM in use: total less available.
-    pub fn used_mb(&self) -> MemoryMb {
+    #[must_use]
+    pub const fn used_mb(&self) -> MemoryMb {
         MemoryMb(self.total_mb.0.saturating_sub(self.available_mb.0))
     }
 }
@@ -1023,11 +1038,13 @@ impl HostMemoryCoordinator {
     /// A server builds it from its host snapshot
     /// (`HostSnapshot::memory_coordinator`), so the ledger reads the same
     /// host its tier and admission gates describe.
-    pub fn new(config: HostMemoryRuntimeConfig, readings: HostReadings) -> Self {
+    #[must_use]
+    pub const fn new(config: HostMemoryRuntimeConfig, readings: HostReadings) -> Self {
         Self { config, readings }
     }
 
     /// Return the shared ledger path backing this coordinator.
+    #[must_use]
     pub fn coordinator_path(&self) -> &Path {
         &self.config.coordinator_path
     }
@@ -1552,7 +1569,7 @@ fn with_locked_ledger<T, E: From<UnusableHost>>(
 /// pre-spawn intent older than this window is by construction stuck.
 ///
 /// Operational evidence (2026-05-01 afternoon wedge): 3 admitted jobs
-/// each held ~76 GB JobExecution leases with `worker_pid: None`; no
+/// each held ~76 GB `JobExecution` leases with `worker_pid: None`; no
 /// workers ever spawned for them; the 228 GB sat as phantom holds for
 /// hours. Without a deadline, every "failed admission cycle" leaks
 /// budget.
@@ -1642,9 +1659,10 @@ fn prune_stale_leases(ledger: &mut MemoryLedger) -> Result<Pruned, HostUnreadabl
         // healthy long-lived state.
         now.saturating_duration_since(lease.created_at) < PRE_SPAWN_INTENT_DEADLINE
     });
-    Ok(match ledger.leases.len() == before {
-        true => Pruned::Nothing,
-        false => Pruned::Some,
+    Ok(if ledger.leases.len() == before {
+        Pruned::Nothing
+    } else {
+        Pruned::Some
     })
 }
 
@@ -1709,7 +1727,10 @@ pub fn read_system_memory() -> Result<SystemMemory, HostUnreadable> {
     }
 }
 
-fn pressure_level_for(available_mb: MemoryMb, reserve_mb: MemoryMb) -> HostMemoryPressureLevel {
+const fn pressure_level_for(
+    available_mb: MemoryMb,
+    reserve_mb: MemoryMb,
+) -> HostMemoryPressureLevel {
     if available_mb.0 <= reserve_mb.0 {
         return HostMemoryPressureLevel::Critical;
     }
@@ -2207,7 +2228,7 @@ mod tests {
     }
 
     /// Test helper: inject a synthetic lease into the ledger so we can
-    /// drive prune_stale_leases without spawning real workers.
+    /// drive `prune_stale_leases` without spawning real workers.
     fn inject_lease(
         config: &HostMemoryRuntimeConfig,
         kind: MemoryLeaseKind,
@@ -2234,7 +2255,7 @@ mod tests {
     /// Bug 2 (ghost slots) regression: when a worker subprocess dies
     /// without the daemon explicitly releasing its lease, the ledger
     /// retains a phantom reservation that blocks future jobs from
-    /// fitting. Pruning MUST detect a dead worker_pid and drop the
+    /// fitting. Pruning MUST detect a dead `worker_pid` and drop the
     /// lease so reserved memory accounting stays in sync with reality.
     ///
     /// Failure mode (pre-fix): the lease's `owner_pid` is the DAEMON's
@@ -2275,7 +2296,7 @@ mod tests {
     }
 
     /// End-to-end regression: the daemon-side flow is
-    ///   1. acquire a lease (no worker_pid yet, daemon's PID held)
+    ///   1. acquire a lease (no `worker_pid` yet, daemon's PID held)
     ///   2. spawn the worker subprocess (now `Child::id()` is known)
     ///   3. tag the lease with the worker's PID via `set_worker_pid`
     ///   4. when the worker dies later, prune drops the lease.
@@ -2380,7 +2401,7 @@ mod tests {
     ///
     /// Test: simulate a finite-capacity host. Acquire reservations
     /// that fit. The next request that would exceed capacity must be
-    /// rejected with CapacityRejected. The ledger sum must never
+    /// rejected with `CapacityRejected`. The ledger sum must never
     /// transiently exceed (total − headroom).
     #[test]
     fn contract_a_capacity_rejection_when_sum_would_exceed_budget() {
@@ -2443,14 +2464,14 @@ mod tests {
     /// Contract D, No double-counting:
     /// A single live worker subprocess must be represented by exactly
     /// one reservation, not multiple stacking ones. If a job has a
-    /// JobExecution lease covering its workers' budget, individual
-    /// WorkerStartup leases for those same workers must NOT add to
+    /// `JobExecution` lease covering its workers' budget, individual
+    /// `WorkerStartup` leases for those same workers must NOT add to
     /// the daemon-side total reserved figure; they should be
     /// sub-allocations, not additions.
     ///
     /// Operational evidence (2026-05-01): with 3 admitted jobs each
-    /// reserving ~76 GB at JobExecution level, the daemon ALSO
-    /// counts WorkerStartup leases on top, producing the 228 GB ghost
+    /// reserving ~76 GB at `JobExecution` level, the daemon ALSO
+    /// counts `WorkerStartup` leases on top, producing the 228 GB ghost
     /// even though only 3 jobs are active. This test pins what the
     /// contract should be, and SHOULD FAIL TODAY.
     #[test]
@@ -2492,7 +2513,7 @@ mod tests {
 
     /// Contract E: Pre-spawn intent must not phantom-hold capacity:
     /// A reservation made for a worker that has not yet spawned (i.e.,
-    /// `worker_pid: None`, owner_pid = daemon) must either:
+    /// `worker_pid: None`, `owner_pid` = daemon) must either:
     ///   (a) be tied to a deadline, automatically reclaimed if the
     ///       spawn doesn't materialize within the window; OR
     ///   (b) be tagged with the worker's PID promptly after spawn,
@@ -2546,7 +2567,7 @@ mod tests {
 
     /// Contract C: A 64 GB host with clean state must admit at least
     /// a 1-worker morphotag job. Per-worker budget for morphotag is
-    /// 12 GB (8000 base × 1.5 loading_overhead, process mode); reserve
+    /// 12 GB (8000 base × 1.5 `loading_overhead`, process mode); reserve
     /// headroom is 8 GB. With 64 GB available and 0 pending, the
     /// projected leftover after granting 1 worker is 64 − 0 − 12 = 52
     /// GB ≥ 8 GB reserve. The planner MUST grant at least 1 worker.
@@ -2604,7 +2625,7 @@ mod tests {
     ///
     /// Expectation: SHOULD PASS TODAY (the existing
     /// `prune_stale_leases` does this for `worker_pid: None` leases
-    /// via the owner_pid liveness check). This contract test is a
+    /// via the `owner_pid` liveness check). This contract test is a
     /// regression guard.
     #[test]
     fn contract_f_dead_daemon_pid_leases_reclaimed_at_first_access() {
@@ -2630,7 +2651,7 @@ mod tests {
         );
     }
 
-    /// Counterpart: a lease whose worker_pid IS alive must be retained.
+    /// Counterpart: a lease whose `worker_pid` IS alive must be retained.
     /// This guards against an over-eager prune that would drop healthy
     /// reservations and double-book memory.
     #[test]

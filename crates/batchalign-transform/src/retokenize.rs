@@ -60,18 +60,21 @@ pub struct TextDiverged;
 
 impl WordTokenMapping {
     /// Number of original words this mapping covers.
-    pub fn word_count(&self) -> usize {
+    #[must_use]
+    pub const fn word_count(&self) -> usize {
         self.inner.len()
     }
 
     /// Token indices for the given original word index.
     ///
     /// Returns an empty slice if the word has no mapping.
+    #[must_use]
     pub fn tokens_for_word(&self, word_idx: usize) -> &[usize] {
         self.inner.get(word_idx).map_or(&[], |s| s.as_slice())
     }
 
     /// Get a non-empty mapping for the given word, or `None`.
+    #[must_use]
     pub fn get_nonempty(&self, word_idx: usize) -> Option<&[usize]> {
         self.inner
             .get(word_idx)
@@ -106,6 +109,7 @@ impl WordTokenMapping {
 }
 
 /// Normalize a text unit for alignment comparison.
+#[must_use]
 pub fn normalize_alignment_unit(text: &str) -> String {
     text.chars().flat_map(|ch| ch.to_lowercase()).collect()
 }

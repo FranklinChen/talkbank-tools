@@ -47,7 +47,8 @@ impl UtrLexicalUnits {
     /// Cantonese is matched in characters. Taiwanese keeps the word matching
     /// it has always had; whether it would gain from characters has not been
     /// measured. A language with no Han-script handling is space-delimited.
-    pub fn for_script(script: Option<HanScriptNormalization>) -> Self {
+    #[must_use]
+    pub const fn for_script(script: Option<HanScriptNormalization>) -> Self {
         match script {
             Some(HanScriptNormalization::HongKongCantonese) => Self::HanCharacters,
             Some(HanScriptNormalization::TaiwanTraditional) | None => Self::SpaceDelimitedWords,
@@ -55,6 +56,7 @@ impl UtrLexicalUnits {
     }
 
     /// The units for a transcript whose primary language is `language`.
+    #[must_use]
     pub fn for_language(language: &LanguageCode3) -> Self {
         Self::for_script(HanScriptNormalization::for_language(language.as_ref()))
     }
@@ -132,12 +134,12 @@ impl UtrChatUnits {
     }
 
     /// How many units the utterance has.
-    pub(super) fn len(&self) -> usize {
+    pub(super) const fn len(&self) -> usize {
         self.texts.len()
     }
 
     /// Whether the utterance has no unit.
-    pub(super) fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.texts.is_empty()
     }
 
@@ -234,6 +236,7 @@ impl PreparedUtrTokens {
     /// `language`: already in its script, so not normalized again, and
     /// matched in the units that language takes, never in units a caller
     /// chooses.
+    #[must_use]
     pub fn retained(tokens: Vec<AsrTimingToken>, language: &LanguageCode3) -> Self {
         Self {
             tokens,
@@ -242,12 +245,14 @@ impl PreparedUtrTokens {
     }
 
     /// The tokens as the provider gave them (script-normalized).
+    #[must_use]
     pub fn tokens(&self) -> &[AsrTimingToken] {
         &self.tokens
     }
 
     /// The projection both sides are matched in.
-    pub fn units(&self) -> UtrLexicalUnits {
+    #[must_use]
+    pub const fn units(&self) -> UtrLexicalUnits {
         self.units
     }
 }

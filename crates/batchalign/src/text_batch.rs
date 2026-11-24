@@ -18,7 +18,7 @@ use crate::scheduling::FailureCategory;
 /// (and a SQLite/JSON record that is still small). The full count
 /// is preserved on the `total` field so users still see how many
 /// items failed.
-pub(crate) const MAX_ITEM_ERROR_SAMPLES: usize = 5;
+pub const MAX_ITEM_ERROR_SAMPLES: usize = 5;
 
 /// Why one item of a worker batch failed.
 ///
@@ -32,7 +32,7 @@ pub(crate) const MAX_ITEM_ERROR_SAMPLES: usize = 5;
 /// morphotag, whose only per-item failure is the engine's own report, and a
 /// command-specific type (translate's empty translation) where one exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ItemFailure<S> {
+pub enum ItemFailure<S> {
     /// The engine reported this item's failure; its message travels verbatim
     /// (for example `"Translation failed: ConnectionResetError(...)"`).
     EngineReported(String),
@@ -45,7 +45,7 @@ pub(crate) enum ItemFailure<S> {
 /// `Infallible` has no value, so `Command` is uninhabited here: utseg, coref
 /// and morphotag cannot construct a translate-shaped failure, and a match on
 /// one needs no arm for it.
-pub(crate) type EngineItemFailure = ItemFailure<std::convert::Infallible>;
+pub type EngineItemFailure = ItemFailure<std::convert::Infallible>;
 
 impl<S: std::fmt::Display> std::fmt::Display for ItemFailure<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,7 +61,7 @@ impl<S: std::fmt::Display> std::fmt::Display for ItemFailure<S> {
 /// `item_index` is the position within the originating file's payload
 /// list (0-based).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ItemError<S> {
+pub struct ItemError<S> {
     /// Position in the originating file's payload list.
     pub item_index: usize,
     /// What went wrong with this item.
@@ -71,7 +71,7 @@ pub(crate) struct ItemError<S> {
 /// One failure as the file-level error carries it: rendered, because the
 /// file-level error outlives the command's own failure type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ItemErrorSample {
+pub struct ItemErrorSample {
     /// Position in the originating file's payload list.
     pub item_index: usize,
     /// What went wrong, rendered.
@@ -84,7 +84,7 @@ pub(crate) struct ItemErrorSample {
 /// is this type's invariant rather than a check each call site repeats: the
 /// constructor is the only route in, and it refuses an empty list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ItemFailures<S>(Vec<ItemError<S>>);
+pub struct ItemFailures<S>(Vec<ItemError<S>>);
 
 impl<S: std::fmt::Display> ItemFailures<S> {
     /// The failures of one file, or `None` when nothing failed.
@@ -98,7 +98,7 @@ impl<S: std::fmt::Display> ItemFailures<S> {
     }
 
     /// How many items failed.
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.0.len()
     }
 
@@ -126,7 +126,7 @@ impl<S: std::fmt::Display> ItemFailures<S> {
 /// bug where per-item engine failures used to be logged as warnings
 /// and silently dropped instead of failing the file.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum TextWorkflowFileError {
+pub enum TextWorkflowFileError {
     /// A failure the control plane has already classified, carried with its
     /// verdict.
     ///
@@ -189,7 +189,7 @@ impl TextWorkflowFileError {
     /// failure is `execution::text_io::preparation`. There is
     /// deliberately no uncategorised variant left for a new call site to
     /// reach for.
-    pub(crate) fn category(&self) -> FailureCategory {
+    pub(crate) const fn category(&self) -> FailureCategory {
         match self {
             // Already classified, by the control plane's own classifier or by
             // `Self::validation`; the verdict is carried, never re-derived
@@ -281,7 +281,7 @@ impl From<PostValidationFailure> for TextWorkflowFileError {
 /// ``TextWorkflowFileError`` directly so callers can choose whether
 /// to attribute it to one file (in single-file flows) or wrap it in
 /// ``ServerError`` (in API-boundary flows).
-pub(crate) fn unwrap_per_item_results<R, S: std::fmt::Display>(
+pub fn unwrap_per_item_results<R, S: std::fmt::Display>(
     command: &'static str,
     item_results: Vec<Result<R, ItemFailure<S>>>,
 ) -> Result<Vec<R>, TextWorkflowFileError> {
@@ -328,7 +328,7 @@ fn format_item_errors(command: &str, total: usize, samples: &[ItemErrorSample]) 
 
 /// Named per-file outcome for one text workflow batch.
 #[derive(Debug, Clone)]
-pub(crate) struct TextBatchFileResult {
+pub struct TextBatchFileResult {
     /// What the command decided about stamping this file with provenance.
     /// Carried to the writer, which records it on the file's status.
     pub stamp: FileStampOutcome,
@@ -345,7 +345,7 @@ pub(crate) struct TextBatchFileResult {
 }
 
 /// Cross-file outputs for one text workflow family.
-pub(crate) type TextBatchFileResults = Vec<TextBatchFileResult>;
+pub type TextBatchFileResults = Vec<TextBatchFileResult>;
 
 impl TextBatchFileResult {
     /// Construct one successful named file result from gate-proven output.
@@ -394,8 +394,8 @@ impl TextBatchFileResult {
 }
 
 /// Owned named input for one CHAT file in a batch workflow.
-#[derive(Debug, Clone)]
-pub(crate) struct TextBatchFileInput {
+#[derive(Debug)]
+pub struct TextBatchFileInput {
     /// Stable file identity for this input.
     pub filename: DisplayPath,
     /// Owned serialized CHAT document for this file.
@@ -442,6 +442,11 @@ mod tests {
     /// `classify_server_error` answers with `Validation`: the retry policy
     /// never saw a provider failure, and the operator was told the CHAT was
     /// bad.
+    /// Guards: A provider item failure survives the server error round trip with its category and diagnostic.
+    /// Kind: contract
+    /// Not a type: The conversion can erase the external provider message or select the generic worker category.
+    /// State: A literal failed item is carried through actual shared error conversion.
+    /// Concurrency: No network or worker effects.
     #[test]
     fn a_per_item_provider_failure_stays_provider_terminal_through_server_error() {
         let items = TextWorkflowFileError::item_errors(
@@ -472,6 +477,11 @@ mod tests {
         );
     }
 
+    /// Guards: The text validation constructor classifies its failure as validation.
+    /// Kind: policy
+    /// Not a type: The selected classification determines whether invalid source data is presented as a system fault.
+    /// State: One explicit validation failure and its category accessor.
+    /// Concurrency: Pure local failure construction.
     #[test]
     fn a_validation_failure_is_categorised_as_validation() {
         let e = TextWorkflowFileError::validation("utseg post-validation failed: ...");
@@ -490,26 +500,14 @@ mod tests {
         }
     }
 
-    /// An engine's own failure is terminal for the file: the same request gets
-    /// the same answer.
-    #[test]
-    fn item_failures_stay_provider_terminal() {
-        assert_eq!(
-            TextWorkflowFileError::item_errors(
-                "translate",
-                ItemFailures::of_one(ItemError {
-                    item_index: 0,
-                    failure: EngineItemFailure::EngineReported("boom".into()),
-                }),
-            )
-            .category(),
-            FailureCategory::ProviderTerminal
-        );
-    }
-
     /// A command's own failure is terminal too, and the operator reads what it
     /// said. Calling it retryable would tell the control plane to expect a
     /// different answer to an identical request.
+    /// Guards: Provider and command item failures keep their operator-facing causation and terminal disposition.
+    /// Kind: policy
+    /// Not a type: Valid error variants can still be displayed without their concrete cause or assigned the wrong category.
+    /// State: One typed command refusal and one provider message exercise actual rendering.
+    /// Concurrency: Pure in-memory error formatting.
     #[test]
     fn a_command_failure_is_terminal_and_visible() {
         let failures = ItemFailures::new(vec![
@@ -537,6 +535,11 @@ mod tests {
     }
 
     /// Nothing failed, so no failure value exists to report.
+    /// Guards: An empty observed list cannot be admitted as a per-item file failure.
+    /// Kind: policy
+    /// Not a type: The worker may produce an empty failure observation that the admission constructor must distinguish from nonempty evidence.
+    /// State: One empty vector at the concrete admission edge.
+    /// Concurrency: The check allocates no external resources.
     #[test]
     fn no_failures_cannot_become_a_file_failure() {
         assert_eq!(
@@ -553,6 +556,11 @@ mod tests {
     /// all as `ProviderTerminal`, so the runner's retry policy never saw the
     /// one case it exists for. The expectations here are read from
     /// `classify_server_error`, which is the owner.
+    /// Guards: Server failure category and exact message reach the per-file renderer.
+    /// Kind: policy
+    /// Not a type: Typed errors still need policy-based category selection and consistent operator-facing projection.
+    /// State: Literal validation, host, authority and model outcomes are rendered by the common mapper.
+    /// Concurrency: Pure error conversion over a local table.
     #[test]
     fn from_server_error_carries_every_category_verbatim() {
         let cases: Vec<(ServerError, FailureCategory)> = vec![
@@ -602,19 +610,11 @@ mod tests {
         }
     }
 
-    /// A categorised failure renders as its bare message, exactly as the
-    /// other variants do: the category is for the control plane, and the
-    /// operator sees the engine's own words.
-    #[test]
-    fn categorised_error_renders_as_bare_message() {
-        let e = TextWorkflowFileError::Categorised(
-            FailureCategory::MemoryPressure,
-            "worker killed: out of memory".into(),
-        );
-        assert_eq!(e.to_string(), "worker killed: out of memory");
-        assert_eq!(e.category(), FailureCategory::MemoryPressure);
-    }
-
+    /// Guards: A small item failure population renders exact sample indices and total without truncation.
+    /// Kind: wire
+    /// Not a type: Actual provider messages and original indices must survive the human-readable response template.
+    /// State: Two typed item failures with different original indices.
+    /// Concurrency: Pure rendering of one owned failure population.
     #[test]
     fn item_errors_renders_command_and_total() {
         let e = TextWorkflowFileError::item_errors(
@@ -646,6 +646,11 @@ mod tests {
         assert!(!msg.contains("showing first"), "got {msg}");
     }
 
+    /// Guards: Large item failure reports bound inline samples while retaining exact total and truncation text.
+    /// Kind: wire
+    /// Not a type: External failures may exceed the reporting cap and still require a truthful total.
+    /// State: Ten synthetic provider messages test actual report construction and rendering.
+    /// Concurrency: Pure projection over one owned vector.
     #[test]
     fn item_errors_caps_inline_samples_but_preserves_total() {
         let failures: Vec<ItemError<std::convert::Infallible>> = (0..10)

@@ -15,7 +15,7 @@
 //! "lowercase")]` where the Python side expects it (e.g. [`api::JobStatus`]).
 //!
 //! This means a [`api::JobSubmission`] serialized by the Rust CLI can be
-//! deserialized by the Python FastAPI server and vice versa, without any
+//! deserialized by the Python `FastAPI` server and vice versa, without any
 //! translation layer.
 //!
 //! # Module position in the workspace

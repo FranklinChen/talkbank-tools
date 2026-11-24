@@ -473,7 +473,7 @@ fn deserialize_python_health_response() {
     assert_eq!(health.capabilities, vec!["align", "morphotag"]);
 }
 
-/// Verify ServerConfig deserializes from YAML that Python OmegaConf produces.
+/// Verify `ServerConfig` deserializes from YAML that Python `OmegaConf` produces.
 #[test]
 fn deserialize_python_server_config_yaml() {
     let yaml = r#"
@@ -592,7 +592,7 @@ fn batch_infer_ipc_roundtrip() {
     }
 }
 
-/// Verify Python CapabilitiesResponse with infer fields parses in Rust.
+/// Verify Python `CapabilitiesResponse` with infer fields parses in Rust.
 #[test]
 fn deserialize_python_capabilities_with_infer() {
     let python_json = r#"{

@@ -96,6 +96,69 @@ pub(crate) struct FaServices<'a> {
     pub(crate) gpu: &'a crate::worker::pool::GpuModelPlan,
     /// Opt-in diagnostic directory; only Whisper requests use it.
     pub(crate) attention_capture_dir: Option<&'a std::path::Path>,
+    /// The cache as this file's recording may use it. FA rows are read and
+    /// written only through it (`cache_storage`), and the UTR ASR lookup
+    /// opens it, so an unidentified recording touches no identity-keyed row. Content-keyed caches (Rev.AI evidence) still use
+    /// `pipeline.cache`, because their keys do not depend on the metadata.
+    pub(crate) recording_cache: RecordingCache<'a>,
+}
+
+#[cfg(test)]
+impl<'a> FaServices<'a> {
+    /// The services a test runs with: no attention capture, and the cache
+    /// opened as a recording with a stable identity opens it.
+    pub(crate) fn for_tests(
+        pipeline: PipelineServices<'a>,
+        cache_namespace: &'a FaCacheNamespace,
+        gpu: &'a crate::worker::pool::GpuModelPlan,
+    ) -> Self {
+        Self {
+            pipeline,
+            cache_namespace,
+            gpu,
+            attention_capture_dir: None,
+            recording_cache: RecordingCache::for_recording(
+                pipeline.cache,
+                &crate::chat_ops::fa::RecordingIdentity::stable_for_tests(),
+            ),
+        }
+    }
+}
+
+/// The cache, opened for one recording only if it has a stable identity.
+///
+/// The field is private, so the only way to open the cache for identity-keyed
+/// rows is [`Self::for_recording`], from the [`RecordingIdentity`] decided at
+/// media resolution.
+#[derive(Clone, Copy)]
+pub(crate) struct RecordingCache<'a>(RecordingCacheAccess<'a>);
+
+#[derive(Clone, Copy)]
+enum RecordingCacheAccess<'a> {
+    Keyed(&'a crate::cache::UtteranceCache),
+    Withheld,
+}
+
+impl<'a> RecordingCache<'a> {
+    /// The cache as `identity`'s rows may use it.
+    pub(crate) fn for_recording(
+        cache: &'a crate::cache::UtteranceCache,
+        identity: &crate::chat_ops::fa::RecordingIdentity,
+    ) -> Self {
+        use crate::chat_ops::fa::RecordingIdentityView;
+        Self(match identity.view() {
+            RecordingIdentityView::Stable(_) => RecordingCacheAccess::Keyed(cache),
+            RecordingIdentityView::Unidentified(_) => RecordingCacheAccess::Withheld,
+        })
+    }
+
+    /// The cache, when this recording's rows may be read and written.
+    pub(crate) const fn keyed(self) -> Option<&'a crate::cache::UtteranceCache> {
+        match self.0 {
+            RecordingCacheAccess::Keyed(cache) => Some(cache),
+            RecordingCacheAccess::Withheld => None,
+        }
+    }
 }
 
 mod attention_capture;
@@ -301,7 +364,7 @@ impl AdmittedFaEvidence {
     /// The utterances alignment left out on purpose. A preserved source was
     /// not aligned, so it left nothing out; a measured result carries the
     /// account its admission made.
-    fn exclusions(&self) -> Option<&completion::ExclusionAccount> {
+    const fn exclusions(&self) -> Option<&completion::ExclusionAccount> {
         match self {
             Self::Preserved { .. } => None,
             Self::Complete(complete) => complete.exclusions(),
@@ -716,7 +779,7 @@ pub(crate) fn run_fa_from_ast<'run>(
 ) -> FaExecution<'run> {
     Box::pin(async move {
         let prepared = prepare_fa_grouping(active, fa_params)?;
-        let recording = audio.recording().await?;
+        let recording = audio.recording()?;
         let grouped = prepared.aggregate(&recording)?;
         run_grouped_fa_candidates(grouped, audio, worker_lang, services, progress).await
     })
@@ -1193,7 +1256,7 @@ impl NoRecordingRoute {
     }
 
     /// Where this route's timing came from, as its stamp says it.
-    pub(crate) fn timing(&self) -> crate::provenance::AlignTiming {
+    pub(crate) const fn timing(&self) -> crate::provenance::AlignTiming {
         match self {
             Self::PassThrough(_) => crate::provenance::AlignTiming::Preserved,
             Self::RefreshOnly(_) => crate::provenance::AlignTiming::RefreshedFromWor,
@@ -1326,6 +1389,11 @@ mod tests {
     /// The `assert_ne!` is the precondition and it is what makes this test
     /// worth having: without a construct the round trip actually changes, the
     /// assertion below would hold under both behaviours.
+    /// Guards: Declared pass-through emits exactly the submitted CHAT text.
+    /// Kind: transcript
+    /// Not a type: The parser can produce the same document while serialization rewrites observable source bytes.
+    /// State: A valid intentionally noncanonical CHAT source and real pass-through output.
+    /// Concurrency: The original source stays immutable.
     #[test]
     fn a_declared_pass_through_carries_the_input_bytes_not_a_reserialization() {
         const DUMMY: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -1360,6 +1428,11 @@ mod tests {
     /// used to return `Ok(FaResult ...)` without running the gate at all, and
     /// the `%wor`-reuse path is the ordinary rerun route. A finalized model
     /// that fails `validate_output("align")` must be REFUSED, not returned.
+    /// Guards: Fast-path output refuses invalid CHAT despite a valid starting source.
+    /// Kind: transcript
+    /// Not a type: Mutated output bytes can still fail parser and semantic admission after timing processing.
+    /// State: A real parsed fixture and deliberately invalid output cases.
+    /// Concurrency: The mutations are local to the test.
     #[test]
     fn a_fast_path_result_failing_the_align_output_check_is_refused() {
         let admission = source_admission();
@@ -1383,6 +1456,11 @@ mod tests {
 
     /// Complete construction refuses an empty main tier even when the legacy
     /// structural-only workflow check would accept it.
+    /// Guards: Output degraded from L2 to L1 is refused by post-validation.
+    /// Kind: transcript
+    /// Not a type: A structurally valid model can lose required utterance content during processing.
+    /// State: A deliberately degraded CHAT result and its validation facts.
+    /// Concurrency: The test owns the intermediate document.
     #[test]
     fn output_degraded_from_l2_to_l1_is_refused() {
         let admission = source_admission();
@@ -1417,6 +1495,11 @@ mod tests {
     }
 
     /// An output that still meets the bar its input was admitted at passes.
+    /// Guards: Valid fast-path output completes its actual CHAT admission.
+    /// Kind: transcript
+    /// Not a type: A fast-path document still has to meet the real output validator and writer contract.
+    /// State: One valid source submitted through the final output boundary.
+    /// Concurrency: Single owned model and no media effect.
     #[test]
     fn an_undegraded_fast_path_result_is_admitted() {
         let admission = source_admission();
@@ -1441,6 +1524,11 @@ mod tests {
     /// (reused from its `%wor`, so no worker is needed), the untimed one stays
     /// in the transcript without bullets, and the shortfall names it with the
     /// window grouping refused. The writer's report is diagnosed, not clean.
+    /// Guards: Partly alignable CHAT is written with an exact account of untimed utterances.
+    /// Kind: transcript
+    /// Not a type: A valid partial result may silently omit the missing-timing explanation on output.
+    /// State: One actual partly timed source and its structured completion report.
+    /// Concurrency: The admitted model and output are private.
     #[tokio::test]
     async fn a_partly_alignable_file_is_written_with_its_untimed_account() {
         use crate::pipeline::post_validate::{OutputReport, ProducedOutput};
@@ -1536,6 +1624,11 @@ mod tests {
     /// with no recording anywhere (the refresh takes none, by signature: a
     /// namespace and the parameters), its timing stands, and its stamp says
     /// where the timing came from.
+    /// Guards: Complete word timing refreshes without opening a recording and names that provenance.
+    /// Kind: transcript
+    /// Not a type: Real source timing tiers can permit refresh even when audio is unavailable.
+    /// State: Complete word-level CHAT and the actual refresh output and stamp.
+    /// Concurrency: The test supplies no audio resources.
     #[test]
     fn a_complete_wor_file_is_refreshed_without_the_recording_and_says_so() {
         const COMPLETE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -1583,6 +1676,11 @@ mod tests {
     /// the run read no audio, the completion account names those words as
     /// needing a run with the recording, not as a measurement that came out
     /// empty. The file is written, diagnosed.
+    /// Guards: Backward stripped utterances on refresh are named as needing recording evidence.
+    /// Kind: transcript
+    /// Not a type: Chronological repair can leave real speech untimed even after complete source word bullets existed.
+    /// State: Owned CHAT with a backward bullet and the resulting shortfall records.
+    /// Concurrency: One immutable source and its produced result.
     #[test]
     fn a_backward_utterance_stripped_on_the_refresh_route_is_named_as_needing_the_recording() {
         const BACKWARD: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -1660,11 +1758,8 @@ mod tests {
         let audio_path = dir.path().join("sample.mp3");
         crate::media::probe::fixtures::write_unpadded_cbr_mp3(&audio_path);
         let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("sample.mp3", 0, 0);
-        let audio = AudioContext {
-            audio_path: &audio_path,
-            audio_identity: &identity,
-            audio_duration: None,
-        };
+        let measured = crate::ensure_wav::MeasuredAudio::probe_fixture(&audio_path).await;
+        let audio = AudioContext::new(&measured, &identity);
         let pool = WorkerPool::new(PoolConfig {
             python_path: dir
                 .path()
@@ -1681,12 +1776,8 @@ mod tests {
             crate::types::engines::FaEngineName::Wave2Vec,
             None,
         );
-        let services = FaServices {
-            pipeline: PipelineServices::new(&pool, &cache),
-            cache_namespace: &namespace,
-            gpu: &gpu,
-            attention_capture_dir: None,
-        };
+        let services =
+            FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
         let params = FaParams {
             gap_healing: WordGapHealing::Heal,
             whisper_text: crate::chat_ops::fa::WhisperTextMode::SpaceJoined,
@@ -1734,6 +1825,11 @@ mod tests {
     /// because dividing the recording by its word count fits the model budget.
     /// The deliberately unavailable worker makes any inference attempt fail;
     /// this exercises request planning through durable completion without ML.
+    /// Guards: Unsupported utterances stay untimed without invented proportional audio requests.
+    /// Kind: contract
+    /// Not a type: Actual words can lack localization even though the recording and surrounding timing are valid.
+    /// State: Measured MP3, anchored source and a worker path that must remain unused.
+    /// Concurrency: A bounded run owns its cache and evidence.
     #[tokio::test]
     async fn unsupported_utterances_do_not_acquire_proportional_request_windows() {
         let source = never_aligned("@Media:\tsample, audio, unlinked\n").replace(
@@ -1807,6 +1903,11 @@ mod tests {
     /// would be linked and untimed. It used to fail the output gate with a
     /// generic E544, reported as an internal fault; it is refused before any
     /// inference as unavailable evidence, naming the note and the remedies.
+    /// Guards: Note-only timing produces an evidence refusal with the operator remedy.
+    /// Kind: transcript
+    /// Not a type: Valid note timing in raw CHAT cannot establish timing of different lexical utterances.
+    /// State: A real note-only timing fixture and typed failure rendering.
+    /// Concurrency: Only local in-memory diagnostics.
     #[tokio::test]
     async fn a_file_timed_only_on_a_note_bullet_is_refused_with_its_remedy() {
         let source = never_aligned("@Media:\tsample, audio\n").replace(
@@ -1842,6 +1943,11 @@ mod tests {
     /// window. `unlinked` is written untimed, still `unlinked`, diagnosed.
     /// Linked owes timing (E544), so it is refused, as unavailable evidence
     /// with the header change named, never as an internal error.
+    /// Guards: Linked and unlinked never-aligned CHAT reach timing admission with correct limitations.
+    /// Kind: transcript
+    /// Not a type: Actual source header states can encode different valid routes before receiving any evidence.
+    /// State: Named sources under both declarations and one undeclared refusal.
+    /// Concurrency: The test owns text and its typed outputs.
     #[tokio::test]
     async fn a_never_aligned_transcript_reaches_alignment_under_either_declaration() {
         let unlinked =
@@ -1889,6 +1995,11 @@ mod tests {
     /// its admission proved: `unlinked` is consumed, a plain declaration
     /// stays, and the written document is valid CHAT. The same untimed
     /// output from a linked source is refused, because E544 forbids writing it.
+    /// Guards: Timing from a proper completion links the never-aligned source's media.
+    /// Kind: transcript
+    /// Not a type: An admitted source can contain a media declaration whose link changes only after actual timing.
+    /// State: Synthetic CHAT and actual completed timing or missing evidence outcomes.
+    /// Concurrency: No external media reads.
     #[test]
     fn timing_written_into_a_never_aligned_source_links_its_media() {
         const TIMED: &str = "*CHI:\thello world . \u{15}0_500\u{15}\n\
@@ -1950,6 +2061,11 @@ mod tests {
         );
     }
 
+    /// Guards: The two FA cache namespaces retain the SQLite key vocabulary.
+    /// Kind: wire
+    /// Not a type: Persistent keys are compared by literal names across independently built versions.
+    /// State: The task constants and exact retained storage names.
+    /// Concurrency: No database or mutable state.
     #[test]
     fn cache_task_name_is_stable() {
         assert_eq!(FORCED_ALIGNMENT.name().as_str(), "forced_alignment");
@@ -1959,6 +2075,11 @@ mod tests {
         );
     }
 
+    /// Guards: A legacy bare timing vector cannot enter versioned derived cache replay.
+    /// Kind: wire
+    /// Not a type: Older SQLite JSON can lack the envelope needed to prove its engine and schema.
+    /// State: An actual bare JSON cache payload sent to the decoder.
+    /// Concurrency: Only immutable JSON and typed cache identity.
     #[test]
     fn cached_group_timing_admission_refuses_legacy_bare_vectors() {
         let value = serde_json::json!([null]);
@@ -1975,6 +2096,11 @@ mod tests {
         assert!(matches!(error, FaDerivedEvidenceError::InvalidJson(_)));
     }
 
+    /// Guards: An exact versioned timing envelope is admitted with its original word slots.
+    /// Kind: wire
+    /// Not a type: Stored JSON still has to prove the expected version and population on read.
+    /// State: A real-shaped canonical derived cache envelope and its admitted vector.
+    /// Concurrency: No persistent database is needed.
     #[test]
     fn cached_group_timing_admission_accepts_an_exact_versioned_envelope() {
         use crate::api::NonNegativeSeconds;
@@ -2019,6 +2145,11 @@ mod tests {
         assert_eq!(timings, vec![None, None]);
     }
 
+    /// Guards: Interval and onset cache evidence use distinct schema admission rules.
+    /// Kind: wire
+    /// Not a type: Stored schemas can name a different timing semantics from the request they are read for.
+    /// State: Two typed engine recipes and a matrix of stored version envelopes.
+    /// Concurrency: Each candidate owns its serialized values.
     #[test]
     fn derived_cache_schema_admission_distinguishes_interval_and_onset_evidence() {
         use crate::types::engines::FaEngineName;
@@ -2055,6 +2186,11 @@ mod tests {
         }
     }
 
+    /// Guards: Worker version drift invalidates derived cache evidence.
+    /// Kind: wire
+    /// Not a type: A structurally valid cache entry can come from a different engine implementation.
+    /// State: One encoded timing envelope whose declared version differs from admission.
+    /// Concurrency: Cache record decoding uses only owned bytes.
     #[test]
     fn cached_group_timing_admission_refuses_worker_version_drift() {
         let key = CacheKey::from_content("derived-version-drift");
@@ -2085,6 +2221,11 @@ mod tests {
         ));
     }
 
+    /// Guards: Qwen accepts current admission evidence and refuses both old cache layers.
+    /// Kind: wire
+    /// Not a type: Persistent raw and derived records can each carry superseded model evidence independently.
+    /// State: Paired real-shaped old/new replay envelopes and an expected matching request.
+    /// Concurrency: Each record is mutated and admitted in isolation.
     #[test]
     fn qwen_admission_revision_refuses_both_old_cache_layers_and_accepts_current_evidence() {
         use crate::api::NonNegativeSeconds;
@@ -2162,6 +2303,11 @@ mod tests {
         }
     }
 
+    /// Guards: Raw model evidence wins over otherwise admissible derived timing.
+    /// Kind: contract
+    /// Not a type: Two simultaneously present cache records leave a real selection policy at the read edge.
+    /// State: Private cache with raw and derived values paired to one request and engine.
+    /// Concurrency: The test owns the retained rows and reads them after persistence.
     #[test]
     fn raw_evidence_is_replayed_before_a_derived_timing_hit() {
         use crate::api::NonNegativeSeconds;

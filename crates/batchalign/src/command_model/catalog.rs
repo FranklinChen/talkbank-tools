@@ -6,7 +6,7 @@ use crate::recipe_runner::catalog::recipe_command_catalog;
 use super::CatalogEntry;
 
 /// Return the authoritative catalog entry for one released command.
-pub(crate) fn command_spec(command: ReleasedCommand) -> &'static CatalogEntry {
+pub fn command_spec(command: ReleasedCommand) -> &'static CatalogEntry {
     // Catalog invariant: every `ReleasedCommand` variant has an entry in
     // `recipe_command_catalog()`, pinned by
     // `recipe_runner::catalog::tests::every_released_command_has_a_spec`. An
@@ -20,7 +20,7 @@ pub(crate) fn command_spec(command: ReleasedCommand) -> &'static CatalogEntry {
 
 /// Return the authoritative catalog entries for all released commands, in
 /// capability-advertisement order.
-pub(crate) fn command_specs() -> &'static [CatalogEntry] {
+pub const fn command_specs() -> &'static [CatalogEntry] {
     recipe_command_catalog()
 }
 
@@ -34,7 +34,7 @@ pub(crate) fn command_specs() -> &'static [CatalogEntry] {
 /// and duplicate-free, in first-seen order.
 ///
 /// [`RecipeStageId::provenance`]: crate::recipe_runner::recipe::RecipeStageId::provenance
-pub(crate) fn commands_stamped_by(command: ReleasedCommand) -> Vec<ReleasedCommand> {
+pub fn commands_stamped_by(command: ReleasedCommand) -> Vec<ReleasedCommand> {
     use crate::recipe_runner::recipe::StageProvenance;
 
     let mut stamped = vec![command];

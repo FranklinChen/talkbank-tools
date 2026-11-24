@@ -31,7 +31,8 @@ pub struct WordIsolation {
 
 impl WordIsolation {
     /// Set off on both sides: the shape of a tag or a stand-alone response.
-    pub fn is_isolated(self) -> bool {
+    #[must_use]
+    pub const fn is_isolated(self) -> bool {
         self.break_before && self.break_after
     }
 }
@@ -45,6 +46,7 @@ pub struct UtteranceEvidence {
 impl UtteranceEvidence {
     /// No evidence at all: every word reads as unbroken on both sides, so no
     /// evidence-driven rewrite can fire. For callers that have no utterance.
+    #[must_use]
     pub fn none(word_count: usize) -> Self {
         Self {
             isolation: vec![WordIsolation::default(); word_count],
@@ -64,6 +66,7 @@ impl UtteranceEvidence {
     /// definition. A genuine mismatch leaves every later word unbroken,
     /// which is the safe direction: no rewrite fires on words whose evidence
     /// could not be placed.
+    #[must_use]
     pub fn from_utterance(content: &[UtteranceContent], words: &[ExtractedWord]) -> Self {
         let mut placer = Placer {
             isolation: vec![WordIsolation::default(); words.len()],
@@ -123,22 +126,26 @@ impl UtteranceEvidence {
 
     /// Evidence assembled by a caller that already knows the breaks (tests,
     /// or a producer that read them another way).
-    pub fn from_isolation(isolation: Vec<WordIsolation>) -> Self {
+    #[must_use]
+    pub const fn from_isolation(isolation: Vec<WordIsolation>) -> Self {
         Self { isolation }
     }
 
     /// The evidence for payload word `index`, if the utterance has that many.
+    #[must_use]
     pub fn isolation(&self, index: usize) -> Option<WordIsolation> {
         self.isolation.get(index).copied()
     }
 
     /// Number of words the evidence covers.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.isolation.len()
     }
 
     /// Whether the evidence covers no words.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.isolation.is_empty()
     }
 }

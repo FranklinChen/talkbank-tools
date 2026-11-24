@@ -1,6 +1,6 @@
 //! Rust-owned normalization for worker-protocol V2 text-task batch results.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "7. Text Task Result Normalization" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "7. Text Task Result Normalization" for:
 //! - Python caller: `batchalign/worker/_text_v2.py`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
@@ -21,7 +21,7 @@ use serde::de::DeserializeOwned;
 /// internal error; the Rust text executor folds it into
 /// `runtime_failure` with the established "invalid <task> host output"
 /// prefix the Python test matrix asserts on).
-pub(crate) struct TextResultShapeError(pub(crate) String);
+pub struct TextResultShapeError(pub(crate) String);
 
 fn normalize_result_count<'a>(
     response: &'a BatchInferResponse,
@@ -84,7 +84,7 @@ fn normalize_item<T: HostItemResult>(infer_result: &InferResponse, task: &str) -
     }
 }
 
-pub(crate) fn normalize_morphosyntax_result(
+pub fn normalize_morphosyntax_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<MorphosyntaxResultV2, TextResultShapeError> {
@@ -152,7 +152,7 @@ mod cue_projection_tests {
     }
 }
 
-pub(crate) fn normalize_utseg_result(
+pub fn normalize_utseg_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<UtsegResultV2, TextResultShapeError> {
@@ -164,7 +164,7 @@ pub(crate) fn normalize_utseg_result(
     })
 }
 
-pub(crate) fn normalize_translation_result(
+pub fn normalize_translation_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<TranslationResultV2, TextResultShapeError> {
@@ -176,7 +176,7 @@ pub(crate) fn normalize_translation_result(
     })
 }
 
-pub(crate) fn normalize_coref_result(
+pub fn normalize_coref_result(
     response: &BatchInferResponse,
     expected_count: usize,
 ) -> Result<CorefResultV2, TextResultShapeError> {
@@ -198,7 +198,7 @@ pub(crate) fn normalize_coref_result(
 /// its `TokenizerContext` and hands it back to [`align_tokens`].
 ///
 /// A mirror rather than the transform crate's enum itself, because that crate
-/// does not depend on PyO3; both conversions are exhaustive matches, so a
+/// does not depend on `PyO3`; both conversions are exhaustive matches, so a
 /// variant added on either side fails to compile until the other has it.
 #[pyclass(
     eq,
@@ -208,7 +208,7 @@ pub(crate) fn normalize_coref_result(
     name = "RealignLanguage"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PyRealignLanguage {
+pub enum PyRealignLanguage {
     /// Stanza `en`.
     English,
     /// Stanza `fr`.
@@ -258,7 +258,7 @@ impl PyRealignLanguage {
 /// Returns a Python list: plain `str` for unchanged tokens,
 /// `(str, bool)` tuples for MWT expansion hints.
 #[pyfunction]
-pub(crate) fn align_tokens(
+pub fn align_tokens(
     py: Python<'_>,
     original_words: Vec<String>,
     stanza_tokens: Vec<String>,

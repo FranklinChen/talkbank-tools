@@ -269,18 +269,58 @@ class TaskLoadRegistry:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkerBootstrapRuntime:
-    """Typed worker bootstrap inputs resolved once at process startup."""
+class ProfileTarget:
+    profile: WorkerProfile
 
-    task: InferTask | None
+    @property
+    def label(self) -> str:
+        return f"profile:{self.profile.value}"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskTarget:
+    task: InferTask
+
+    @property
+    def label(self) -> str:
+        return f"infer:{self.task.value}"
+
+
+ModelTarget = ProfileTarget | TaskTarget
+
+
+@dataclass(frozen=True, slots=True)
+class UntargetedEcho:
+    @property
+    def label(self) -> str:
+        return "test-echo"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerBootstrapRuntime:
+    """Inputs carried from launch into later model loads."""
+
     lang: LanguageCode
     num_speakers: NumSpeakers
-    profile: WorkerProfile | None = None
     engine_overrides: dict[str, str] = field(default_factory=dict)
-    test_echo: bool = False
-    verbose: int = 0
     device_policy: DevicePolicy = field(default_factory=DevicePolicy)
-    revai_api_key: RevAiApiKey | None = None
+    revai_api_key: RevAiApiKey | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelStartup:
+    target: ModelTarget
+    bootstrap: WorkerBootstrapRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class EchoStartup:
+    target: ModelTarget | UntargetedEcho
+    bootstrap: WorkerBootstrapRuntime
+    delay_ms: int
+
+
+WorkerStartup = ModelStartup | EchoStartup
 
 
 class AsrEngine(str, Enum):

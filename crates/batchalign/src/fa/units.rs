@@ -87,7 +87,7 @@ pub(super) struct GroupOrdinal(usize);
 
 impl GroupOrdinal {
     /// The ordinal as evidence and logs spell it.
-    pub(super) fn index(self) -> usize {
+    pub(super) const fn index(self) -> usize {
         self.0
     }
 }
@@ -101,11 +101,11 @@ impl std::fmt::Display for GroupOrdinal {
 /// A request's position in one file's [`DispatchPlan`], for request ids,
 /// logs and evidence. Minted only by [`DispatchPlan::build`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct UnitOrdinal(usize);
+pub struct UnitOrdinal(usize);
 
 impl UnitOrdinal {
     /// The ordinal as evidence, request ids and logs spell it.
-    pub(crate) fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self.0
     }
 }
@@ -132,7 +132,7 @@ impl<'g> UnitRequest<'g> {
         }
     }
 
-    fn window(self) -> FaWindow {
+    const fn window(self) -> FaWindow {
         match self {
             Self::Whole(request) => request.window(),
             Self::Piece(piece) => piece.window(),
@@ -143,7 +143,7 @@ impl<'g> UnitRequest<'g> {
 /// One FA request: some consecutive words of one group, the window they are
 /// aligned against, and the request's cache identity.
 #[derive(Debug)]
-pub(crate) struct DispatchUnit<'g> {
+pub struct DispatchUnit<'g> {
     ordinal: UnitOrdinal,
     group: GroupOrdinal,
     request: UnitRequest<'g>,
@@ -184,12 +184,12 @@ impl<'g> DispatchUnit<'g> {
     }
 
     /// This unit's position in its plan.
-    pub(crate) fn ordinal(&self) -> UnitOrdinal {
+    pub(crate) const fn ordinal(&self) -> UnitOrdinal {
         self.ordinal
     }
 
     /// The group whose words this unit aligns.
-    pub(super) fn group(&self) -> GroupOrdinal {
+    pub(super) const fn group(&self) -> GroupOrdinal {
         self.group
     }
 
@@ -211,7 +211,7 @@ impl<'g> DispatchUnit<'g> {
     }
 
     /// The request's content-addressed cache identity.
-    pub(crate) fn cache_key(&self) -> &CacheKey {
+    pub(crate) const fn cache_key(&self) -> &CacheKey {
         &self.cache_key
     }
 }
@@ -386,7 +386,7 @@ impl<'g> PlannedGroup<'g> {
 /// Every request one file's groups are executed as, held per group in each
 /// group's own shape.
 #[derive(Debug)]
-pub(crate) struct DispatchPlan<'g> {
+pub struct DispatchPlan<'g> {
     groups: Vec<PlannedGroup<'g>>,
 }
 
@@ -644,12 +644,13 @@ impl<'p, 'g> UnitLedger<'p, 'g> {
                 timings,
             });
         }
-        match missing.is_empty() {
-            true => Ok(resolved),
-            false => Err(ServerError::Validation(format!(
+        if missing.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(ServerError::Validation(format!(
                 "{context} completed without timings for request(s): {:?}",
                 missing.iter().map(|unit| unit.0).collect::<Vec<_>>()
-            ))),
+            )))
         }
     }
 }
@@ -899,9 +900,10 @@ pub(super) async fn resolve_group_timings<'a>(
         replies,
         progress: reply_progress,
     } = UnitLedger::open(&plan, |group| {
-        match group.is_reusable_from(reusable_utterances) {
-            true => collect_preserved_group_timings(chat_file, group),
-            false => None,
+        if group.is_reusable_from(reusable_utterances) {
+            collect_preserved_group_timings(chat_file, group)
+        } else {
+            None
         }
     });
     let reused_units = ledger.reused_units();
@@ -1014,7 +1016,7 @@ pub(super) async fn resolve_group_timings<'a>(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
+pub mod test_support {
     use super::*;
     use crate::chat_ops::fa::coordinates::{FileMs, Ms, Recording};
     use crate::chat_ops::fa::{AnchorIndex, AnchoredSplit, UtteranceAnchors, WordAnchor};
@@ -1022,7 +1024,7 @@ pub(crate) mod test_support {
 
     /// A plan over `groups` with fixed run parameters, for unit tests of the
     /// transport and assembly.
-    pub(crate) fn plan_for(groups: &[FaGroup]) -> DispatchPlan<'_> {
+    pub fn plan_for(groups: &[FaGroup]) -> DispatchPlan<'_> {
         let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("/tmp/test.wav", 0, 0);
         DispatchPlan::build(
             groups,
@@ -1037,7 +1039,7 @@ pub(crate) mod test_support {
 
     /// An anchored group of five words over 0..40 s, cut after word 1 and
     /// word 3 into three pieces.
-    pub(crate) fn anchored_group() -> FaGroup {
+    pub fn anchored_group() -> FaGroup {
         let words: Vec<FaWord> = (0..5)
             .map(|i| FaWord {
                 utterance_index: UtteranceIdx::new(1),

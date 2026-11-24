@@ -334,7 +334,7 @@ mod tests {
 
     /// Negative values are not the legacy sentinel, only `0` is.
     /// `-1` survives as `Some(-1)` even though it's nonsensical for
-    /// these fields; validation is the EffectiveConfig layer's job.
+    /// these fields; validation is the `EffectiveConfig` layer's job.
     #[test]
     fn i32_negative_value_preserves_some() {
         let parsed: CarrierI32 = yaml_serde::from_str("value: -1\n").expect("parse");

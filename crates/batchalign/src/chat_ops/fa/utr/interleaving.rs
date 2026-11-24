@@ -53,6 +53,7 @@ struct WordObservation {
 /// are included, not just pairs selected by a short-turn heuristic. Common
 /// lexical matches here are local diagnostic facts, not acoustic speaker proof
 /// and not producer-admitted UTR timing authority. Refused analysis is explicit.
+#[must_use]
 pub fn observe(
     chat: &ChatFile,
     tokens: &super::PreparedUtrTokens,

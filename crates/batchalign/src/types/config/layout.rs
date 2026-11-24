@@ -16,6 +16,7 @@ pub struct RuntimeLayout {
 
 impl RuntimeLayout {
     /// Resolve the runtime layout from ambient environment variables.
+    #[must_use]
     pub fn from_env() -> Self {
         let home = crate::runtime_paths::BatchalignHome::from_env();
         Self::from_sources(
@@ -41,6 +42,7 @@ impl RuntimeLayout {
     }
 
     /// Build the runtime layout from an explicit state directory.
+    #[must_use]
     pub fn from_state_dir(state_dir: PathBuf) -> Self {
         let config_path = state_dir.join("server.yaml");
         Self {
@@ -50,42 +52,50 @@ impl RuntimeLayout {
     }
 
     /// Runtime state directory (jobs, DB, daemon metadata, logs, config).
+    #[must_use]
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
     }
 
     /// Default server config path under the runtime state directory.
+    #[must_use]
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
 
     /// Runtime jobs directory under the owned state root.
+    #[must_use]
     pub fn jobs_dir(&self) -> PathBuf {
         self.state_dir.join("jobs")
     }
 
     /// Runtime logs directory under the owned state root.
+    #[must_use]
     pub fn logs_dir(&self) -> PathBuf {
         self.state_dir.join("logs")
     }
 
     /// Runtime dashboard asset directory under the owned state root.
+    #[must_use]
     pub fn dashboard_dir(&self) -> PathBuf {
         self.state_dir.join("dashboard")
     }
 
     /// Server stderr log file under the owned state root.
+    #[must_use]
     pub fn server_log_path(&self) -> PathBuf {
         self.state_dir.join("server.log")
     }
 }
 
 /// Default config file path.
+#[must_use]
 pub fn default_config_path() -> PathBuf {
     RuntimeLayout::from_env().config_path().to_path_buf()
 }
 
 /// State directory: `$BATCHALIGN_STATE_DIR` if set, else `$HOME/.batchalign3`.
+#[must_use]
 pub fn ba_state_dir() -> PathBuf {
     RuntimeLayout::from_env().state_dir().to_path_buf()
 }

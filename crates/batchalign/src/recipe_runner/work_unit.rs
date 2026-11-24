@@ -6,7 +6,7 @@ use crate::api::DisplayPath;
 
 /// One discovered source input before command-specific planning.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiscoveredInput {
+pub struct DiscoveredInput {
     /// Relative display path tracked by the job system.
     pub display_path: DisplayPath,
     /// Concrete source path read by the runner.
@@ -32,21 +32,21 @@ impl DiscoveredInput {
 
 /// Text-only commands that transform one CHAT input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TextWorkUnit {
+pub struct TextWorkUnit {
     /// Source CHAT input.
     pub source: DiscoveredInput,
 }
 
 /// Audio-first commands such as transcribe and align.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AudioWorkUnit {
+pub struct AudioWorkUnit {
     /// Source audio input.
     pub audio: DiscoveredInput,
 }
 
 /// Paired main/reference transcript work unit for compare.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CompareWorkUnit {
+pub struct CompareWorkUnit {
     /// Main transcript to annotate.
     pub main: DiscoveredInput,
     /// Gold/reference transcript.
@@ -64,7 +64,7 @@ pub(crate) struct CompareWorkUnit {
 /// in the `audio` slot, and nothing downstream inspects the slot's contents
 /// before decoding it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BenchmarkWorkUnit {
+pub struct BenchmarkWorkUnit {
     /// Source audio input.
     audio: DiscoveredInput,
     /// Gold CHAT transcript expected for the benchmark.
@@ -77,31 +77,31 @@ impl BenchmarkWorkUnit {
     /// `pub(super)`, so only `recipe_runner` can call it; in practice that is
     /// `plan_benchmark_pairs`, which is the only code that knows how the gold
     /// path is derived.
-    pub(super) fn new(audio: DiscoveredInput, gold_chat: DiscoveredInput) -> Self {
+    pub(super) const fn new(audio: DiscoveredInput, gold_chat: DiscoveredInput) -> Self {
         Self { audio, gold_chat }
     }
 
     /// The recording this benchmark transcribes.
-    pub(crate) fn audio(&self) -> &DiscoveredInput {
+    pub(crate) const fn audio(&self) -> &DiscoveredInput {
         &self.audio
     }
 
     /// The gold transcript this benchmark scores against.
-    pub(crate) fn gold_chat(&self) -> &DiscoveredInput {
+    pub(crate) const fn gold_chat(&self) -> &DiscoveredInput {
         &self.gold_chat
     }
 }
 
 /// Media-analysis work unit for openSMILE or AVQI.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MediaAnalysisWorkUnit {
+pub struct MediaAnalysisWorkUnit {
     /// Source media input.
     pub source: DiscoveredInput,
 }
 
 /// Command-family-specific planned work units.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PlannedWorkUnit {
+pub enum PlannedWorkUnit {
     /// One text transform unit.
     Text(TextWorkUnit),
     /// One audio transform unit.

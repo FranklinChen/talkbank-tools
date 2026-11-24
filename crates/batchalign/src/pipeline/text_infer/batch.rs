@@ -63,11 +63,7 @@ impl<Item> CollectedTextBatch<Item> {
         let parser = crate::chat_parser();
         let mut batch = Self::Complete(Vec::with_capacity(files.len()));
         for file in files {
-            let input = match admit_retained_text(
-                &parser,
-                &file.chat_text,
-                TranscriptName::for_path(std::path::Path::new(file.filename.as_ref())),
-            ) {
+            let input = match AdmittedTextSource::admit(&parser, file) {
                 Ok(input) => input,
                 Err(error) => {
                     batch.push_complete(TextBatchFileResult::err(
@@ -77,25 +73,42 @@ impl<Item> CollectedTextBatch<Item> {
                     continue;
                 }
             };
-            let work = if is_dummy(input.document()) {
-                Vec::new()
-            } else {
-                (hooks.collect)(input.document())
-            };
-            if work.is_empty() {
-                batch.push_complete(TextBatchFileResult::ok(
-                    file.filename.clone(),
-                    PostValidated::pass_through(input, hooks.command),
-                ));
-                continue;
-            }
-            batch = batch.attach_pending(
-                file.filename.clone(),
-                input.into_valid_file(),
-                NonEmptyFileItems(work),
-            );
+            batch = batch.collect_admitted(input, hooks);
         }
         batch
+    }
+
+    pub(super) fn one<Response>(
+        source: AdmittedTextSource<'_>,
+        hooks: &TextBatchHooks<Item, Response>,
+    ) -> Self {
+        Self::Complete(Vec::with_capacity(1)).collect_admitted(source, hooks)
+    }
+
+    fn collect_admitted<Response>(
+        mut self,
+        source: AdmittedTextSource<'_>,
+        hooks: &TextBatchHooks<Item, Response>,
+    ) -> Self {
+        let (filename, input) = source.into_parts();
+        let work = if is_dummy(input.document()) {
+            Vec::new()
+        } else {
+            (hooks.collect)(input.document())
+        };
+        if work.is_empty() {
+            self.push_complete(TextBatchFileResult::ok(
+                filename.clone(),
+                PostValidated::pass_through(input, hooks.command),
+            ));
+            self
+        } else {
+            self.attach_pending(
+                filename.clone(),
+                input.into_valid_file(),
+                NonEmptyFileItems(work),
+            )
+        }
     }
 
     fn push_complete(&mut self, result: TextBatchFileResult) {

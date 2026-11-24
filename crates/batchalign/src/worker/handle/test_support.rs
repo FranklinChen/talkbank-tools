@@ -3,7 +3,7 @@
 /// A minimal, well-formed `ready` line, the same shape
 /// `worker::handle::lifecycle`'s own tests use, PID hardcoded since
 /// nothing here asserts on it.
-pub(crate) fn ready_line() -> String {
+pub fn ready_line() -> String {
     format!(
         concat!(
             "{{\"ready\":true,\"pid\":424242,\"transport\":\"stdio\",\"runtime\":{{",

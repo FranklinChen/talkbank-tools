@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::{InvalidStampSafeText, LanguageCode3, ReleasedCommand};
+use crate::api::{DisplayPath, InvalidStampSafeText, LanguageCode3, ReleasedCommand};
 use crate::chat_ops::ChatFile;
 use crate::provenance::TextStamp;
 use crate::text_batch::{ItemFailure, TextBatchFileInput, TextBatchFileResults};
@@ -26,7 +26,7 @@ type IntegrateFn<Item, State, Response> =
 
 /// These workflows retain input content: no generated-tier recovery exemption
 /// applies. Only Chatter's complete source admission can produce their input.
-pub(crate) fn admit_retained_text<'source>(
+pub fn admit_retained_text<'source>(
     parser: &batchalign_transform::parse::TreeSitterParser,
     source: &'source str,
     name: TranscriptName<'_>,
@@ -34,6 +34,35 @@ pub(crate) fn admit_retained_text<'source>(
     parse_source_with_parser(parser, source)
         .admit(name, &talkbank_model::NullErrorSink)
         .map_err(|error| ServerError::ChatAdmission(SourceRefusal::in_source(error, source)))
+}
+
+/// The staged name and the admitted parse of that file's exact bytes.
+/// Only named source admission can produce this pair.
+pub struct AdmittedTextSource<'source> {
+    filename: &'source DisplayPath,
+    source: AdmittedSourceChat<'source>,
+}
+
+impl<'source> AdmittedTextSource<'source> {
+    pub(crate) fn admit(
+        parser: &batchalign_transform::parse::TreeSitterParser,
+        input: &'source TextBatchFileInput,
+    ) -> Result<Self, ServerError> {
+        let name = TranscriptName::for_path(std::path::Path::new(input.filename.as_ref()));
+        let source = admit_retained_text(parser, &input.chat_text, name)?;
+        Ok(Self {
+            filename: &input.filename,
+            source,
+        })
+    }
+
+    pub(crate) fn document(&self) -> &ChatFile {
+        self.source.document()
+    }
+
+    pub(crate) fn into_parts(self) -> (&'source DisplayPath, AdmittedSourceChat<'source>) {
+        (self.filename, self.source)
+    }
 }
 
 /// Where a text command's provenance comment comes from: the responses it
@@ -47,7 +76,7 @@ pub(crate) fn admit_retained_text<'source>(
 /// There is no pipeline-wide engine version and no capability report to fall
 /// back on (see the book's provenance page), so a command cannot stamp an
 /// engine its responses did not name.
-pub(crate) type TextProvenance<Response> =
+pub type TextProvenance<Response> =
     fn(&LanguageCode3, &[Response]) -> Result<TextStamp, InvalidStampSafeText>;
 
 /// Hooks for a text-only single-file pipeline.
@@ -56,7 +85,7 @@ pub(crate) type TextProvenance<Response> =
 /// responses into the state map; `apply` writes the state back into
 /// the CHAT AST. The inference function itself is a separate argument
 /// to [`run_admitted_text_pipeline`] so callers can pass any `async fn` directly.
-pub(crate) struct TextPipelineHooks<Item, State, Response> {
+pub struct TextPipelineHooks<Item, State, Response> {
     /// The command this pipeline is running, for validation, error strings
     /// and the proof its gate produces.
     pub command: ReleasedCommand,
@@ -74,7 +103,7 @@ pub(crate) struct TextPipelineHooks<Item, State, Response> {
     pub provenance: TextProvenance<Response>,
 }
 
-pub(crate) use application::{run_admitted_text_pipeline, run_localized_text_pipeline};
+pub use application::{run_admitted_text_pipeline, run_localized_text_pipeline};
 
 /// Hooks for the cross-file text-batch pipeline (pool all files'
 /// payloads into one `batch_infer` call, then redistribute responses).
@@ -85,14 +114,14 @@ pub(crate) use application::{run_admitted_text_pipeline, run_localized_text_pipe
 /// generic shape.
 /// Extract worker payloads from a parsed chat file. Each payload is tagged
 /// with its utterance index so the injector can match responses back.
-pub(crate) type TextBatchCollect<Item> = fn(&ChatFile) -> Vec<(usize, Item)>;
+pub type TextBatchCollect<Item> = fn(&ChatFile) -> Vec<(usize, Item)>;
 
 /// Apply one file's collected items + their worker responses to the chat
 /// file's AST. Called once per file after global inference completes.
-pub(crate) type TextBatchApply<Item, Response> =
+pub type TextBatchApply<Item, Response> =
     fn(&mut ChatFile, &[(usize, Item)], &[Response]) -> Result<(), ServerError>;
 
-pub(crate) struct TextBatchHooks<Item, Response> {
+pub struct TextBatchHooks<Item, Response> {
     /// The command this pipeline is running, for validation, log messages
     /// and the proof its gate produces.
     pub command: ReleasedCommand,
@@ -113,11 +142,11 @@ pub(crate) struct TextBatchHooks<Item, Response> {
 /// Source admission parses and validates each source once. Collection retains
 /// completed refusals and exact no-work outcomes, while pending files own their
 /// valid source and private spans into the collected item population. Inference
-/// runs once over that population. MatchedPopulation admits the actual response
+/// runs once over that population. `MatchedPopulation` admits the actual response
 /// count before consuming per-file partition, application, stamping and output
 /// judgment. Worker failures refuse pending files while moving completed outcomes
 /// through unchanged.
-pub(crate) async fn run_text_batch_pipeline<Item, Response, Failure, Infer>(
+pub async fn run_text_batch_pipeline<Item, Response, Failure, Infer>(
     files: &[TextBatchFileInput],
     lang: &LanguageCode3,
     pool: &WorkerPool,
@@ -134,6 +163,25 @@ where
 {
     batch::CollectedTextBatch::collect(files, &hooks)
         .run_with(lang, &hooks, async |items| infer(pool, items, lang).await)
+        .await
+}
+
+/// Run the shared text pipeline on the admitted source used to set its route.
+/// Collection receives the model and consumes its proof without parsing bytes.
+pub async fn run_admitted_text_source<Item, Response, Failure, Infer>(
+    source: AdmittedTextSource<'_>,
+    lang: &LanguageCode3,
+    hooks: TextBatchHooks<Item, Response>,
+    infer: Infer,
+) -> TextBatchFileResults
+where
+    Failure: std::fmt::Display,
+    Infer: AsyncFnOnce(
+        &[(usize, Item)],
+    ) -> Result<Vec<Result<Response, ItemFailure<Failure>>>, ServerError>,
+{
+    batch::CollectedTextBatch::one(source, &hooks)
+        .run_with(lang, &hooks, infer)
         .await
 }
 

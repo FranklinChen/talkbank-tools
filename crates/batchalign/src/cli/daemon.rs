@@ -68,6 +68,7 @@ const HEALTH_TIMEOUT: f64 = 90.0;
 /// suite derives its kill budget from this function rather than restating a
 /// number that could drift under it (`tests/live_deadline`,
 /// `CliRunBudget::DaemonStart`).
+#[must_use]
 pub fn startup_budget() -> Duration {
     Duration::from_secs_f64(HEALTH_TIMEOUT)
 }
@@ -140,7 +141,7 @@ enum DaemonProfile {
 }
 
 impl DaemonProfile {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Main => "local",
             Self::Sidecar => "sidecar",
@@ -152,7 +153,7 @@ impl DaemonProfile {
     /// Every other per-profile artifact was already namespaced; this closes the
     /// last shared one, which mattered once discovery started reading the
     /// published port rather than re-deriving it from config.
-    fn handshake_slot(self) -> HandshakeSlot {
+    const fn handshake_slot(self) -> HandshakeSlot {
         match self {
             Self::Main => HandshakeSlot::Main,
             Self::Sidecar => HandshakeSlot::Sidecar,
@@ -180,14 +181,14 @@ impl DaemonProfile {
         }
     }
 
-    fn startup_message(self) -> &'static str {
+    const fn startup_message(self) -> &'static str {
         match self {
             Self::Main => "Starting local daemon...",
             Self::Sidecar => "Starting sidecar daemon for transcribe workloads...",
         }
     }
 
-    fn check_manual_server(self) -> bool {
+    const fn check_manual_server(self) -> bool {
         matches!(self, Self::Main)
     }
 
@@ -293,6 +294,7 @@ impl RequestedRuntime {
     };
 
     /// Whether the invocation asked for nothing, and so can use any daemon.
+    #[must_use]
     pub const fn is_none(self) -> bool {
         self.workers.is_none() && self.timeout.is_none()
     }
@@ -303,6 +305,7 @@ impl RequestedRuntime {
     /// was started without the flag" is a value (auto-tune, the built-in
     /// ceiling) and not a wildcard: a request for four workers against a
     /// daemon auto-tuning to one differs.
+    #[must_use]
     pub fn reconcile(self, running: Self) -> RuntimeReconciliation {
         /// One setting: not asked for, or asked for and equal to the daemon's.
         fn setting_matches<T: PartialEq>(requested: Option<T>, running: Option<T>) -> bool {
@@ -328,7 +331,7 @@ impl RequestedRuntime {
     /// `audio_task_timeout_s`, for a daemon being started, a `serve start`,
     /// and a direct (`--no-server`) run alike. A setting not asked for leaves
     /// the configured value alone.
-    pub fn apply_to(self, config: &mut ServerConfig) {
+    pub const fn apply_to(self, config: &mut ServerConfig) {
         if let Some(workers) = self.workers {
             config.max_workers_per_job = Some(workers.get());
         }
@@ -339,6 +342,7 @@ impl RequestedRuntime {
 
     /// The flags that hand these settings to a `serve start` child process,
     /// in the spelling that process parses.
+    #[must_use]
     pub fn serve_start_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(4);
         if let Some(workers) = self.workers {
@@ -485,7 +489,7 @@ pub struct ResolvedDaemon {
 
 impl ResolvedDaemon {
     /// A daemon that was running before this invocation looked.
-    fn already_running(url: String) -> Self {
+    const fn already_running(url: String) -> Self {
         Self {
             url,
             origin: ServerOrigin::AlreadyRunning,
@@ -722,7 +726,7 @@ fn is_stale(info: &DaemonInfo) -> bool {
     info.build_hash != crate::build_hash()
 }
 
-fn runtime_mismatch(info: &DaemonInfo, flags: DaemonDeviceFlags) -> bool {
+const fn runtime_mismatch(info: &DaemonInfo, flags: DaemonDeviceFlags) -> bool {
     info.force_cpu != flags.resolved_force_cpu || info.allow_mps != flags.resolved_allow_mps
 }
 
@@ -1365,15 +1369,7 @@ async fn start_daemon(
     cmd.stderr(log_file);
 
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
+    crate::detached::start_in_new_session(&mut cmd);
 
     // On Windows, CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS ensures the
     // daemon survives after the spawning CLI process exits, analogous to
@@ -1635,6 +1631,7 @@ const KILL_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 /// The test suite's 10 s `serve stop` budget was below this deadline, so a
 /// server that took eleven seconds to retire its workers on a busy machine
 /// was killed by the harness mid-shutdown and the test failed.
+#[must_use]
 pub fn stop_budget_per_process() -> Duration {
     GRACEFUL_STOP_DEADLINE + KILL_SETTLE
 }

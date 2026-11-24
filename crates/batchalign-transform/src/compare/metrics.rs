@@ -17,46 +17,57 @@ pub struct CompareMetrics {
 
 impl CompareMetrics {
     /// Matched alignment tokens.
+    #[must_use]
     pub fn matches(&self) -> usize {
         self.languages.matches()
     }
     /// Unmatched hypothesis tokens, including substitution partners.
+    #[must_use]
     pub fn insertions(&self) -> usize {
         self.languages.unmatched_main_words()
     }
     /// Unmatched reference tokens, including substitution partners.
+    #[must_use]
     pub fn deletions(&self) -> usize {
         self.languages.unmatched_gold_words()
     }
     /// Reference token count.
+    #[must_use]
     pub fn total_gold_words(&self) -> usize {
         self.matches() + self.deletions()
     }
     /// Hypothesis token count.
+    #[must_use]
     pub fn total_main_words(&self) -> usize {
         self.matches() + self.insertions()
     }
     /// Legacy WER: substitutions count as both insertion and deletion.
+    #[must_use]
     pub fn wer(&self) -> f64 {
         self.legacy_rate(self.insertions() + self.deletions())
     }
     /// Error rate after cancelling displacement within gold utterances.
+    #[must_use]
     pub fn cwer(&self) -> f64 {
         self.legacy_rate(self.displacement_edits)
     }
     /// Legacy accuracy, clamped to zero through one.
+    #[must_use]
     pub fn accuracy(&self) -> f64 {
         (1.0 - self.wer()).clamp(0.0, 1.0)
     }
     /// Immutable per-POS counts.
-    pub fn pos_counts(&self) -> &BTreeMap<String, PosErrorCounts> {
+    #[must_use]
+    pub const fn pos_counts(&self) -> &BTreeMap<String, PosErrorCounts> {
         &self.pos_counts
     }
     /// Immutable language scores, the source of aggregate counts.
-    pub fn languages(&self) -> &LanguageScores {
+    #[must_use]
+    pub const fn languages(&self) -> &LanguageScores {
         &self.languages
     }
     /// Error rate with substitutions paired within alignment gaps.
+    #[must_use]
     pub fn wer_with_substitutions(&self) -> Rate {
         self.languages.wer_with_substitutions()
     }
@@ -182,7 +193,10 @@ pub struct CompareMetricsCsvRow {
 }
 
 impl CompareMetricsCsvRow {
-    pub(in crate::compare) fn new(metric: CompareMetricName, value: CompareMetricValue) -> Self {
+    pub(in crate::compare) const fn new(
+        metric: CompareMetricName,
+        value: CompareMetricValue,
+    ) -> Self {
         Self { metric, value }
     }
 }
@@ -197,7 +211,7 @@ pub enum CompareCsvHeader {
 }
 
 impl CompareCsvHeader {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Metric => "metric",
             Self::Value => "value",
@@ -271,6 +285,7 @@ pub enum CompareMetricName {
 
 impl CompareMetricName {
     /// The field exactly as the metrics CSV writes it.
+    #[must_use]
     pub fn to_csv_field(&self) -> String {
         match self {
             Self::Wer => "wer".to_string(),
@@ -318,6 +333,7 @@ pub enum CompareMetricValue {
 
 impl CompareMetricValue {
     /// The field exactly as the metrics CSV writes it.
+    #[must_use]
     pub fn to_csv_field(&self) -> String {
         match self {
             Self::Decimal(value) | Self::Rate(Rate::Defined(value)) => format!("{value:.4}"),
@@ -345,7 +361,7 @@ pub enum LanguageMetricKind {
 }
 
 impl LanguageMetricKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::GoldWords => "gold_words",
             Self::Matches => "matches",
@@ -367,7 +383,7 @@ pub enum AgreementScope {
 }
 
 impl AgreementScope {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Utterance => "utterance_language",
             Self::Word => "word_language",
@@ -389,7 +405,7 @@ pub enum AgreementMetricKind {
 }
 
 impl AgreementMetricKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Scored => "scored",
             Self::Agreeing => "agreeing",
@@ -417,7 +433,7 @@ pub enum SwitchMetricKind {
 }
 
 impl SwitchMetricKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Both => "both",
             Self::GoldOnly => "gold_only",
@@ -443,7 +459,7 @@ pub enum ComparePosMetricKind {
 }
 
 impl ComparePosMetricKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Matches => "matches",
             Self::Insertions => "insertions",
@@ -475,7 +491,7 @@ enum WordEvidence<'a> {
 }
 
 impl<'a> ScoredWord<'a> {
-    pub(in crate::compare) fn matched(
+    pub(in crate::compare) const fn matched(
         text: String,
         pos: Option<String>,
         gold: &'a LanguagedWord<Gold>,
@@ -491,7 +507,7 @@ impl<'a> ScoredWord<'a> {
         }
     }
 
-    pub(in crate::compare) fn inserted(
+    pub(in crate::compare) const fn inserted(
         text: String,
         pos: Option<String>,
         attribution: InsertionAttribution<'a>,
@@ -506,7 +522,7 @@ impl<'a> ScoredWord<'a> {
         }
     }
 
-    pub(in crate::compare) fn deleted(
+    pub(in crate::compare) const fn deleted(
         text: String,
         pos: Option<String>,
         gold: &'a LanguagedWord<Gold>,
@@ -665,7 +681,7 @@ impl DisplacementTally {
     }
 
     /// A main word with no gold words to cancel against: an edit now.
-    fn extra_without_gold(&mut self) {
+    const fn extra_without_gold(&mut self) {
         self.edits += 1;
     }
 
@@ -678,11 +694,12 @@ impl DisplacementTally {
         };
         let mut extra = Vec::with_capacity(carried.len());
         for (target, word) in carried {
-            match target == utterance {
-                true => extra.push(word),
+            if target == utterance {
+                extra.push(word);
+            } else {
                 // Carried toward an utterance the alignment did not enter
                 // next: nothing is left to cancel against.
-                false => self.edits += 1,
+                self.edits += 1;
             }
         }
         self.open.insert(OpenUtterance {

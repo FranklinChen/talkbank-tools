@@ -82,22 +82,24 @@ pub struct UtrRegionSpan {
 
 impl UtrRegionSpan {
     /// First utterance the region owns.
-    pub fn first_utterance(&self) -> UtrUtteranceOrdinal {
+    #[must_use]
+    pub const fn first_utterance(&self) -> UtrUtteranceOrdinal {
         self.first_utterance
     }
 
     /// Last utterance the region owns (inclusive).
-    pub fn last_utterance(&self) -> UtrUtteranceOrdinal {
+    #[must_use]
+    pub const fn last_utterance(&self) -> UtrUtteranceOrdinal {
         self.last_utterance
     }
 
     /// How many utterances the region owns.
-    pub(super) fn owned(&self) -> usize {
+    pub(super) const fn owned(&self) -> usize {
         self.last_utterance.index() + 1 - self.first_utterance.index()
     }
 
     /// Whether a provider token with this onset belongs to the region's window.
-    pub(super) fn admits_onset(&self, onset_ms: u64) -> bool {
+    pub(super) const fn admits_onset(&self, onset_ms: u64) -> bool {
         let above_floor = match self.onset_floor {
             UtrRegionEdge::StreamEdge => true,
             UtrRegionEdge::Anchor { ms, .. } => onset_ms >= ms,
@@ -139,7 +141,7 @@ impl UtrRegion {
     /// The owned span, as published in evidence. Production reads it from
     /// the region's [`SearchedCensus`], which carries it into the plan.
     #[cfg(test)]
-    pub(super) fn span(&self) -> UtrRegionSpan {
+    pub(super) const fn span(&self) -> UtrRegionSpan {
         self.span
     }
 
@@ -154,7 +156,7 @@ impl UtrRegion {
     }
 
     /// The region's tokens, in stream order, with their original ordinals.
-    pub(super) fn admits(&self, token: &AsrTimingToken) -> bool {
+    pub(super) const fn admits(&self, token: &AsrTimingToken) -> bool {
         self.span.admits_onset(token.start_ms)
     }
 }
@@ -170,12 +172,12 @@ pub(super) struct SearchedCensus<'c> {
 
 impl<'c> SearchedCensus<'c> {
     /// The span whose search this is.
-    pub(super) fn span(&self) -> UtrRegionSpan {
+    pub(super) const fn span(&self) -> UtrRegionSpan {
         self.span
     }
 
     /// The searched utterances, in the region's local numbering.
-    pub(super) fn infos(&self) -> &'c [UtrUtteranceInfo] {
+    pub(super) const fn infos(&self) -> &'c [UtrUtteranceInfo] {
         self.infos
     }
 
@@ -202,7 +204,7 @@ pub(super) struct PerSearched<'c, T> {
 
 impl<'c, T> PerSearched<'c, T> {
     /// The census these values belong to.
-    pub(super) fn searched(&self) -> SearchedCensus<'c> {
+    pub(super) const fn searched(&self) -> SearchedCensus<'c> {
         self.searched
     }
 
@@ -231,7 +233,7 @@ struct Anchor {
 /// overlap-marked. An overlap-marked utterance may legitimately start before
 /// its predecessor ends, so its bullet does not separate what precedes it
 /// from what follows.
-fn anchor_timing(info: &UtrUtteranceInfo) -> Option<ObservedWordTiming> {
+const fn anchor_timing(info: &UtrUtteranceInfo) -> Option<ObservedWordTiming> {
     if info.has_lazy_overlap || info.has_ca_overlap {
         return None;
     }

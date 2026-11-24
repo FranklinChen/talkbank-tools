@@ -4,15 +4,15 @@
 use std::path::Path;
 
 /// Frames in each unpadded fixture.
-pub(crate) const FRAMES: u64 = 11_485;
+pub const FRAMES: u64 = 11_485;
 
 /// The MPEG-1 fixture's true length in whole milliseconds, rounded UP: 11,485
 /// frames of 1152 samples at 44,100 Hz is 300,016.33 ms.
-pub(crate) const TRUE_LENGTH_MS: u64 = 300_017;
+pub const TRUE_LENGTH_MS: u64 = 300_017;
 
 /// ffprobe's bitrate ESTIMATE for the MPEG-1 fixture, in milliseconds: the
 /// number the probe returned before 2026-09-30 (file bytes * 8 / 128,000).
-pub(crate) const ESTIMATED_LENGTH_MS: f64 = 299_327.8;
+pub const ESTIMATED_LENGTH_MS: f64 = 299_327.8;
 
 /// Write a constant-bitrate MPEG-1 Layer III stream shaped like the recordings
 /// that exposed the defect: 128 kbit/s at 44.1 kHz, no Xing or Info header, no
@@ -30,7 +30,7 @@ pub(crate) const ESTIMATED_LENGTH_MS: f64 = 299_327.8;
 /// `main_data_begin` is 0 and every granule codes no spectral values. ffmpeg
 /// decodes each to 1152 samples of silence without a diagnostic, which the
 /// tests using this assert rather than assume.
-pub(crate) fn write_unpadded_cbr_mp3(path: &Path) {
+pub fn write_unpadded_cbr_mp3(path: &Path) {
     // Sync, MPEG-1, Layer III, no CRC | 128 kbit/s, 44.1 kHz, unpadded | mono.
     write_frames(path, [0xFF, 0xFB, 0x90, 0xC0], 417);
 }
@@ -39,7 +39,7 @@ pub(crate) fn write_unpadded_cbr_mp3(path: &Path) {
 /// frame unpadded (208 bytes where the bitrate implies 208.98). The same
 /// shortfall on the half-size frame, so a walk that assumed 1152 samples per
 /// frame would be off by a factor of two here.
-pub(crate) fn write_unpadded_cbr_mpeg2_mp3(path: &Path) {
+pub fn write_unpadded_cbr_mpeg2_mp3(path: &Path) {
     // Sync, MPEG-2, Layer III, no CRC | 64 kbit/s, 22.05 kHz, unpadded | mono.
     write_frames(path, [0xFF, 0xF3, 0x80, 0xC0], 208);
 }
@@ -52,7 +52,7 @@ pub(crate) fn write_unpadded_cbr_mpeg2_mp3(path: &Path) {
 /// `pcm_s16le`) without an encoder: the Rev.AI provider-media boundary probes
 /// the container of what it is handed, so arbitrary bytes no longer stand in
 /// for a recording there.
-pub(crate) fn write_pcm_wav(path: &Path, seed: u8) {
+pub fn write_pcm_wav(path: &Path, seed: u8) {
     const RATE_HZ: u32 = 16_000;
     const CHANNELS: u16 = 1;
     const BITS_PER_SAMPLE: u16 = 16;

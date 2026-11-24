@@ -27,6 +27,7 @@ from batchalign.inference._domain_types import (
     SpeakerId,
     TimestampMs,
 )
+from batchalign.inference._speaker_model_evidence import SpeakerLoadedModelGraph
 
 if TYPE_CHECKING:
     from batchalign.inference.pyannote_local import LoadedPyannotePipeline
@@ -76,7 +77,8 @@ def infer_local_pyannote_prepared_audio(
         evidence=LocalPyannoteSpeakerEvidence(
             segments=infer_pyannote_speaker_prepared_audio(
                 audio, sample_rate_hz, num_speakers, pipeline=pipeline
-            )
+            ),
+            loaded_graph=pipeline.loaded_graph,
         )
     )
 
@@ -108,6 +110,7 @@ class LocalPyannoteSpeakerEvidence(BaseModel):
 
     kind: Literal["pyannote"] = "pyannote"
     segments: list[SpeakerSegment]
+    loaded_graph: SpeakerLoadedModelGraph
 
 
 SpeakerEvidence: TypeAlias = Annotated[

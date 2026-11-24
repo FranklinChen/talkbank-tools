@@ -35,6 +35,11 @@ fn request(lang: &LanguageCode3) -> BatchInferRequest {
     }
 }
 
+/// Guards: A wait that crosses the report interval still serves the queued request.
+/// Kind: contract
+/// Not a type: The runtime can confuse the reporting timer with the actual checkout deadline.
+/// State: One native echo slot, a delayed response and a separate language request.
+/// Concurrency: A sampled claimed slot establishes occupancy before the second dispatch is submitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_request_waits_through_a_saturated_pool_instead_of_failing() {
     let python = crate::prerequisite::PythonWorker::require().interpreter();

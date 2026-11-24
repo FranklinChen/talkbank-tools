@@ -10,7 +10,7 @@ use super::OperationalCounters;
 
 /// Store-owned mutable operational counters.
 #[derive(Debug, Default)]
-pub(crate) struct OperationalCounterStore {
+pub struct OperationalCounterStore {
     counters: Mutex<OperationalCounters>,
 }
 

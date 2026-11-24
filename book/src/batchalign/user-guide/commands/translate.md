@@ -1,10 +1,15 @@
 # translate
 
 **Status:** Current
-**Last updated:** 2026-11-05 14:17 EST
+**Last updated:** 2026-11-17 17:39 EST
 
 Add translations to CHAT transcripts by injecting a
 `%xtra` tier after each utterance. Text-only, no audio involved.
+
+BA3 checks the CHAT file and reads its primary language from `@Languages:`
+before sending any text to the engine. If the file is invalid, the job reports
+the CHAT finding and its source line when available. The failed file produces
+no output.
 
 ## What gets translated
 

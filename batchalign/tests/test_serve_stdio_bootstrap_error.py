@@ -448,6 +448,8 @@ def _run_real_ensure_task(monkeypatch, failure: BaseException) -> dict[str, obje
     envelope the worker wrote."""
     from batchalign.worker._model_loading.bootstrap import start_worker
     from batchalign.worker._types import (
+        ModelStartup,
+        ProfileTarget,
         WorkerBootstrapRuntime,
         WorkerProfile,
         _state,
@@ -455,8 +457,9 @@ def _run_real_ensure_task(monkeypatch, failure: BaseException) -> dict[str, obje
 
     _state.__init__()  # type: ignore[misc]
     start_worker(
-        WorkerBootstrapRuntime(
-            task=None, lang="eng", num_speakers=1, profile=WorkerProfile.GPU
+        ModelStartup(
+            ProfileTarget(WorkerProfile.GPU),
+            WorkerBootstrapRuntime(lang="eng", num_speakers=1),
         )
     )
 

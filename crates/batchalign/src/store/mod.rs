@@ -82,7 +82,8 @@ enum Failure {
 
 impl FileFailure {
     /// A failure this build records: always both a message and a category.
-    pub fn recorded(message: String, category: FailureCategory) -> Self {
+    #[must_use]
+    pub const fn recorded(message: String, category: FailureCategory) -> Self {
         Self(Failure::Recorded { message, category })
     }
 
@@ -115,6 +116,7 @@ impl FileFailure {
     }
 
     /// The message, when one was recorded.
+    #[must_use]
     pub fn message(&self) -> Option<&str> {
         match &self.0 {
             Failure::Recorded { message, .. } | Failure::MessageOnly(message) => Some(message),
@@ -123,7 +125,8 @@ impl FileFailure {
     }
 
     /// The category, when one was recorded.
-    pub fn category(&self) -> Option<FailureCategory> {
+    #[must_use]
+    pub const fn category(&self) -> Option<FailureCategory> {
         match &self.0 {
             Failure::Recorded { category, .. } | Failure::CategoryOnly(category) => Some(*category),
             Failure::MessageOnly(_) | Failure::Unrecorded => None,
@@ -213,7 +216,8 @@ pub enum FilePhase {
 
 impl FilePhase {
     /// The API's status vocabulary. A pending retry is still `Processing`.
-    pub fn kind(&self) -> FileStatusKind {
+    #[must_use]
+    pub const fn kind(&self) -> FileStatusKind {
         match self {
             Self::Queued => FileStatusKind::Queued,
             Self::Processing { .. } | Self::RetryPending { .. } => FileStatusKind::Processing,
@@ -225,7 +229,8 @@ impl FilePhase {
     }
 
     /// When the current or last attempt started.
-    pub fn started_at(&self) -> Option<MachineTime> {
+    #[must_use]
+    pub const fn started_at(&self) -> Option<MachineTime> {
         match self {
             Self::Queued => None,
             Self::Processing { started_at }
@@ -238,7 +243,8 @@ impl FilePhase {
     }
 
     /// When the file finished: only a terminal file has finished.
-    pub fn finished_at(&self) -> Option<MachineTime> {
+    #[must_use]
+    pub const fn finished_at(&self) -> Option<MachineTime> {
         match self {
             Self::Done { finished_at, .. }
             | Self::Diagnosed { finished_at, .. }
@@ -251,7 +257,8 @@ impl FilePhase {
     }
 
     /// The failure this phase carries, if any.
-    pub fn failure(&self) -> Option<&FileFailure> {
+    #[must_use]
+    pub const fn failure(&self) -> Option<&FileFailure> {
         match self {
             Self::RetryPending { failure, .. } | Self::Error { failure, .. } => Some(failure),
             Self::Interrupted { last_failure, .. } => last_failure.as_ref(),
@@ -262,7 +269,8 @@ impl FilePhase {
     }
 
     /// The admission diagnostics of a file written with them.
-    pub fn diagnostics(&self) -> Option<&FileOutputDiagnostics> {
+    #[must_use]
+    pub const fn diagnostics(&self) -> Option<&FileOutputDiagnostics> {
         match self {
             Self::Diagnosed { diagnostics, .. } => diagnostics.as_ref(),
             Self::Queued
@@ -276,6 +284,7 @@ impl FilePhase {
 
     /// What the producer of a written output left out of its work on
     /// purpose; empty for every other phase.
+    #[must_use]
     pub fn exclusions(&self) -> &[OutputExclusionRecord] {
         match self {
             Self::Done { exclusions, .. } | Self::Diagnosed { exclusions, .. } => exclusions,
@@ -317,7 +326,8 @@ impl FilePhase {
     }
 
     /// When a pending retry may run.
-    pub fn next_eligible_at(&self) -> Option<MachineTime> {
+    #[must_use]
+    pub const fn next_eligible_at(&self) -> Option<MachineTime> {
         match self {
             Self::RetryPending { retry_at, .. } => Some(*retry_at),
             Self::Queued
@@ -330,6 +340,7 @@ impl FilePhase {
     }
 
     /// The latest moment this file is known to have moved (stall alarm).
+    #[must_use]
     pub fn last_activity_at(&self) -> Option<MachineTime> {
         let failed_at = match self {
             Self::RetryPending { failed_at, .. } => *failed_at,
@@ -702,7 +713,7 @@ impl OpenWorkerWaits {
         }
     }
 
-    fn count(&mut self, wait: PoolWait) -> &mut u32 {
+    const fn count(&mut self, wait: PoolWait) -> &mut u32 {
         match wait {
             PoolWait::Worker => &mut self.worker,
             PoolWait::HostMemory => &mut self.host_memory,
@@ -711,7 +722,7 @@ impl OpenWorkerWaits {
 
     /// The stage an open wait shows, if any: a host-memory wait before a
     /// worker wait, since memory is the scarcer of the two to wait on.
-    pub(crate) fn shown_stage(self) -> Option<FileProgressStage> {
+    pub(crate) const fn shown_stage(self) -> Option<FileProgressStage> {
         match (self.host_memory, self.worker) {
             (1.., _) => Some(FileProgressStage::WaitingForHostMemory),
             (0, 1..) => Some(FileProgressStage::WaitingForWorker),
@@ -757,6 +768,7 @@ pub struct FileStatus {
 
 impl FileStatus {
     /// Create a new `FileStatus` in the `Queued` state.
+    #[must_use]
     pub fn new(filename: DisplayPath) -> Self {
         Self {
             filename,
@@ -792,7 +804,8 @@ impl FileStatus {
     }
 
     /// The API status of this file.
-    pub fn status(&self) -> FileStatusKind {
+    #[must_use]
+    pub const fn status(&self) -> FileStatusKind {
         self.phase.kind()
     }
 
@@ -998,7 +1011,7 @@ impl JobStore {
     }
 
     /// The host this store was composed on.
-    pub(crate) fn host(&self) -> &Arc<crate::host_facts::HostSnapshot> {
+    pub(crate) const fn host(&self) -> &Arc<crate::host_facts::HostSnapshot> {
         &self.host
     }
 
@@ -1014,12 +1027,12 @@ impl JobStore {
     }
 
     /// Borrow the immutable server configuration owned by the store.
-    pub(crate) fn config(&self) -> &ServerConfig {
+    pub(crate) const fn config(&self) -> &ServerConfig {
         &self.config
     }
 
     /// Borrow the node identifier used for local queue-lease ownership.
-    pub(crate) fn node_id(&self) -> &NodeId {
+    pub(crate) const fn node_id(&self) -> &NodeId {
         &self.node_id
     }
 
@@ -1029,7 +1042,7 @@ impl JobStore {
     }
 
     /// Share the same trace owner with a run's immutable dispatch context.
-    pub(crate) fn trace_store_handle(&self) -> &Arc<crate::trace_store::TraceStore> {
+    pub(crate) const fn trace_store_handle(&self) -> &Arc<crate::trace_store::TraceStore> {
         &self.trace_store
     }
 

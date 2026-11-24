@@ -352,7 +352,7 @@ fn scan_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn is_word_boundary_match(line: &str, start: usize, end: usize) -> bool {
+const fn is_word_boundary_match(line: &str, start: usize, end: usize) -> bool {
     let before_ok = start == 0
         || !line.as_bytes()[start - 1].is_ascii_alphanumeric()
             && line.as_bytes()[start - 1] != b'_';

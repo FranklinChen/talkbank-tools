@@ -35,7 +35,8 @@ impl HostExecutionPolicy {
     ///
     /// In every mode no model loads at a worker's start: each loads in its
     /// task's `ensure_task`, before the task's first request.
-    pub fn from_memory_tier(memory_tier: MemoryTier) -> Self {
+    #[must_use]
+    pub const fn from_memory_tier(memory_tier: MemoryTier) -> Self {
         match memory_tier.kind {
             MemoryTierKind::Small => Self {
                 memory_tier,
@@ -57,11 +58,13 @@ impl HostExecutionPolicy {
     /// Both `Task` (small) and `LazyProfile` (medium) are constrained, they
     /// need careful memory management. Only `Profile` (large/fleet) is
     /// unconstrained.
-    pub fn is_constrained_host(self) -> bool {
+    #[must_use]
+    pub const fn is_constrained_host(self) -> bool {
         !matches!(self.bootstrap_mode, WorkerBootstrapMode::Profile)
     }
 
     /// Resolve auto job concurrency using the current host policy.
+    #[must_use]
     pub fn auto_max_concurrent_jobs(self) -> usize {
         let by_cpu = std::thread::available_parallelism()
             .map(|parallelism| parallelism.get())
@@ -90,6 +93,7 @@ impl HostExecutionPolicy {
 }
 
 /// Resolve auto job concurrency from CPU and memory caps.
+#[must_use]
 pub fn auto_max_concurrent_from(by_cpu: usize, by_memory: usize) -> usize {
     by_cpu
         .clamp(1, AUTO_CONCURRENT_MAX_SLOTS)

@@ -32,7 +32,7 @@ use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 /// The runner always passes this bundle together after it chooses the
 /// transcribe command family, so keeping it typed here makes the dispatch seam
 /// explicit and keeps the function signature narrow.
-pub(crate) struct TranscribeDispatchRuntime {
+pub struct TranscribeDispatchRuntime {
     /// Worker pool used for ASR and optional speaker diarization requests.
     pub pool: Arc<WorkerPool>,
     /// Shared utterance cache used by post-ASR server-side stages.
@@ -88,7 +88,7 @@ async fn acquire_dispatch_slot(
 ///
 /// Like FA, transcribe is per-file (each file has its own audio). Files are
 /// processed concurrently up to `num_workers` at a time, bounded by a semaphore.
-pub(crate) async fn dispatch_transcribe_infer(
+pub async fn dispatch_transcribe_infer(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     runtime: TranscribeDispatchRuntime,

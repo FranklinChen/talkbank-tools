@@ -181,6 +181,7 @@ pub struct NamedAsrUtterances<'a> {
 
 impl<'a> NamedAsrUtterances<'a> {
     /// Assign neutral PAR codes while preserving provider speaker indices.
+    #[must_use]
     pub fn numbered(source: &'a [asr_postprocess::Utterance]) -> Self {
         Self {
             source,

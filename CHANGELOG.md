@@ -5,6 +5,9 @@ design; this file records how it changed.
 
 ## Unreleased
 
+- Generated CHAT comments follow the media declaration. Reprocessing repairs
+  adjacent BA3 stamps and ASR warnings left before `@Media` by earlier builds.
+
 - Audio preparation now inspects the actual container before selecting native
   decoding or PCM conversion. QuickTime audio containing MP3 now converts
   correctly even when its filename ends in `.mp3`. Byte-identical recordings

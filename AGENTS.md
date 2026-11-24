@@ -20,6 +20,12 @@ architecture permits recurs for the life of the project.
   residual gap after that design search. Remove the checks and setup that the
   new graph makes redundant, and count those reductions separately from rubric
   annotations.
+- No rubberstamping. Test review is groundwork for the
+  typestate improvement of production code and what it delivers, never the
+  goal. Decide keep, delete or replace-by-type for each test first; only a kept
+  test gets rubric lines, and accurate lines never make a weak test worth
+  keeping. Never generate rubric text in bulk or report rubric counts or an
+  empty baseline as progress; a found type change not made is still owed.
 - Before writing code or a test, ask which type change makes the defect
   unrepresentable, and make it. The compiler is the first test.
 - Give each distinct meaning its own type and each step a transition

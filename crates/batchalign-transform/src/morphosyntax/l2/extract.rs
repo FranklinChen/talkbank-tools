@@ -57,26 +57,31 @@ impl PrimaryStructuralInfo {
     }
 
     /// UD dependency relation from the primary model.
-    pub fn deprel(&self) -> &UdDeprel {
+    #[must_use]
+    pub const fn deprel(&self) -> &UdDeprel {
         &self.deprel
     }
 
     /// The host `%mor` item the primary model attached this word to.
-    pub fn head(&self) -> HeadTarget<MorItemIndex> {
+    #[must_use]
+    pub const fn head(&self) -> HeadTarget<MorItemIndex> {
         self.head
     }
 
     /// Dependency relations of words that attach TO this word.
+    #[must_use]
     pub fn dependent_deprels(&self) -> &[UdDeprel] {
         &self.dependent_deprels
     }
 
     /// UPOS of the head word (for GRA upgrade decisions).
-    pub fn head_upos(&self) -> Option<UniversalPos> {
+    #[must_use]
+    pub const fn head_upos(&self) -> Option<UniversalPos> {
         self.head_upos
     }
 
     /// Whether any dependent has deprel "case" (oblique/prepositional phrase).
+    #[must_use]
     pub fn has_case_dependent(&self) -> bool {
         self.dependent_deprels.iter().any(|d| d.base() == "case")
     }
@@ -114,40 +119,47 @@ pub struct L2DeferredPosition {
 
 impl L2DeferredPosition {
     /// Line index in `ChatFile.lines`.
-    pub fn line_idx(&self) -> usize {
+    #[must_use]
+    pub const fn line_idx(&self) -> usize {
         self.address.line().raw()
     }
 
     /// Where the position's utterance is.
-    pub fn address(&self) -> UtteranceAddress {
+    #[must_use]
+    pub const fn address(&self) -> UtteranceAddress {
         self.address
     }
 
     /// The `%mor` item the position's word was written as.
-    pub fn word_idx(&self) -> MorItemIndex {
+    #[must_use]
+    pub const fn word_idx(&self) -> MorItemIndex {
         self.word_idx
     }
 
     /// Resolved target language for secondary dispatch.
-    pub fn target_lang(&self) -> &LanguageCode {
+    #[must_use]
+    pub const fn target_lang(&self) -> &LanguageCode {
         &self.target_lang
     }
 
     /// Structural info from the primary model.
-    pub fn primary(&self) -> &PrimaryStructuralInfo {
+    #[must_use]
+    pub const fn primary(&self) -> &PrimaryStructuralInfo {
         &self.primary
     }
 
     /// The provenance-sealed text to send to the secondary model: the batch
     /// word the position was aligned from.
-    pub fn word(&self) -> &talkbank_model::ChatCleanedText {
+    #[must_use]
+    pub const fn word(&self) -> &talkbank_model::ChatCleanedText {
         &self.word
     }
 
     /// Terminator of the utterance this position sits in: an INPUT to the
     /// secondary Stanza model, which changes its analysis when
     /// sentence-final punctuation is absent or wrong.
-    pub fn terminator(&self) -> &talkbank_model::Terminator {
+    #[must_use]
+    pub const fn terminator(&self) -> &talkbank_model::Terminator {
         &self.terminator
     }
 
@@ -177,7 +189,7 @@ impl L2DeferredPosition {
 
     /// The same position in an utterance with another terminator.
     #[cfg(test)]
-    pub(crate) fn with_terminator(mut self, terminator: talkbank_model::Terminator) -> Self {
+    pub(crate) const fn with_terminator(mut self, terminator: talkbank_model::Terminator) -> Self {
         self.terminator = terminator;
         self
     }
@@ -255,6 +267,7 @@ impl L2Extraction {
     }
 
     /// The utterances whose `@s` words fall back, and why.
+    #[must_use]
     pub fn unaligned(&self) -> &[UnalignedL2Utterance] {
         &self.unaligned
     }
@@ -325,7 +338,7 @@ impl L2Extraction {
 
 /// Where the `%mor` items injection wrote for an utterance lie: the space a
 /// deferred position's word and head are named in.
-pub(crate) enum ItemPlacement<'p> {
+pub enum ItemPlacement<'p> {
     /// One item per CHAT word, in order (the main tier is kept, or every
     /// word's `%mor` was synthesized): a word's item is its own index, and a
     /// head is the CHAT word it lies in.
@@ -336,7 +349,7 @@ pub(crate) enum ItemPlacement<'p> {
 }
 
 /// The items of a retokenized utterance.
-pub(crate) struct RetokenizedItems<'p> {
+pub struct RetokenizedItems<'p> {
     /// Which items each token of the mapped walk produced.
     pub(crate) mapped: &'p TokenItems,
     /// Per mapped item, the items it became after the MWT lexicon expanded
@@ -452,7 +465,7 @@ fn resolve_dispatch_lang(resolution: &LanguageResolution) -> Option<LanguageCode
 }
 
 /// A word's UPOS, or `None` for a raw punctuation tag.
-fn upos_of(upos: &UdPunctable<UniversalPos>) -> Option<UniversalPos> {
+const fn upos_of(upos: &UdPunctable<UniversalPos>) -> Option<UniversalPos> {
     match upos {
         UdPunctable::Value(pos) => Some(*pos),
         UdPunctable::Punct(_) => None,

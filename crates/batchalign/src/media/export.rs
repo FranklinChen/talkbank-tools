@@ -4,13 +4,12 @@
 //! only inspected output can consume the new-only publication operation.
 
 use std::ffi::OsString;
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use super::probe::{AudioDuration, MediaProbe, ProbeError};
+use super::probe::{AudioDuration, MediaProbe, ObservedSingleAudio, ProbeError};
 use super::tools::{MediaTool, MediaToolError};
 
 /// User-selected output encoding; neither variant is model audio.
@@ -26,6 +25,7 @@ pub enum AudioExportFormat {
 
 impl AudioExportFormat {
     /// Canonical output suffix and container name.
+    #[must_use]
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Wav => "wav",
@@ -33,14 +33,14 @@ impl AudioExportFormat {
         }
     }
 
-    fn codec(self) -> &'static str {
+    const fn codec(self) -> &'static str {
         match self {
             Self::Wav => "pcm_s16le",
             Self::Mp3 => "libmp3lame",
         }
     }
 
-    fn output_codec(self) -> &'static str {
+    const fn output_codec(self) -> &'static str {
         match self {
             Self::Wav => "pcm_s16le",
             Self::Mp3 => "mp3",
@@ -107,85 +107,80 @@ impl From<MediaToolError> for AudioExportError {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct AudioLayout {
-    sample_rate: NonZeroU32,
-    channels: NonZeroU32,
+async fn inspect_stream(source: &Path) -> Result<ObservedSingleAudio, AudioExportError> {
+    MediaProbe::new(source)
+        .inspect_single_audio()
+        .await
+        .map_err(|error| {
+            let tool = MediaTool::Ffprobe.program();
+            match error {
+                ProbeError::FfprobeMissing { .. } => AudioExportError::Tool {
+                    tool,
+                    detail: "not installed or not on PATH".to_owned(),
+                },
+                ProbeError::Spawn { source, .. } => AudioExportError::Tool {
+                    tool,
+                    detail: source.to_string(),
+                },
+                ProbeError::Refused { diagnostics, .. } => {
+                    AudioExportError::Refused { tool, diagnostics }
+                }
+                ProbeError::Unreadable { detail, .. } => AudioExportError::Stream(detail),
+                other => AudioExportError::Duration(other),
+            }
+        })
 }
 
-#[derive(Deserialize)]
-struct StreamAnswer {
-    streams: Vec<StreamWire>,
+/// An absent destination with its admitted parent carried into encoding.
+#[derive(Debug)]
+struct NewDestination {
+    path: PathBuf,
+    parent: PathBuf,
 }
 
-#[derive(Deserialize)]
-struct StreamWire {
-    sample_rate: String,
-    channels: u32,
-    codec_name: String,
-}
-
-struct InspectedStream {
-    layout: AudioLayout,
-    codec: String,
-}
-
-async fn inspect_stream(source: &Path) -> Result<InspectedStream, AudioExportError> {
-    let args = [
-        OsString::from("-v"),
-        OsString::from("error"),
-        OsString::from("-select_streams"),
-        OsString::from("a"),
-        OsString::from("-show_entries"),
-        OsString::from("stream=sample_rate,channels,codec_name"),
-        OsString::from("-of"),
-        OsString::from("json"),
-        source.as_os_str().to_owned(),
-    ];
-    let output = MediaTool::Ffprobe.run_async(args).await?;
-    if !output.status.success() {
-        return Err(AudioExportError::Refused {
-            tool: MediaTool::Ffprobe.program(),
-            diagnostics: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+impl NewDestination {
+    fn admit(destination: &Path) -> Result<Self, AudioExportError> {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()?;
+        let name = destination
+            .file_name()
+            .ok_or_else(|| AudioExportError::Stream("destination has no filename".into()))?;
+        let path = parent.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => return Err(AudioExportError::ExistingDestination(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(Self { path, parent })
     }
-    let answer: StreamAnswer = serde_json::from_slice(&output.stdout)
-        .map_err(|error| AudioExportError::Stream(error.to_string()))?;
-    let [stream]: [StreamWire; 1] =
-        answer
-            .streams
-            .try_into()
-            .map_err(|streams: Vec<StreamWire>| {
-                AudioExportError::Stream(format!(
-                    "expected one audio stream, observed {}",
-                    streams.len()
-                ))
-            })?;
-    let sample_rate = stream
-        .sample_rate
-        .parse::<NonZeroU32>()
-        .map_err(|error| AudioExportError::Stream(error.to_string()))?;
-    let channels = NonZeroU32::new(stream.channels)
-        .ok_or_else(|| AudioExportError::Stream("zero audio channels".into()))?;
-    Ok(InspectedStream {
-        layout: AudioLayout {
-            sample_rate,
-            channels,
-        },
-        codec: stream.codec_name,
-    })
+
+    fn verify_parent(&self) -> Result<(), AudioExportError> {
+        if self.parent.canonicalize()? != self.parent {
+            return Err(AudioExportError::Stream(
+                "export destination directory changed after admission".into(),
+            ));
+        }
+        Ok(())
+    }
 }
+
+/// A primary export may optionally bind one staged destination.
+#[derive(Debug)]
+pub struct PrimaryAudioExport(AudioExportPlan);
 
 /// Source-bound encoding and new-only destination admission.
 #[derive(Debug)]
 pub struct AudioExportPlan {
     source: PathBuf,
-    destination: PathBuf,
+    destination: NewDestination,
     format: AudioExportFormat,
-    staged_destination: Option<PathBuf>,
+    staged_destination: Option<NewDestination>,
 }
 
-impl AudioExportPlan {
+impl PrimaryAudioExport {
     /// Admit a regular source and an absent destination in an existing directory.
     ///
     /// The final atomic no-clobber operation repeats destination exclusion:
@@ -201,54 +196,50 @@ impl AudioExportPlan {
                 "source is not a regular file".into(),
             ));
         }
-        require_absent(destination)?;
-        let parent = destination
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let name = destination
-            .file_name()
-            .ok_or_else(|| AudioExportError::Stream("destination has no filename".into()))?;
-        let destination = parent.canonicalize()?.join(name);
-        require_absent(&destination)?;
-        Ok(Self {
+        let destination = NewDestination::admit(destination)?;
+        if destination.path == source {
+            return Err(AudioExportError::ExistingDestination(destination.path));
+        }
+        Ok(Self(AudioExportPlan {
             source,
             destination,
             format,
             staged_destination: None,
-        })
+        }))
     }
 
-    /// Bind the managed download copy before encoding, not after obtaining proof.
-    /// Both destinations must be absent and distinct from the source and each other.
-    pub fn with_staged_copy(mut self, destination: &Path) -> Result<Self, AudioExportError> {
-        require_absent(destination)?;
-        let parent = destination.parent().ok_or_else(|| {
-            AudioExportError::Stream("staged destination has no directory".into())
-        })?;
-        let name = destination
-            .file_name()
-            .ok_or_else(|| AudioExportError::Stream("staged destination has no filename".into()))?;
-        let destination = parent.canonicalize()?.join(name);
-        require_absent(&destination)?;
-        if destination == self.source
-            || destination == self.destination
-            || self.staged_destination.is_some()
-        {
+    /// Bind one independent managed download copy before encoding.
+    pub fn with_staged_copy(self, destination: &Path) -> Result<AudioExportPlan, AudioExportError> {
+        let destination = NewDestination::admit(destination)?;
+        let mut plan = self.0;
+        if destination.path == plan.source || destination.path == plan.destination.path {
             return Err(AudioExportError::Stream(
                 "staged export destination is not independent".into(),
             ));
         }
-        self.staged_destination = Some(destination);
-        Ok(self)
+        plan.staged_destination = Some(destination);
+        Ok(plan)
     }
 
+    /// Fix this plan's destination set to its primary path.
+    #[must_use]
+    pub fn primary_only(self) -> AudioExportPlan {
+        self.0
+    }
+
+    /// Encode only the primary export.
+    pub async fn encode(self) -> Result<VerifiedAudioExport, AudioExportError> {
+        self.primary_only().encode().await
+    }
+}
+
+impl AudioExportPlan {
     /// Encode in a private adjacent file; inspect it before producing publication proof.
     /// Cancellation drops the temporary artifact and kills the owned tool process.
     pub async fn encode(self) -> Result<VerifiedAudioExport, AudioExportError> {
         let input = inspect_stream(&self.source).await?;
-        let sample_rate = input.layout.sample_rate.get();
-        let channels = input.layout.channels.get();
+        let sample_rate = input.layout().sample_rate.get();
+        let channels = input.layout().channels.get();
         if self.format == AudioExportFormat::Mp3
             && (channels > 2
                 || ![
@@ -261,14 +252,10 @@ impl AudioExportPlan {
                 sample_rate,
             });
         }
-        let parent = self
-            .destination
-            .parent()
-            .ok_or_else(|| AudioExportError::Stream("destination has no directory".into()))?;
         let temporary = tempfile::Builder::new()
             .prefix(".audio-export-")
             .suffix(&format!(".{}", self.format.extension()))
-            .tempfile_in(parent)?;
+            .tempfile_in(&self.destination.parent)?;
         let mut args: Vec<OsString> = ["-nostdin", "-v", "error", "-xerror", "-y", "-i"]
             .into_iter()
             .map(OsString::from)
@@ -309,17 +296,15 @@ impl AudioExportPlan {
             });
         }
         let encoded = inspect_stream(temporary.path()).await?;
-        if encoded.layout != input.layout || encoded.codec != self.format.output_codec() {
+        if encoded.layout() != input.layout() || encoded.codec() != self.format.output_codec() {
             return Err(AudioExportError::ProducerLayout);
         }
-        let duration = MediaProbe::new(temporary.path()).duration().await?;
+        let duration = encoded.duration().await?;
         temporary.as_file().sync_all()?;
         let staged = if let Some(destination) = self.staged_destination {
             let staged = tempfile::Builder::new()
                 .prefix(".audio-export-")
-                .tempfile_in(destination.parent().ok_or_else(|| {
-                    AudioExportError::Stream("staged destination has no directory".into())
-                })?)?;
+                .tempfile_in(&destination.parent)?;
             // Held handles prevent cancellation from recreating a dropped
             // temporary path in a delayed filesystem-copy task.
             let mut input = tokio::fs::File::from_std(temporary.reopen()?);
@@ -342,21 +327,11 @@ impl AudioExportPlan {
     }
 }
 
-fn require_absent(destination: &Path) -> Result<(), AudioExportError> {
-    match std::fs::symlink_metadata(destination) {
-        Ok(_) => Err(AudioExportError::ExistingDestination(
-            destination.to_owned(),
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Encoded and inspected artifact. No public constructor or replaceable target.
 #[derive(Debug)]
 pub struct VerifiedAudioExport {
     temporary: NamedTempFile,
-    destination: PathBuf,
+    destination: NewDestination,
     duration: AudioDuration,
     staged: Option<StagedExport>,
 }
@@ -364,45 +339,34 @@ pub struct VerifiedAudioExport {
 #[derive(Debug)]
 struct StagedExport {
     temporary: NamedTempFile,
-    destination: PathBuf,
+    destination: NewDestination,
 }
 
 impl VerifiedAudioExport {
     /// Measured nonempty encoded duration; not a linguistic-quality claim.
+    #[must_use]
     pub const fn duration(&self) -> AudioDuration {
         self.duration
     }
 
     /// Publish exactly the admitted destination, atomically refusing existing files.
     pub fn publish(self) -> Result<PathBuf, AudioExportError> {
-        verify_destination_parent(&self.destination)?;
+        self.destination.verify_parent()?;
         if let Some(staged) = self.staged {
-            verify_destination_parent(&staged.destination)?;
+            staged.destination.verify_parent()?;
             staged
                 .temporary
-                .persist_noclobber(&staged.destination)
+                .persist_noclobber(&staged.destination.path)
                 .map_err(|error| AudioExportError::Io(error.error))?;
         }
         // Publish the user-visible file last. A final competing writer can
         // leave a private staged copy, but never a claimed successful result
         // or an overwritten file; two filesystems are not one transaction.
         self.temporary
-            .persist_noclobber(&self.destination)
+            .persist_noclobber(&self.destination.path)
             .map_err(|error| AudioExportError::Io(error.error))?;
-        Ok(self.destination)
+        Ok(self.destination.path)
     }
-}
-
-fn verify_destination_parent(destination: &Path) -> Result<(), AudioExportError> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| AudioExportError::Stream("export destination has no directory".into()))?;
-    if parent.canonicalize()? != parent {
-        return Err(AudioExportError::Stream(
-            "export destination directory changed after admission".into(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

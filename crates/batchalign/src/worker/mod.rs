@@ -127,11 +127,13 @@ impl LoadingStall {
     /// A window of exactly `window`: the configuration boundary
     /// (`ServerConfig::worker_startup_stall`, `ServerConfig::ensure_task_stall`)
     /// and tests.
+    #[must_use]
     pub const fn new(window: crate::api::PositiveSeconds) -> Self {
         Self(window)
     }
 
     /// The window, in seconds.
+    #[must_use]
     pub const fn window(self) -> crate::api::PositiveSeconds {
         self.0
     }

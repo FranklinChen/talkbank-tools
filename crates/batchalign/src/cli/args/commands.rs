@@ -42,7 +42,7 @@ pub enum UtrOverlapStrategy {
     /// not been validated on operator-reported regression files. See
     /// the book chapter on align for the historical context. Pass
     /// `two-pass` explicitly to opt into the
-    /// experimental TwoPassOverlapUtr path.
+    /// experimental `TwoPassOverlapUtr` path.
     #[default]
     Auto,
     /// Single global DP pass (original algorithm). All utterances
@@ -323,6 +323,7 @@ impl AlignArgs {
     /// 2. `--utr-engine-custom`, the hidden legacy flag.
     /// 3. the BA2 compatibility switch `--whisper` (unless `--rev` is also set).
     /// 4. `--utr-engine`, which has a default and so is always present.
+    #[must_use]
     pub fn utr_selection(&self) -> Option<AppUtrEngine> {
         if !self.utr_args.selection.utr || self.utr_args.selection.no_utr {
             return None;
@@ -346,9 +347,10 @@ impl AlignArgs {
     ///
     /// `--wav2vec` was dead before 2026-07-01: nothing consulted the flag, so
     /// it silently fell through to whatever the default happened to be. That
-    /// was masked while the default WAS Wav2Vec, and exposed the moment the
+    /// was masked while the default WAS `Wav2Vec`, and exposed the moment the
     /// default became Whisper. It is consulted here.
-    pub fn fa_selection(&self) -> FaEngineName {
+    #[must_use]
+    pub const fn fa_selection(&self) -> FaEngineName {
         if let Some(ref engine) = self.fa_engine_custom {
             return *engine;
         }
@@ -403,7 +405,7 @@ pub struct AsrSelectionArgs {
     #[arg(long, hide = true)]
     pub whisperx: bool,
 
-    /// BA2 compat: use --asr-engine whisper_oai instead.
+    /// BA2 compat: use --asr-engine `whisper_oai` instead.
     #[arg(long, hide = true)]
     pub whisper_oai: bool,
 
@@ -424,6 +426,7 @@ impl AsrSelectionArgs {
     /// 1. `--asr-engine-custom`, the hidden legacy flag.
     /// 2. the BA2 compatibility switches.
     /// 3. `--asr-engine`, which has a default and so is always present.
+    #[must_use]
     pub fn selection(&self) -> AsrSelection {
         use crate::types::engines::AsrEngineName;
         if let Some(ref selection) = self.asr_engine_custom {
@@ -535,7 +538,7 @@ pub struct TranscribeArgs {
     pub no_merge_abbrev: bool,
 
     /// Opt in to the legacy Stanza constituency-parser fallback for
-    /// utterance segmentation when no language-specific TalkBank BERT
+    /// utterance segmentation when no language-specific `TalkBank` BERT
     /// model is configured for `--lang`. Default refuses substitution;
     /// pass this flag to permit the same Stanza-based segmenter that
     /// Batchalign 2 used for unsupported languages (quality varies).
@@ -739,7 +742,7 @@ pub struct UtsegArgs {
     pub num_speakers: u32,
 
     /// Opt in to the legacy Stanza constituency-parser fallback for
-    /// utterance segmentation when no language-specific TalkBank BERT
+    /// utterance segmentation when no language-specific `TalkBank` BERT
     /// model is configured for `--lang`. Default refuses substitution;
     /// pass this flag to permit the same Stanza-based segmenter that
     /// Batchalign 2 used for unsupported languages (quality varies).
@@ -786,7 +789,7 @@ pub struct BenchmarkArgs {
     #[arg(long, conflicts_with = "wor")]
     pub nowor: bool,
 
-    /// Server media bank name (from server.yaml media_mappings).
+    /// Server media bank name (from server.yaml `media_mappings`).
     #[arg(long)]
     pub bank: Option<String>,
 
@@ -956,12 +959,12 @@ pub struct SpeakerIdentifyArgs {
 
 /// The documented count, read from its one owner so the help text cannot
 /// disagree with the persisted-job fallback.
-fn documented_permutations() -> crate::chat_ops::speaker_identity::PermutationCount {
+const fn documented_permutations() -> crate::chat_ops::speaker_identity::PermutationCount {
     crate::chat_ops::speaker_identity::documented_permutation_plan().count
 }
 
 /// The documented seed, same owner.
-fn documented_permutation_seed() -> u64 {
+const fn documented_permutation_seed() -> u64 {
     crate::chat_ops::speaker_identity::documented_permutation_plan().seed
 }
 
@@ -1050,7 +1053,7 @@ pub enum BenchTarget {
     Utseg,
     /// WER benchmarking.
     Benchmark,
-    /// OpenSMILE feature extraction.
+    /// `OpenSMILE` feature extraction.
     Opensmile,
     /// Coreference resolution.
     Coref,
@@ -1060,7 +1063,8 @@ pub enum BenchTarget {
 
 impl BenchTarget {
     /// Return the server-side command name string for this target.
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Align => "align",
             Self::Transcribe => "transcribe",
@@ -1166,7 +1170,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub non_interactive: bool,
 
-    /// Download (or verify) the whisper_rs default model now, so first
+    /// Download (or verify) the `whisper_rs` default model now, so first
     /// use does not pay a ~3.1 GB download inside a job.
     #[arg(long)]
     pub prefetch_whisper_rs: bool,
@@ -1283,7 +1287,8 @@ pub enum CompareRunsCachePolicy {
 
 impl CompareRunsExecuteArgs {
     /// Convert the CLI compatibility flag into a typed cache policy at the boundary.
-    pub fn cache_policy(&self) -> CompareRunsCachePolicy {
+    #[must_use]
+    pub const fn cache_policy(&self) -> CompareRunsCachePolicy {
         if self.recompute {
             CompareRunsCachePolicy::Recompute
         } else {
@@ -1389,7 +1394,8 @@ impl ServeStartArgs {
     /// The settings this server is started with, built once from `--workers`
     /// and `--timeout`: applied to its config in the foreground, forwarded to
     /// the child otherwise.
-    pub fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
+    #[must_use]
+    pub const fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
         crate::cli::daemon::RequestedRuntime {
             workers: self.workers,
             timeout: self.timeout,
@@ -1431,7 +1437,7 @@ pub struct JobsArgs {
     /// job artifacts.
     pub job_id: Option<String>,
 
-    /// Server URL (or set BATCHALIGN_SERVER env var) for remote job listing/detail.
+    /// Server URL (or set `BATCHALIGN_SERVER` env var) for remote job listing/detail.
     #[arg(long, env = "BATCHALIGN_SERVER")]
     pub server: Option<String>,
 
@@ -1459,7 +1465,7 @@ pub struct JobsCancellationsArgs {
     /// Job ID whose cancellation history should be printed.
     pub job_id: String,
 
-    /// Server URL (or set BATCHALIGN_SERVER env var).
+    /// Server URL (or set `BATCHALIGN_SERVER` env var).
     #[arg(long, env = "BATCHALIGN_SERVER")]
     pub server: Option<String>,
 
@@ -1499,7 +1505,7 @@ pub struct LogsArgs {
 /// Arguments for the `openapi` subcommand.
 #[derive(Args, Debug, Clone)]
 pub struct OpenapiArgs {
-    /// Output path for OpenAPI JSON.
+    /// Output path for `OpenAPI` JSON.
     ///
     /// In normal mode, if omitted, schema is written to stdout.
     /// In `--check` mode, if omitted, defaults to `openapi.json`.
@@ -1685,7 +1691,7 @@ pub struct DoctorArgs {
     #[arg(long, default_value = "human")]
     pub format: DoctorFormat,
 
-    /// Custom Python path (overrides BATCHALIGN_PYTHON).
+    /// Custom Python path (overrides `BATCHALIGN_PYTHON`).
     #[arg(long)]
     pub python: Option<String>,
 
@@ -1734,14 +1740,14 @@ pub enum DoctorFormat {
 /// Replay a captured failed IPC request.
 #[derive(Args, Debug, Clone)]
 pub struct ReplayArgs {
-    /// Path to a failed_ipc_*.json dump file.
+    /// Path to a `failed_ipc`_*.json dump file.
     pub dump_file: std::path::PathBuf,
 
     /// Language override (uses dump file's worker label if omitted).
     #[arg(long)]
     pub lang: Option<String>,
 
-    /// Custom Python path (overrides BATCHALIGN_PYTHON).
+    /// Custom Python path (overrides `BATCHALIGN_PYTHON`).
     #[arg(long)]
     pub python: Option<String>,
 }

@@ -19,6 +19,7 @@ pub mod asr_preferences;
 
 pub mod command_spec;
 pub mod domain;
+pub mod evidence;
 pub mod interval;
 pub mod iso639_part1;
 pub mod machine_time;

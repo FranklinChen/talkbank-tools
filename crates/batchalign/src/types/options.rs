@@ -37,7 +37,7 @@ pub use diarize::{DiarizeOutputMode, SpeakerTrackMapping, SpeakerTrackMappingRef
 
 /// Default forced-alignment engine for serialized command options.
 ///
-/// Wave2Vec, because it reports a word's END as well as its start.
+/// `Wave2Vec`, because it reports a word's END as well as its start.
 ///
 /// Whisper FA reports token onsets only, so selecting it without deriving an
 /// end yields zero-duration words. See the FA reference chapter for the
@@ -46,12 +46,12 @@ pub use diarize::{DiarizeOutputMode, SpeakerTrackMapping, SpeakerTrackMappingRef
 /// DERIVED, not restated: the CLI flag's default comes from the same constant,
 /// so the value a user gets by omitting `--fa-engine` and the value a
 /// deserialized `AlignOptions` gets by omitting the field cannot disagree.
-fn default_fa_engine() -> FaEngineName {
+const fn default_fa_engine() -> FaEngineName {
     FaEngineName::DEFAULT
 }
 
 /// Default ASR engine for serialized command options.
-fn default_asr_engine() -> AsrEngineName {
+const fn default_asr_engine() -> AsrEngineName {
     AsrEngineName::DEFAULT
 }
 
@@ -64,17 +64,17 @@ fn default_asr_engine() -> AsrEngineName {
 /// because hidden host-specific behavior is the failure mode this
 /// project rules out (see the no-config-junk discussion in
 /// `book/src/batchalign/user-guide/commands/translate.md`).
-fn default_translate_engine() -> TranslateEngineName {
+const fn default_translate_engine() -> TranslateEngineName {
     TranslateEngineName::Google
 }
 
 /// Default Whisper batch size.
-fn default_batch_size() -> i32 {
+const fn default_batch_size() -> i32 {
     8
 }
 
 /// Default `%wor` policy for commands that enable the tier by default.
-fn default_wor_tier_include() -> WorTierPolicy {
+const fn default_wor_tier_include() -> WorTierPolicy {
     WorTierPolicy::Include
 }
 
@@ -83,7 +83,7 @@ fn default_feature_set() -> String {
     "eGeMAPSv02".to_string()
 }
 
-fn is_false(value: &bool) -> bool {
+const fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -117,7 +117,7 @@ pub struct CommonOptions {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_media_cache_tasks: Vec<String>,
 
-    /// Engine overrides selected for this job (e.g., ASR=tencent, FA=cantonese_fa).
+    /// Engine overrides selected for this job (e.g., ASR=tencent, `FA=cantonese_fa`).
     /// Typed struct with `Option<AsrEngineName>` and `Option<FaEngineName>`.
     #[serde(default, skip_serializing_if = "EngineOverrides::is_empty")]
     pub engine_overrides: EngineOverrides,
@@ -267,7 +267,7 @@ pub struct TranscribeOptions {
     pub merge_abbrev: MergeAbbrevPolicy,
 
     /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for utseg when no language-specific TalkBank BERT
+    /// fallback for utseg when no language-specific `TalkBank` BERT
     /// model is configured for the job's language. Driven by the
     /// `--utseg-fallback-stanza` CLI flag; default refuses
     /// substitution.
@@ -281,6 +281,7 @@ pub struct TranscribeOptions {
 
 impl TranscribeOptions {
     /// Return the effective ASR engine after applying any shared `asr` override.
+    #[must_use]
     pub fn effective_asr_engine(&self) -> AsrEngineName {
         self.common
             .engine_overrides
@@ -357,7 +358,7 @@ pub struct TranslateOptions {
 
     /// Translation engine selector. Default Google preserves the
     /// fleet's historical behavior; pass `--translate-engine seamless`
-    /// to opt into the local Meta SeamlessM4T model.
+    /// to opt into the local Meta `SeamlessM4T` model.
     #[serde(default = "default_translate_engine")]
     pub translate_engine: TranslateEngineName,
 
@@ -383,6 +384,7 @@ impl TranslateOptions {
     /// Precedence mirrors `AlignOptions::effective_fa_engine`:
     /// `--engine-overrides '{"translate":"..."}'` beats the dedicated
     /// `--translate-engine` flag.
+    #[must_use]
     pub fn effective_translate_engine(&self) -> TranslateEngineName {
         self.common
             .engine_overrides
@@ -408,7 +410,7 @@ pub struct UtsegOptions {
     pub common: CommonOptions,
 
     /// Operator opt-in to the legacy Stanza constituency-parser
-    /// fallback for utseg when no language-specific TalkBank BERT
+    /// fallback for utseg when no language-specific `TalkBank` BERT
     /// model is configured for the job's language. Driven by the
     /// `--utseg-fallback-stanza` CLI flag; default refuses
     /// substitution.
@@ -439,6 +441,7 @@ pub struct BenchmarkOptions {
 
 impl BenchmarkOptions {
     /// Return the effective ASR engine after applying any shared `asr` override.
+    #[must_use]
     pub fn effective_asr_engine(&self) -> AsrEngineName {
         self.common
             .engine_overrides
@@ -550,7 +553,7 @@ pub struct DiarizeOptions {
     pub output_mode: DiarizeOutputMode,
 }
 
-fn default_standalone_speaker_engine() -> SpeakerEngineName {
+const fn default_standalone_speaker_engine() -> SpeakerEngineName {
     SpeakerEngineName::Pyannote
 }
 
@@ -670,7 +673,8 @@ pub enum CommandOptions {
 
 impl CommandOptions {
     /// Get the common options shared by all commands.
-    pub fn common(&self) -> &CommonOptions {
+    #[must_use]
+    pub const fn common(&self) -> &CommonOptions {
         match self {
             Self::Align(o) => &o.common,
             Self::Transcribe(o) | Self::TranscribeS(o) => &o.common,
@@ -689,7 +693,7 @@ impl CommandOptions {
     }
 
     /// Get a mutable reference to the common options.
-    pub fn common_mut(&mut self) -> &mut CommonOptions {
+    pub const fn common_mut(&mut self) -> &mut CommonOptions {
         match self {
             Self::Align(o) => &mut o.common,
             Self::Transcribe(o) | Self::TranscribeS(o) => &mut o.common,
@@ -711,7 +715,8 @@ impl CommandOptions {
     ///
     /// Commands without an utseg surface return
     /// [`UtsegFallbackPolicy::Refuse`].
-    pub fn utseg_fallback_policy(&self) -> UtsegFallbackPolicy {
+    #[must_use]
+    pub const fn utseg_fallback_policy(&self) -> UtsegFallbackPolicy {
         match self {
             Self::Transcribe(o) | Self::TranscribeS(o) => o.utseg_fallback,
             Self::Utseg(o) => o.utseg_fallback,
@@ -724,7 +729,8 @@ impl CommandOptions {
     /// `None` for every other command rather than a defaulted engine: a
     /// translate dispatcher handed another command's options must refuse,
     /// not translate with whatever the default happens to be.
-    pub fn as_translate(&self) -> Option<&TranslateOptions> {
+    #[must_use]
+    pub const fn as_translate(&self) -> Option<&TranslateOptions> {
         match self {
             Self::Translate(options) => Some(options),
             _ => None,
@@ -732,12 +738,14 @@ impl CommandOptions {
     }
 
     /// Get the command name as a string (matches the serde tag value).
-    pub fn command_name(&self) -> &'static str {
+    #[must_use]
+    pub const fn command_name(&self) -> &'static str {
         self.command().as_str()
     }
 
     /// Command identity derived from the options variant, not a second token.
-    pub fn command(&self) -> crate::ReleasedCommand {
+    #[must_use]
+    pub const fn command(&self) -> crate::ReleasedCommand {
         use crate::ReleasedCommand as Command;
         match self {
             Self::Align(_) => Command::Align,

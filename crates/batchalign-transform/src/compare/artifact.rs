@@ -48,14 +48,17 @@ impl MachineIdentity {
     }
 
     /// Stable implementation label.
+    #[must_use]
     pub fn implementation(&self) -> &str {
         &self.implementation
     }
     /// Producer command family.
+    #[must_use]
     pub fn command(&self) -> &str {
         &self.command
     }
     /// Reproducible build identity.
+    #[must_use]
     pub fn build(&self) -> &str {
         &self.build
     }
@@ -80,10 +83,12 @@ impl HumanIdentity {
     }
 
     /// Review protocol version.
+    #[must_use]
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
     /// Reviewer cohort label.
+    #[must_use]
     pub fn cohort(&self) -> &str {
         &self.cohort
     }
@@ -111,10 +116,12 @@ pub struct ArtifactDigest {
 
 impl ArtifactDigest {
     /// Safe root-relative path of the inventoried file.
+    #[must_use]
     pub fn relative_path(&self) -> &str {
         &self.relative_path
     }
     /// Typed lowercase BLAKE3 text.
+    #[must_use]
     pub fn blake3(&self) -> &str {
         &self.blake3
     }
@@ -169,10 +176,12 @@ pub struct RunArtifactRoot(PathBuf);
 
 impl RunArtifactRoot {
     /// Construct an artifact-root path wrapper.
-    pub fn new(path: PathBuf) -> Self {
+    #[must_use]
+    pub const fn new(path: PathBuf) -> Self {
         Self(path)
     }
     /// Borrow the root path.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.0
     }
@@ -209,6 +218,7 @@ impl RelativeArtifactPath {
     }
 
     /// Return the normalized relative path text.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -226,15 +236,18 @@ pub struct ArtifactPair {
 
 impl ArtifactPair {
     /// Construct an explicit pair of safe relative paths.
-    pub fn new(left: RelativeArtifactPath, right: RelativeArtifactPath) -> Self {
+    #[must_use]
+    pub const fn new(left: RelativeArtifactPath, right: RelativeArtifactPath) -> Self {
         Self { left, right }
     }
     /// Left artifact path.
-    pub fn left(&self) -> &RelativeArtifactPath {
+    #[must_use]
+    pub const fn left(&self) -> &RelativeArtifactPath {
         &self.left
     }
     /// Right artifact path.
-    pub fn right(&self) -> &RelativeArtifactPath {
+    #[must_use]
+    pub const fn right(&self) -> &RelativeArtifactPath {
         &self.right
     }
 }
@@ -252,22 +265,26 @@ pub struct ValidatedArtifactPair {
 
 impl ValidatedArtifactPair {
     /// Verified left artifact path.
-    pub fn left(&self) -> &RelativeArtifactPath {
+    #[must_use]
+    pub const fn left(&self) -> &RelativeArtifactPath {
         &self.left
     }
 
     /// Verified right artifact path.
-    pub fn right(&self) -> &RelativeArtifactPath {
+    #[must_use]
+    pub const fn right(&self) -> &RelativeArtifactPath {
         &self.right
     }
 
     /// Whether this pair contributes to included aggregates.
-    pub fn aggregate(&self) -> &AggregatePolicy {
+    #[must_use]
+    pub const fn aggregate(&self) -> &AggregatePolicy {
         &self.aggregate
     }
 
     /// Pair-effective explicit speaker assignments, if supplied.
-    pub fn speaker_map(&self) -> Option<&BTreeMap<String, String>> {
+    #[must_use]
+    pub const fn speaker_map(&self) -> Option<&BTreeMap<String, String>> {
         self.speaker_map.as_ref()
     }
 }
@@ -305,12 +322,14 @@ pub struct ValidatedProducedRun {
 
 impl ValidatedProducedRun {
     /// Verified run manifest.
-    pub fn manifest(&self) -> &RunManifest {
+    #[must_use]
+    pub const fn manifest(&self) -> &RunManifest {
         &self.manifest
     }
 
     /// Verified artifact root.
-    pub fn artifacts(&self) -> &RunArtifactRoot {
+    #[must_use]
+    pub const fn artifacts(&self) -> &RunArtifactRoot {
         &self.artifacts
     }
 }
@@ -392,12 +411,12 @@ macro_rules! validated_plan_accessors {
     ($plan:ty) => {
         impl $plan {
             /// Verified left and right runs; neither is implicitly gold.
-            pub fn runs(&self) -> &[ValidatedProducedRun; 2] {
+            pub const fn runs(&self) -> &[ValidatedProducedRun; 2] {
                 &self.0.runs
             }
 
             /// Verified source-pairing policy.
-            pub fn pairing(&self) -> PairingPolicy {
+            pub const fn pairing(&self) -> PairingPolicy {
                 self.0.pairing
             }
 
@@ -412,7 +431,7 @@ macro_rules! validated_plan_accessors {
             }
 
             /// Tokens excluded from transcription agreement scoring.
-            pub fn exclusion_tokens(&self) -> &BTreeSet<String> {
+            pub const fn exclusion_tokens(&self) -> &BTreeSet<String> {
                 &self.0.exclusion_tokens
             }
         }
@@ -473,26 +492,32 @@ pub enum ArtifactContractError {
 
 impl RunManifest {
     /// Manifest schema version.
-    pub fn schema_version(&self) -> u32 {
+    #[must_use]
+    pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
     /// Stable run identifier.
+    #[must_use]
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
     /// Producer identity.
-    pub fn identity(&self) -> &RunIdentity {
+    #[must_use]
+    pub const fn identity(&self) -> &RunIdentity {
         &self.identity
     }
     /// Immutable source-set identifier.
+    #[must_use]
     pub fn source_id(&self) -> &str {
         &self.source_id
     }
     /// Normalized producer arguments.
-    pub fn arguments(&self) -> &BTreeMap<String, String> {
+    #[must_use]
+    pub const fn arguments(&self) -> &BTreeMap<String, String> {
         &self.arguments
     }
     /// Non-empty artifact inventory.
+    #[must_use]
     pub fn artifacts(&self) -> &[ArtifactDigest] {
         &self.artifacts
     }

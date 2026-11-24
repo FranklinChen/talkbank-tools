@@ -3,7 +3,7 @@
 //! ⚠️ **This module is frozen and no longer the active protocol.**
 //!
 //! - **Status:** Legacy compatibility surface (JSON-lines over stdio).
-//! - **Active alternative:** [`crate::worker_v2`] (typed MessagePack envelopes).
+//! - **Active alternative:** [`crate::worker_v2`] (typed `MessagePack` envelopes).
 //! - **Deprecation:** V1 support will be removed after all production tasks are migrated
 //!   to [`crate::worker_v2`]. Currently used only by `dispatch_batch_infer()` for
 //!   backward-compatibility paths that do not route through the task orchestration layer.
@@ -75,7 +75,8 @@ pub enum WorkerHealthStatus {
 
 impl WorkerHealthStatus {
     /// Return `true` when the worker reported healthy status.
-    pub fn is_ok(self) -> bool {
+    #[must_use]
+    pub const fn is_ok(self) -> bool {
         matches!(self, Self::Ok)
     }
 }
@@ -141,7 +142,7 @@ pub struct WorkerCapabilities {
     /// and `null` for every other task, whose engine is named on the results
     /// it returns instead. A worker never sends a guessed name or `"unknown"`.
     ///
-    /// Keyed by [`InferTask`] (its snake_case wire names) and valued by the
+    /// Keyed by [`InferTask`] (its `snake_case` wire names) and valued by the
     /// validated [`ReportedEngineName`], so an unknown task key, a blank name
     /// or a name carrying a provenance separator fails at deserialization. The
     /// server's capability gate
@@ -215,6 +216,7 @@ infer_tasks! {
 
 impl InferTask {
     /// The task's name on the wire and in worker argv (its serde spelling).
+    #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Morphosyntax => "morphosyntax",
@@ -270,7 +272,8 @@ pub enum ItemOutcome {
 
 impl ItemOutcome {
     /// The result payload, when the item produced one.
-    pub fn result(&self) -> Option<&serde_json::Value> {
+    #[must_use]
+    pub const fn result(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Produced { result } => Some(result.as_value()),
             Self::Failed { .. } => None,
@@ -278,6 +281,7 @@ impl ItemOutcome {
     }
 
     /// The failure, when the item failed.
+    #[must_use]
     pub fn error(&self) -> Option<&str> {
         match self {
             Self::Failed { error } => Some(error),
@@ -297,7 +301,8 @@ pub struct ItemPayload(serde_json::Value);
 
 impl ItemPayload {
     /// The payload as JSON.
-    pub fn as_value(&self) -> &serde_json::Value {
+    #[must_use]
+    pub const fn as_value(&self) -> &serde_json::Value {
         &self.0
     }
 }

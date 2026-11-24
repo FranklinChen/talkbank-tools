@@ -191,37 +191,59 @@ revision and a stable
 raw-key-derived logical identity, so multiple partial windows cannot overwrite
 each other.
 
-Dedicated speaker inference uses the same single-use shape. A validated
-speaker-cache miss becomes `SpeakerInferenceAuthorization`; consuming it yields
-one privately constructible `AuthorizedSpeakerEvidenceRun` plus one durable
-commit permit. The resolver rereads the source and proves its digest before
-constructing `VerifiedSpeakerEvidenceRun`; `SpeakerEvidenceInference` accepts
-that verified run by value and Rust prepares worker PCM from its owned bytes.
-This makes both the no-duplicate-paid-call rule and request/upload identity
-part of the Rust API rather than adapter conventions, while the commit permit
-retains the request identity and single-flight lease until validated evidence
-is durable.
+### Speaker invocation and cache evidence
 
-With `--debug-dir`, the same resolver-bound trace seed becomes a versioned
-`*_speaker_evidence.json` causal receipt. It records the source digest,
-preparation revision, backend, expected-speaker count, model revision, raw and
-derived cache identities, normalization revision, cache outcome, and named
-segment-projection revision. It also carries the segment count and a
-versioned BLAKE3 digest over the validated segment timing and speaker labels,
-so the causal receipt identifies the exact semantic projection rather than
-only the cache slot that supplied it. It contains no source path. The companion
-`<stem>.turns.json` remains the exact normalized segment set used for CHAT
-projection. Both writes are fail-closed when requested, so causal identity and
-the consumed turns cannot silently disappear from an experiment run.
+Both `diarize` and dedicated speaker inference in `transcribe` use the same
+resolver. A cache miss holds the request, the cache that authorized it, and
+its single-flight lease. Executing the miss consumes it. The resolver verifies
+the source bytes against the request digest, sends those bytes through worker
+audio preparation, and commits the correlated reply to the same cache.
+A hit carries the admitted result and has no inference authority.
 
-The trace type separates semantic projection from causal origin. A cold run and
-durable replay should have the same media/request identity, transcript
-fidelity, named projection revision, and exact projected-segment digest, but
-they must not claim the same cache outcome. The full transcribe regression compares that typed semantic projection
-and requires byte-identical final CHAT and ASR debug output, while separately
-requiring `inferred_not_found` then `replayed`. This avoids both extremes of
-ignoring provenance and normalizing debug JSON with an untyped field-deletion
-hack.
+```mermaid
+flowchart TD
+    Request["Speaker request and cache lookup"] --> Miss["Miss owns request, cache and lease"]
+    Miss --> Verify["Verify source bytes and dispatch once"]
+    Verify --> Reply["Correlated worker reply"]
+    Local["Local loader verifies and retains three SHA-256 digests"] --> Reply
+    Hosted["Hosted provider returns the completed job ID"] --> Reply
+    Reply --> Fresh["Normalize and admit fresh speaker segments"]
+    Fresh --> Raw["Persist raw result and its producer"]
+    Request -->|Raw hit| SavedRaw["Admit and normalize the retained raw result"]
+    Raw --> Derived["Persist derived segments and the same producer"]
+    SavedRaw --> Derived
+    Request -->|Derived hit| SavedSegments["Admit retained segments and producer"]
+    Derived --> Receipt["Write receipt with current cache outcome and original producer"]
+    SavedSegments --> Receipt
+    Older["Older derived row without producer evidence"] -->|Unrecorded| SavedSegments
+```
+
+With `--debug-dir`, `*_speaker_evidence.json` uses trace schema 2. In addition
+to source BLAKE3, preparation and normalization revisions, backend and expected
+speaker count, it carries the raw and derived BLAKE3 cache keys, the outcome of
+this lookup, and a versioned BLAKE3 digest of the exact projected segments.
+The existing `model_revision` field records the request's model configuration.
+The separate `producer` field records the worker request ID and dispatching
+server build, together with what the backend observed:
+
+- Local pyannote retains SHA-256 digests of the verified upstream pipeline
+  configuration, segmentation checkpoint, and embedding checkpoint. The loader
+  carries these observations on the handle it passes to inference.
+- pyannoteAI retains the completed provider job ID. The hosted service does
+  not expose a digest of the weights used for that job.
+
+Re-normalizing a raw hit and replaying a derived hit both retain their original
+producer. Older raw entries can supply backend evidence without a worker
+invocation. Older local replies can leave the graph unreported. An older
+derived entry without producer metadata explicitly reports `unrecorded`.
+Cache identities stay compatible with existing entries.
+
+The receipt omits the source path. The companion `<stem>.turns.json` retains
+the normalized segments used for CHAT projection. Requested writes continue
+to fail closed. A fresh run and its durable replay can have the same segment
+digest and producer while recording different cache outcomes. This receipt
+covers the speaker stage. Complete command provenance across all stages and
+published outputs requires a separate completion receipt.
 
 ### Utterance-boundary decision evidence
 

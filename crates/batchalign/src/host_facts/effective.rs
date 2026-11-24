@@ -78,7 +78,7 @@ pub struct ConfigOverrides {
 /// runtime input to [`EffectiveConfig::resolve`]. Each migrated knob
 /// maps one-to-one; the single `max_workers_per_key` knob fans out
 /// uniformly to all three per-profile slots (gpu/stanza/io), matching
-/// the legacy "one PoolConfig.max_workers_per_key applies to every
+/// the legacy "one `PoolConfig.max_workers_per_key` applies to every
 /// profile in the pool" semantics. Per-profile differentiation would
 /// require a `ServerConfig` shape change.
 ///
@@ -166,6 +166,7 @@ impl EffectiveConfig {
     ///
     /// Pure function: same `(overrides, facts)` always produces the
     /// same `EffectiveConfig`. No I/O, no time-dependence.
+    #[must_use]
     pub fn resolve(overrides: &ConfigOverrides, facts: &HostFacts) -> Self {
         let r: RecommendedKnobs = recommend(facts);
 
@@ -209,6 +210,7 @@ impl EffectiveConfig {
     /// command (matches the legacy single-knob `ServerConfig` shape).
     /// Otherwise the per-command recommendation is computed from the
     /// stored facts.
+    #[must_use]
     pub fn max_workers_per_job(&self, command: &ReleasedCommand) -> u32 {
         self.max_workers_per_job_override
             .unwrap_or_else(|| recommend_max_workers_per_job(&self.host_facts, command))
@@ -229,6 +231,11 @@ mod tests {
     // override None → effective = recommendation.
     // -------------------------------------------------------------------
 
+    /// Guards: With no operator overrides, every resolved knob equals its host recommendation and the memory gate falls back to the minimum free-memory constant.
+    /// Kind: contract
+    /// Not a type: `ConfigOverrides` uses Option per knob, but a type cannot carry the recommendation table's chosen value for each knob; resolution over a declared host is the remaining pure mapping.
+    /// State: None. One declared 64 GB Apple Silicon snapshot supplies every recommendation; no host is read.
+    /// Concurrency: None. The snapshot, overrides and resolved config are local to this test.
     #[test]
     fn no_overrides_yields_recommendation() {
         let facts = apple_silicon_64gb();
@@ -248,84 +255,62 @@ mod tests {
         );
     }
 
+    /// Guards: Every scalar operator override wins over its host recommendation in one resolution.
+    /// Kind: policy
+    /// Not a type: `ConfigOverrides` carries each override as Option, but the choice that Some beats the recommendation is a merge rule, not a state a type can forbid; one resolution keeps all four field oracles.
+    /// State: None. One declared 64 GB Apple Silicon snapshot and one override set cover all four scalar knobs.
+    /// Concurrency: None. The snapshot, overrides and resolved config are local to this test.
     #[test]
-    fn gpu_thread_pool_size_override_wins() {
+    fn scalar_overrides_win_over_recommendation() {
         let facts = apple_silicon_64gb();
         let overrides = ConfigOverrides {
             gpu_thread_pool_size: Some(7),
-            ..Default::default()
-        };
-        let effective = EffectiveConfig::resolve(&overrides, &facts);
-        assert_eq!(effective.gpu_thread_pool_size, 7);
-    }
-
-    /// Overriding `force_cpu` to `false` on a host whose recommendation
-    /// is `true` survives the merge (the validator will warn). This
-    /// test pins the merge contract; the warning lives in Phase D.
-    #[test]
-    fn force_cpu_override_to_false_survives_recommendation_true() {
-        let facts = apple_silicon_64gb();
-        assert!(recommend(&facts).force_cpu, "Apple Silicon recommends true");
-        let overrides = ConfigOverrides {
-            force_cpu: Some(false),
-            ..Default::default()
-        };
-        let effective = EffectiveConfig::resolve(&overrides, &facts);
-        assert!(!effective.force_cpu);
-    }
-
-    #[test]
-    fn force_cpu_override_to_true_survives_recommendation_false() {
-        let mut facts = apple_silicon_64gb();
-        facts.gpu = GpuPresence::NvidiaCuda {
-            device_count: 1,
-            total_vram_mb: 24_000,
-            driver_version: "555.42".into(),
-        };
-        assert!(!recommend(&facts).force_cpu, "CUDA recommends false");
-        let overrides = ConfigOverrides {
-            force_cpu: Some(true),
-            ..Default::default()
-        };
-        let effective = EffectiveConfig::resolve(&overrides, &facts);
-        assert!(effective.force_cpu);
-    }
-
-    #[test]
-    fn max_total_workers_override_wins() {
-        let facts = apple_silicon_64gb();
-        let overrides = ConfigOverrides {
             max_total_workers: Some(2),
-            ..Default::default()
-        };
-        let effective = EffectiveConfig::resolve(&overrides, &facts);
-        assert_eq!(effective.max_total_workers, 2);
-    }
-
-    #[test]
-    fn max_concurrent_jobs_override_wins() {
-        let facts = apple_silicon_64gb();
-        let overrides = ConfigOverrides {
             max_concurrent_jobs: Some(3),
-            ..Default::default()
-        };
-        let effective = EffectiveConfig::resolve(&overrides, &facts);
-        assert_eq!(effective.max_concurrent_jobs, 3);
-    }
-
-    #[test]
-    fn memory_gate_mb_override_wins() {
-        let facts = apple_silicon_64gb();
-        let overrides = ConfigOverrides {
             memory_gate_mb: Some(MemoryMb(16_000)),
             ..Default::default()
         };
         let effective = EffectiveConfig::resolve(&overrides, &facts);
+        assert_eq!(effective.gpu_thread_pool_size, 7);
+        assert_eq!(effective.max_total_workers, 2);
+        assert_eq!(effective.max_concurrent_jobs, 3);
         assert_eq!(effective.memory_gate_mb, MemoryMb(16_000));
     }
 
-    /// Per-profile override of `max_workers_per_key.gpu` does not
-    /// affect the other profiles' recommendations.
+    /// Guards: A `force_cpu` override survives both an Apple Silicon true recommendation and a CUDA false recommendation.
+    /// Kind: policy
+    /// Not a type: An Option<bool> override cannot encode that the operator's explicit choice outranks a contradictory recommendation; the two declared hosts remain the residual boundary.
+    /// State: None. Two in-memory fact shapes (Apple Silicon and CUDA) supply the opposing recommendations; no GPU is probed.
+    /// Concurrency: None. Each resolution owns its facts and result.
+    #[test]
+    fn force_cpu_override_survives_either_recommendation() {
+        let apple = apple_silicon_64gb();
+        assert!(recommend(&apple).force_cpu, "Apple Silicon recommends true");
+        let false_override = ConfigOverrides {
+            force_cpu: Some(false),
+            ..Default::default()
+        };
+        assert!(!EffectiveConfig::resolve(&false_override, &apple).force_cpu);
+
+        let mut cuda = apple;
+        cuda.gpu = GpuPresence::NvidiaCuda {
+            device_count: 1,
+            total_vram_mb: 24_000,
+            driver_version: "555.42".into(),
+        };
+        assert!(!recommend(&cuda).force_cpu, "CUDA recommends false");
+        let true_override = ConfigOverrides {
+            force_cpu: Some(true),
+            ..Default::default()
+        };
+        assert!(EffectiveConfig::resolve(&true_override, &cuda).force_cpu);
+    }
+
+    /// Guards: Overriding one profile's per-key worker count leaves the other two profiles at their recommendations.
+    /// Kind: policy
+    /// Not a type: `PerProfileOverrides` has one Option per profile, but the independence of those three fields through merge is a rule of `EffectiveConfig`, not a state a type can forbid.
+    /// State: None. One declared host supplies the three recommendations; all values are in memory.
+    /// Concurrency: None. The snapshot and resolved config are local to this test.
     #[test]
     fn max_workers_per_key_per_profile_override_is_independent() {
         let facts = apple_silicon_64gb();
@@ -349,6 +334,11 @@ mod tests {
     // ReleasedCommand::ALL.
     // -------------------------------------------------------------------
 
+    /// Guards: With no override, the resolved per-job count equals the recommendation for every released command.
+    /// Kind: contract
+    /// Not a type: `EffectiveConfig` stores the declared facts to recompute per-command, but that the no-override branch delegates to `recommend_max_workers_per_job` for each of the 14 commands is a mapping no type pins.
+    /// State: None. One declared 64 GB host and the released-command set are all in memory.
+    /// Concurrency: None. The resolved config is read-only across the loop.
     #[test]
     fn max_workers_per_job_no_override_matches_recommendation_per_command() {
         let facts = apple_silicon_64gb();
@@ -362,8 +352,11 @@ mod tests {
         }
     }
 
-    /// One operator-set value applies uniformly to every command
-    /// (matches the legacy single-knob `ServerConfig` shape).
+    /// Guards: One per-job override applies uniformly to all 14 released commands, decoupling it from the total-worker cap.
+    /// Kind: policy
+    /// Not a type: The override is a single Option<u32> on `EffectiveConfig`; that it fans out to every command rather than interacting with `max_total_workers` is a legacy-compatibility rule a type cannot express.
+    /// State: None. One override and one declared host cover the whole released-command set in memory.
+    /// Concurrency: None. The resolved config is read-only across the loop.
     #[test]
     fn max_workers_per_job_override_applies_to_every_command() {
         let facts = apple_silicon_64gb();
@@ -381,8 +374,11 @@ mod tests {
         }
     }
 
-    /// Spot-check that lookup by `&ReleasedCommand` works against an
-    /// arbitrary instance, not just iteration over `ALL`.
+    /// Guards: Per-job lookup works on a command built from its name, not only on the released-command array constant.
+    /// Kind: wire
+    /// Not a type: `ReleasedCommand::try_from` is the untrusted-name admission edge; a type cannot prove the resolved lookup accepts that admitted value as the array member does.
+    /// State: None. The command is parsed from a string literal; no process or host is read.
+    /// Concurrency: None. All values are owned by this call.
     #[test]
     fn max_workers_per_job_lookup_by_arbitrary_instance() {
         let facts = apple_silicon_64gb();
@@ -391,7 +387,11 @@ mod tests {
         assert!(value >= 1);
     }
 
-    /// Pure-function contract: same inputs → same output.
+    /// Guards: Resolving the same overrides and facts twice produces identical effective values and per-job results.
+    /// Kind: contract
+    /// Not a type: `EffectiveConfig` is a pure merge with no interior state, but the compiler cannot prove that equal inputs yield equal resolved knobs; this pins determinism for downstream caching.
+    /// State: None. Two in-memory resolutions over one declared host.
+    /// Concurrency: None. Both resolutions are serial and own their values.
     #[test]
     fn resolve_is_pure() {
         let facts = apple_silicon_64gb();

@@ -1,6 +1,6 @@
 //! Rust-owned worker-protocol V2 prepared-artifact lookup and reads.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "8. Worker Artifact Loading" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "8. Worker Artifact Loading" for:
 //! - Python callers: All V2 executors use these functions
 //! - Design: File-backed artifacts with future shared-memory migration path.
 
@@ -29,7 +29,7 @@ use crate::worker_execute::ExecuteFailure;
 /// Deliberately has no `Display` and no message accessor. Either would make
 /// `format!("{failure}")` type-check while discarding the category, which is
 /// the loss this type exists to prevent.
-pub(crate) enum ArtifactFailure {
+pub enum ArtifactFailure {
     /// The request never carried the attachment the task asked for.
     Missing(String),
     /// The attachment was declared but could not be read or decoded.
@@ -65,7 +65,7 @@ impl ArtifactFailure {
 /// handed back prose (`Result<(), String>`) and each caller had to guess the
 /// category. The category now travels with the value: every consumer
 /// taxonomy's `From` impl maps it to `invalid_payload`, the ruled code.
-pub(crate) struct DescriptorFailure(String);
+pub struct DescriptorFailure(String);
 
 fn validate_prepared_audio_attachment(
     attachment: &PreparedAudioRefV2,
@@ -85,7 +85,7 @@ fn validate_prepared_audio_attachment(
     Ok(())
 }
 
-pub(crate) fn validate_attachment_descriptors(
+pub fn validate_attachment_descriptors(
     attachments: &[ArtifactRefV2],
 ) -> Result<(), DescriptorFailure> {
     for attachment in attachments {
@@ -104,7 +104,7 @@ impl From<DescriptorFailure> for ArtifactFailure {
     }
 }
 
-pub(crate) fn find_attachment<'a>(
+pub fn find_attachment<'a>(
     attachments: &'a [ArtifactRefV2],
     artifact_id: &str,
 ) -> Result<&'a ArtifactRefV2, ArtifactFailure> {
@@ -166,7 +166,7 @@ fn slice_prepared_bytes(
     Ok(raw)
 }
 
-pub(crate) fn load_prepared_text_json_impl(
+pub fn load_prepared_text_json_impl(
     attachment: &PreparedTextRefV2,
 ) -> Result<String, ArtifactFailure> {
     if attachment.encoding != PreparedTextEncodingV2::Utf8Json {
@@ -213,7 +213,7 @@ fn load_prepared_audio_bytes_impl(
 
 /// The concrete type name of an attachment, for the wrong-type diagnostics
 /// below. One owner for what were two identical inline `match` arms.
-fn attachment_type_name(attachment: &ArtifactRefV2) -> &'static str {
+const fn attachment_type_name(attachment: &ArtifactRefV2) -> &'static str {
     match attachment {
         ArtifactRefV2::PreparedAudio(_) => "PreparedAudioRefV2",
         ArtifactRefV2::PreparedText(_) => "PreparedTextRefV2",
@@ -248,7 +248,7 @@ fn require_prepared_audio_attachment<'a>(
 /// froze; only an inline value (already parsed by the envelope) is
 /// serialized. Whether the text is valid JSON is the CONSUMER's question,
 /// asked where the answer can carry the right category.
-pub(crate) fn load_json_attachment_text(
+pub fn load_json_attachment_text(
     attachments: &[ArtifactRefV2],
     artifact_id: &str,
 ) -> Result<String, ArtifactFailure> {
@@ -266,7 +266,7 @@ pub(crate) fn load_json_attachment_text(
     }
 }
 
-pub(crate) fn require_prepared_text_attachment<'a>(
+pub fn require_prepared_text_attachment<'a>(
     attachments: &'a [ArtifactRefV2],
     artifact_id: &str,
 ) -> Result<&'a PreparedTextRefV2, ArtifactFailure> {
@@ -318,12 +318,12 @@ fn decode_f32le_audio(raw: Vec<u8>) -> Vec<f32> {
 /// `decode_f32le_audio`) are PRIVATE to this module, so this type really is
 /// the only route from an executor to decoded samples: the check travels with
 /// the value, and the un-proved path has no signature to reach.
-pub(crate) struct MonoPreparedAudio<'a>(&'a PreparedAudioRefV2);
+pub struct MonoPreparedAudio<'a>(&'a PreparedAudioRefV2);
 
 impl<'a> MonoPreparedAudio<'a> {
     /// The underlying descriptor, for callers that need the sample rate or
     /// source path alongside the samples.
-    pub(crate) fn descriptor(&self) -> &'a PreparedAudioRefV2 {
+    pub(crate) const fn descriptor(&self) -> &'a PreparedAudioRefV2 {
         self.0
     }
 
@@ -341,7 +341,7 @@ impl<'a> MonoPreparedAudio<'a> {
 ///
 /// `task_label` keeps each executor's established message wording
 /// ("<label> currently expects mono prepared audio").
-pub(crate) fn require_mono_prepared_audio<'a>(
+pub fn require_mono_prepared_audio<'a>(
     attachments: &'a [ArtifactRefV2],
     artifact_id: &str,
     task_label: &str,

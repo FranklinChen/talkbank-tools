@@ -15,7 +15,7 @@ use crate::inject::MisalignmentClass;
 
 /// One reason the rebuild could not rewrite the main tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RebuildRefusal {
+pub enum RebuildRefusal {
     /// A token joins word `first_word` to the next word across other
     /// main-tier content (a retrace, a pause, a bracket edge).
     MergeCrossesContent { token: usize, first_word: usize },
@@ -33,7 +33,7 @@ pub(crate) enum RebuildRefusal {
 
 impl RebuildRefusal {
     /// The misalignment class this refusal reports as.
-    pub(crate) fn class(&self) -> MisalignmentClass {
+    pub(crate) const fn class(&self) -> MisalignmentClass {
         match self {
             Self::MergeCrossesContent { .. } => MisalignmentClass::MergeCrossesContent,
             Self::WordUnmapped { .. }

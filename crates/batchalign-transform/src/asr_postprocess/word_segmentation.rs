@@ -1,7 +1,7 @@
 //! Word segmentation of recognized Han text, for languages that need it.
 //!
 //! A recognizer for Taiwanese returns one word per Han character, each with
-//! its own timing. TalkBank transcripts write words, so the runs of
+//! its own timing. `TalkBank` transcripts write words, so the runs of
 //! consecutive one-character words are segmented by a lexicon-based segmenter
 //! (which one, and for which languages, is `WordSegmenterV2::for_language`;
 //! the Python worker runs it) and each segmented word takes the span its
@@ -90,6 +90,7 @@ fn single_han(word: &AsrWord) -> bool {
 impl PlannedSegmentation {
     /// Find the runs of one-character Han words in `monologues`. The only
     /// constructor of a [`SegmentationPlan`].
+    #[must_use]
     pub fn new(monologues: Vec<MonologueWords>) -> Self {
         let mut runs = Vec::new();
         for (index, monologue) in monologues.iter().enumerate() {

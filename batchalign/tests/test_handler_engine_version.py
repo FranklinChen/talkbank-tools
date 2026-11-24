@@ -38,6 +38,12 @@ from batchalign.worker._types import (
 
 
 def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) -> None:
+    """Guards: Whisper FA publishes the new window-algorithm cache identity after the load records.
+    Kind: contract
+    Not a type: The reported version string can still name an obsolete cache namespace.
+    State: A tiny fake model handle and the actual local load registry and report adapter.
+    Concurrency: The monkeypatch swaps only the test's registry and restores it afterwards.
+    """
     from batchalign.inference.fa import WHISPER_FA_ENGINE_ID
     from batchalign.tests.test_whisper_fa_resources import tiny_whisper_handle
     from batchalign.worker._model_loading.forced_alignment import load_fa_engine
@@ -57,7 +63,6 @@ def test_whisper_loader_reports_observed_window_algorithm_identity(monkeypatch) 
     )
     host = load_fa_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.FA,
             lang="eng",
             num_speakers=1,
             engine_overrides={"fa": "whisper"},
@@ -85,6 +90,12 @@ def test_stanza_version_reads_the_installed_package() -> None:
 def test_source_preserving_cantonese_load_reports_a_new_cache_namespace(
     monkeypatch,
 ) -> None:
+    """Guards: Cantonese FA reports its source-preserving cache identity only after the host loads.
+    Kind: contract
+    Not a type: The reported engine marker can still collide with older Cantonese cache entries.
+    State: A fake Cantonese host and the real load registry and reporting path.
+    Concurrency: A privately substituted registry prevents one case observing another's loaded host.
+    """
     from batchalign.inference.fa import infer_wave2vec_fa
     from batchalign.inference.languages.cantonese._cantonese_fa import (
         CANTONESE_FA_ENGINE_ID,
@@ -108,7 +119,6 @@ def test_source_preserving_cantonese_load_reports_a_new_cache_namespace(
     )
     host = load_fa_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.FA,
             lang="yue",
             num_speakers=1,
             engine_overrides={"fa": "cantonese_fa"},

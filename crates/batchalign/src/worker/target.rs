@@ -46,17 +46,20 @@ pub enum WorkerTarget {
 
 impl WorkerTarget {
     /// Build a profile bootstrap target.
-    pub fn profile(profile: WorkerProfile) -> Self {
+    #[must_use]
+    pub const fn profile(profile: WorkerProfile) -> Self {
         Self::Profile(profile)
     }
 
     /// Build a pure inference worker target.
-    pub fn infer_task(task: InferTask) -> Self {
+    #[must_use]
+    pub const fn infer_task(task: InferTask) -> Self {
         Self::InferTask(task)
     }
 
     /// Build one worker target from an infer task and host bootstrap mode.
-    pub fn from_infer_task(task: InferTask, mode: WorkerBootstrapMode) -> Self {
+    #[must_use]
+    pub const fn from_infer_task(task: InferTask, mode: WorkerBootstrapMode) -> Self {
         match mode {
             WorkerBootstrapMode::Profile | WorkerBootstrapMode::LazyProfile => {
                 Self::Profile(WorkerProfile::for_task(task))
@@ -66,6 +69,7 @@ impl WorkerTarget {
     }
 
     /// Return the string label used in logs, health responses, and worker keys.
+    #[must_use]
     pub fn label(&self) -> String {
         match self {
             Self::Profile(profile) => profile.label().to_string(),
@@ -74,7 +78,8 @@ impl WorkerTarget {
     }
 
     /// Return the shared profile that owns this target's task family.
-    pub fn profile_kind(&self) -> WorkerProfile {
+    #[must_use]
+    pub const fn profile_kind(&self) -> WorkerProfile {
         match self {
             Self::Profile(profile) => *profile,
             Self::InferTask(task) => WorkerProfile::for_task(*task),
@@ -82,7 +87,8 @@ impl WorkerTarget {
     }
 
     /// Return the specific infer task if this is a task bootstrap target.
-    pub fn task(&self) -> Option<InferTask> {
+    #[must_use]
+    pub const fn task(&self) -> Option<InferTask> {
         match self {
             Self::Profile(_) => None,
             Self::InferTask(task) => Some(*task),
@@ -91,7 +97,7 @@ impl WorkerTarget {
 
     /// Derive a target only from admitted inference requirements. A native
     /// command cannot be passed to this constructor.
-    pub(crate) fn for_inference_with_mode(
+    pub(crate) const fn for_inference_with_mode(
         requirement: InferenceRequirement,
         mode: WorkerBootstrapMode,
     ) -> Self {
@@ -99,9 +105,9 @@ impl WorkerTarget {
     }
 }
 
-/// Convert one infer task into the stable snake_case label used across Rust and
+/// Convert one infer task into the stable `snake_case` label used across Rust and
 /// Python bootstrap code.
-pub(crate) fn task_name(task: InferTask) -> &'static str {
+pub const fn task_name(task: InferTask) -> &'static str {
     task.wire_name()
 }
 

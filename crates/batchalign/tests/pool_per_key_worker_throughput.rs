@@ -9,36 +9,20 @@
 
 //! Per-key worker count throughput sweep for the Stanza profile.
 //!
-//! [`recommend_max_workers_per_key`] derives per-profile worker counts
-//! from RAM only:
+//! Sweep the Stanza per-key worker limit and measure a cold-start burst on
+//! the current host. Each sweep point admits a positive per-key count and
+//! admits a larger dispatch count from the experiment inputs. Hold that
+//! workload constant across sweep points and retain the request population.
 //!
-//! ```text
-//! gpu    = clamp(ram / 16 GB, 1, 8)
-//! stanza = clamp(ram / 12 GB, 1, 8)
-//! io     = 1
-//! ```
-//!
-//! Hosts with abundant RAM but limited core count can find the
-//! RAM-only formula recommends more Stanza workers than their cores
-//! actually support: every Stanza worker is a CPU-bound process, so
-//! oversubscribing cores costs throughput rather than buying it. This
-//! test exercises that question empirically: sweep
-//! `max_workers_per_key.stanza` while holding everything else fixed,
-//! dispatch a fixed number of concurrent batched-infer requests, and
-//! record the wall-clock to all-complete. The output line per
-//! invocation is consumed by an external orchestrator that aggregates
-//! sweep points into a throughput-vs-K plot.
-//!
-//! Run is gated by `#[ignore]` because each sweep point cold-loads `K`
-//! Stanza workers (~30 s each on a CPU build) and the Stanza Python
-//! environment may not be available everywhere.
+//! This opt-in measurement loads actual Stanza models. It isn't a CI gate or a
+//! substitute for an end-to-end run through the managed server.
 //!
 //! ## How to run
 //!
-//! Single-point invocation (set `STANZA_PER_KEY` from `1..=9`):
+//! Single-point invocation (set a positive `STANZA_PER_KEY` and a larger `STANZA_DISPATCHES`):
 //!
 //! ```text
-//! STANZA_PER_KEY=7 cargo test -p batchalign \
+//! STANZA_PER_KEY=7 STANZA_DISPATCHES=16 cargo test -p batchalign \
 //!     --test worker_integration_suite pool_per_key_worker_throughput:: -- --ignored
 //! ```
 //!
@@ -56,22 +40,42 @@
 use crate::common;
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use batchalign::api::LanguageCode3;
 use batchalign::host_facts::PerProfile;
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask};
-use common::pool_dispatch::{count_successes, launch_oversubscribed_dispatches};
+use common::pool_dispatch::launch_oversubscribed_dispatches;
 use serde_json::json;
 
-/// Concurrent dispatches launched per sweep point. Must oversubscribe
-/// `K` for any value of K we plan to test, so the per-key cap is the
-/// binding constraint and we observe the cost of the queueing imposed
-/// by it. With `K_MAX = 9` (the largest sweep value), we want
-/// `CONCURRENT >= 16` to keep at least 7 callers parked when 9 workers
-/// are busy.
-const CONCURRENT_DISPATCHES: usize = 16;
+/// One opt-in measurement owns the declared per-key limit and complete workload.
+struct SweepPoint {
+    per_key: NonZeroUsize,
+    dispatches: NonZeroUsize,
+}
+
+impl SweepPoint {
+    fn from_env() -> Self {
+        fn count(name: &str) -> NonZeroUsize {
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("set {name} for the sweep"))
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must be positive"))
+        }
+        let per_key = count("STANZA_PER_KEY");
+        let dispatches = count("STANZA_DISPATCHES");
+        assert!(
+            dispatches > per_key,
+            "the burst must exceed the per-key limit"
+        );
+        Self {
+            per_key,
+            dispatches,
+        }
+    }
+}
 
 /// Items per request. Each item is a synthetic short utterance, words
 /// list of fixed length. Stanza tokenizes + tags each item; the
@@ -82,21 +86,6 @@ const CONCURRENT_DISPATCHES: usize = 16;
 /// without inflating total sweep runtime. Adjust if the test ends up
 /// either too noisy (too short) or too slow (too long).
 const ITEMS_PER_REQUEST: usize = 50;
-
-/// Read the per-key Stanza budget from `STANZA_PER_KEY`, defaulting
-/// to a moderate `7` when unset. Reject obvious nonsense up-front
-/// so a typo never silently picks an unintended configuration.
-fn stanza_per_key_from_env() -> usize {
-    let raw = std::env::var("STANZA_PER_KEY").unwrap_or_else(|_| "7".to_owned());
-    let k: usize = raw
-        .parse()
-        .unwrap_or_else(|_| panic!("STANZA_PER_KEY must be a positive integer; got {raw:?}"));
-    assert!(
-        (1..=16).contains(&k),
-        "STANZA_PER_KEY out of plausible range; got {k}"
-    );
-    k
-}
 
 /// Build one synthetic batched-infer item, a list of `words` to be
 /// tagged by Stanza, paired with a per-item `lang` field as required by
@@ -113,15 +102,24 @@ fn synthetic_item(lang: LanguageCode3) -> serde_json::Value {
     })
 }
 
+/// Guards: A cold-start Stanza sweep reports observed capacity, time and
+/// rejection counts only with a complete request population.
+/// Kind: measurement
+/// Not a type: Actual model startup, host scheduler and process admission
+/// determine runtime and whether all requests finish under measured contention.
+/// State: An explicitly admitted sweep point, real Stanza workers and synthetic text.
+/// Concurrency: An opt-in pool owns the burst. The progress deadline bounds stalled work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "Real Stanza models; opt-in via --ignored. Reads STANZA_PER_KEY."]
+#[ignore = "Real Stanza models; opt-in via --ignored. Reads STANZA_PER_KEY and STANZA_DISPATCHES."]
 async fn measure_stanza_per_key_throughput() {
     let python = crate::prerequisite::PythonWorker::require().interpreter();
 
-    let stanza_k = stanza_per_key_from_env();
+    let sweep = SweepPoint::from_env();
+    let stanza_k = sweep.per_key.get();
+    let dispatches = sweep.dispatches.get();
     eprintln!(
         "Sweep point: stanza_per_key={stanza_k} \
-         (CONCURRENT_DISPATCHES={CONCURRENT_DISPATCHES}, \
+         (dispatches={dispatches}, \
          ITEMS_PER_REQUEST={ITEMS_PER_REQUEST})"
     );
 
@@ -130,8 +128,7 @@ async fn measure_stanza_per_key_throughput() {
     // the per-key axis: gpu and io stay at 1 so they cannot absorb
     // headroom and confound the measurement.
     let pool = std::sync::Arc::new(WorkerPool::new(PoolConfig {
-        python_path: python,
-        max_total_workers: stanza_k.max(8),
+        max_total_workers: dispatches,
         max_workers_per_key: PerProfile {
             gpu: 1,
             stanza: stanza_k,
@@ -139,13 +136,12 @@ async fn measure_stanza_per_key_throughput() {
         },
         test_echo: false,
         // Long timeouts so cold model loads (~30 s) on every spawn
-        // don't trip the readiness gate. We're measuring steady-state
-        // throughput, not warmup.
+        // don't trip the readiness gate. The observation includes startup.
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<180>(),
         ),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     }));
 
     let lang = LanguageCode3::eng();
@@ -156,8 +152,8 @@ async fn measure_stanza_per_key_throughput() {
     let started = Instant::now();
     let outcomes = launch_oversubscribed_dispatches(
         &pool,
-        CONCURRENT_DISPATCHES,
-        crate::live_deadline::WaitSubject::oversubscribed_model_dispatches(CONCURRENT_DISPATCHES),
+        dispatches,
+        crate::live_deadline::WaitSubject::oversubscribed_model_dispatches(dispatches),
         |_| lang.clone(),
         |lang, _| BatchInferRequest {
             task: InferTask::Morphosyntax,
@@ -170,7 +166,13 @@ async fn measure_stanza_per_key_throughput() {
     )
     .await;
 
-    let completed = count_successes(&outcomes);
+    let completed = outcomes
+        .iter()
+        .filter(|response| {
+            matches!(response, Ok(Ok(batch)) if batch.results.len() == ITEMS_PER_REQUEST
+            && batch.results.iter().all(|item| item.outcome.result().is_some()))
+        })
+        .count();
     for outcome in &outcomes {
         if !matches!(outcome, Ok(Ok(_))) {
             eprintln!("dispatch outcome: {outcome:?}");
@@ -189,16 +191,13 @@ async fn measure_stanza_per_key_throughput() {
         metrics.permit_rejections_total,
         metrics.spawn_rejections_total,
         completed,
-        CONCURRENT_DISPATCHES
+        dispatches
     );
 
     pool.shutdown().await;
 
-    // Sanity: assert most dispatches actually finished. The throughput
-    // measurement only means something if the pool serviced the load
-    // a config that drops half the requests is not a "fast" config.
-    assert!(
-        completed >= CONCURRENT_DISPATCHES * 3 / 4,
-        "expected most dispatches to complete; got {completed}/{CONCURRENT_DISPATCHES}"
+    assert_eq!(
+        completed, dispatches,
+        "the sweep must account for every response"
     );
 }

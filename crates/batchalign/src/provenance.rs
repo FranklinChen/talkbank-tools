@@ -443,6 +443,7 @@ impl ProvenanceComment {
 
     /// Format as the `[fc-ba3 ...]` comment string (without `@Comment:\t`
     /// prefix), under [`StampName::WRITTEN`], the only name this build writes.
+    #[must_use]
     pub fn format(&self) -> String {
         // The writing host's local time with its offset, whole seconds:
         // the form these stamps have always had in the corpora.
@@ -728,7 +729,7 @@ mod recognize {
 
     impl<'a> NamedStamp<'a> {
         /// The command this stamp records, as written.
-        pub(super) fn command(&self) -> &'a str {
+        pub(super) const fn command(&self) -> &'a str {
             self.command
         }
 
@@ -803,43 +804,78 @@ fn comment_body(line: &str) -> Option<&str> {
 // Injection
 // ---------------------------------------------------------------------------
 
-/// Find the index at which a new changeable header (such as a provenance
-/// `@Comment`) should be inserted: immediately after the last header that must
-/// precede changeable headers, i.e. the last `@ID` or constant participant
-/// header (`@Birth of` / `@Birthplace of` / `@L1 of`).
-///
-/// Per the CHAT format the constant participant headers must immediately follow
-/// the `@ID` block. Inserting after the last `@ID` *only* (ignoring the
-/// constant headers) displaces `@Birth of` and produces CLAN CHECK error 127,
-/// so we scan for the last of all four header kinds.
-pub(crate) fn insert_pos_after_constant_headers(file: &ChatFile) -> usize {
-    file.lines
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(i, line)| {
-            if let Line::Header { header, .. } = line
-                && matches!(
-                    header.as_ref(),
+/// Exclusive insertion point for generated comments in this document's preamble.
+pub(crate) struct CommentSlot<'a> {
+    file: &'a mut ChatFile,
+    index: usize,
+}
+
+impl<'a> CommentSlot<'a> {
+    pub(crate) fn in_preamble(file: &'a mut ChatFile) -> Self {
+        let preamble = file
+            .lines
+            .iter()
+            .take_while(|line| matches!(line, Line::Header { .. }))
+            .count();
+        let lines = &mut file.lines.as_mut_slice()[..preamble];
+        let anchor = lines.iter().rposition(|line| {
+            matches!(
+                line.as_header(),
+                Some(
                     Header::ID(_)
                         | Header::Birth { .. }
                         | Header::Birthplace { .. }
                         | Header::L1Of { .. }
+                        | Header::Media(_)
                 )
-            {
-                return Some(i + 1);
+            )
+        });
+        let index = match anchor {
+            Some(last) if matches!(lines[last].as_header(), Some(Header::Media(_))) => {
+                // Earlier writers inserted their comments immediately before @Media.
+                let first = lines[..last]
+                    .iter()
+                    .rposition(|line| {
+                        let Some(Header::Comment { content }) = line.as_header() else {
+                            return true;
+                        };
+                        !matches!(
+                            RecognizedComment::classify(
+                                &content.as_bullet_content().to_chat_string()
+                            ),
+                            RecognizedComment::Stamp(_)
+                                | RecognizedComment::UncheckedAsrWarning { .. }
+                        )
+                    })
+                    .map_or(0, |previous| previous + 1);
+                lines[first..=last].rotate_right(1);
+                first + 1
             }
-            None
-        })
-        .unwrap_or(0)
+            Some(last) => last + 1,
+            None => 0,
+        };
+        Self { file, index }
+    }
+
+    pub(crate) fn insert(self, content: talkbank_model::model::CommentContent) {
+        self.file.lines.insert(
+            self.index,
+            Line::header(Location::Unlocated, Header::Comment { content }),
+        );
+    }
+
+    fn inherit(self, records: impl Iterator<Item = Line>) {
+        for (offset, record) in records.enumerate() {
+            self.file.lines.insert(self.index + offset, record);
+        }
+    }
 }
 
 /// Inject a provenance comment into a CHAT file's AST.
 ///
 /// Replaces any existing stamp for the same command, under either name
 /// (`[fc-ba3 <command> |` or the legacy `[ba3 <command> |`). New comments are
-/// placed immediately after the constant participant headers (the last `@ID` /
-/// `@Birth of` / `@Birthplace of` / `@L1 of`).
+/// placed after the participant block and its optional `@Media` declaration.
 pub fn inject_provenance(
     file: &mut ChatFile,
     comment: &ProvenanceComment,
@@ -860,14 +896,7 @@ pub fn inject_provenance(
         true
     });
 
-    // Insert after the constant participant headers (not merely after the last
-    // @ID), so @Birth of / @Birthplace of / @L1 of stay adjacent to @ID.
-    let insert_pos = insert_pos_after_constant_headers(file);
-
-    file.lines.insert(
-        insert_pos,
-        Line::header(Location::Unlocated, Header::Comment { content }),
-    );
+    CommentSlot::in_preamble(file).insert(content);
     Ok(())
 }
 
@@ -894,10 +923,7 @@ pub(crate) fn inherit_morphotag_provenance(
         .filter(|line| records_morphology(line))
         .cloned();
     destination.lines.retain(|line| !records_morphology(line));
-    let insert_pos = insert_pos_after_constant_headers(destination);
-    for (offset, line) in inherited.enumerate() {
-        destination.lines.insert(insert_pos + offset, line);
-    }
+    CommentSlot::in_preamble(destination).inherit(inherited);
 }
 
 /// Inject a provenance comment into serialized CHAT text.
@@ -1064,18 +1090,8 @@ pub(crate) fn finish_incremental_morphotag_provenance(
                     && record.parse().is_ok_and(|parsed| parsed.fields.contains_key(StampField::ProvenanceIncomplete.as_str())))
             });
             if !applied.ran_no_model() || !already_marked {
-                let position = insert_pos_after_constant_headers(destination);
-                destination.lines.insert(
-                    position,
-                    Line::header(
-                        Location::Unlocated,
-                        Header::Comment {
-                            content: talkbank_model::model::CommentContent::try_from_text(
-                                stamp.format(),
-                            )?,
-                        },
-                    ),
-                );
+                let content = talkbank_model::model::CommentContent::try_from_text(stamp.format())?;
+                CommentSlot::in_preamble(destination).insert(content);
             }
             MorphologyProvenanceReport::Incomplete(cause)
         }
@@ -1527,14 +1543,7 @@ pub(crate) fn inject_unchecked_warning(
         true
     });
 
-    // Insert after the constant participant headers (same position as
-    // provenance), so @Birth of / @Birthplace of / @L1 of stay adjacent to @ID.
-    let insert_pos = insert_pos_after_constant_headers(file);
-
-    file.lines.insert(
-        insert_pos,
-        Line::header(Location::Unlocated, Header::Comment { content }),
-    );
+    CommentSlot::in_preamble(file).insert(content);
     Ok(())
 }
 
@@ -1582,8 +1591,8 @@ struct ProvenanceSeen<'a> {
 /// Returns `false` for byte-equal inputs: there is no diff to suppress.
 ///
 /// Comparison is line-based and streamed: both inputs are walked in lockstep,
-/// stamp and warning lines are set aside on either side (so a stamp that moved
-/// position is not a difference by itself), and the set-aside provenance is
+/// stamp and warning lines are set aside on either side (except that crossing
+/// the media declaration changes header validity), and the set-aside provenance is
 /// compared once both walks finish. No intermediate copy of either text is
 /// made.
 pub(crate) fn is_provenance_only_difference(
@@ -1607,6 +1616,10 @@ pub(crate) fn is_provenance_only_difference(
         let old = next_content_line(&mut old_lines, &stamped, &mut old_seen);
         let new = next_content_line(&mut new_lines, &stamped, &mut new_seen);
         if old != new {
+            return false;
+        }
+        // Moving a generated comment past @Media repairs the written header order.
+        if old.is_some_and(|line| line.starts_with("@Media:")) && old_seen != new_seen {
             return false;
         }
         if old.is_none() {
@@ -1839,6 +1852,11 @@ mod tests {
     /// Qwen is the case worth pinning because its composition has a second
     /// model: a transcript that names the recognizer but not the aligner that
     /// produced its word timings is only half attributed.
+    /// Guards: ASR provenance names each loaded model with its revision.
+    /// Kind: wire
+    /// Not a type: Worker model metadata is dynamic and multiple entries can be lost or mislabeled in output.
+    /// State: Literal loaded model identities enter the real stamp formatter.
+    /// Concurrency: Only local identity values are used.
     #[test]
     fn asr_model_records_every_loaded_model_with_its_revision() {
         use crate::types::worker_v2::{
@@ -1891,6 +1909,11 @@ mod tests {
     /// RED FIRST: utterances closed with a terminator the pipeline added
     /// were reported only in a log line; the file's own stamp now counts
     /// them, and says nothing when there were none.
+    /// Guards: The transcribe stamp records synthesized terminator counts only when present.
+    /// Kind: wire
+    /// Not a type: Actual processing may synthesize zero or multiple terminators and the field depends on that observation.
+    /// State: Two synthesis receipts feed the real provenance formatter.
+    /// Concurrency: No worker, file or cache effect.
     #[test]
     fn the_transcribe_stamp_counts_synthesized_terminators() {
         let asr =
@@ -1918,6 +1941,11 @@ mod tests {
     /// A reader of a transcript can tell whether `--merge-abbrev` ran on the
     /// recognized words: the stamp says so when it did, even when no run of
     /// letters spelled an abbreviation, and is silent when it was not asked.
+    /// Guards: The transcribe stamp records actual abbreviation merge execution.
+    /// Kind: wire
+    /// Not a type: The operation can complete with or without optional abbreviation normalization and the field reflects that value.
+    /// State: Two typed options and outcome receipts drive the actual formatter.
+    /// Concurrency: Pure formatting over local metadata.
     #[test]
     fn the_transcribe_stamp_records_that_abbreviation_merging_ran() {
         let asr =
@@ -1939,6 +1967,11 @@ mod tests {
         assert!(!not_requested.contains("merge_abbrev"), "{not_requested}");
     }
 
+    /// Guards: Provenance renders selected fields and valid fieldless command envelopes.
+    /// Kind: wire
+    /// Not a type: Actual command/field lists can produce different literal envelope layout and delimiter behavior.
+    /// State: Morphotag with fields and a fieldless utseg stamp exercise the writer.
+    /// Concurrency: Immutable metadata and build identity only.
     #[test]
     fn format_morphotag_provenance() {
         let comment = ProvenanceComment::new(ReleasedCommand::Morphotag)
@@ -1950,11 +1983,7 @@ mod tests {
             crate::build_hash()
         )));
         assert!(formatted.ends_with(']'));
-    }
 
-    /// Every stamp names the build that wrote it, even with no other field.
-    #[test]
-    fn format_empty_fields() {
         let formatted = ProvenanceComment::new(ReleasedCommand::Utseg).format();
         assert!(
             formatted.starts_with(&format!("[fc-ba3 utseg | build={} | ", crate::build_hash()))
@@ -1964,6 +1993,11 @@ mod tests {
 
     /// The build field reads back through the same codec, and a stamp written
     /// before the field existed still reads back, with no build.
+    /// Guards: New stamps round-trip the build ID and older stamps with no build remain readable.
+    /// Kind: wire
+    /// Not a type: Persisted stamp bytes can predate the build field even when all other metadata is valid.
+    /// State: Formatter output and a literal legacy stamp enter real parsing and extraction.
+    /// Concurrency: Only local immutable input bytes.
     #[test]
     fn the_build_field_reads_back_and_older_stamps_still_read() {
         let written = ProvenanceComment::new(ReleasedCommand::Align)
@@ -1987,6 +2021,11 @@ mod tests {
     /// A rebuild that reproduces the same output is not a reason to rewrite:
     /// the build field is set aside like the timestamp, whether the on-disk
     /// stamp names another build or predates the field.
+    /// Guards: Cosmetic build and timestamp changes make a provenance-only difference while an engine change is meaningful.
+    /// Kind: policy
+    /// Not a type: Two actual transcripts may differ in build metadata alone or in the engine recorded.
+    /// State: Literal older and current comments exercise the semantic no-op predicate.
+    /// Concurrency: Pure comparisons with no filesystem writes.
     #[test]
     fn provenance_only_diff_sets_the_build_aside() {
         let body = "*PAR:\thello .\n@End\n";
@@ -2022,6 +2061,11 @@ mod tests {
 
     /// The writer and the reader are one codec: what is written reads back,
     /// the command through step one and the rest through step two.
+    /// Guards: The stamp codec round-trips exact fields and timestamp for ordinary and empty field lists.
+    /// Kind: wire
+    /// Not a type: Delimiter and spacing rules can alter literal values and parsing of empty lists.
+    /// State: Two exact envelopes pass through the real text writer and reader.
+    /// Concurrency: Pure encoding and decoding.
     #[test]
     fn the_stamp_codec_reads_what_it_writes() {
         let written = StampCodec::write(
@@ -2057,6 +2101,11 @@ mod tests {
     /// a stamp for another command are different facts, and the no-op write
     /// gate acts differently on each; a recognizer that could only say "parsed"
     /// or "did not parse" would force two of them together.
+    /// Guards: Classification preserves ownership under both spellings and identifies malformed fields or foreign comments.
+    /// Kind: wire
+    /// Not a type: A saved comment can have a valid command token and a damaged body or foreign prefix.
+    /// State: Current, legacy and foreign literal stamps exercise classifier and parser.
+    /// Concurrency: All strings are immutable local values.
     #[test]
     fn classification_names_a_command_before_the_body_is_parsed() {
         // Ours, named, and the body parses.
@@ -2114,12 +2163,7 @@ mod tests {
             ),
             RecognizedComment::UncheckedAsrWarning { engine: "rev" }
         ));
-    }
 
-    /// Recognition takes both names and nothing else, and a command must match
-    /// whole: a longer command sharing the prefix is a different stamp.
-    #[test]
-    fn stamps_are_recognized_under_both_names_only() {
         for text in [
             "[fc-ba3 transcribe | asr=rev | 2026-09-15T10:00:00-04:00]",
             "[ba3 transcribe | asr=rev | 2026-03-28T10:00:00-04:00]",
@@ -2137,6 +2181,11 @@ mod tests {
         }
     }
 
+    /// Guards: The provenance writer refuses recovered CHAT before injection.
+    /// Kind: transcript
+    /// Not a type: Source bytes can build a recovered model without qualifying for complete write admission.
+    /// State: Actual malformed CHAT and owned provenance use the real writer.
+    /// Concurrency: No filesystem effect is attempted.
     #[test]
     fn provenance_refuses_recovered_output() {
         let comment = ProvenanceComment::new(ReleasedCommand::Align);
@@ -2154,6 +2203,11 @@ mod tests {
         }
     }
 
+    /// Guards: Stamp replacement handles old and current spellings while retaining another command's provenance.
+    /// Kind: transcript
+    /// Not a type: Actual saved comments may contain older stamps alongside unrelated valid command records.
+    /// State: One literal source rewrites morphotag provenance twice and retains transcribe evidence.
+    /// Concurrency: Operations consume each local revision in order.
     #[test]
     fn inject_replaces_existing_comment_for_same_command() {
         let chat = "\
@@ -2163,6 +2217,7 @@ mod tests {
 @Participants:\tPAR Participant
 @ID:\teng|test|PAR|||||Participant|||
 @Comment:\t[ba3 morphotag | engine=stanza-1.10.0 ; lang=eng | 2026-03-28T10:00:00-04:00]
+@Comment:\t[ba3 transcribe | asr=whisper ; lang=eng | 2026-03-28T10:00:00-04:00]
 *PAR:\thello .
 @End
 ";
@@ -2174,6 +2229,7 @@ mod tests {
 
         // The legacy-named comment is ours, so it is replaced, not kept.
         assert!(!result.contains("stanza-1.10.0"));
+        assert!(result.contains("[ba3 transcribe"));
         assert!(!result.contains("[ba3 morphotag"), "{result}");
         // New comment should be present, under the written name only.
         assert!(result.contains("stanza-1.11.1"));
@@ -2191,37 +2247,19 @@ mod tests {
         )
         .expect("valid CHAT");
         assert!(!rerun.contains("stanza-1.11.1"), "{rerun}");
+        assert!(rerun.contains("[ba3 transcribe"), "{rerun}");
         assert_eq!(rerun.matches("[fc-ba3 morphotag").count(), 1, "{rerun}");
-    }
-
-    #[test]
-    fn inject_preserves_comments_from_other_commands() {
-        let chat = "\
-@UTF8
-@Begin
-@Languages:\teng
-@Participants:\tPAR Participant
-@ID:\teng|test|PAR|||||Participant|||
-@Comment:\t[ba3 transcribe | asr=whisper ; lang=eng | 2026-03-28T10:00:00-04:00]
-*PAR:\thello .
-@End
-";
-        let morphotag_comment = ProvenanceComment::new(ReleasedCommand::Morphotag)
-            .field(StampField::Engine, value("stanza-1.11.1"))
-            .field(StampField::Lang, value("eng"));
-
-        let result = inject_provenance_into_text(chat, &morphotag_comment).expect("valid CHAT");
-
-        // Another command's stamp survives, whichever name wrote it.
-        assert!(result.contains("[ba3 transcribe"));
-        // Morphotag comment should be added
-        assert!(result.contains("[fc-ba3 morphotag"));
     }
 
     /// The provenance `@Comment` must land AFTER the constant participant
     /// headers (`@Birth of` / `@Birthplace of` / `@L1 of`), not between the
     /// `@ID` block and `@Birth of`. Inserting it right after the last `@ID`
     /// displaces `@Birth of`, which CLAN CHECK flags as error 127.
+    /// Guards: Generated comments follow both participant metadata and the media declaration.
+    /// Kind: transcript
+    /// Not a type: A valid document may contain constant metadata whose exact source order matters.
+    /// State: A source with actual headers passes through parser, stamp injection and serialization.
+    /// Concurrency: One local source model is used.
     #[test]
     fn inject_provenance_lands_after_constant_headers() {
         let chat = "\
@@ -2231,6 +2269,7 @@ mod tests {
 @Participants:\tPAR Participant
 @ID:\teng|test|PAR|||||Participant|||
 @Birth of PAR:\t15-DEC-1970
+@Media:\tsample, audio
 *PAR:\thello .
 @End
 ";
@@ -2246,11 +2285,30 @@ mod tests {
         let stamp_pos = result
             .find("[fc-ba3 morphotag")
             .expect("provenance comment must be present");
+        let media_pos = result.find("@Media:").expect("retained media declaration");
         assert!(
-            birth_pos < stamp_pos,
+            birth_pos < media_pos && media_pos < stamp_pos,
             "provenance @Comment must follow @Birth of (constant headers must \
              immediately follow @ID); got:\n{result}"
         );
+
+        // Recreate an older writer's actual wire order with the identical stamp.
+        let mut lines: Vec<_> = result.lines().collect();
+        let media = lines
+            .iter()
+            .position(|line| line.starts_with("@Media:"))
+            .unwrap();
+        lines.swap(media, media + 1);
+        let older = format!("{}\n", lines.join("\n"));
+        assert!(!is_provenance_only_difference(
+            &older,
+            &result,
+            ReleasedCommand::Morphotag
+        ));
+        let repaired =
+            inject_provenance_into_text(&older, &ProvenanceComment::new(ReleasedCommand::Align))
+                .expect("read older output");
+        assert!(repaired.find("@Media:").unwrap() < repaired.find("[fc-ba3 morphotag").unwrap());
     }
 
     /// The machine-readable stamp and the human warning both name the models
@@ -2259,6 +2317,11 @@ mod tests {
     /// Agreement is the property under test. Two comments describing one run
     /// that could drift apart is the defect this workstream removes, which is
     /// why both render from one accessor rather than from two formatters.
+    /// Guards: Reported ASR identity renders the same model in the warning and provenance comment.
+    /// Kind: wire
+    /// Not a type: An actual provider report can carry arbitrary model identity that both readers must preserve.
+    /// State: Typed model identities and both real formatters.
+    /// Concurrency: Pure text generation over immutable evidence.
     #[test]
     fn asr_model_is_recorded_in_provenance_and_warning_text() {
         use crate::types::engines::AsrEngineName;
@@ -2320,6 +2383,11 @@ mod tests {
     /// nowhere: printing it would record what was asked for as though it had
     /// been observed, the same substitution the ASR bridge refuses. Replaying
     /// legacy evidence is the live case; the warning simply says less.
+    /// Guards: An unreported ASR identity contributes no invented model name in either surface.
+    /// Kind: wire
+    /// Not a type: A service can report a known engine independently of the optional model identity.
+    /// State: A typed unreported identity enters both production formatters.
+    /// Concurrency: Pure text generation over immutable evidence.
     #[test]
     fn an_unreported_identity_names_no_model_in_either_line() {
         use crate::types::engines::{AsrEngineName, FUNAUDIO_MODEL_OVERRIDE_KEY};
@@ -2354,6 +2422,11 @@ mod tests {
 
     /// A checkpoint that would break the stamp is refused when the transcribe
     /// plan is admitted, so no stamp can ever be built from it.
+    /// Guards: Checkpoint admission rejects input stamped by a later stage.
+    /// Kind: transcript
+    /// Not a type: Valid CHAT structure can still contain actual provenance inappropriate to a checkpoint.
+    /// State: Literal stamp structure enters real checkpoint plan admission.
+    /// Concurrency: All parsing and admission stay in memory.
     #[test]
     fn a_checkpoint_with_stamp_structure_is_refused_at_plan_admission() {
         use crate::transcribe::types::{AsrBackend, TranscribeAsrPlan, TranscribeAsrPlanError};
@@ -2380,6 +2453,11 @@ mod tests {
 
     /// Our warning is recognized in its current and legacy shapes, with the
     /// engine it names, and never in a line that merely shares the sentence.
+    /// Guards: Unchecked-warning recognition accepts supported historical spellings and excludes foreign text.
+    /// Kind: wire
+    /// Not a type: Actual comment contents can resemble the warning format without matching the ownership grammar.
+    /// State: A current warning and legacy and foreign string cases.
+    /// Concurrency: Pure ownership recognition over local strings.
     #[test]
     fn unchecked_warning_shapes_are_ours_only() {
         let whisper = asr_identity(
@@ -2418,6 +2496,11 @@ mod tests {
 
     /// Re-transcription replaces every warning of ours, in either shape, with
     /// one current warning, and leaves another distribution's lines alone.
+    /// Guards: Re-transcription replaces owned warnings while retaining unrelated and foreign comments.
+    /// Kind: transcript
+    /// Not a type: Actual saved CHAT may contain multiple warning families and only one is owned by this writer.
+    /// State: A synthetic transcript with prior warning text goes through the real output projection.
+    /// Concurrency: One local document is rewritten in memory.
     #[test]
     fn re_transcription_replaces_our_warnings_and_keeps_foreign_lines() {
         let chat = "\
@@ -2458,6 +2541,11 @@ mod tests {
 
     /// The unchecked-ASR warning shares the same insertion logic and must also
     /// land after the constant participant headers.
+    /// Guards: Unchecked warning insertion lands after retained constant headers.
+    /// Kind: transcript
+    /// Not a type: A source can contain several constant headers whose observable order insertion must preserve.
+    /// State: A parsed fixture and typed warning exercise actual insertion and rendering.
+    /// Concurrency: One local AST and immutable output bytes.
     #[test]
     fn inject_unchecked_warning_lands_after_constant_headers() {
         let chat = "\
@@ -2500,6 +2588,11 @@ mod tests {
 
     /// Extraction reads both names into the same entry shape: a legacy stamp
     /// from an older build and a current one from this build.
+    /// Guards: Both supported provenance spellings are extracted from actual CHAT comments.
+    /// Kind: wire
+    /// Not a type: Persisted text may contain either supported wire spelling independently of the current writer.
+    /// State: A source carrying both literal spellings enters the actual extractor.
+    /// Concurrency: No external data or shared mutation.
     #[test]
     fn extract_provenance_from_chat_under_both_names() {
         let chat = "\

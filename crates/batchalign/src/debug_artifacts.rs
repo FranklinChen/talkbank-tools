@@ -24,6 +24,7 @@ pub struct JobDebugArtifacts {
 
 impl JobDebugArtifacts {
     /// Build one debug-artifact summary from a job detail snapshot.
+    #[must_use]
     pub fn from_job_detail(job_id: JobId, detail: &JobDetail, trace_file: Option<PathBuf>) -> Self {
         Self {
             job_id,

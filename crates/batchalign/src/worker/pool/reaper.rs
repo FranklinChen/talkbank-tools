@@ -53,7 +53,7 @@ fn ensure_pid_dir() -> Option<PathBuf> {
 /// Record a spawned worker by writing its PID file.
 ///
 /// File format: `server_pid={server_pid}\n`, one line, easy to parse.
-pub(crate) fn record_worker_pid(worker_pid: u32) {
+pub fn record_worker_pid(worker_pid: u32) {
     let Some(dir) = ensure_pid_dir() else {
         return;
     };
@@ -71,7 +71,7 @@ pub(crate) fn record_worker_pid(worker_pid: u32) {
 }
 
 /// Remove a worker's PID file (called on clean shutdown / Drop).
-pub(crate) fn remove_worker_pid(worker_pid: u32) {
+pub fn remove_worker_pid(worker_pid: u32) {
     let dir = pid_dir();
     let path = dir.join(worker_pid.to_string());
     match fs::remove_file(&path) {
@@ -93,7 +93,7 @@ pub(crate) fn remove_worker_pid(worker_pid: u32) {
 /// but whose recorded server PID is dead (server crashed or exited).
 ///
 /// Returns the number of orphans reaped.
-pub(crate) fn reap_orphaned_workers() -> usize {
+pub fn reap_orphaned_workers() -> usize {
     let dir = pid_dir();
     if !dir.exists() {
         return 0;
@@ -223,7 +223,7 @@ fn parse_server_pid(content: &str) -> Option<NativePid> {
 }
 
 /// Legacy raw-ID boundary. A non-process selector cannot acquire native authority.
-pub(crate) fn process_alive(pid: u32) -> bool {
+pub fn process_alive(pid: u32) -> bool {
     NativePid::admit(pid).is_some_and(NativePid::is_alive)
 }
 
@@ -234,12 +234,12 @@ fn signal_target(pid: u32) -> Option<NativePid> {
     }
     target
 }
-pub(crate) fn terminate_pgid(pid: u32) {
+pub fn terminate_pgid(pid: u32) {
     if let Some(target) = signal_target(pid) {
         target.terminate();
     }
 }
-pub(crate) fn kill_pgid(pid: u32) {
+pub fn kill_pgid(pid: u32) {
     if let Some(target) = signal_target(pid) {
         target.kill();
     }
@@ -272,7 +272,7 @@ mod tests {
     /// Guards: PID marker bytes retain their actual positive owner ID and
     /// refuse malformed, zero and out-of-range native process selectors.
     /// Kind: wire
-    /// Not a type: external marker text and numeric range must earn NativePid
+    /// Not a type: external marker text and numeric range must earn `NativePid`
     /// admission before any process/group syscall can consume the result.
     /// State: immutable strings exercise the real marker parser and target admission.
     /// Concurrency: none
@@ -296,7 +296,7 @@ mod tests {
     /// Guards: PID records use the selected state root's worker-pids child.
     /// Kind: policy
     /// Not a type: the externally recognized directory name is a layout choice
-    /// shared with cleanup, after RuntimeLayout owns the admitted source root.
+    /// shared with cleanup, after `RuntimeLayout` owns the admitted source root.
     /// State: local path values require no directory or environment mutation.
     /// Concurrency: none
     #[test]

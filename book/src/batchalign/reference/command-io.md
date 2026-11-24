@@ -661,8 +661,10 @@ in-process execution via `DirectHost`. `DirectHost` reuses the same
 the wire, canonical filesystem paths are prepared once and handed to the
 direct host. No HTTP hop, no staging directory, no body limit.
 
-**Media resolution:** Same as local CLI, the direct host resolves
-`@Media:` headers against its filesystem (same machine, same paths).
+**Media resolution:** Same as local CLI: the direct host searches its own
+filesystem (same machine, same paths) for a recording named like the
+transcript, which CHAT requires to equal the `@Media` name (see
+[File Name Matching](file-name-matching.md)).
 
 ---
 

@@ -110,7 +110,7 @@ pub fn lookup(alpha_3: &str) -> Iso639Part1Lookup {
 ///
 /// For a consumer that must enumerate the standard rather than look one code
 /// up: the Python worker's Stanza capability table, which reads it through
-/// the PyO3 extension (`batchalign_core.ISO_639_1_PAIRS`) so that its ISO
+/// the `PyO3` extension (`batchalign_core.ISO_639_1_PAIRS`) so that its ISO
 /// 639-3 to Stanza mapping rests on this table and not on a second copy.
 pub fn pairs() -> impl ExactSizeIterator<Item = (&'static str, Iso639Part1)> {
     table::ISO_639_3_TO_PART1

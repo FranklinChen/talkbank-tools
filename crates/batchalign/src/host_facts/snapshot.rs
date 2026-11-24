@@ -98,6 +98,7 @@ impl HostSnapshot {
     /// ([`PrivateLedger::DeclaredHost`]): leases taken against declared
     /// memory never meet the machine's real servers, or another test
     /// binary's.
+    #[must_use]
     pub fn for_tests(config: &ServerConfig) -> Self {
         Self::for_tests_in(
             config,
@@ -108,6 +109,7 @@ impl HostSnapshot {
     /// The same declared host with a fixture-owned ledger. Pass this snapshot
     /// to both the app and its worker pool: unrelated test apps then cannot
     /// consume the capacity required to reach a particular boundary.
+    #[must_use]
     pub fn for_tests_in(config: &ServerConfig, ledger_path: std::path::PathBuf) -> Self {
         Self::declared_in(config, super::test_helpers::laptop_16gb(), ledger_path)
     }
@@ -116,6 +118,7 @@ impl HostSnapshot {
     /// fixture-owned ledger, for a test whose boundary depends on what the
     /// host can hold: a model that genuinely needs more than the default
     /// laptop names the machine it needs instead of inflating that laptop.
+    #[must_use]
     pub fn declared_in(
         config: &ServerConfig,
         facts: HostFacts,
@@ -146,43 +149,51 @@ impl HostSnapshot {
     }
 
     /// The facts as read.
-    pub fn facts(&self) -> &HostFacts {
+    #[must_use]
+    pub const fn facts(&self) -> &HostFacts {
         &self.facts
     }
 
     /// The operator's overrides resolved against the facts.
-    pub fn effective(&self) -> &EffectiveConfig {
+    #[must_use]
+    pub const fn effective(&self) -> &EffectiveConfig {
         &self.effective
     }
 
     /// The memory tier: the operator's declared tier, or the facts' RAM.
-    pub fn tier(&self) -> MemoryTier {
+    #[must_use]
+    pub const fn tier(&self) -> MemoryTier {
         self.tier
     }
 
     /// How many jobs may run at once: the operator's `max_concurrent_jobs`,
     /// or the tier's auto-tune.
-    pub fn max_concurrent_jobs(&self) -> usize {
+    #[must_use]
+    pub const fn max_concurrent_jobs(&self) -> usize {
         self.max_concurrent_jobs
     }
 
     /// The execution policy the tier implies.
-    pub fn policy(&self) -> HostExecutionPolicy {
+    #[must_use]
+    pub const fn policy(&self) -> HostExecutionPolicy {
         HostExecutionPolicy::from_memory_tier(self.tier)
     }
 
     /// Where this host's live figures come from.
-    pub fn readings(&self) -> HostReadings {
+    #[must_use]
+    pub const fn readings(&self) -> HostReadings {
         self.readings
     }
 
     /// The host-memory ledger coordinator for this host: the operator's
     /// ledger settings, deciding on this host's readings.
+    #[must_use]
     pub fn memory_coordinator(&self) -> HostMemoryCoordinator {
         HostMemoryCoordinator::new(self.ledger.clone(), self.readings)
     }
 
     /// The part of this host a worker launch carries.
+    #[must_use]
     pub fn runtime_host(&self) -> RuntimeHost {
         RuntimeHost {
             tier: self.tier,
@@ -208,16 +219,19 @@ pub struct RuntimeHost {
 
 impl RuntimeHost {
     /// The memory tier the launch is sized for.
-    pub fn tier(&self) -> MemoryTier {
+    #[must_use]
+    pub const fn tier(&self) -> MemoryTier {
         self.tier
     }
 
     /// Where the launch's live figures come from.
-    pub fn readings(&self) -> &HostReadings {
+    #[must_use]
+    pub const fn readings(&self) -> &HostReadings {
         &self.readings
     }
 
     /// A ledger coordinator deciding on this host's readings.
+    #[must_use]
     pub fn memory_coordinator(&self) -> HostMemoryCoordinator {
         HostMemoryCoordinator::new(self.ledger.clone(), self.readings)
     }
@@ -225,6 +239,7 @@ impl RuntimeHost {
     /// The same host with another ledger (a test's own path or reserve).
     /// The ledger carries no tier or readings, so this cannot pair the
     /// host with another machine's figures.
+    #[must_use]
     pub fn with_ledger(self, ledger: HostMemoryRuntimeConfig) -> Self {
         Self { ledger, ..self }
     }
@@ -235,6 +250,11 @@ mod tests {
     use super::*;
     use crate::types::runtime::MemoryTierKind;
 
+    /// Guards: An explicitly declared memory tier overrides the facts' RAM tier, while an undeclared snapshot follows the facts.
+    /// Kind: policy
+    /// Not a type: `ServerConfig` carries `memory_tier` as Option and `HostSnapshot` resolves it once; the precedence between the two sources is a rule no type can forbid from being reversed.
+    /// State: None. Two declared test snapshots built fully in memory.
+    /// Concurrency: None. Each snapshot owns its config and facts.
     #[test]
     fn a_declared_tier_wins_over_the_facts_and_undeclared_follows_them() {
         let undeclared = HostSnapshot::for_tests(&ServerConfig::default());
@@ -249,7 +269,11 @@ mod tests {
         assert_eq!(declared.tier().kind, MemoryTierKind::Large);
     }
 
-    /// A declared snapshot's readings are its facts; a read one is live.
+    /// Guards: A declared snapshot's readings equal its own facts and a live snapshot's readings are marked Live.
+    /// Kind: contract
+    /// Not a type: `HostReadings` is a closed Declared/Live choice, but that `for_tests` pairs declared facts with Declared readings and read pairs live detection with Live is a constructor invariant a bare enum cannot enforce.
+    /// State: The read snapshot reads this host's memory once; the declared snapshot stays in memory.
+    /// Concurrency: None. Each snapshot is built and read synchronously.
     #[test]
     fn a_declared_snapshot_reads_its_own_facts() {
         let declared = HostSnapshot::for_tests(&ServerConfig::default());
@@ -265,6 +289,11 @@ mod tests {
         assert_eq!(read.readings(), HostReadings::Live);
     }
 
+    /// Guards: A live-read snapshot derives its tier from the very facts it reports.
+    /// Kind: journey
+    /// Not a type: `HostSnapshot::read` takes one live host reading; that the reported facts and the resolved tier come from the same reading (not two polls that disagree) is an external consistency no type pins.
+    /// State: Reads this host's memory once through the real source.
+    /// Concurrency: None. One synchronous read in this process.
     #[test]
     fn reading_this_host_resolves_from_the_same_facts_it_reports() {
         let snapshot =

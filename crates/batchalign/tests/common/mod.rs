@@ -23,12 +23,12 @@ pub mod chat_fixtures;
 mod direct_job_client;
 pub mod drift_assertions;
 pub mod drift_staging;
+pub mod echo_worker;
 mod paths_mode;
 pub mod pool_dispatch;
 pub mod regression_manifest;
 mod server_job_client;
 pub mod test_server_fixture;
-pub mod test_worker_pool;
 
 #[allow(unused_imports)]
 pub use audio_fixtures::{
@@ -263,7 +263,7 @@ impl LiveServerSession {
     }
 
     /// Shared HTTP client for the session.
-    pub fn client(&self) -> &reqwest::Client {
+    pub const fn client(&self) -> &reqwest::Client {
         &self.client
     }
 
@@ -628,7 +628,7 @@ pub async fn submit_and_complete_direct(
 /// submission from a bare language string otherwise silently produces
 /// `Resolved(lang)`, which makes morphotag/translate/coref tests panic on a
 /// warmed backend and silently skip everywhere else.
-pub(crate) fn submission_lang(command: ReleasedCommand, lang: &str) -> LanguageSpec {
+pub fn submission_lang(command: ReleasedCommand, lang: &str) -> LanguageSpec {
     if batchalign::takes_no_job_language(command) {
         LanguageSpec::PerFile
     } else {
@@ -850,7 +850,7 @@ async fn cleanup_session(session: ActiveSession) {
 /// runtime tempdir last so per-session state outlives any task that
 /// might still touch it. `label` is used only in WARN log lines so
 /// operators can tell which fixture failed to shut down cleanly.
-pub(super) async fn cleanup_active_session(
+pub async fn cleanup_active_session(
     state: Arc<AppState>,
     runtime_root: tempfile::TempDir,
     server_task: tokio::task::JoinHandle<()>,

@@ -182,6 +182,7 @@ pub struct RetainedRevLanguageRejection {
 
 impl RetainedRevLanguageRejection {
     /// Address of the committed diagnostic, not a successful ASR cache entry.
+    #[must_use]
     pub fn diagnostic_key(&self) -> &str {
         &self.diagnostic_key
     }
@@ -217,7 +218,7 @@ pub(crate) enum RevMediaPreparationRecipe {
 }
 
 impl RevMediaPreparationRecipe {
-    fn prepare_provider_bytes(self, source_bytes: Vec<u8>) -> Vec<u8> {
+    const fn prepare_provider_bytes(self, source_bytes: Vec<u8>) -> Vec<u8> {
         match self {
             Self::SourceBytesLegacyAudioMpegV1 | Self::SourceBytesDeclaredContainerV1 => {
                 source_bytes
@@ -528,7 +529,7 @@ struct RevAsrEvidenceKeyMaterial<'a> {
 pub(crate) struct RevAsrModelRevision(crate::cache::BuildOwnedNamespace);
 
 impl RevAsrModelRevision {
-    pub(crate) fn current() -> Self {
+    pub(crate) const fn current() -> Self {
         Self(crate::cache::BuildOwnedNamespace::literal(
             "revai:asynchronous-transcript-v1",
         ))
@@ -629,18 +630,18 @@ impl RevAsrEvidenceRequest {
     /// Whether this request has a legacy key distinct from its own, for the
     /// tests that pin which containers consult one.
     #[cfg(test)]
-    fn has_distinct_legacy_key(&self) -> bool {
+    const fn has_distinct_legacy_key(&self) -> bool {
         matches!(self.legacy_key, LegacyEvidenceKey::Distinct(_))
     }
 
-    pub(crate) fn cache_key(&self) -> &CacheKey {
+    pub(crate) const fn cache_key(&self) -> &CacheKey {
         &self.cache_key
     }
 
     /// The key this request's evidence was stored under before 2026-11-03,
     /// where that is not today's key; for the log line that names a
     /// migration.
-    pub(crate) fn legacy_key(&self) -> Option<&CacheKey> {
+    pub(crate) const fn legacy_key(&self) -> Option<&CacheKey> {
         match &self.legacy_key {
             LegacyEvidenceKey::SameAsCurrent => None,
             LegacyEvidenceKey::Distinct(key) => Some(key),
@@ -837,10 +838,10 @@ impl CompletedRevAsrEvidence {
         Ok(Self(raw))
     }
 
-    pub(crate) fn transcript_evidence(&self) -> &RevTranscriptEvidence {
+    pub(crate) const fn transcript_evidence(&self) -> &RevTranscriptEvidence {
         &self.0.transcript_evidence
     }
-    pub(crate) fn resolved_language(&self) -> &TranscriptLanguage {
+    pub(crate) const fn resolved_language(&self) -> &TranscriptLanguage {
         &self.0.resolved_language
     }
 
@@ -1018,7 +1019,7 @@ struct RevAsrEvidenceTraceSeed {
 }
 
 impl RevAsrEvidenceTraceSeed {
-    fn finish(
+    const fn finish(
         self,
         cache_outcome: RevAsrEvidenceCacheOutcome,
         transcript_fidelity: RevTranscriptFidelity,
@@ -1050,12 +1051,12 @@ pub(crate) struct RevAsrEvidenceSemanticProjection<'a> {
 
 impl RevAsrEvidenceTrace {
     #[cfg(test)]
-    pub(crate) fn cache_outcome(&self) -> RevAsrEvidenceCacheOutcome {
+    pub(crate) const fn cache_outcome(&self) -> RevAsrEvidenceCacheOutcome {
         self.cache_outcome
     }
 
     #[cfg(test)]
-    pub(crate) fn semantic_projection(&self) -> RevAsrEvidenceSemanticProjection<'_> {
+    pub(crate) const fn semantic_projection(&self) -> RevAsrEvidenceSemanticProjection<'_> {
         RevAsrEvidenceSemanticProjection {
             request: &self.request,
             transcript_fidelity: self.transcript_fidelity,
@@ -1368,7 +1369,7 @@ pub(crate) struct RevAsrEvidenceResolution {
 }
 
 impl RevAsrEvidenceResolution {
-    fn cache_outcome(&self) -> RevAsrEvidenceCacheOutcome {
+    const fn cache_outcome(&self) -> RevAsrEvidenceCacheOutcome {
         match self.source {
             RevAsrEvidenceSource::Replayed => RevAsrEvidenceCacheOutcome::Replayed,
             RevAsrEvidenceSource::MigratedFromLegacyKey => {
@@ -1394,7 +1395,7 @@ impl RevAsrEvidenceResolution {
         )
     }
 
-    pub(crate) fn source(&self) -> RevAsrEvidenceSource {
+    pub(crate) const fn source(&self) -> RevAsrEvidenceSource {
         self.source
     }
 
@@ -1712,6 +1713,11 @@ mod tests {
 
     /// A code-switched request is its own evidence: it keys apart from each
     /// of its languages and from detection, and its trace names the pair.
+    /// Guards: A language-pair request has its own cache identity and shares neither monolingual key.
+    /// Kind: wire
+    /// Not a type: External request and trace string encoding can collapse a pair into a member.
+    /// State: Pure Rev evidence request fixtures expose derived keys and trace language.
+    /// Concurrency: none
     #[test]
     fn a_language_pair_request_keys_apart_from_its_languages() {
         let pair = RevLanguage::admit(&AsrLanguageRequest::Pair(
@@ -1738,6 +1744,11 @@ mod tests {
         assert_eq!(pair_request.trace_seed().requested_language, "eng,spa");
     }
 
+    /// Guards: A provider response omitting language is retained for diagnosis and never becomes replayable.
+    /// Kind: journey
+    /// Not a type: Foreign provider bytes, persisted diagnostic identity, and scheduler response shape must agree.
+    /// State: Private media and SQLite with a scripted Rev double exercise repeated refusal, diagnostics and eventual recovery.
+    /// Concurrency: Private directory and deterministic response order.
     #[tokio::test]
     async fn rejected_language_response_is_exact_retained_and_never_replayed() {
         let backend = RecordingBackend::default();
@@ -1883,6 +1894,11 @@ mod tests {
         }
     }
 
+    /// Guards: Automatic speaker count differs from a fixed count and serializes as null.
+    /// Kind: wire
+    /// Not a type: Cache input serialization can inadvertently coalesce configured and absent speaker counts.
+    /// State: Pure Rev request and trace fixtures vary the count.
+    /// Concurrency: none
     #[test]
     fn auto_speakers_cache_identity_is_distinct_and_trace_records_null() {
         // Request identity admission is pure: no media upload or temporary files.
@@ -1915,6 +1931,11 @@ mod tests {
         );
     }
 
+    /// Guards: Rev keys share identical media and change with media, container, language or speaker meaning.
+    /// Kind: contract
+    /// Not a type: Actual file hashing and media presentation may disagree after relocation or format changes.
+    /// State: Private generated audio and copies drive the real probe and digest path.
+    /// Concurrency: Private directory and ordered media generation.
     #[tokio::test]
     async fn rev_key_reuses_identical_media_but_invalidates_semantic_changes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2004,6 +2025,11 @@ mod tests {
     /// Every container Rev.AI is sent declares its own type and file name,
     /// and MPEG audio alone keeps the historical recipe, because its
     /// declaration never changed.
+    /// Guards: Every supported Rev container maps to its exact upload MIME, extension and recipe.
+    /// Kind: wire
+    /// Not a type: Those provider multipart values are external protocol spellings, independent of Rust variants.
+    /// State: Pure container variants and extension inputs exercise the protocol mapping.
+    /// Concurrency: none
     #[test]
     fn each_provider_container_declares_its_own_type_and_name() {
         use RevMediaPreparationRecipe::{
@@ -2079,6 +2105,11 @@ mod tests {
     /// Both come from the probed container: a WAV named `.mp3` is declared a
     /// WAV and an MP3 named `.wav` an MP3, and MPEG audio's request key is,
     /// byte for byte, the legacy formula's, so no MP3 evidence is re-bought.
+    /// Guards: Misnamed WAV and MP3 files use the provider presentation selected by probing bytes.
+    /// Kind: boundary
+    /// Not a type: File suffixes are untrusted input and `FFmpeg` observes actual media container bytes.
+    /// State: Private WAV and encoded MP3 fixtures drive real format probing.
+    /// Concurrency: Private directory and awaited preparation.
     #[tokio::test]
     async fn provider_media_is_declared_by_its_probed_container_not_its_name() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2147,6 +2178,11 @@ mod tests {
     /// Media in a container the probe has not measured (AIFF), or one BA3
     /// does not upload as is (Matroska), is refused at the boundary naming
     /// the file; nothing is declared `audio/mpeg` for it.
+    /// Guards: Unsupported AIFF and Matroska are refused with their exact identity and actionable output.
+    /// Kind: boundary
+    /// Not a type: `FFmpeg` demuxer reports and diagnostic path rendering depend on the source bytes.
+    /// State: Private generated media executes real container admission.
+    /// Concurrency: Private directory and serial probing.
     #[tokio::test]
     async fn a_container_not_sent_to_rev_is_refused_naming_the_file() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2176,6 +2212,11 @@ mod tests {
         }
     }
 
+    /// Guards: A stored schema-two record replays under its original key and reports legacy transcript fidelity.
+    /// Kind: journey
+    /// Not a type: Retained database bytes may carry older projection fields that newer source types cannot guarantee.
+    /// State: Private SQLite and source media retain original key and schema-two evidence with a counting double.
+    /// Concurrency: Private directory and ordered fixture operations.
     #[tokio::test]
     async fn storage_upgrade_preserves_request_key_and_replays_schema_two_evidence() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2251,6 +2292,11 @@ mod tests {
     /// Evidence whose transcript language its request could not have resolved
     /// to is refused at replay, not handed to the pipeline: an English request
     /// never yields a Spanish transcript.
+    /// Guards: Retained Rev evidence with an impossible language is rejected before provider dispatch.
+    /// Kind: boundary
+    /// Not a type: Persisted bytes can pair a supported language with the wrong request identity.
+    /// State: Private media and SQLite contain a contradictory legacy row, plus a counting service double.
+    /// Concurrency: Private directory and awaited resolver stages.
     #[tokio::test]
     async fn stored_evidence_in_a_language_its_request_cannot_resolve_to_is_refused() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2296,6 +2342,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
     }
 
+    /// Guards: A newly delivered contradictory language is refused before a replayable write.
+    /// Kind: boundary
+    /// Not a type: Provider-supplied language can conflict with the admitted request despite a successful transport.
+    /// State: Private cache, synthetic audio and scripted provider evidence witness the bad response and durable absence.
+    /// Concurrency: Private directory and awaited commit check.
     #[tokio::test]
     async fn contradictory_fresh_evidence_is_refused_before_commit() {
         struct Contradictory;
@@ -2347,6 +2398,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Guards: Changing prepared media bytes makes authorization refuse before upload.
+    /// Kind: boundary
+    /// Not a type: A live file can change between its original identity and the verified read.
+    /// State: Private file rewritten between preparation and verified submission admission.
+    /// Concurrency: Fixture mutation completes before the read.
     #[tokio::test]
     async fn prepared_media_refuses_bytes_changed_before_authorized_submission() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2366,6 +2422,11 @@ mod tests {
     /// The presentation is the file's: the bytes as they are, declared by
     /// the probed container (not the `.WAV` spelling of the name), and named
     /// and labelled from the digest of those bytes.
+    /// Guards: Verified media owns the exact source bytes and stable provider multipart values.
+    /// Kind: contract
+    /// Not a type: File reading and normalization can alter bytes or provider-visible metadata at runtime.
+    /// State: Private WAV invokes real media preparation and verifies against its source bytes.
+    /// Concurrency: Private directory and awaited reads.
     #[tokio::test]
     async fn verified_media_has_stable_provider_visible_presentation() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2389,6 +2450,11 @@ mod tests {
         );
     }
 
+    /// Guards: Rev trace joins source and submitted digests, exact request values, cache origin and projection version.
+    /// Kind: wire
+    /// Not a type: A serialized receipt can misstate the connection between independent media and provider observations.
+    /// State: Private generated media, SQLite and a counting provider double supply the real trace producer.
+    /// Concurrency: Private directory and awaited resolver stages.
     #[tokio::test]
     async fn evidence_trace_joins_media_request_cache_and_projection_identity() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2442,6 +2508,11 @@ mod tests {
         );
     }
 
+    /// Guards: Reopened required-cache replay preserves the original ASR projection with one provider call total.
+    /// Kind: journey
+    /// Not a type: Durability, recovery routing and exact projected JSON depend on real persisted provider output.
+    /// State: Private SQLite reopened after a scripted completed job and resolution.
+    /// Concurrency: Private directory and ordered close and reopen.
     #[tokio::test]
     async fn durable_replay_does_not_cross_rev_service_again() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2475,9 +2546,10 @@ mod tests {
         let reopened = UtteranceCache::sqlite(Some(cache_dir))
             .await
             .expect("reopen");
-        let warm = resolve_rev_asr_evidence(&request, &reopened, CachePolicy::UseCache, &service)
-            .await
-            .expect("warm");
+        let warm =
+            resolve_rev_asr_evidence(&request, &reopened, CachePolicy::RequireCache, &service)
+                .await
+                .expect("warm");
         assert_eq!(warm.source(), RevAsrEvidenceSource::Replayed);
         let warm_evidence = warm.into_evidence();
         let warm_response = crate::revai::rev_evidence_to_asr_response(&warm_evidence)
@@ -2489,6 +2561,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Guards: A cold required-cache request reports its exact missing key and stays outside the service.
+    /// Kind: policy
+    /// Not a type: A cache check can lack evidence for a key calculated from actual media.
+    /// State: Private media and empty SQLite with a counting provider double check the precondition.
+    /// Concurrency: Private directory and awaited resolution.
     #[tokio::test]
     async fn required_cache_refuses_cold_rev_service_call() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2526,39 +2603,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
-    async fn required_cache_replays_warm_rev_evidence() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let audio = tempdir.path().join("audio.wav");
-        write_pcm_wav(&audio, 0);
-        let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-            .await
-            .expect("cache");
-        let request = RevAsrEvidenceRequest::from_audio(
-            &audio,
-            &english(),
-            speakers(2),
-            &RevAsrModelRevision::current(),
-        )
-        .await
-        .expect("request");
-        let service = CountingRevService {
-            calls: AtomicUsize::new(0),
-            delay_ms: 0,
-        };
-        resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
-            .await
-            .expect("seed evidence");
-
-        let replay =
-            resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service)
-                .await
-                .expect("required-cache replay");
-
-        assert_eq!(replay.source(), RevAsrEvidenceSource::Replayed);
-        assert_eq!(service.calls.load(Ordering::SeqCst), 1);
-    }
-
+    /// Guards: Concurrent cache users share one Rev provider execution for the same identity.
+    /// Kind: contract
+    /// Not a type: Wake and commit order govern whether a waiting request reaches the provider.
+    /// State: Private media and cache with a delayed counting service witness single flight.
+    /// Concurrency: Joined futures overlap while the first call holds its lease.
     #[tokio::test]
     async fn concurrent_rev_resolvers_cross_service_once() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2599,6 +2648,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Guards: Concurrent forced refreshes share the result generated during the waiting refresh.
+    /// Kind: contract
+    /// Not a type: Waiting-state ordering can accidentally make a second explicit refresh bill again.
+    /// State: Private media and cache with a delayed counting service witness shared publication.
+    /// Concurrency: Joined futures overlap across one held lease.
     #[tokio::test]
     async fn concurrent_forced_refreshes_share_one_fresh_service_result() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2640,6 +2694,11 @@ mod tests {
         assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Guards: Corrupt stored Rev evidence fails closed without another paid request.
+    /// Kind: boundary
+    /// Not a type: SQLite can contain arbitrary legacy or damaged JSON before typed decoding.
+    /// State: Private media, corrupt SQLite row and counting provider double show the refusal.
+    /// Concurrency: Private directory and awaited resolution.
     #[tokio::test]
     async fn corrupt_rev_evidence_fails_without_service_call() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -2810,6 +2869,11 @@ mod tests {
     /// recorded by name, the failure is reported transient (so the control
     /// plane retries), the retry is told to RESUME that job, and once its
     /// transcript is committed the record is gone and later runs replay.
+    /// Guards: A pending Rev job resumes by its exact provider ID and completed replay stays local.
+    /// Kind: journey
+    /// Not a type: Pending-row durability and later provider route selection depend on actual persisted state.
+    /// State: Private SQLite plus scripted submit and resume outcomes retain the unfinished job.
+    /// Concurrency: Private directory with first failure completed before resumed dispatch.
     #[tokio::test]
     async fn an_unfinished_job_is_recorded_and_resumed_by_the_next_run() {
         let (_tempdir, cache, request) = pending_fixture().await;
@@ -2872,6 +2936,11 @@ mod tests {
     /// Rev.AI's terminal verdict on a resumed job (failed, or gone) ends the
     /// record, so the run after that submits afresh; a transient failure of
     /// the resumed wait keeps the record, so the run after that resumes again.
+    /// Guards: Provider verdicts keep or retire the resumed job with the right subsequent route.
+    /// Kind: journey
+    /// Not a type: Provider timeout and terminal outcomes can change the policy selected at runtime.
+    /// State: Private SQLite and an ordered provider double expose submit, resume and replacement routes.
+    /// Concurrency: Private directory and awaited route sequence.
     #[tokio::test]
     async fn a_resumed_jobs_record_follows_the_providers_verdict() {
         let (_tempdir, cache, request) = pending_fixture().await;
@@ -2910,6 +2979,11 @@ mod tests {
     /// A pending-job record this build cannot read, or one for another
     /// request, is refused by name without a provider call: ignoring it would
     /// upload and pay again, which is what the record exists to prevent.
+    /// Guards: A corrupt pending record reaches no submit or resume path.
+    /// Kind: boundary
+    /// Not a type: An externally damaged pending row can name an inadmissible job or address.
+    /// State: Private SQLite holds the corrupt record and a route-recording double detects execution.
+    /// Concurrency: Private directory and serial awaited operations.
     #[tokio::test]
     async fn a_corrupt_pending_record_is_refused_without_a_provider_call() {
         let (_tempdir, cache, request) = pending_fixture().await;
@@ -2950,6 +3024,11 @@ mod tests {
     /// first run under the new key, stored under the new key, and used
     /// without a provider call; the run's trace says it was replayed from the
     /// legacy key. The second run hits the new key directly.
+    /// Guards: Required cache finds a legacy WAV key once, writes the canonical row and then hits it directly.
+    /// Kind: journey
+    /// Not a type: Old keys and their persistent migration cannot be enforced by current Rust variant shapes.
+    /// State: Private SQLite holds only a legacy entry and a counting service detects billing.
+    /// Concurrency: Private directory and awaiting migration before direct replay.
     #[tokio::test]
     async fn a_wav_cached_under_the_legacy_key_is_found_once_and_then_hit_directly() {
         let (_tempdir, cache, request) = legacy_fixture().await;
@@ -2958,9 +3037,10 @@ mod tests {
             calls: AtomicUsize::new(0),
             delay_ms: 0,
         };
-        let migrated = resolve_rev_asr_evidence(&request, &cache, CachePolicy::UseCache, &service)
-            .await
-            .expect("the legacy entry serves the request");
+        let migrated =
+            resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service)
+                .await
+                .expect("the legacy entry serves the request");
         assert_eq!(
             migrated.source(),
             RevAsrEvidenceSource::MigratedFromLegacyKey
@@ -2997,6 +3077,11 @@ mod tests {
 
     /// MPEG audio kept its key, so it has no legacy key to consult: a cold
     /// MP3 request goes to the provider once, consulting nothing else.
+    /// Guards: A canonical MP3 miss has no separate legacy probe and submits once.
+    /// Kind: policy
+    /// Not a type: The old and new serialized provider presentation may be identical for a concrete MP3.
+    /// State: Private encoded source and SQLite with a counting service expose actual lookup and miss resolution.
+    /// Concurrency: Private directory and awaited resolver stages.
     #[tokio::test]
     async fn an_mp3_request_has_no_legacy_key_to_consult() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -3035,6 +3120,11 @@ mod tests {
     /// by container: MPEG audio at a `.mp3` path has one key then and now,
     /// while the same bytes at an `.mpga` path, or at a path with no
     /// extension, were keyed by that name before and by `mp3` since.
+    /// Guards: MP3 aliases and unnamed MPEG files distinguish legacy key eligibility from canonical presentation.
+    /// Kind: policy
+    /// Not a type: Filename spellings supplied by users can derive different old lookup identities.
+    /// State: Pure request fixture varies candidate filenames for one MPEG container.
+    /// Concurrency: none
     #[test]
     fn an_mpeg_file_not_named_mp3_consults_the_key_its_name_gave_it() {
         let digest = RevProviderMediaDigest::from_bytes(b"provider media");
@@ -3059,26 +3149,6 @@ mod tests {
         );
         assert!(request("recording.mpga").has_distinct_legacy_key());
         assert!(request("recording").has_distinct_legacy_key());
-    }
-
-    /// A required cache that holds the evidence under the legacy key has it:
-    /// the first run under the new key is a hit, not a refusal.
-    #[tokio::test]
-    async fn a_legacy_entry_satisfies_a_required_cache_on_the_first_run() {
-        let (_tempdir, cache, request) = legacy_fixture().await;
-        let service = CountingRevService {
-            calls: AtomicUsize::new(0),
-            delay_ms: 0,
-        };
-        let migrated =
-            resolve_rev_asr_evidence(&request, &cache, CachePolicy::RequireCache, &service)
-                .await
-                .expect("a required cache holding the evidence under its old key has it");
-        assert_eq!(
-            migrated.source(),
-            RevAsrEvidenceSource::MigratedFromLegacyKey
-        );
-        assert_eq!(service.calls.load(Ordering::SeqCst), 0, "no provider call");
     }
 
     /// A forced refresh bypasses the cache, the legacy key included: the

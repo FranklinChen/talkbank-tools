@@ -4,7 +4,7 @@ use crate::types::worker_v2::{LoadProgressV2, ProgressEventV2};
 
 /// Callers can await or observe a running operation without replacing its deadline.
 #[derive(Debug)]
-pub(crate) struct RunningWait(RunningKind);
+pub struct RunningWait(RunningKind);
 #[derive(Debug)]
 enum RunningKind {
     Budget(FixedBudget),
@@ -66,14 +66,14 @@ impl LoadEvidence {
     }
 }
 impl ObservedPhases {
-    fn first(edge: crate::types::worker_v2::PhaseEdgeV2) -> Self {
+    const fn first(edge: crate::types::worker_v2::PhaseEdgeV2) -> Self {
         use crate::types::worker_v2::PhaseEdgeV2;
         match edge {
             PhaseEdgeV2::Begin => Self::BeginOnly,
             PhaseEdgeV2::Complete => Self::CompleteOnly,
         }
     }
-    fn record(self, edge: crate::types::worker_v2::PhaseEdgeV2) -> (Self, bool) {
+    const fn record(self, edge: crate::types::worker_v2::PhaseEdgeV2) -> (Self, bool) {
         use crate::types::worker_v2::PhaseEdgeV2;
         match (self, edge) {
             (Self::BeginOnly, PhaseEdgeV2::Begin)
@@ -86,7 +86,7 @@ impl ObservedPhases {
     }
 }
 impl StageEvidence {
-    fn first(evidence: LoadEvidence) -> Self {
+    const fn first(evidence: LoadEvidence) -> Self {
         match evidence {
             LoadEvidence::Growth(mark) => Self::Download(mark),
             LoadEvidence::Phase(edge) => Self::Phases(ObservedPhases::first(edge)),
@@ -170,7 +170,7 @@ impl RunningWait {
             }),
         })
     }
-    fn deadline(&self) -> &Deadline {
+    const fn deadline(&self) -> &Deadline {
         match &self.0 {
             RunningKind::Budget(budget) => &budget.deadline,
             RunningKind::Loading(window) => &window.deadline,

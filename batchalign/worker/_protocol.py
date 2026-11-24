@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from batchalign.inference._domain_types import TcpPort
     from batchalign.worker._registry import WorkerRegistryEntry
+    from batchalign.worker._types import WorkerStartup
 
 from batchalign.worker._protocol_ops import (
     PendingProtocolRequest,
@@ -57,7 +58,7 @@ from batchalign.worker._protocol_ops import (
     prepare_protocol_message,
 )
 from batchalign.worker._runtime_identity import WorkerRuntimeIdentity
-from batchalign.worker._types import WorkerJSONValue
+from batchalign.worker._types import ProfileTarget, WorkerJSONValue
 from batchalign.worker._types_v2 import (
     LoadMeasureV2,
     LoadProgressV2,
@@ -105,16 +106,18 @@ def _build_identity_from_env() -> str | None:
     return value
 
 
-def _registry_entry(host: str, port: TcpPort) -> WorkerRegistryEntry:
+def _registry_entry(
+    host: str, port: TcpPort, startup: WorkerStartup
+) -> WorkerRegistryEntry:
     """The registry entry this TCP daemon advertises itself under.
 
     One constructor for both serve loops, which used to spell the same
     eleven-line construction twice.
     """
     from batchalign.worker._registry import WorkerRegistryEntry
-    from batchalign.worker._types import _state
 
-    bootstrap = _state.bootstrap
+    target = startup.target
+    bootstrap = startup.bootstrap
     ownership, owner_server_instance_id, owner_server_pid = (
         _registry_ownership_from_env()
     )
@@ -122,11 +125,11 @@ def _registry_entry(host: str, port: TcpPort) -> WorkerRegistryEntry:
         pid=os.getpid(),
         host=host,
         port=port,
-        profile=bootstrap.profile.value if bootstrap and bootstrap.profile else "",
-        lang=bootstrap.lang if bootstrap else "eng",
+        profile=target.profile.value if isinstance(target, ProfileTarget) else "",
+        lang=bootstrap.lang,
         build_identity=_build_identity_from_env(),
         engine_overrides=json.dumps(bootstrap.engine_overrides)
-        if bootstrap and bootstrap.engine_overrides
+        if bootstrap.engine_overrides
         else "",
         ownership=ownership,
         owner_server_instance_id=owner_server_instance_id,
@@ -744,6 +747,7 @@ def _serve_tcp(
     host: str,
     port: TcpPort,
     runtime: WorkerRuntimeIdentity,
+    startup: WorkerStartup,
     *,
     registry_path: Path | None = None,
 ) -> None:
@@ -765,7 +769,9 @@ def _serve_tcp(
     server_sock.listen(1)
     actual_port = server_sock.getsockname()[1]
 
-    register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
+    register_worker(
+        _registry_entry(host, actual_port, startup), registry_path=registry_path
+    )
 
     _print_ready_tcp(host, actual_port, runtime)
     logger.info("TCP worker listening on %s:%d (sequential)", host, actual_port)
@@ -787,6 +793,7 @@ def _serve_tcp_concurrent(
     host: str,
     port: TcpPort,
     runtime: WorkerRuntimeIdentity,
+    startup: WorkerStartup,
     max_threads: int = 4,
     *,
     registry_path: Path | None = None,
@@ -804,7 +811,9 @@ def _serve_tcp_concurrent(
     server_sock.listen(1)
     actual_port = server_sock.getsockname()[1]
 
-    register_worker(_registry_entry(host, actual_port), registry_path=registry_path)
+    register_worker(
+        _registry_entry(host, actual_port, startup), registry_path=registry_path
+    )
 
     _print_ready_tcp(host, actual_port, runtime)
     logger.info(

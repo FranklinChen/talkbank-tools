@@ -89,7 +89,8 @@ pub enum DeclineCause {
 
 impl DeclineCause {
     /// Stable label for tracing and records.
-    pub fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoAnalysis => "no_analysis",
             Self::MappingFailed => "mapping_failed",
@@ -119,12 +120,14 @@ impl InjectionResult {
     ///     let _ = completed.l2();
     /// }
     /// ```
-    pub fn l2(&self) -> &L2Extraction {
+    #[must_use]
+    pub const fn l2(&self) -> &L2Extraction {
         &self.l2
     }
 
     /// Consume completed injection into its traces, secondary-language data
     /// and declined utterances.
+    #[must_use]
     pub fn into_parts(self) -> InjectionParts {
         InjectionParts {
             retokenization_traces: self.retokenization_traces,

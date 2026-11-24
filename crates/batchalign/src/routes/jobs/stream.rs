@@ -32,7 +32,7 @@ use crate::ws::WsEvent;
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn stream_job(
+pub async fn stream_job(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ServerError> {

@@ -122,7 +122,7 @@ impl Mailbox {
 
 /// Process-owned stdin delivery. Only `open_protocol_stdin` can construct it.
 #[pyclass(frozen)]
-pub(crate) struct ProtocolStdin {
+pub struct ProtocolStdin {
     mailbox: Arc<Mailbox>,
 }
 
@@ -153,7 +153,7 @@ impl Drop for ProtocolStdin {
 
 /// Start the sole native reader for this worker process.
 #[pyfunction]
-pub(crate) fn open_protocol_stdin() -> PyResult<ProtocolStdin> {
+pub fn open_protocol_stdin() -> PyResult<ProtocolStdin> {
     let claim = StdinClaim::acquire()?;
     let mailbox = Arc::new(Mailbox {
         state: Mutex::new(InputState::Waiting),

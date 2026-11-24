@@ -34,7 +34,7 @@ pub fn evaluate_drift_assertion(
 /// start-time monotonicity. Utterances without a bullet are skipped (they
 /// carry no timing to compare).
 ///
-/// Overlap-continuation utterances: those carrying a `+<` LazyOverlapPrecedes
+/// Overlap-continuation utterances: those carrying a `+<` `LazyOverlapPrecedes`
 /// linker or a ⌊ CA bottom-overlap marker, legitimately share start timing
 /// with their predecessor by design. They are skipped from BOTH the comparison
 /// (their start is not a violation) AND the `prev_start` baseline (their start

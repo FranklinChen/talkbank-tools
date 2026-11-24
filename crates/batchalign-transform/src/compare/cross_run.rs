@@ -88,17 +88,20 @@ pub struct ArtifactTranscriptionComparison {
 
 impl ArtifactTranscriptionComparison {
     /// Left-run relative artifact path.
+    #[must_use]
     pub fn left_artifact(&self) -> &str {
         &self.left_artifact
     }
 
     /// Right-run relative artifact path.
+    #[must_use]
     pub fn right_artifact(&self) -> &str {
         &self.right_artifact
     }
 
     /// Typed speaker-aware result.
-    pub fn report(&self) -> &CrossRunTranscriptionReport {
+    #[must_use]
+    pub const fn report(&self) -> &CrossRunTranscriptionReport {
         &self.report
     }
 }
@@ -120,6 +123,7 @@ pub struct CrossRunTranscriptionPlanReport {
 
 impl CrossRunTranscriptionPlanReport {
     /// Results in declared pair order.
+    #[must_use]
     pub fn comparisons(&self) -> &[ArtifactTranscriptionComparison] {
         &self.comparisons
     }
@@ -199,7 +203,8 @@ impl SpeakerMap {
     }
 
     /// One-to-one left-to-right speaker assignments.
-    pub fn assignments(&self) -> &BTreeMap<String, String> {
+    #[must_use]
+    pub const fn assignments(&self) -> &BTreeMap<String, String> {
         &self.assignments
     }
 }
@@ -215,12 +220,14 @@ pub struct SpeakerMapCandidate {
 
 impl SpeakerMapCandidate {
     /// Proposed one-to-one assignment.
-    pub fn map(&self) -> &SpeakerMap {
+    #[must_use]
+    pub const fn map(&self) -> &SpeakerMap {
         &self.map
     }
 
     /// Number of order-insensitive word overlaps supporting the assignment.
-    pub fn overlap(&self) -> usize {
+    #[must_use]
+    pub const fn overlap(&self) -> usize {
         self.overlap
     }
 }
@@ -231,6 +238,7 @@ pub struct AmbiguousSpeakerMaps(Vec<SpeakerMapCandidate>);
 
 impl AmbiguousSpeakerMaps {
     /// Candidate mappings. This slice is guaranteed non-empty.
+    #[must_use]
     pub fn candidates(&self) -> &[SpeakerMapCandidate] {
         &self.0
     }
@@ -310,7 +318,7 @@ impl AgreementMetrics {
     /// to one could leave the other stale and nothing would notice. Callers
     /// cannot build this struct literally: its fields are private to the
     /// module and this is the only constructor.
-    fn new(
+    const fn new(
         left: &[String],
         right: &[String],
         tally: AlignmentTally,
@@ -343,54 +351,65 @@ impl AgreementMetrics {
     /// DERIVED, not stored: it is exactly `insertions + deletions`, and a
     /// stored copy is a second representation of a fact the struct already
     /// holds, free to drift from it.
-    pub fn wer_numerator(&self) -> usize {
+    #[must_use]
+    pub const fn wer_numerator(&self) -> usize {
         self.tally.insertions + self.tally.deletions
     }
 
     /// Order-insensitive agreement-error numerator.
-    pub fn cwer_numerator(&self) -> usize {
+    #[must_use]
+    pub const fn cwer_numerator(&self) -> usize {
         self.cwer_numerator
     }
 
     /// Number of words in the left run.
-    pub fn left_words(&self) -> usize {
+    #[must_use]
+    pub const fn left_words(&self) -> usize {
         self.words.left
     }
 
     /// Number of words in the right run.
-    pub fn right_words(&self) -> usize {
+    #[must_use]
+    pub const fn right_words(&self) -> usize {
         self.words.right
     }
 
     /// Number of ordered matches.
-    pub fn matches(&self) -> usize {
+    #[must_use]
+    pub const fn matches(&self) -> usize {
         self.tally.matches
     }
 
     /// Words only in the left run.
-    pub fn insertions(&self) -> usize {
+    #[must_use]
+    pub const fn insertions(&self) -> usize {
         self.tally.insertions
     }
 
     /// Words only in the right run.
-    pub fn deletions(&self) -> usize {
+    #[must_use]
+    pub const fn deletions(&self) -> usize {
         self.tally.deletions
     }
 
     /// Ordered agreement error rate, absent for a zero-word left side.
+    #[must_use]
     pub fn wer_rate(&self) -> Option<f64> {
         self.rate(self.wer_numerator())
     }
     /// Order-insensitive agreement error rate, absent for a zero-word left side.
+    #[must_use]
     pub fn cwer_rate(&self) -> Option<f64> {
         self.rate(self.cwer_numerator)
     }
     /// Excluded left token count.
-    pub fn excluded_left_tokens(&self) -> usize {
+    #[must_use]
+    pub const fn excluded_left_tokens(&self) -> usize {
         self.excluded_tokens.left
     }
     /// Excluded right token count.
-    pub fn excluded_right_tokens(&self) -> usize {
+    #[must_use]
+    pub const fn excluded_right_tokens(&self) -> usize {
         self.excluded_tokens.right
     }
 }
@@ -408,17 +427,20 @@ pub struct SpeakerAgreement {
 
 impl SpeakerAgreement {
     /// Left-run speaker label.
+    #[must_use]
     pub fn left_speaker(&self) -> &str {
         &self.left_speaker
     }
 
     /// Right-run speaker label.
+    #[must_use]
     pub fn right_speaker(&self) -> &str {
         &self.right_speaker
     }
 
     /// Pairwise agreement metrics.
-    pub fn metrics(&self) -> &AgreementMetrics {
+    #[must_use]
+    pub const fn metrics(&self) -> &AgreementMetrics {
         &self.metrics
     }
 }
@@ -438,27 +460,32 @@ pub struct CrossRunTranscriptionReport {
 
 impl CrossRunTranscriptionReport {
     /// Result of speaker correspondence inference.
-    pub fn correspondence(&self) -> &SpeakerCorrespondence {
+    #[must_use]
+    pub const fn correspondence(&self) -> &SpeakerCorrespondence {
         &self.correspondence
     }
 
     /// Metrics for mapped speakers; empty unless correspondence is established.
+    #[must_use]
     pub fn speaker_agreements(&self) -> &[SpeakerAgreement] {
         &self.speaker_agreements
     }
 
     /// Left speakers with no mapped right speaker.
+    #[must_use]
     pub fn unmatched_left_speakers(&self) -> &[String] {
         &self.unmatched_left_speakers
     }
 
     /// Right speakers with no mapped left speaker.
+    #[must_use]
     pub fn unmatched_right_speakers(&self) -> &[String] {
         &self.unmatched_right_speakers
     }
 }
 
 /// Compare two transcript artifacts without treating either as gold.
+#[must_use]
 pub fn compare_transcripts_by_speaker(
     left: &ChatFile,
     right: &ChatFile,

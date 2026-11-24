@@ -3,16 +3,16 @@
 mod db_helpers;
 mod dispatch;
 mod execution;
-pub(crate) mod file_state;
+pub mod file_state;
 mod lifecycle;
 mod recovery;
 #[cfg(test)]
-pub(crate) use recovery::RecoveredFilePhase;
-pub(crate) use recovery::recover_file_phase;
+pub use recovery::RecoveredFilePhase;
+pub use recovery::recover_file_phase;
 mod runner;
 
-pub(crate) use db_helpers::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
-pub(crate) use dispatch::LeaseRenewalOutcome;
+pub use db_helpers::{AttemptFinishRecord, AttemptStartRecord, PersistedFileUpdate};
+pub use dispatch::LeaseRenewalOutcome;
 
 use crate::api::{CancellationRequest, JobId, JobInfo, JobListItem, JobStatus, MachineTime};
 
@@ -33,7 +33,7 @@ fn non_empty(s: Option<&str>) -> Option<&str> {
 impl JobStore {
     /// How long a locally-dispatched lease lives before it is considered
     /// orphaned (`ServerConfig::local_lease_ttl`).
-    fn local_lease_ttl(&self) -> crate::config::LeaseTtl {
+    const fn local_lease_ttl(&self) -> crate::config::LeaseTtl {
         self.config().local_lease_ttl
     }
 
@@ -986,7 +986,7 @@ mod tests {
     /// Guards: Queue admission claims ready work and retains the exact deferred eligibility deadline.
     /// Kind: contract
     /// Not a type: The owned clock binds instants to this store but cannot determine the queue policy applied to a deferred job.
-    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// State: `ManualClockStore` owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
     /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_deferred_and_reports_next_wake() {
@@ -1055,7 +1055,7 @@ mod tests {
     /// Guards: Queue admission preserves a live foreign lease and reclaims only the expired lease.
     /// Kind: contract
     /// Not a type: Ordered lease values cannot establish the current-clock policy selecting an expired owner over a live owner.
-    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// State: `ManualClockStore` owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
     /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn claim_ready_queued_jobs_skips_unexpired_leases_and_reclaims_expired_ones() {
@@ -1168,7 +1168,7 @@ mod tests {
     /// Guards: Renewal uses the exact advanced store clock and stops after the queue claim is released.
     /// Kind: contract
     /// Not a type: The private clock owner prevents mismatching stores but cannot prove the actual lease mutation or post-release refusal.
-    /// State: ManualClockStore owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
+    /// State: `ManualClockStore` owns the real registry and its exact manual clock. Clock advancement supplies deterministic instants without sleeping.
     /// Concurrency: Each case owns its clock, actor and channel. Requests are awaited around explicit clock advancement or claim release.
     #[tokio::test]
     async fn renew_job_lease_updates_heartbeat_and_expiry_for_local_claim() {

@@ -130,7 +130,9 @@ pub(super) enum GateRefusal {
 /// Returned by a function (not inlined as a constant) so unit
 /// tests can audit "what number is the production gate using"
 /// without duplicating tier-arithmetic at every call site.
-pub(super) fn host_min_free_mb_threshold_for_tier(tier: &crate::types::runtime::MemoryTier) -> u64 {
+pub(super) const fn host_min_free_mb_threshold_for_tier(
+    tier: &crate::types::runtime::MemoryTier,
+) -> u64 {
     use crate::types::runtime::MemoryTierKind;
     match tier.kind {
         MemoryTierKind::Small => 1024,
@@ -155,7 +157,7 @@ impl StartupReservation {
             &host.tier(),
         ))
     }
-    pub(super) fn mb(&self) -> u64 {
+    pub(super) const fn mb(&self) -> u64 {
         self.0.0
     }
 }

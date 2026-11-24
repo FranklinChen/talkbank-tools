@@ -47,6 +47,7 @@ pub enum DeclaredMedia {
 impl DeclaredMedia {
     /// Inspect the already-produced header structure, without a second parse.
     /// This classifies a declaration, not the presence of an actual recording.
+    #[must_use]
     pub fn from_document(file: &crate::chat_ops::ChatFile) -> Self {
         use talkbank_model::model::Header;
         file.lines
@@ -83,6 +84,7 @@ impl DeclaredMedia {
     /// elsewhere in the workspace. Each candidate line goes through chatter's
     /// `parse_header_fragment`, so what an `@Media` payload MEANS stays
     /// chatter's decision rather than becoming a split on a comma here.
+    #[must_use]
     pub fn read(chat_text: &str) -> Self {
         use talkbank_model::errors::NullErrorSink;
         use talkbank_model::model::header::Header;
@@ -133,22 +135,16 @@ impl DeclaredMedia {
 mod declared_media_tests {
     use super::DeclaredMedia;
 
-    /// Wraps a `@Media` line in the minimum around it that parses.
-    fn transcript(media_line: &str) -> String {
-        format!("@UTF8\n@Begin\n@Languages:\teng\n{media_line}\n*CHI:\thi .\n@End\n")
-    }
-
-    #[test]
-    fn a_plain_declaration_expects_media() {
-        assert_eq!(
-            DeclaredMedia::read(&transcript("@Media:\tfoo, audio")),
-            DeclaredMedia::Expected
-        );
-    }
-
+    /// Guards: Parsed CHAT and the header-only scan classify the same media declarations.
+    /// Kind: transcript
+    /// Not a type: CHAT header bytes and the two parser entry points still
+    /// determine which typed declaration the shared policy receives.
+    /// State: One in-memory complete CHAT input per distinct declaration.
+    /// Concurrency: The parser reads independently owned input strings.
     #[test]
     fn produced_header_structure_uses_the_same_declaration_policy() {
         for (payload, expected) in [
+            ("audio", DeclaredMedia::Expected),
             ("audio, unlinked", DeclaredMedia::Expected),
             ("video, notrans", DeclaredMedia::Expected),
             (
@@ -164,10 +160,15 @@ mod declared_media_tests {
                 },
             ),
         ] {
+            let timing = if payload == "audio" {
+                " \u{15}0_100\u{15}"
+            } else {
+                ""
+            };
             let source = format!(
                 "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Target_Child\n@ID:\teng|test|CHI|||||Target_Child|||\n\
-@Media:\tsample, {payload}\n*CHI:\thello .\n@End\n"
+@Media:\tsample, {payload}\n*CHI:\thello .{timing}\n@End\n"
             );
             let admitted = crate::pipeline::text_infer::admit_retained_text(
                 &crate::chat_parser(),
@@ -180,63 +181,19 @@ mod declared_media_tests {
         }
     }
 
-    #[test]
-    fn unlinked_expects_media_because_the_recording_exists() {
-        // The case this type got wrong, and the reason it now has tests at all.
-        // chatter documents `unlinked` as "the media file EXISTS but utterances
-        // have not been aligned yet ... the NORMAL state for a transcript before
-        // forced alignment", which is precisely the state `align` is run to
-        // change. Classifying it as absent told operators the opposite, on the
-        // one command where it matters most.
-        assert_eq!(
-            DeclaredMedia::read(&transcript("@Media:\tfoo, audio, unlinked")),
-            DeclaredMedia::Expected
-        );
-    }
-
-    #[test]
-    fn notrans_expects_media_too() {
-        // "the media exists but no transcription has been done."
-        assert_eq!(
-            DeclaredMedia::read(&transcript("@Media:\tfoo, audio, notrans")),
-            DeclaredMedia::Expected
-        );
-    }
-
-    #[test]
-    fn a_missing_status_is_the_only_absent_status() {
-        assert_eq!(
-            DeclaredMedia::read(&transcript("@Media:\tfoo, audio, missing")),
-            DeclaredMedia::Absent {
-                as_written: "missing".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn a_missing_media_type_is_absent() {
-        assert_eq!(
-            DeclaredMedia::read(&transcript("@Media:\tfoo, missing")),
-            DeclaredMedia::Absent {
-                as_written: "missing".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn no_header_is_undeclared() {
-        assert_eq!(
-            DeclaredMedia::read("@UTF8\n@Begin\n*CHI:\thi .\n@End\n"),
-            DeclaredMedia::Undeclared
-        );
-    }
-
+    /// Guards: Only @Media in the header block can declare a recording.
+    /// Kind: transcript
+    /// Not a type: The raw text can omit the declaration or contain a
+    /// media-looking line after the first speaker tier.
+    /// State: Two synthetic strings traverse the header fragment parser.
+    /// Concurrency: The test owns its text and uses no files.
     #[test]
     fn the_scan_stops_at_the_first_speaker_tier() {
-        // The header block is the bound. A `@Media`-looking line in the body is
-        // not a declaration, and reading the whole file to find out is what this
-        // function exists to avoid.
-        let text = "@UTF8\n@Begin\n*CHI:\thi .\n@Media:\tfoo, audio\n@End\n";
-        assert_eq!(DeclaredMedia::read(text), DeclaredMedia::Undeclared);
+        for text in [
+            "@UTF8\n@Begin\n*CHI:\thi .\n@End\n",
+            "@UTF8\n@Begin\n*CHI:\thi .\n@Media:\tfoo, audio\n@End\n",
+        ] {
+            assert_eq!(DeclaredMedia::read(text), DeclaredMedia::Undeclared);
+        }
     }
 }

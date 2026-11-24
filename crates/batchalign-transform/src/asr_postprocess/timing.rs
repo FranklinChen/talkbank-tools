@@ -2,7 +2,7 @@
 //!
 //! Every provider reports word and segment boundaries as its own numbers:
 //! fractional seconds (Rev, Whisper, the HK provider elements), whole
-//! milliseconds (FunASR, Aliyun), or a millisecond OFFSET that only means
+//! milliseconds (`FunASR`, Aliyun), or a millisecond OFFSET that only means
 //! something once a segment start is added to it (Tencent). Before this module
 //! each of those was converted where it happened, with `as i64` casts, `round()`
 //! calls and `unwrap_or(0)` defaults spread across the bridge and the pipeline.
@@ -85,6 +85,7 @@ impl WordTiming {
     }
 
     /// Wrap an already-admitted interval, demoting a zero-width one.
+    #[must_use]
     pub const fn from_admitted(interval: AdmittedInterval) -> Self {
         if interval.is_empty() {
             Self::Untimed(UntimedCause::ZeroLengthSpan)
@@ -105,6 +106,7 @@ impl WordTiming {
     /// they were born, so the `NotFinite` and `Negative` refusals cannot arise
     /// here. What can still be refused is the PAIR: an end before its start,
     /// or a bound beyond [`AdmittedInterval::MAX_MS`].
+    #[must_use]
     pub fn admit_positions_or_untimed(
         start: Option<AudioPositionSeconds>,
         end: Option<AudioPositionSeconds>,
@@ -116,6 +118,7 @@ impl WordTiming {
     }
 
     /// The admitted interval, when there is one.
+    #[must_use]
     pub const fn interval(self) -> Option<AdmittedInterval> {
         match self {
             Self::Timed(interval) => Some(interval),
@@ -124,6 +127,7 @@ impl WordTiming {
     }
 
     /// The cause of absence, when the word is untimed.
+    #[must_use]
     pub const fn untimed_cause(self) -> Option<UntimedCause> {
         match self {
             Self::Timed(_) => None,
@@ -148,6 +152,7 @@ impl WordTiming {
     ///
     /// The ONE lossy step, named so the place where the cause stops travelling
     /// is a signature rather than a habit.
+    #[must_use]
     pub const fn into_optional_millis(self) -> (Option<i64>, Option<i64>) {
         match self {
             Self::Timed(interval) => (Some(interval.start_ms()), Some(interval.end_ms())),
@@ -206,16 +211,19 @@ impl PositiveInterval {
     }
 
     /// Start, in recording milliseconds.
+    #[must_use]
     pub const fn start_ms(self) -> u64 {
         self.start_ms
     }
 
     /// End, in recording milliseconds; always after the start.
+    #[must_use]
     pub const fn end_ms(self) -> u64 {
         self.end_ms
     }
 
     /// The smallest interval covering both. Positive because both are.
+    #[must_use]
     pub fn covering(self, other: Self) -> Self {
         Self {
             start_ms: self.start_ms.min(other.start_ms),
@@ -224,6 +232,7 @@ impl PositiveInterval {
     }
 
     /// THE construction of a generated bullet: from a positive interval only.
+    #[must_use]
     pub fn bullet(self) -> talkbank_model::model::Bullet {
         talkbank_model::model::Bullet::new(
             talkbank_model::Location::Unlocated,

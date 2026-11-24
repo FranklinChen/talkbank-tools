@@ -33,7 +33,7 @@ use crate::worker::text_result_v2::parse_word_segmentation_result_v2;
 
 /// Monologue words that have been through word segmentation, whether or not
 /// it changed them.
-pub(crate) struct SegmentedMonologues {
+pub struct SegmentedMonologues {
     monologues: Vec<MonologueWords>,
     /// The segmenter that changed the words, as the worker reported it; `None`
     /// when the language has no segmenter or the file had nothing to segment.
@@ -69,7 +69,7 @@ fn segmentation_protocol_error(message: impl Into<String>) -> ServerError {
 }
 
 /// Segment `monologues` for `language`, or pass them through unchanged.
-pub(crate) async fn segment_words(
+pub async fn segment_words(
     pool: &WorkerPool,
     language: &LanguageCode3,
     monologues: Vec<MonologueWords>,
@@ -96,7 +96,7 @@ pub(crate) async fn segment_words(
             "could not build the word-segmentation request: {error}"
         ))
     })?;
-    let response = dispatch_execute_v2_with_retry(pool, language, &request, cancellation).await?;
+    let response = dispatch_execute_v2_with_retry(pool, language, request, cancellation).await?;
     let result = parse_word_segmentation_result_v2(response)
         .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     let monologues = plan.apply(result.items).map_err(|refusal| {

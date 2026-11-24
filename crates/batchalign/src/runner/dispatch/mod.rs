@@ -47,12 +47,12 @@
 mod asr_media;
 /// The one rule for the `@Media` name of a recording (its stem), shared with
 /// the replay paths so they derive it as live transcribe does.
-pub(crate) use asr_media::preserved_media_name_for_chat;
+pub use asr_media::preserved_media_name_for_chat;
 mod audio_output;
 mod audio_task;
 mod benchmark_pipeline;
 mod diarize_chat;
-pub(crate) mod diarize_turns;
+pub mod diarize_turns;
 mod fa_admission;
 mod fa_pipeline;
 mod kernel_plan;
@@ -60,19 +60,17 @@ mod media_analysis_v2;
 mod media_search;
 mod options;
 mod plan;
-pub(crate) mod speaker_identity_pipeline;
+pub mod speaker_identity_pipeline;
 mod transcribe_pipeline;
 mod utr;
-pub(crate) use utr::{
+pub use utr::{
     AbandonedPartialAttempt, CompletedRecognition, UtrRecognitionRoute, UtrTokenConversion,
 };
 #[cfg(test)]
-pub(crate) use utr::{
-    PreparedRecognition, convert_utr_for_test, prepare_after_partial_failure_for_test,
-};
+pub use utr::{PreparedRecognition, convert_utr_for_test, prepare_after_partial_failure_for_test};
 
-pub(crate) use benchmark_pipeline::{BenchmarkDispatchRuntime, dispatch_benchmark_infer};
-pub(crate) use fa_admission::FaWorkerAdmission;
+pub use benchmark_pipeline::{BenchmarkDispatchRuntime, dispatch_benchmark_infer};
+pub use fa_admission::FaWorkerAdmission;
 
 /// Why a command's worker could not be probed into a usable state.
 ///
@@ -83,7 +81,7 @@ pub(crate) use fa_admission::FaWorkerAdmission;
 /// The router fails the whole job with one of these; `align` fails every file
 /// of one language with one (`FaWorkerAdmission`). Both say the same words.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WorkerProbeRefusal {
+pub enum WorkerProbeRefusal {
     /// The worker keyed for this command could not be probed.
     #[error("failed to resolve selected worker capabilities: {0}")]
     Probe(#[source] crate::worker::error::WorkerError),
@@ -128,7 +126,7 @@ impl WorkerProbeRefusal {
 /// it is where a stalled first download surfaces; it used to fail the whole
 /// job at the first stall (2026-11-05), where the same failure inside a
 /// request would have been retried.
-pub(crate) async fn probe_command_worker(
+pub async fn probe_command_worker(
     pool: &crate::worker::pool::WorkerPool,
     command: crate::api::ReleasedCommand,
     language: impl Into<crate::api::WorkerLanguage>,
@@ -153,9 +151,9 @@ pub(crate) async fn probe_command_worker(
     Ok(loaded)
 }
 pub(crate) use fa_pipeline::*;
-pub(crate) use media_analysis_v2::{MediaAnalysisDispatchRuntime, dispatch_media_analysis_v2};
+pub use media_analysis_v2::{MediaAnalysisDispatchRuntime, dispatch_media_analysis_v2};
 pub(crate) use plan::*;
-pub(crate) use transcribe_pipeline::{TranscribeDispatchRuntime, dispatch_transcribe_infer};
+pub use transcribe_pipeline::{TranscribeDispatchRuntime, dispatch_transcribe_infer};
 
 /// Pre-scale the workers one command's requests will reach, so a batch pays
 /// one cold start rather than one per file.
@@ -167,10 +165,10 @@ pub(crate) use transcribe_pipeline::{TranscribeDispatchRuntime, dispatch_transcr
 /// job's language; `align` calls it once per language from
 /// [`FaWorkerAdmission`], with the language the files declare.
 ///
-/// Skipped for LazyProfile: on constrained machines workers start empty and
+/// Skipped for `LazyProfile`: on constrained machines workers start empty and
 /// load models on demand, so a pre-scaled worker would sit idle until files
 /// need it.
-pub(crate) async fn pre_scale_workers(
+pub async fn pre_scale_workers(
     pool: &std::sync::Arc<crate::worker::pool::WorkerPool>,
     command: crate::api::ReleasedCommand,
     language: impl Into<crate::api::WorkerLanguage>,

@@ -38,7 +38,8 @@ enum Continuation {
 
 impl<'source> SpeakerTurn<'source> {
     /// Bind one source turn without reconstructing text from a wire artifact.
-    pub fn new(speaker: &'source str, words: &'source [String]) -> Self {
+    #[must_use]
+    pub const fn new(speaker: &'source str, words: &'source [String]) -> Self {
         Self {
             speaker,
             words,
@@ -48,7 +49,8 @@ impl<'source> SpeakerTurn<'source> {
 
     /// Declare source-observed overlap continuity for extending the following
     /// speaker's chain. This is an order-model input, not acoustic proof.
-    pub fn overlapping_continuation(speaker: &'source str, words: &'source [String]) -> Self {
+    #[must_use]
+    pub const fn overlapping_continuation(speaker: &'source str, words: &'source [String]) -> Self {
         Self {
             speaker,
             words,
@@ -72,7 +74,8 @@ pub enum LocalInterleavingWorkPhase {
 
 impl LocalInterleavingWorkPhase {
     /// Stable diagnostic spelling, not a correspondence certificate.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::GraphShape => "graph_shape",
             Self::FeasibleWitness => "feasible_witness",
@@ -223,23 +226,28 @@ pub struct LocalMatch<'source> {
 
 impl<'source> LocalMatch<'source> {
     /// Original turn ordinal, never an episode-local index.
-    pub fn utterance_index(self) -> usize {
+    #[must_use]
+    pub const fn utterance_index(self) -> usize {
         self.address.utterance
     }
     /// Original within-turn word ordinal.
-    pub fn word_index(self) -> usize {
+    #[must_use]
+    pub const fn word_index(self) -> usize {
         self.address.word
     }
     /// Original reference word ordinal.
-    pub fn reference_index(self) -> usize {
+    #[must_use]
+    pub const fn reference_index(self) -> usize {
         self.reference_index
     }
     /// Producer-bound source spelling.
-    pub fn source_text(self) -> &'source str {
+    #[must_use]
+    pub const fn source_text(self) -> &'source str {
         self.source
     }
     /// Producer-bound reference spelling.
-    pub fn reference_text(self) -> &'source str {
+    #[must_use]
+    pub const fn reference_text(self) -> &'source str {
         self.reference
     }
 }
@@ -258,7 +266,8 @@ pub struct CommonLocalMatch<'source>(LocalMatch<'source>);
 
 impl<'source> CommonLocalMatch<'source> {
     /// Inspect correspondence without allowing a selected match to create proof.
-    pub fn matched(self) -> LocalMatch<'source> {
+    #[must_use]
+    pub const fn matched(self) -> LocalMatch<'source> {
         self.0
     }
 }
@@ -366,12 +375,14 @@ impl<'source> LocalSearchCorridor<'_, 'source> {
 
 impl<'analysis, 'source> LocalWord<'analysis, 'source> {
     /// Admit only a nonempty match population present in every optimum.
+    #[must_use]
     pub fn required(self) -> Option<RequiredLocalWord<'analysis, 'source>> {
         let evidence = &self.analysis.words[self.source];
         (!evidence.can_be_missing && !evidence.candidates.is_empty())
             .then_some(RequiredLocalWord(self))
     }
     /// An optimal assignment can omit this word.
+    #[must_use]
     pub fn can_be_missing(&self) -> bool {
         self.analysis.words[self.source].can_be_missing
     }
@@ -388,6 +399,7 @@ impl<'analysis, 'source> LocalWord<'analysis, 'source> {
             })
     }
     /// A reference match common to all optimal assignments, if proved.
+    #[must_use]
     pub fn common(&self) -> Option<CommonLocalMatch<'source>> {
         let evidence = &self.analysis.words[self.source];
         (!evidence.can_be_missing && evidence.candidates.len() == 1).then(|| {
@@ -429,7 +441,8 @@ impl<'source> LocalInterleaving<'source> {
     }
 
     /// Maximum matched population under the declared bounded order model.
-    pub fn matched_words(&self) -> usize {
+    #[must_use]
+    pub const fn matched_words(&self) -> usize {
         self.selected.len()
     }
     /// One globally compatible optimum for inspection, never timing authority.
@@ -444,6 +457,7 @@ impl<'source> LocalInterleaving<'source> {
         })
     }
     /// Conservative order corridor, independent of which optimum was selected.
+    #[must_use]
     pub fn search_corridor(&self, utterance: usize) -> Option<LocalSearchCorridor<'_, 'source>> {
         let frontier = self.search_frontiers.get(utterance)?;
         Some(LocalSearchCorridor {

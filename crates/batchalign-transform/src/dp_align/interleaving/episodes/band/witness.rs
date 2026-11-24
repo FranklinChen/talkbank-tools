@@ -23,7 +23,7 @@ pub(super) struct CanonicalWitness<'relation, 'source> {
 }
 
 impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
-    pub(super) fn zero(relation: &'relation Relation<'source>) -> Self {
+    pub(super) const fn zero(relation: &'relation Relation<'source>) -> Self {
         Self {
             relation,
             score: 0,
@@ -31,13 +31,13 @@ impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
         }
     }
 
-    pub(super) fn relation(&self) -> &'relation Relation<'source> {
+    pub(super) const fn relation(&self) -> &'relation Relation<'source> {
         self.relation
     }
-    pub(super) fn score(&self) -> usize {
+    pub(super) const fn score(&self) -> usize {
         self.score
     }
-    pub(super) fn work(&self) -> usize {
+    pub(super) const fn work(&self) -> usize {
         self.work
     }
 
@@ -55,7 +55,7 @@ impl<'relation, 'source> CanonicalWitness<'relation, 'source> {
 impl LiteralInterior<'_, '_> {
     // One sparse-mask/row stream per source word, plus normalization/scans.
     // This is declared algorithmic work, not latency or byte memory.
-    fn work(&self) -> usize {
+    const fn work(&self) -> usize {
         self.source
             .len()
             .saturating_mul(self.reference.len().div_ceil(64))
@@ -64,7 +64,7 @@ impl LiteralInterior<'_, '_> {
             .saturating_add(2)
     }
 
-    fn cells(&self) -> usize {
+    const fn cells(&self) -> usize {
         // Posting pairs, map entries and two packed rows.
         self.reference.len().saturating_mul(6).saturating_add(
             self.reference
@@ -75,7 +75,7 @@ impl LiteralInterior<'_, '_> {
     }
 
     /// Allison-Dix exact LCS row differences with sparse equality masks.
-    /// https://www.cantab.net/users/mmlist/ll/Publications/1986IPL/
+    /// <https://www.cantab.net/users/mmlist/ll/Publications/1986IPL/>
     /// Only the admitted witness owner executes this in production.
     fn execute<C: WorkControl + ?Sized>(self, control: &C) -> Result<InteriorScore, C::Error> {
         let reference =

@@ -30,7 +30,7 @@ impl WorkerPlan {
             prepared,
         })
     }
-    pub(super) fn key(&self) -> &WorkerKey {
+    pub(super) const fn key(&self) -> &WorkerKey {
         &self.key
     }
     pub(super) fn into_parts(self) -> (WorkerKey, DispatchPreparation) {
@@ -63,10 +63,10 @@ impl CommandWorkerPlan {
         };
         Self { key, load }
     }
-    pub(super) fn key(&self) -> &WorkerKey {
+    pub(super) const fn key(&self) -> &WorkerKey {
         &self.key
     }
-    pub(super) fn load(&self) -> &TaskLoad {
+    pub(super) const fn load(&self) -> &TaskLoad {
         &self.load
     }
 }

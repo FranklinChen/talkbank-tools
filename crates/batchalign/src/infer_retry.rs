@@ -2,8 +2,8 @@
 //!
 //! This helper keeps batch-oriented server orchestrators from immediately
 //! degrading transient worker failures into terminal per-file errors. The retry
-//! boundary is the actual worker request, not the higher-level per-file
-//! orchestration that consumes its results.
+//! boundary is the actual worker request. The retry loop owns that request;
+//! the higher-level per-file submission is consumed independently.
 
 use std::time::Duration;
 
@@ -44,28 +44,19 @@ pub enum Cancellation<'a> {
 }
 
 impl Cancellation<'_> {
-    /// Run work under this cancellation authority. A stopped operation cannot
-    /// yield an output; its future is dropped before any later work can use it.
-    pub(crate) async fn supervise<T>(
+    /// Construct and run work under this authority. A pre-cancelled token
+    /// cannot start work, and cancellation drops an already-started future.
+    pub(crate) async fn supervise<'a, T>(
         &self,
-        operation: crate::owned_future::OwnedFuture<'_, T>,
+        start: impl FnOnce() -> crate::owned_future::OwnedFuture<'a, T> + Send,
     ) -> Result<T, ServerError> {
-        tokio::select! {
-            biased;
-            () = self.cancelled() => Err(ServerError::Cancelled),
-            output = operation => Ok(output),
-        }
-    }
-
-    /// Wait for cancellation. [`Self::NotWired`] returns a future that
-    /// never resolves (`std::future::pending`), so racing it in a
-    /// `select!` simply means that branch never wins: the same runtime
-    /// behavior a call site with no cancellation concept always had, now
-    /// stated by the type rather than by a token nothing will ever cancel.
-    async fn cancelled(&self) {
         match self {
-            Self::Token(token) => token.cancelled().await,
-            Self::NotWired { .. } => std::future::pending().await,
+            Self::Token(token) => tokio::select! {
+                biased;
+                () = token.cancelled() => Err(ServerError::Cancelled),
+                output = async { start().await } => Ok(output),
+            },
+            Self::NotWired { .. } => Ok(start().await),
         }
     }
 
@@ -76,7 +67,8 @@ impl Cancellation<'_> {
     /// finished. Every wait a dispatch takes on a job's behalf goes through
     /// here, so none of them can outlive a stop.
     pub(crate) async fn sleep(&self, duration: Duration) -> Result<(), ServerError> {
-        self.supervise(Box::pin(tokio::time::sleep(duration))).await
+        self.supervise(|| Box::pin(tokio::time::sleep(duration)))
+            .await
     }
 }
 
@@ -88,10 +80,10 @@ impl Cancellation<'_> {
 /// minutes after cancellation, because nothing along its retry-and-backoff
 /// path could ever observe the stop. See
 /// [`dispatch_execute_v2_with_retry_and_progress`] for the full contract.
-pub(crate) async fn dispatch_execute_v2_with_retry(
+pub async fn dispatch_execute_v2_with_retry(
     pool: &WorkerPool,
     lang: &LanguageCode3,
-    request: &ExecuteRequestV2,
+    request: ExecuteRequestV2,
     cancellation: Cancellation<'_>,
 ) -> Result<ExecuteResponseV2, ServerError> {
     dispatch_execute_v2_with_retry_and_progress(pool, lang, request, None, cancellation).await
@@ -106,9 +98,8 @@ pub(crate) async fn dispatch_execute_v2_with_retry(
 /// be mid-decode on a long file) and the backoff sleep between attempts.
 /// A cancellation observed at either point stops the loop immediately with
 /// [`ServerError::Cancelled`] rather than completing one more attempt or
-/// one more backoff first. [`Cancellation::NotWired`] can never produce
-/// that outcome: its `cancelled()` future never resolves, so a `NotWired`
-/// dispatch runs to its own success or failure exactly as it always did.
+/// one more backoff first. [`Cancellation::NotWired`] awaits the operation
+/// directly, with no local cancellation race.
 ///
 /// **Consequence of cancelling mid-attempt:** dropping the in-flight
 /// `pool.dispatch_execute_v2_with_progress` future abandons a worker that
@@ -118,15 +109,15 @@ pub(crate) async fn dispatch_execute_v2_with_retry(
 /// `CheckedOutWorker`'s request-in-flight tracking); a cancelled attempt's
 /// worker is never reused, so its eventual, unread response can never be
 /// misread as the answer to a later, unrelated request.
-pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
+pub async fn dispatch_execute_v2_with_retry_and_progress(
     pool: &WorkerPool,
     lang: &LanguageCode3,
-    request: &ExecuteRequestV2,
+    request: ExecuteRequestV2,
     progress_tx: Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>>,
     cancellation: Cancellation<'_>,
 ) -> Result<ExecuteResponseV2, ServerError> {
     retry_worker_operation(cancellation, "execute_v2", || {
-        Box::pin(pool.dispatch_execute_v2_with_progress(lang, request, progress_tx))
+        Box::pin(pool.dispatch_execute_v2_with_progress(lang, &request, progress_tx))
     })
     .await
     .map_err(ServerError::from)
@@ -134,7 +125,7 @@ pub(crate) async fn dispatch_execute_v2_with_retry_and_progress(
 
 /// Why [`retry_worker_operation`] stopped without a result.
 #[derive(Debug)]
-pub(crate) enum RetryEnd {
+pub enum RetryEnd {
     /// The last attempt failed in a way the policy does not retry, or the
     /// attempts ran out.
     Failed(WorkerError),
@@ -164,19 +155,19 @@ impl From<RetryEnd> for ServerError {
 /// Each attempt is an [`crate::owned_future::OwnedFuture`], the form
 /// [`Cancellation::supervise`] races, boxed by the caller, so the loop is not
 /// generic over each attempt's own future type.
-pub(crate) async fn retry_worker_operation<'a, T, F>(
+pub async fn retry_worker_operation<'a, T, F>(
     cancellation: Cancellation<'_>,
     what: &'static str,
     mut attempt: F,
 ) -> Result<T, RetryEnd>
 where
-    F: FnMut() -> crate::owned_future::OwnedFuture<'a, Result<T, WorkerError>>,
+    F: FnMut() -> crate::owned_future::OwnedFuture<'a, Result<T, WorkerError>> + Send,
 {
     let retry_policy = RetryPolicy::default();
     let mut attempt_number = 1;
     loop {
         let outcome = cancellation
-            .supervise(attempt())
+            .supervise(&mut attempt)
             .await
             .map_err(|_| RetryEnd::Cancelled)?;
         let error = match outcome {
@@ -267,6 +258,11 @@ mod tests {
     /// A token cancelled before the call must stop the loop before it ever
     /// reaches the worker pool, and report the typed `Cancelled` outcome,
     /// not a worker failure or a silent hang.
+    /// Guards: An already cancelled token prevents attempt factory execution and produces typed runner cancellation.
+    /// Kind: contract
+    /// Not a type: Cancellation is an independently timed observation and must win before a factory can perform effects.
+    /// State: A failing-on-use factory and a real pool invocation whose unrouted ASR control would reject immediately if polled.
+    /// Concurrency: The token is cancelled before either future is polled.
     #[tokio::test]
     async fn cancelled_before_dispatch_returns_cancelled_without_attempting() {
         let pool = WorkerPool::new(PoolConfig::for_tests());
@@ -275,10 +271,17 @@ mod tests {
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
 
+        let stopped: Result<(), RetryEnd> =
+            retry_worker_operation(Cancellation::Token(&cancel_token), "test op", || {
+                panic!("a cancelled operation must not create a worker attempt");
+            })
+            .await;
+        assert!(matches!(stopped, Err(RetryEnd::Cancelled)));
+
         let mut dispatch = Box::pin(dispatch_execute_v2_with_retry(
             &pool,
             &lang,
-            &request,
+            request,
             Cancellation::Token(&cancel_token),
         ));
         let result = futures::poll!(&mut dispatch);
@@ -287,72 +290,6 @@ mod tests {
             matches!(result, std::task::Poll::Ready(Err(ServerError::Cancelled))),
             "expected Err(ServerError::Cancelled), got {result:?}"
         );
-    }
-
-    /// [`Cancellation::NotWired`] can never produce `Err(Cancelled)`: its
-    /// `cancelled()` future never resolves, so the dispatch runs to its
-    /// own outcome (here, a worker failure, since `PoolConfig::for_tests()`
-    /// has no engine registered) rather than being interrupted. This is
-    /// the outcome-type half of the reviewer's ask: a `NotWired` call
-    /// cannot be cancelled, and the returned `Result` proves it by never
-    /// being the `Cancelled` variant, however long the underlying dispatch
-    /// takes or however it eventually fails.
-    /// The direct, fast proof of the mechanism the retry loop's `select!`
-    /// actually relies on: [`Cancellation::NotWired`]'s `cancelled()`
-    /// future never resolves, so it can never win a race against the
-    /// dispatch attempt. This is what makes `Err(ServerError::Cancelled)`
-    /// unreachable for a `NotWired` dispatch, independent of how long or
-    /// how the underlying attempt itself completes.
-    #[tokio::test]
-    async fn not_wired_cancelled_future_never_resolves() {
-        let cancellation = Cancellation::NotWired {
-            reason: "test: no job token in scope",
-        };
-
-        let mut waiting = Box::pin(cancellation.cancelled());
-        let outcome = futures::poll!(&mut waiting);
-
-        assert!(
-            matches!(outcome, std::task::Poll::Pending),
-            "Cancellation::NotWired.cancelled() must never resolve; a NotWired dispatch has \
-             nothing that could fire it"
-        );
-    }
-
-    /// Outcome-type-level companion to the test above: a full dispatch
-    /// given `Cancellation::NotWired` must not resolve spuriously.
-    /// Established by a DETERMINISTIC gate, not elapsed time: a future's
-    /// first `poll` either returns the outcome or `Pending`, with no
-    /// ambiguity and no dependence on how fast the runner schedules
-    /// things. If `NotWired` could somehow still short-circuit the
-    /// dispatch, this poll would already observe `Ready` instead of
-    /// `Pending`.
-    #[tokio::test]
-    async fn not_wired_dispatch_is_not_spuriously_resolved() {
-        let pool = WorkerPool::new(PoolConfig::for_tests());
-        let lang = LanguageCode3::eng();
-        let request = minimal_text_request();
-
-        let mut fut = Box::pin(dispatch_execute_v2_with_retry(
-            &pool,
-            &lang,
-            &request,
-            Cancellation::NotWired {
-                reason: "test: no job token in scope",
-            },
-        ));
-
-        let first_poll = futures::poll!(&mut fut);
-        assert!(
-            matches!(first_poll, std::task::Poll::Pending),
-            "a NotWired dispatch must not resolve (as Cancelled or otherwise) on its very \
-             first poll; nothing here should be able to finish it early, got {first_poll:?}"
-        );
-
-        // The attempt genuinely never completes under this pool config (no
-        // engine registered); drop rather than await so this test does
-        // not itself hang.
-        drop(fut);
     }
 
     /// A cancellation that fires while the FIRST attempt is still being
@@ -369,6 +306,11 @@ mod tests {
     /// not-yet-polled), independent of runner speed or scheduling, so the
     /// cancellation that follows is provably racing an IN-FLIGHT attempt
     /// rather than a call that had not started yet.
+    /// Guards: Cancellation during a pending worker attempt returns without waiting for output.
+    /// Kind: contract
+    /// Not a type: A token can fire while an actual pool checkout is suspended and the caller must regain control.
+    /// State: A private pool supplies the live pending checkout and a private token supplies the stop.
+    /// Concurrency: Explicit polling proves suspension before signalling the token.
     #[tokio::test]
     async fn cancelled_during_the_first_attempt_stops_the_loop() {
         let pool = WorkerPool::new(PoolConfig::for_tests());
@@ -379,7 +321,7 @@ mod tests {
         let mut fut = Box::pin(dispatch_execute_v2_with_retry(
             &pool,
             &lang,
-            &request,
+            request,
             Cancellation::Token(&cancel_token),
         ));
 
@@ -400,6 +342,11 @@ mod tests {
         );
     }
 
+    /// Guards: A suspended supervised operation drops its owned work when cancelled.
+    /// Kind: contract
+    /// Not a type: Rust ownership drops a future only after cancellation wins the actual asynchronous selection.
+    /// State: A drop receipt marks destructor entry for a suspended synthetic operation.
+    /// Concurrency: Explicit polling orders the start and cancelled result.
     #[tokio::test]
     async fn supervising_cancellation_drops_suspended_work_without_an_output() {
         use std::sync::{
@@ -422,7 +369,7 @@ mod tests {
             let _receipt = receipt;
             std::future::pending::<()>().await;
         };
-        let mut supervised = Box::pin(cancellation.supervise(Box::pin(work)));
+        let mut supervised = Box::pin(cancellation.supervise(|| Box::pin(work)));
         assert!(matches!(
             futures::poll!(&mut supervised),
             std::task::Poll::Pending
@@ -444,6 +391,11 @@ mod tests {
         }
     }
 
+    /// Guards: A jobless transient worker failure retries until its first success.
+    /// Kind: policy
+    /// Not a type: Retry classification and policy determine whether a fresh attempt follows each actual failure.
+    /// State: A scripted retry factory emits two crashes and a successful receipt without using a pool.
+    /// Concurrency: One task owns the attempt sequence and awaits its terminal outcome.
     #[tokio::test(start_paused = true)]
     async fn a_transient_failure_is_retried_until_it_succeeds() {
         let mut attempts = 0;
@@ -463,6 +415,11 @@ mod tests {
         assert!(matches!(result, Ok(3)), "{result:?}");
     }
 
+    /// Guards: An interpreter spawn failure is terminal after one attempt.
+    /// Kind: policy
+    /// Not a type: A valid worker error still needs a runtime classification into retry or stop.
+    /// State: A scripted spawn refusal and attempt counter exercise the shared policy without starting an interpreter.
+    /// Concurrency: The loop owns the sole attempt counter.
     #[tokio::test(start_paused = true)]
     async fn a_final_failure_stops_at_once() {
         let mut attempts = 0;
@@ -482,6 +439,11 @@ mod tests {
     /// A job cancelled while an attempt runs ends the loop as `Cancelled`,
     /// with no retry: the cancellation wins the supervised race (it is
     /// checked first), so neither the failed attempt nor a backoff follows.
+    /// Guards: Cancellation during recovery from a failed attempt prevents the next attempt.
+    /// Kind: policy
+    /// Not a type: A token can fire independently of the already observed transient error and backoff policy.
+    /// State: One token and a scripted first crash exercise real retry cancellation.
+    /// Concurrency: The first attempt itself signals the token before returning.
     #[tokio::test(start_paused = true)]
     async fn a_cancelled_job_ends_the_loop_without_another_attempt() {
         let token = CancellationToken::new();

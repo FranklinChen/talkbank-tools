@@ -1,7 +1,7 @@
 //! Rust-owned worker-protocol V2 prepared-audio executor control plane.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) for:
-//! - Section "4. Media Analysis V2: OpenSMILE" → `batchalign/worker/_opensmile_v2.py`
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) for:
+//! - Section "4. Media Analysis V2: `OpenSMILE`" → `batchalign/worker/_opensmile_v2.py`
 //! - Section "5. Media Analysis V2: AVQI" → `batchalign/worker/_avqi_v2.py`
 //! - Section "6. Media Analysis V2: Speaker Diarization" → `batchalign/worker/_speaker_v2.py`
 
@@ -253,7 +253,7 @@ fn run_speaker_embedding(
 /// Execute one openSMILE request with the analysis its (model-free) load
 /// recorded.
 #[pyfunction]
-pub(crate) fn execute_opensmile_request_v2(
+pub fn execute_opensmile_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     prepared_audio_runner: Py<PyAny>,
@@ -264,7 +264,7 @@ pub(crate) fn execute_opensmile_request_v2(
 
 /// Execute one AVQI request with the analysis its (model-free) load recorded.
 #[pyfunction]
-pub(crate) fn execute_avqi_request_v2(
+pub fn execute_avqi_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     prepared_audio_runner: Py<PyAny>,
@@ -277,7 +277,7 @@ pub(crate) fn execute_avqi_request_v2(
 /// speaker load built (`LoadedDiarization` on the Python side): its
 /// `backend` and `runner` are read from it.
 #[pyfunction]
-pub(crate) fn execute_speaker_request_v2(
+pub fn execute_speaker_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     loaded: &Bound<'_, PyAny>,
@@ -288,7 +288,7 @@ pub(crate) fn execute_speaker_request_v2(
 /// Execute one embedding request on `loaded`, the host the embedding load
 /// built (`LoadedSpeakerEmbedding` on the Python side).
 #[pyfunction]
-pub(crate) fn execute_speaker_embedding_request_v2(
+pub fn execute_speaker_embedding_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     loaded: &Bound<'_, PyAny>,

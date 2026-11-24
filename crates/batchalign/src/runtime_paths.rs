@@ -38,6 +38,7 @@ impl BatchalignHome {
     /// The root from `BATCHALIGN_HOME`, else the user's home (else the
     /// temporary directory, where a process with no home has always kept its
     /// state).
+    #[must_use]
     pub fn from_env() -> Self {
         Self::from_sources(std::env::var(HOME_ENV).ok().as_deref(), dirs::home_dir())
     }
@@ -51,6 +52,7 @@ impl BatchalignHome {
     }
 
     /// The directory holding `.batchalign.ini` and `.batchalign3`.
+    #[must_use]
     pub fn base(&self) -> &Path {
         match self {
             Self::User(home) | Self::Rooted(home) => home,
@@ -58,16 +60,19 @@ impl BatchalignHome {
     }
 
     /// `.batchalign.ini`: the default ASR engine and provider credentials.
+    #[must_use]
     pub fn config_ini(&self) -> PathBuf {
         self.base().join(".batchalign.ini")
     }
 
     /// The state directory when `BATCHALIGN_STATE_DIR` does not name one.
+    #[must_use]
     pub fn default_state_dir(&self) -> PathBuf {
         self.base().join(".batchalign3")
     }
 
     /// The base the analysis cache lives under, when its own override is unset.
+    #[must_use]
     pub fn cache_base(&self) -> Option<PathBuf> {
         match self {
             Self::User(_) => dirs::cache_dir(),
@@ -76,6 +81,7 @@ impl BatchalignHome {
     }
 
     /// The base the media cache lives under, when its own override is unset.
+    #[must_use]
     pub fn data_base(&self) -> Option<PathBuf> {
         match self {
             Self::User(_) => dirs::data_dir(),
@@ -105,12 +111,14 @@ fn override_dir_from(source: Option<&str>) -> Option<PathBuf> {
 
 /// Parse an explicit analysis-cache directory override from a caller-provided
 /// source.
+#[must_use]
 pub fn analysis_cache_dir_override_from(source: Option<&str>) -> Option<PathBuf> {
     override_dir_from(source)
 }
 
 /// Resolve the canonical analysis-cache setting and its application-name
 /// alias. A nonempty canonical value wins if both are present.
+#[must_use]
 pub fn analysis_cache_dir_override_from_sources(
     canonical: Option<&str>,
     alias: Option<&str>,
@@ -120,6 +128,7 @@ pub fn analysis_cache_dir_override_from_sources(
 
 /// Parse the analysis-cache directory override from the current process
 /// environment.
+#[must_use]
 pub fn analysis_cache_dir_override_from_env() -> Option<PathBuf> {
     analysis_cache_dir_override_from_sources(
         std::env::var(ANALYSIS_CACHE_DIR_ENV).ok().as_deref(),
@@ -129,12 +138,14 @@ pub fn analysis_cache_dir_override_from_env() -> Option<PathBuf> {
 
 /// Parse an explicit media-cache directory override from a caller-provided
 /// source.
+#[must_use]
 pub fn media_cache_dir_override_from(source: Option<&str>) -> Option<PathBuf> {
     override_dir_from(source)
 }
 
 /// Parse the media-cache directory override from the current process
 /// environment.
+#[must_use]
 pub fn media_cache_dir_override_from_env() -> Option<PathBuf> {
     media_cache_dir_override_from(std::env::var(MEDIA_CACHE_DIR_ENV).ok().as_deref())
 }

@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use crate::api::{DisplayPath, LanguageCode3, NumWorkers};
 use crate::cache::UtteranceCache;
+use crate::chat_ops::fa::{RecordingIdentity, RecordingIdentityView};
 use crate::engine_reports::FaCacheNamespace;
 use crate::fa::{
     ActiveAlignment, AdmittedFaResult, AlignRoute, FaServices, NoRecordingRoute, RealignmentRequest,
 };
-use crate::options::EngineBackend as _;
 use crate::params::{AudioContext, FaParams};
 use crate::pipeline::PipelineServices;
 use crate::provenance::AlignTiming;
@@ -28,14 +28,13 @@ use crate::types::request::{
 };
 
 use super::super::util::{
-    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, compute_audio_identity,
-    drain_supervised_file_tasks, probe_audio_duration, spawn_observed_progress_forwarder,
-    spawn_supervised_file_task,
+    FileRunTracker, FileStage, FileTaskOutcome, RunnerEventSink, drain_supervised_file_tasks,
+    spawn_observed_progress_forwarder, spawn_supervised_file_task,
 };
 use super::audio_output::{ChatOutput, FileOutput};
 use super::audio_task::{AudioFileTask, AudioTaskReporting, run_audio_file_task};
 use super::fa_admission::FaWorkerRefusal;
-use super::utr::{UtrPassContext, run_utr_pass};
+use super::utr::{UtrPassContext, UtrRecognizer, run_utr_pass};
 use super::{FaDispatchPlan, FaWorkerAdmission};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +59,7 @@ enum FaEvidenceRetention {
 }
 
 impl FaEvidenceRetention {
-    fn requested(durable: bool, trace: bool) -> Self {
+    const fn requested(durable: bool, trace: bool) -> Self {
         match (durable, trace) {
             (false, false) => Self::None,
             (true, false) => Self::DurableOnly,
@@ -69,11 +68,11 @@ impl FaEvidenceRetention {
         }
     }
 
-    fn requires_timeline(self) -> bool {
+    const fn requires_timeline(self) -> bool {
         !matches!(self, Self::None)
     }
 
-    fn stores_trace(self) -> bool {
+    const fn stores_trace(self) -> bool {
         matches!(self, Self::TraceOnly | Self::DurableAndTrace)
     }
 }
@@ -149,17 +148,20 @@ impl<'a> FaEngineAdmission<'a> {
 
 impl AdmittedFaEngine<'_> {
     /// The FA services for this file: the shared pool and cache, under the
-    /// admitted namespace and the job's GPU plan.
+    /// admitted namespace and the job's GPU plan, with the cache opened as
+    /// the recording's identity permits.
     fn services<'s>(
         &'s self,
         pipeline: PipelineServices<'s>,
         attention_capture_dir: Option<&'s std::path::Path>,
+        identity: &RecordingIdentity,
     ) -> FaServices<'s> {
         FaServices {
             pipeline,
             cache_namespace: &self.cache_namespace,
             gpu: self.gpu,
             attention_capture_dir,
+            recording_cache: crate::fa::RecordingCache::for_recording(pipeline.cache, identity),
         }
     }
 }
@@ -203,6 +205,11 @@ mod tests {
     use super::super::media_search::media_search_subdir;
     use super::FaEvidenceRetention;
 
+    /// Guards: Media search composes mapped subdirs with the correct source-path components.
+    /// Kind: policy
+    /// Not a type: Independent relative path inputs can accidentally repeat or discard a mapped branch.
+    /// State: Literal filenames and mapped subdirs exercising actual path selection.
+    /// Concurrency: Pure path composition makes no filesystem changes.
     #[test]
     fn media_search_subdir_preserves_mapping_subdir() {
         assert_eq!(
@@ -215,6 +222,11 @@ mod tests {
         );
     }
 
+    /// Guards: Durable alignment evidence demands its timeline even when dashboard traces are disabled.
+    /// Kind: policy
+    /// Not a type: The two independently valid evidence options must preserve the durable request's effect.
+    /// State: An in-memory retention selection and its timeline capability.
+    /// Concurrency: No runner or mutable options.
     #[test]
     fn durable_evidence_does_not_depend_on_dashboard_tracing() {
         let retention = FaEvidenceRetention::requested(true, false);
@@ -236,16 +248,10 @@ mod tests {
 pub(super) struct ResolvedMedia {
     /// The recording as found: the path the Rust-owned UTR engines read.
     original: PathBuf,
-    /// The recording as 16 kHz mono WAV, converted when the container needs
-    /// it: the path the Python workers read.
-    wav: PathBuf,
-    /// Content identity of the WAV for cache keying.
-    identity: crate::chat_ops::fa::AudioIdentity,
-    /// The probe's measurement of the WAV, taken once per file and handed to
-    /// both the UTR pass and FA so neither probes again. Optional because a
-    /// failed probe is logged and FA probes again for the recording it cannot
-    /// run without, reporting that failure as the file's error.
-    duration: Option<crate::media::probe::AudioDuration>,
+    /// The model-facing path and its completed duration result.
+    prepared: crate::ensure_wav::MeasuredAudio,
+    /// The prepared recording's cache identity, or why it has none.
+    identity: RecordingIdentity,
 }
 
 /// Why a file's recording could not be made ready, naming the file.
@@ -291,47 +297,68 @@ impl ResolvedMedia {
 
         // Convert non-WAV media (e.g. mp4) to WAV via ffmpeg if needed.
         // soundfile (Python) cannot read container formats like mp4 directly.
-        let wav = crate::ensure_wav::ensure_wav(&original, None)
+        let prepared = crate::ensure_wav::prepare_measured_audio(&original)
             .await
             .map_err(|error| MediaUnavailable::Conversion {
                 filename: filename.to_owned(),
                 error,
             })?;
 
-        // Compute audio identity for cache keying: path|mtime|size
-        let wav_str = wav.to_string_lossy();
-        let identity = compute_audio_identity(&wav_str).await.unwrap_or_else(|| {
-            // Fallback: use path with zeroed metadata
-            crate::chat_ops::fa::AudioIdentity::from_metadata(&wav_str, 0, 0)
-        });
+        // The cache identity (path, modification time, size). A recording
+        // whose metadata cannot be read is still aligned, with no cache read
+        // or write, rather than under a path-only key that would replay an
+        // earlier version's results.
+        let identity = RecordingIdentity::read(prepared.path()).await;
+        if let RecordingIdentityView::Unidentified(why) = identity.view() {
+            warn!(filename, %why, "Recording identity unreadable; aligning without the cache");
+        }
 
-        // How long the audio runs, measured once for UTR and FA alike.
-        let duration = probe_audio_duration(&wav).await;
+        match prepared.duration() {
+            Ok(duration) => tracing::debug!(audio = %prepared.path().display(),
+                length_ms = duration.length().0, basis = ?duration.basis(), "Probed audio duration"),
+            Err(error) => {
+                warn!(audio = %prepared.path().display(), %error, "Could not determine audio duration")
+            }
+        }
         Ok(Self {
             original,
-            wav,
+            prepared,
             identity,
-            duration,
         })
     }
 
-    /// The recording as FA and the worker-hosted UTR engines read it.
-    fn context(&self) -> AudioContext<'_> {
-        AudioContext {
-            audio_path: &self.wav,
-            audio_identity: &self.identity,
-            audio_duration: self.duration,
-        }
+    /// The recording as FA and worker-hosted UTR engines read it.
+    const fn context(&self) -> AudioContext<'_> {
+        AudioContext::new(&self.prepared, self.identity.keying())
     }
 
-    /// The path a UTR engine reads: a Rust-owned engine decodes the recording
-    /// as found, a worker-hosted one the prepared WAV.
-    fn utr_audio_path(&self, utr_engine: Option<&crate::options::UtrEngine>) -> &std::path::Path {
-        if utr_engine.is_some_and(|engine| engine.is_rust_owned()) {
-            self.original.as_path()
-        } else {
-            self.wav.as_path()
-        }
+    /// The recording as found, for the UTR engines that upload it.
+    fn original_recording(&self) -> OriginalRecording<'_> {
+        OriginalRecording(&self.original)
+    }
+}
+
+/// The recording as found, before any conversion.
+///
+/// Rev.AI uploads it, and keys its paid evidence by the uploaded bytes, so
+/// every UTR pass of a file must hand it the same file. A distinct type from
+/// the prepared WAV inside [`AudioContext`], and minted only from a
+/// [`ResolvedMedia`], so no pass can give Rev.AI the WAV instead: the fallback
+/// pass once did, and a fallback on an mp3 then missed the evidence the first
+/// pass had paid for.
+#[derive(Clone, Copy)]
+pub(super) struct OriginalRecording<'a>(&'a std::path::Path);
+
+impl<'a> OriginalRecording<'a> {
+    /// Where the recording is.
+    pub(super) const fn path(self) -> &'a std::path::Path {
+        self.0
+    }
+
+    /// A recording a test has written itself.
+    #[cfg(test)]
+    pub(super) const fn for_tests(path: &'a std::path::Path) -> Self {
+        Self(path)
     }
 }
 
@@ -449,15 +476,16 @@ impl AudioFileTask for AlignAudioTask<'_> {
                         file,
                         UtrPassContext {
                             pass: crate::api::UtrPass::Fallback,
-                            audio_path: media.wav.as_path(),
+                            recognizer: UtrRecognizer::new(
+                                pending.engine(),
+                                media.original_recording(),
+                            ),
                             lang: self.admitted.primary_language(),
                             services: self.services,
-                            audio_identity: &media.identity,
+                            audio: media.context(),
                             cache_policy: self.utr_cache_policy,
-                            audio_duration: media.duration,
                             aggregation_target: Some(self.admitted.params().aggregation_target()),
                             filename: &self.destination.filename,
-                            engine: pending.engine(),
                             strategy: &self.utr_strategy,
                             dumper: self.destination.dumper,
                         },
@@ -899,8 +927,6 @@ async fn process_one_fa_file(
                 .into();
         }
     };
-    let services = engine.services(pipeline, job.dispatch.options.common().debug_dir.as_deref());
-
     // Provenance comments embed the language for auditability. Use the
     // per-file language we just resolved above (`file_lang`), not the
     // job-level placeholder. This matches what gets stamped into
@@ -996,7 +1022,26 @@ async fn process_one_fa_file(
                 .into();
         }
     };
-    let utr_audio_path = media.utr_audio_path(utr_engine);
+    // A required cache cannot be met for a recording whose identity cannot
+    // be read; say so, rather than report every request's evidence missing.
+    if let (RecordingIdentityView::Unidentified(why), crate::params::CachePolicy::RequireCache) =
+        (media.identity.view(), fa_params.cache_policy)
+    {
+        return lifecycle
+            .fail(
+                &format!("The cache is required, but this recording has no cache identity: {why}"),
+                FailureCategory::Validation,
+            )
+            .await
+            .into();
+    }
+    // The FA services exist only once the recording's identity is known: the
+    // cache they open is the one that identity permits.
+    let services = engine.services(
+        pipeline,
+        job.dispatch.options.common().debug_dir.as_deref(),
+        &media.identity,
+    );
 
     // UTR pre-pass: if untimed utterances exist and a UTR engine is configured,
     // run ASR to recover utterance-level timing before FA grouping. The model
@@ -1024,15 +1069,13 @@ async fn process_one_fa_file(
                         file,
                         UtrPassContext {
                             pass: crate::api::UtrPass::Initial,
-                            audio_path: utr_audio_path,
+                            recognizer: UtrRecognizer::new(utr_engine, media.original_recording()),
                             lang: &file_lang,
                             services,
-                            audio_identity: &media.identity,
+                            audio: media.context(),
                             cache_policy: utr_cache_policy,
-                            audio_duration: media.duration,
                             aggregation_target: Some(admitted.params().aggregation_target()),
                             filename,
-                            engine: utr_engine,
                             strategy: &context.utr_strategy,
                             dumper,
                         },
@@ -1110,6 +1153,11 @@ mod auto_detect_tests {
     ///
     /// The fix: join `source_dir + parent(filename)` before inference so the
     /// repo key is visible, then use `repo_subdir` directly (no double-join).
+    /// Guards: Content-mode path with a repository prefix reaches the actual mapped media file.
+    /// Kind: contract
+    /// Not a type: An external client's filename can include a key with no local source-root component.
+    /// State: Synthetic client/root mapping and a real nested temporary media entry.
+    /// Concurrency: The map and directory are owned by the test.
     #[tokio::test]
     async fn auto_detect_media_mapping_content_mode_filename_has_repo_key_prefix() {
         let dir = tempfile::tempdir().unwrap();
@@ -1169,11 +1217,16 @@ mod auto_detect_tests {
     /// This test used to hand-rebuild `infer_media_mapping` with its own string
     /// splitting and then assert `"{repo_suffix}/{mapped_subdir}"`, which is
     /// exactly the double-count the production comment forbids ("Do NOT join
-    /// repo_subdir with mapped_subdir afterwards ... Joining again would
+    /// `repo_subdir` with `mapped_subdir` afterwards ... Joining again would
     /// double-count it"). It passed, because it was checking its own
     /// reconstruction rather than the code. It now calls the real inference and
     /// the real search, which is possible only because the rung became a value
     /// something can call.
+    /// Guards: Inferred source-path media finds the complete relative directory exactly once.
+    /// Kind: contract
+    /// Not a type: A mapped client path can produce a complete relative suffix that would be wrong if joined again.
+    /// State: An explicit synthetic mapping and owned nested recording entry.
+    /// Concurrency: One private filesystem search sees stable names.
     #[tokio::test]
     async fn auto_detect_media_mapping_from_source_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -1220,32 +1273,41 @@ mod utr_stage_tests {
     use crate::api::LanguageCode3;
     use crate::options::UtrEngine;
 
+    /// Guards: Timing population and language select the documented UTR route.
+    /// Kind: policy
+    /// Not a type: A valid language, a selected engine and observed timing
+    /// population must still resolve to the intended command policy.
+    /// State: Four pure inputs cover skip, interpolation, run and rejection.
+    /// Concurrency: Each input owns its selected values.
     #[test]
-    fn fully_timed_align_skips_utr_even_if_selected_engine_would_not_support_language() {
-        let decision =
-            plan_align_utr_stage(0, &LanguageCode3::yue(), Some(&UtrEngine::RevAi)).unwrap();
-        assert_eq!(decision, AlignUtrDecision::SkipAllTimed);
-    }
-
-    #[test]
-    fn untimed_align_with_no_utr_engine_uses_interpolation_path() {
-        let decision = plan_align_utr_stage(3, &LanguageCode3::eng(), None).unwrap();
-        assert_eq!(decision, AlignUtrDecision::ProceedWithoutUtr);
-    }
-
-    #[test]
-    fn untimed_align_with_supported_utr_runs_selected_backend() {
-        let decision =
-            plan_align_utr_stage(2, &LanguageCode3::yue(), Some(&UtrEngine::Whisper)).unwrap();
-        assert_eq!(decision, AlignUtrDecision::Run(&UtrEngine::Whisper));
-    }
-
-    #[test]
-    fn untimed_align_with_unsupported_rev_utr_fails_stage_validation() {
-        let err =
-            plan_align_utr_stage(4, &LanguageCode3::yue(), Some(&UtrEngine::RevAi)).unwrap_err();
+    fn align_utr_policy_uses_observed_timing_and_engine_support() {
+        let cantonese = LanguageCode3::yue();
+        let english = LanguageCode3::eng();
+        let cases = [
+            (
+                0,
+                &cantonese,
+                Some(&UtrEngine::RevAi),
+                AlignUtrDecision::SkipAllTimed,
+            ),
+            (3, &english, None, AlignUtrDecision::ProceedWithoutUtr),
+            (
+                2,
+                &cantonese,
+                Some(&UtrEngine::Whisper),
+                AlignUtrDecision::Run(&UtrEngine::Whisper),
+            ),
+        ];
+        for (untimed, lang, selected, expected) in cases {
+            assert_eq!(
+                plan_align_utr_stage(untimed, lang, selected).unwrap(),
+                expected
+            );
+        }
+        let rejected = plan_align_utr_stage(4, &cantonese, Some(&UtrEngine::RevAi)).unwrap_err();
         assert!(
-            err.to_string()
+            rejected
+                .to_string()
                 .contains("requires utterance timing recovery")
         );
     }

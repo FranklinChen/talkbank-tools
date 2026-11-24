@@ -104,17 +104,20 @@ impl TaskLoad {
     }
 
     /// The load a request needs: its pool task and the engines it names.
+    #[must_use]
     pub fn for_request(request: &ExecuteRequestV2) -> Self {
         let task = infer_task_for_execute_v2(request.task);
         Self::new(task, execute_request_overrides(request))
     }
 
     /// The task loaded.
+    #[must_use]
     pub fn task(&self) -> InferTask {
         self.0.identity.task
     }
 
     /// What the load keeps resident in its worker.
+    #[must_use]
     pub fn residency(&self) -> Residency {
         self.0.identity.residency
     }
@@ -334,7 +337,7 @@ pub struct AdmittedLoad {
 
 impl AdmittedLoad {
     /// The load admitted, for the transport's `ensure_task` request.
-    pub(crate) fn load(&self) -> &TaskLoad {
+    pub(crate) const fn load(&self) -> &TaskLoad {
         &self.load
     }
 
@@ -396,19 +399,20 @@ impl ModelLeaseCoverage {
         Self(loaded.load.residency().resident())
     }
 
-    pub(super) fn reserved(self) -> MemoryMb {
+    pub(super) const fn reserved(self) -> MemoryMb {
         self.0
     }
 
     #[cfg(test)]
-    pub(super) fn declared(reserved: MemoryMb) -> Self {
+    pub(super) const fn declared(reserved: MemoryMb) -> Self {
         Self(reserved)
     }
 }
 
 impl Loaded {
     /// The load this proves.
-    pub fn load(&self) -> &TaskLoad {
+    #[must_use]
+    pub const fn load(&self) -> &TaskLoad {
         &self.load
     }
 
@@ -448,7 +452,7 @@ impl Loaded {
 
 /// The actual transport that performs a load. Implementations are sealed to the
 /// three production adapters and the shared declared-effect fixture.
-pub(crate) trait TaskLoader: loader_seal::Sealed {
+pub trait TaskLoader: loader_seal::Sealed {
     fn ensure_load(
         &mut self,
         load: &TaskLoad,
@@ -457,7 +461,7 @@ pub(crate) trait TaskLoader: loader_seal::Sealed {
 }
 
 mod loader_seal {
-    pub(crate) trait Sealed {}
+    pub trait Sealed {}
     impl Sealed for crate::worker::handle::WorkerHandle {}
     impl Sealed for crate::worker::tcp_handle::TcpWorkerHandle {}
     impl<W> Sealed for &super::super::shared_gpu::channel::SharedGpuChannel<W> {}
@@ -527,7 +531,8 @@ enum RequestHold {
 
 impl RunPermit {
     /// The request to send.
-    pub fn request(&self) -> &ExecuteRequestV2 {
+    #[must_use]
+    pub const fn request(&self) -> &ExecuteRequestV2 {
         self.prepared.request()
     }
 
@@ -576,6 +581,7 @@ impl RunPermit {
     }
 
     /// The load it runs on.
+    #[must_use]
     pub fn loaded(&self) -> &Loaded {
         &self.loaded
     }
@@ -584,7 +590,7 @@ impl RunPermit {
 /// One worker's on-demand loads: `Loaded` states by load, absent is
 /// `NotLoaded`.
 #[derive(Debug, Default)]
-pub(crate) struct TaskLoads {
+pub struct TaskLoads {
     loaded: HashMap<TaskLoad, Arc<Loaded>>,
 }
 
@@ -609,4 +615,4 @@ impl TaskLoads {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub mod tests;

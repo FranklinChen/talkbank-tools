@@ -11,6 +11,7 @@ pub enum FrenchPronounCase {
 
 impl FrenchPronounCase {
     /// The `%mor` suffix text.
+    #[must_use]
     pub const fn text(self) -> &'static str {
         match self {
             Self::Nom => "Nom",
@@ -21,6 +22,7 @@ impl FrenchPronounCase {
 
 /// French pronoun case from the surface word form; `None` for a form the
 /// table does not list. (`lui` is listed as both and reads as nominative.)
+#[must_use]
 pub fn french_pronoun_case(text: &str) -> Option<FrenchPronounCase> {
     let clean = text.to_lowercase();
     let clean = clean.trim_matches('\'').trim();
@@ -41,6 +43,7 @@ const PRON_NOM: &[&str] = &[
 const PRON_ACC: &[&str] = &["que", "quoi", "me", "te", "le", "la", "les", "lui", "leur"];
 
 /// Return `true` if the word is a French noun with auditory plural marking.
+#[must_use]
 pub fn is_apm_noun(text: &str) -> bool {
     let lower = text.trim().to_lowercase();
     APM_NOUNS.contains(&lower.as_str())

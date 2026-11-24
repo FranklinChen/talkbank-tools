@@ -14,7 +14,7 @@ use crate::state::AppState;
 use crate::ws::WsEvent;
 
 /// Build the WebSocket route as a separate router.
-pub(crate) fn ws_route(_state: Arc<AppState>) -> Router<Arc<AppState>> {
+pub fn ws_route(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new().route("/ws", get(ws_handler))
 }
 

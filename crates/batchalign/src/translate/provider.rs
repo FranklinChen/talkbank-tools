@@ -21,7 +21,7 @@ use crate::types::worker_v2::HttpStatusCodeV2;
 
 /// What a provider answered instead of a translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderAnswer {
+pub enum ProviderAnswer {
     /// An HTTP status, with the cooldown the provider asked for, if any.
     Status {
         /// The status the provider answered.
@@ -57,7 +57,7 @@ impl std::fmt::Display for ProviderAnswer {
 
 /// Which answers an HTTP provider is given time to recover from, and how much.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TransientPolicy {
+pub struct TransientPolicy {
     /// Statuses worth waiting out. A transport failure with no response is
     /// always among the transient answers.
     statuses: &'static [HttpStatusCodeV2],
@@ -71,7 +71,7 @@ pub(crate) struct TransientPolicy {
 
 /// How to approach one engine's provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProviderPolicy {
+pub struct ProviderPolicy {
     /// The gap kept between consecutive requests. `None` for a model in the
     /// worker process, which has no rate limit to respect.
     spacing: Option<Duration>,
@@ -82,7 +82,7 @@ pub(crate) struct ProviderPolicy {
 
 impl ProviderPolicy {
     /// The gap kept between consecutive requests, if any.
-    pub(crate) fn spacing(&self) -> Option<Duration> {
+    pub(crate) const fn spacing(&self) -> Option<Duration> {
         self.spacing
     }
 
@@ -134,13 +134,13 @@ impl ProviderPolicy {
 /// [`Verdict::WaitAndRetry`], and replaced by a fresh one on a success, so the
 /// number of retries a file has spent is never a counter kept beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Throttle {
+pub struct Throttle {
     remaining: &'static [Duration],
 }
 
 /// The policy's answer to a provider answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// Sleep `cooldown`, then send the same item again with `throttle`.
     WaitAndRetry {
         /// How long to wait before the next attempt.
@@ -154,7 +154,7 @@ pub(crate) enum Verdict {
 
 /// Why an item was given up on: the last answer, and what the policy made of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProviderGiveUp {
+pub struct ProviderGiveUp {
     /// The answer the policy stopped on.
     pub(crate) answer: ProviderAnswer,
     /// Why it stopped.
@@ -163,7 +163,7 @@ pub(crate) struct ProviderGiveUp {
 
 /// What the policy made of the last answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GiveUpReason {
+pub enum GiveUpReason {
     /// Not an answer this engine recovers from.
     Final,
     /// Transient, but every scheduled cooldown has been spent.
@@ -211,7 +211,7 @@ const GOOGLE_TRANSIENT: TransientPolicy = TransientPolicy {
 
 impl TranslateEngineName {
     /// How this engine's provider is approached.
-    pub(crate) fn provider_policy(&self) -> ProviderPolicy {
+    pub(crate) const fn provider_policy(&self) -> ProviderPolicy {
         match self {
             // The 1.5 s gap is the rate the endpoint tolerates from one client
             // without answering 429; it used to be a sleep inside the worker.
@@ -264,15 +264,27 @@ mod tests {
         }
     }
 
+    /// Guards: The first rate limit or unanswered request uses the scheduled initial cooldown.
+    /// Kind: policy
+    /// Not a type: The received provider answer and fresh retry schedule are independent inputs to the policy.
+    /// State: Two typed provider reply shapes and a reproducible fresh plan.
+    /// Concurrency: Pure provider policy evaluation.
     #[test]
-    fn a_rate_limit_waits_the_scheduled_cooldown_first() {
+    fn the_first_transient_answer_uses_the_engine_cooldown() {
         let policy = google();
-        assert_eq!(
-            cooldown_of(policy.verdict(status(429, None), policy.fresh_throttle())),
-            Duration::from_secs(5)
-        );
+        for answer in [status(429, None), ProviderAnswer::NoResponse] {
+            assert_eq!(
+                cooldown_of(policy.verdict(answer, policy.fresh_throttle())),
+                Duration::from_secs(5)
+            );
+        }
     }
 
+    /// Guards: Retry-After below the schedule leaves it intact and a larger value extends the wait.
+    /// Kind: policy
+    /// Not a type: A provider can report a delay on either side of BA3's scheduled cooldown.
+    /// State: Two literal Retry-After values are judged against the same fresh policy.
+    /// Concurrency: Pure duration comparison without timers.
     #[test]
     fn a_longer_retry_after_replaces_the_schedule_and_a_shorter_one_does_not() {
         let policy = google();
@@ -292,6 +304,11 @@ mod tests {
         );
     }
 
+    /// Guards: The second cooldown grows and the third rate limit exhausts the two-stage retry schedule.
+    /// Kind: policy
+    /// Not a type: Repeated provider observations may saturate the admitted retry policy at its external response boundary.
+    /// State: Three typed rate-limit observations advance the actual schedule.
+    /// Concurrency: Pure successive policy transitions without sleeping.
     #[test]
     fn the_second_cooldown_is_longer_and_the_third_answer_is_refused() {
         let policy = google();
@@ -315,6 +332,11 @@ mod tests {
         );
     }
 
+    /// Guards: Oversized provider cooldowns refuse with the exact ceiling and requested time.
+    /// Kind: policy
+    /// Not a type: Retry-After can exceed the supported bound by one second or by an extreme amount.
+    /// State: Two typed external duration claims enter the actual ceiling decision.
+    /// Concurrency: Pure duration policy without timers.
     #[test]
     fn a_cooldown_above_the_ceiling_is_refused_rather_than_slept() {
         let policy = google();
@@ -332,6 +354,11 @@ mod tests {
         }
     }
 
+    /// Guards: Representative terminal HTTP responses do not start a cooldown.
+    /// Kind: policy
+    /// Not a type: Potentially valid external status codes still need provider-specific classification.
+    /// State: Four literal non-retryable HTTP responses enter the actual provider policy.
+    /// Concurrency: Pure policy evaluation without transport.
     #[test]
     fn a_final_status_is_refused_at_once() {
         let policy = google();
@@ -347,15 +374,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_response_is_waited_out_on_the_same_schedule() {
-        let policy = google();
-        assert_eq!(
-            cooldown_of(policy.verdict(ProviderAnswer::NoResponse, policy.fresh_throttle())),
-            Duration::from_secs(5)
-        );
-    }
-
+    /// Guards: Engines without a transient policy stop immediately and retain their configured pacing.
+    /// Kind: policy
+    /// Not a type: Engine policy can vary independently of an observed transient response category.
+    /// State: Four configured engines and two external answer shapes check retry and spacing.
+    /// Concurrency: Pure policy evaluation with no clock.
     #[test]
     fn an_engine_without_a_transient_policy_refuses_every_answer_and_keeps_its_spacing() {
         for engine in [
@@ -370,7 +393,7 @@ mod tests {
                     policy.verdict(answer, policy.fresh_throttle()),
                     Verdict::GiveUp(ProviderGiveUp {
                         answer,
-                        why: GiveUpReason::Final,
+                        why: GiveUpReason::Final
                     }),
                     "{engine:?} {answer}"
                 );
@@ -384,6 +407,11 @@ mod tests {
     }
 
     /// The operator reads these in the file's failure; the book quotes them.
+    /// Guards: Operator-visible terminal and exhaustion diagnostics preserve the actual HTTP and Retry-After values.
+    /// Kind: wire
+    /// Not a type: Typed fields do not establish the formatted human-readable wording or preserve the actual numeric content.
+    /// State: Two concrete provider give-up receipts with distinct reasons.
+    /// Concurrency: Pure diagnostic rendering without a transport.
     #[test]
     fn give_up_reasons_read_as_the_operator_will_see_them() {
         assert_eq!(

@@ -9,6 +9,11 @@ use std::{
     },
 };
 
+/// Guards: A consumed source retry cannot reselect its owner while unused preparation survives.
+/// Kind: policy
+/// Not a type: Dynamic request selection decides which actual resource survives each retry attempt.
+/// State: Synthetic preparation scopes and their retained resource values.
+/// Concurrency: One registry owns each inserted value.
 #[tokio::test]
 async fn source_retry_retains_unused_owner_and_cannot_repeat_selected_input() {
     let mut registry = PreparationRegistry::new();
@@ -56,6 +61,11 @@ fn scope(key: &str) -> RequestScope {
     }
 }
 
+/// Guards: Repeated request scope executes the actual preparation factory only once.
+/// Kind: policy
+/// Not a type: Equal runtime scopes can arrive repeatedly even when each caller is individually valid.
+/// State: One typed scope and a counter-backed materialization closure.
+/// Concurrency: One async registry serializes requests.
 #[tokio::test]
 async fn repeated_scope_constructs_and_runs_the_preparation_factory_once() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -95,6 +105,11 @@ async fn repeated_scope_constructs_and_runs_the_preparation_factory_once() {
     );
 }
 
+/// Guards: Changed request scope gets a new preparation and drops unselected owners.
+/// Kind: policy
+/// Not a type: Two valid requests can differ materially and therefore require independent resource work.
+/// State: Synthetic original and changed scopes and their counted resource factory.
+/// Concurrency: Selection consumes only the intended outcomes.
 #[tokio::test]
 async fn changed_input_is_a_new_preparation_and_unselected_inputs_are_dropped() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -124,6 +139,11 @@ async fn changed_input_is_a_new_preparation_and_unselected_inputs_are_dropped() 
     assert!(frozen.contains_key(&scope("changed-window")));
 }
 
+/// Guards: Cancelling an unsettled preparation cannot reissue its capability.
+/// Kind: contract
+/// Not a type: A factory can be suspended and dropped before a produced value exists.
+/// State: Private registry with a deliberately pending preparation and a refusing second factory.
+/// Concurrency: The caller cancels before the original factory settles.
 #[tokio::test]
 async fn dropping_a_claim_cannot_issue_a_second_preparation_capability() {
     let mut registry = PreparationRegistry::<String>::new();
@@ -152,6 +172,11 @@ async fn dropping_a_claim_cannot_issue_a_second_preparation_capability() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
+/// Guards: A recorded resource refusal surfaces on repeat without rerunning preparation.
+/// Kind: policy
+/// Not a type: Equivalent runtime inputs can encounter a retained inability to materialize audio.
+/// State: One typed empty-audio outcome and a counted producer.
+/// Concurrency: A single registry owns the refusal and prevents another effect.
 #[tokio::test]
 async fn an_unchanged_refused_input_cannot_repeat_materialization_or_model_preparation() {
     let calls = AtomicUsize::new(0);

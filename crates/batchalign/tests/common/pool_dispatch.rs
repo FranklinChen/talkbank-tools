@@ -35,7 +35,6 @@ pub fn echo_pool_config(
     test_delay_ms: u64,
 ) -> PoolConfig {
     PoolConfig {
-        python_path,
         max_total_workers,
         max_workers_per_key,
         test_echo: true,
@@ -44,7 +43,7 @@ pub fn echo_pool_config(
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
         ),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python_path)
     }
 }
 

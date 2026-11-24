@@ -29,7 +29,7 @@ use super::{
 /// to the job module (the live job adopts an image whole), and read
 /// elsewhere through accessors, so no other code can mint an image to write.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct JobStatusColumns {
+pub struct JobStatusColumns {
     /// The `status` column.
     pub(in crate::store::job) status: crate::api::JobStatus,
     /// The `error` column.
@@ -45,7 +45,7 @@ pub(crate) struct JobStatusColumns {
 /// How a job was stopped before it finished: the two statuses a stop
 /// writes, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stop {
+pub enum Stop {
     /// The server stopped (a shutdown, or a crash found at startup); the job
     /// is resumable.
     Interrupted,
@@ -55,7 +55,7 @@ pub(crate) enum Stop {
 
 impl Stop {
     /// The status the stop writes.
-    pub(crate) fn status(self) -> crate::api::FinishedStatus {
+    pub(crate) const fn status(self) -> crate::api::FinishedStatus {
         match self {
             Self::Interrupted => crate::api::FinishedStatus::Interrupted,
             Self::Cancelled => crate::api::FinishedStatus::Cancelled,
@@ -89,7 +89,7 @@ impl JobStatusColumns {
 
     /// Any image, for tests that write a row as a job would leave it.
     #[cfg(test)]
-    pub(crate) fn for_test(
+    pub(crate) const fn for_test(
         status: crate::api::JobStatus,
         error: Option<String>,
         completed_at: Option<crate::api::MachineTime>,
@@ -106,7 +106,7 @@ impl JobStatusColumns {
     }
 
     /// The `status` column.
-    pub(crate) fn status(&self) -> crate::api::JobStatus {
+    pub(crate) const fn status(&self) -> crate::api::JobStatus {
         self.status
     }
 
@@ -116,17 +116,17 @@ impl JobStatusColumns {
     }
 
     /// The `completed_at` column.
-    pub(crate) fn completed_at(&self) -> Option<crate::api::MachineTime> {
+    pub(crate) const fn completed_at(&self) -> Option<crate::api::MachineTime> {
         self.completed_at
     }
 
     /// The `num_workers` column.
-    pub(crate) fn num_workers(&self) -> Option<i64> {
+    pub(crate) const fn num_workers(&self) -> Option<i64> {
         self.num_workers
     }
 
     /// The `next_eligible_at` column.
-    pub(crate) fn next_eligible_at(&self) -> Option<crate::api::MachineTime> {
+    pub(crate) const fn next_eligible_at(&self) -> Option<crate::api::MachineTime> {
         self.next_eligible_at
     }
 
@@ -158,11 +158,13 @@ impl Job {
     }
 
     /// Return the stable job identifier.
-    pub fn job_id(&self) -> &crate::api::JobId {
+    #[must_use]
+    pub const fn job_id(&self) -> &crate::api::JobId {
         &self.identity.job_id
     }
 
     /// Return the total number of logical files in the job.
+    #[must_use]
     pub fn total_files(&self) -> usize {
         self.inputs().len()
     }
@@ -194,6 +196,7 @@ impl Job {
     }
 
     /// Convert to the API `JobInfo` response.
+    #[must_use]
     pub fn to_info(&self) -> JobInfo {
         let file_statuses: Vec<FileStatusEntry> = self
             .execution
@@ -241,6 +244,7 @@ impl Job {
     }
 
     /// Convert to the API `JobListItem` summary.
+    #[must_use]
     pub fn to_list_item(&self) -> JobListItem {
         let count = |kind: FileStatusKind| {
             self.execution
@@ -278,6 +282,7 @@ impl Job {
 
     /// The files that have not yet reached a terminal state, from the job's
     /// admitted inputs: `None` when this process has not admitted them.
+    #[must_use]
     pub fn pending_files(&self) -> Option<Vec<PendingJobFile>> {
         Some(self.pending_files_of(self.admitted_inputs()?))
     }
@@ -296,6 +301,7 @@ impl Job {
 
     /// Create the immutable runner-facing snapshot for this job: `None` when
     /// this process has not admitted its inputs, so it cannot run.
+    #[must_use]
     pub fn to_runner_snapshot(&self) -> Option<RunnerJobSnapshot> {
         let inputs = self.admitted_inputs()?;
         Some(RunnerJobSnapshot {

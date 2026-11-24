@@ -47,7 +47,7 @@ impl Eq for UtrResult {}
 
 impl UtrResult {
     /// Construct the only valid state in which UTR does not run.
-    pub(crate) fn not_run_no_untimed(skipped: usize) -> Self {
+    pub(crate) const fn not_run_no_untimed(skipped: usize) -> Self {
         Self {
             injected: 0,
             skipped,
@@ -62,7 +62,8 @@ impl UtrResult {
 
     /// Whether recovery ran at all. Only the no-untimed-utterances result did
     /// not; every other result came from matching ASR tokens.
-    pub fn ran(&self) -> bool {
+    #[must_use]
+    pub const fn ran(&self) -> bool {
         match self.alignment {
             UtrAlignmentEvidence::NotRunNoUntimed => false,
             UtrAlignmentEvidence::Global { .. } | UtrAlignmentEvidence::TwoPass { .. } => true,
@@ -70,26 +71,31 @@ impl UtrResult {
     }
 
     /// Number of untimed utterances given candidate timing by the private UTR projection.
-    pub fn injected(&self) -> usize {
+    #[must_use]
+    pub const fn injected(&self) -> usize {
         self.injected
     }
 
     /// Number of already-timed utterances preserved by UTR.
-    pub fn skipped(&self) -> usize {
+    #[must_use]
+    pub const fn skipped(&self) -> usize {
         self.skipped
     }
 
     /// Number of untimed utterances left without UTR timing.
-    pub fn unmatched(&self) -> usize {
+    #[must_use]
+    pub const fn unmatched(&self) -> usize {
         self.unmatched
     }
 
     /// Replayable alignment evidence retained independently from projection.
-    pub fn alignment(&self) -> &UtrAlignmentEvidence {
+    #[must_use]
+    pub const fn alignment(&self) -> &UtrAlignmentEvidence {
         &self.alignment
     }
 
     /// Per-utterance decision records emitted by UTR.
+    #[must_use]
     pub fn decisions(&self) -> &[DecisionRecord] {
         &self.decisions
     }
@@ -97,7 +103,7 @@ impl UtrResult {
     /// Take the word anchors this pass observed, for forced-alignment
     /// grouping, leaving the result's counts and decisions to be read.
     /// The result then reports no observation.
-    pub fn take_anchors(&mut self) -> AnchorIndex {
+    pub const fn take_anchors(&mut self) -> AnchorIndex {
         std::mem::replace(&mut self.anchors, AnchorIndex::not_observed())
     }
 
@@ -159,7 +165,8 @@ pub struct UtrUtteranceOrdinal(pub(super) usize);
 
 impl UtrUtteranceOrdinal {
     /// Return the zero-based ordinal for indexing the same main-tier set.
-    pub fn index(self) -> usize {
+    #[must_use]
+    pub const fn index(self) -> usize {
         self.0
     }
 
@@ -167,7 +174,7 @@ impl UtrUtteranceOrdinal {
     /// is a contiguous census slice starting at `region_start`, so a local
     /// ordinal names the file utterance that far past it. Only plan assembly
     /// (`UtrAlignmentPlan::assemble`) reaches this, once per published address.
-    pub(super) fn placed_after(self, region_start: Self) -> Self {
+    pub(super) const fn placed_after(self, region_start: Self) -> Self {
         Self(region_start.0 + self.0)
     }
 
@@ -207,7 +214,7 @@ impl UtrWordOrdinal {
 pub(super) struct UtrUnitOrdinal(pub(super) usize);
 
 impl UtrUnitOrdinal {
-    pub(super) fn index(self) -> usize {
+    pub(super) const fn index(self) -> usize {
         self.0
     }
 }
@@ -241,17 +248,17 @@ impl UtrUnitOfWord {
     }
 
     /// The alignable word the unit belongs to.
-    pub(super) fn word_index(self) -> UtrWordOrdinal {
+    pub(super) const fn word_index(self) -> UtrWordOrdinal {
         self.word_index
     }
 
     /// This unit's position within its word, below [`Self::parts`].
-    pub(super) fn part(self) -> usize {
+    pub(super) const fn part(self) -> usize {
         self.part
     }
 
     /// How many units the word has.
-    pub(super) fn parts(self) -> std::num::NonZeroUsize {
+    pub(super) const fn parts(self) -> std::num::NonZeroUsize {
         self.parts
     }
 }
@@ -269,7 +276,7 @@ pub(super) struct UtrAsrTokenOrdinal(pub(super) usize);
 pub(super) struct UtrAsrUnitOrdinal(pub(super) usize);
 
 impl UtrAsrTokenOrdinal {
-    pub(super) fn index(self) -> usize {
+    pub(super) const fn index(self) -> usize {
         self.0
     }
 }
@@ -293,7 +300,7 @@ pub struct UtrWordAddress {
 
 impl UtrWordAddress {
     /// The same unit addressed in the file's census instead of a region's.
-    pub(super) fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+    pub(super) const fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
         Self {
             utterance_index: self.utterance_index.placed_after(region_start),
             ..self
@@ -301,12 +308,14 @@ impl UtrWordAddress {
     }
 
     /// Main-tier utterance containing this unit.
-    pub fn utterance_index(self) -> usize {
+    #[must_use]
+    pub const fn utterance_index(self) -> usize {
         self.utterance_index.index()
     }
 
     /// Alignable-word ordinal of the word containing this unit.
-    pub fn word_index(self) -> usize {
+    #[must_use]
+    pub const fn word_index(self) -> usize {
         self.of_word.word_index().0
     }
 }
@@ -323,12 +332,14 @@ pub struct UtrAsrTokenAddress {
 
 impl UtrAsrTokenAddress {
     /// Token ordinal within the admitted ASR timing stream.
-    pub fn token_index(self) -> usize {
+    #[must_use]
+    pub const fn token_index(self) -> usize {
         self.token_index.index()
     }
 
     /// Lexical-unit ordinal within the token's text.
-    pub fn unit_index(self) -> usize {
+    #[must_use]
+    pub const fn unit_index(self) -> usize {
         self.unit_index.0
     }
 }
@@ -460,12 +471,14 @@ impl PositiveUtrInterval {
     }
 
     /// Start of the admitted interval, in recording milliseconds.
-    pub fn start_ms(self) -> u64 {
+    #[must_use]
+    pub const fn start_ms(self) -> u64 {
         self.start_ms
     }
 
     /// End of the admitted interval, in recording milliseconds.
-    pub fn end_ms(self) -> u64 {
+    #[must_use]
+    pub const fn end_ms(self) -> u64 {
         self.end_ms
     }
 
@@ -615,7 +628,8 @@ pub enum UtrInspectionMatches {
 
 impl UtrInspectionMatches {
     /// Completed diagnostic selection, if available.
-    pub fn selected(&self) -> Option<&NonEmptyUtrWordMatches> {
+    #[must_use]
+    pub const fn selected(&self) -> Option<&NonEmptyUtrWordMatches> {
         match self {
             Self::Selected { matches } => Some(matches),
             Self::BudgetExhausted { .. } => None,
@@ -953,7 +967,7 @@ pub(super) struct ClaimedTokens(std::collections::BTreeSet<UtrAsrTokenOrdinal>);
 impl ClaimedTokens {
     /// No token claimed: for tests of the overlap window alone.
     #[cfg(test)]
-    pub(super) fn none() -> Self {
+    pub(super) const fn none() -> Self {
         Self(std::collections::BTreeSet::new())
     }
 
@@ -1047,12 +1061,14 @@ pub struct UtrRegionSummary {
 
 impl UtrRegionSummary {
     /// Owned utterances and searched onset window.
-    pub fn span(&self) -> super::regions::UtrRegionSpan {
+    #[must_use]
+    pub const fn span(&self) -> super::regions::UtrRegionSpan {
         self.span
     }
 
     /// Algorithm used for this region.
-    pub fn strategy(&self) -> UtrAlignmentStrategy {
+    #[must_use]
+    pub const fn strategy(&self) -> UtrAlignmentStrategy {
         self.strategy
     }
 }
@@ -1118,16 +1134,19 @@ impl UtrAlignmentPlan {
     }
 
     /// Order model of the whole pass.
-    pub fn order_model(&self) -> UtrOrderModel {
+    #[must_use]
+    pub const fn order_model(&self) -> UtrOrderModel {
         self.strategy
     }
 
     /// Anchored regions in document order.
+    #[must_use]
     pub fn regions(&self) -> &[UtrRegionSummary] {
         &self.regions
     }
 
     /// Every utterance's evidence in CHAT order.
+    #[must_use]
     pub fn utterances(&self) -> &[UtrUtteranceAlignmentEvidence] {
         &self.utterances
     }
@@ -1190,12 +1209,14 @@ pub struct UtrBudgetRefusal {
 
 impl UtrBudgetRefusal {
     /// The refused region.
-    pub fn region(&self) -> super::regions::UtrRegionSpan {
+    #[must_use]
+    pub const fn region(&self) -> super::regions::UtrRegionSpan {
         self.region
     }
 
     /// The budget it exceeded.
-    pub fn budget(&self) -> UtrSearchBudget {
+    #[must_use]
+    pub const fn budget(&self) -> UtrSearchBudget {
         self.budget
     }
 }
@@ -1251,7 +1272,7 @@ pub struct UtrSearchInconsistency {
 
 impl UtrSearchInconsistency {
     /// The refused region.
-    pub fn region(&self) -> super::regions::UtrRegionSpan {
+    pub const fn region(&self) -> super::regions::UtrRegionSpan {
         self.region
     }
 }
@@ -1269,7 +1290,7 @@ pub enum UtrUnsearchedRegion {
 
 impl UtrUnsearchedRegion {
     /// The region.
-    pub fn region(&self) -> super::regions::UtrRegionSpan {
+    pub const fn region(&self) -> super::regions::UtrRegionSpan {
         match self {
             Self::BudgetExhausted(refusal) => refusal.region(),
             Self::Inconsistent(inconsistency) => inconsistency.region(),
@@ -1279,14 +1300,16 @@ impl UtrUnsearchedRegion {
 
 impl UtrSearchBudget {
     /// The monotonic correspondence producer's named budget.
-    pub(super) fn monotonic(budget: batchalign_transform::dp_align::CorrespondenceBudget) -> Self {
+    pub(super) const fn monotonic(
+        budget: batchalign_transform::dp_align::CorrespondenceBudget,
+    ) -> Self {
         Self::CandidateEdges {
             limit: budget.limit(),
         }
     }
 
     /// The interleaved correspondence producer's named budget.
-    pub(super) fn interleaved(
+    pub(super) const fn interleaved(
         budget: batchalign_transform::dp_align::interleaving::LocalInterleavingBudget,
     ) -> Self {
         use batchalign_transform::dp_align::interleaving::LocalInterleavingBudget;

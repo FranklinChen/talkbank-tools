@@ -10,7 +10,7 @@
 //!    When `BATCHALIGN_OTLP_ENABLE` or an OTLP endpoint env var is set, an
 //!    OpenTelemetry span exporter is layered on top for distributed tracing.
 //! 3. **Subcommand dispatch** -- delegates to [`batchalign::cli::run_command`],
-//!    the single source of truth shared with the PyO3 console_scripts entry point.
+//!    the single source of truth shared with the `PyO3` `console_scripts` entry point.
 //! 4. **Exit code propagation** -- maps `CliError` variants to appropriate
 //!    numeric exit codes so callers (scripts, CI) can distinguish failure modes.
 //!
@@ -61,7 +61,7 @@ impl OtlpRuntimeConfig {
         }
     }
 
-    fn should_enable(&self) -> bool {
+    const fn should_enable(&self) -> bool {
         self.enabled || self.batchalign_endpoint.is_some() || self.otel_exporter_endpoint.is_some()
     }
 

@@ -41,6 +41,7 @@ impl AnchoredPart {
     }
 
     /// All words of this part, whether or not it can be requested.
+    #[must_use]
     pub fn words(&self) -> &[FaWord] {
         match self {
             Self::Request(piece) => piece.words(),
@@ -49,7 +50,8 @@ impl AnchoredPart {
     }
 
     /// Its position in the original window partition, not dispatch permission.
-    pub fn window(&self) -> FaWindow {
+    #[must_use]
+    pub const fn window(&self) -> FaWindow {
         match self {
             Self::Request(piece) => piece.ownership_window(),
             Self::Unavailable(piece) => piece.window(),
@@ -57,6 +59,7 @@ impl AnchoredPart {
     }
 
     /// First original word index, independent of request admission.
+    #[must_use]
     pub fn first_word(&self) -> WordIdx {
         match self {
             Self::Request(piece) => piece.first_word(),
@@ -65,6 +68,7 @@ impl AnchoredPart {
     }
 
     /// Last original word index, inclusive.
+    #[must_use]
     pub fn last_word(&self) -> WordIdx {
         match self {
             Self::Request(piece) => piece.last_word(),
@@ -127,27 +131,32 @@ impl UnavailablePiece {
     }
 
     /// The original consecutive words, with original utterance word indices.
+    #[must_use]
     pub fn words(&self) -> &[FaWord] {
         self.words.as_slice()
     }
 
     /// First word of the unavailable range (zero based).
-    pub fn first_word(&self) -> WordIdx {
+    #[must_use]
+    pub const fn first_word(&self) -> WordIdx {
         self.words.first
     }
 
     /// Last word of the unavailable range (inclusive, zero based).
-    pub fn last_word(&self) -> WordIdx {
+    #[must_use]
+    pub const fn last_word(&self) -> WordIdx {
         self.words.last
     }
 
     /// The unavailable span, inside the recording but over the request budget.
-    pub fn window(&self) -> FaWindow {
+    #[must_use]
+    pub const fn window(&self) -> FaWindow {
         self.window
     }
 
     /// Durable reason for leaving this exact range unrequested.
-    pub fn refusal(&self) -> RefusedWindow {
+    #[must_use]
+    pub const fn refusal(&self) -> RefusedWindow {
         RefusedWindow::AnchorGap {
             start_ms: self.window.audio_start().get(),
             end_ms: self.window.end().get(),

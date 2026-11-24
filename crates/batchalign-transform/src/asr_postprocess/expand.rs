@@ -13,8 +13,8 @@ use super::{AsrNormalizedText, AsrTextLanguage, AsrWord, WordKind, expand_number
 ///   because a `ChatWordText` holds one token.
 /// - A letter-led token whose digits stand alone (`b2`, `mp3`, `R2D2`).
 ///   Words "should not contain numbers" (manual, section 2), and "acronyms
-///   or ones with numbers may require underscores, as in C_three_PO and
-///   R_two_D_two" (8.8.3): each digit is spelled and joined to the letter
+///   or ones with numbers may require underscores, as in `C_three_PO` and
+///   `R_two_D_two`" (8.8.3): each digit is spelled and joined to the letter
 ///   runs with underscores, letters kept as recognized (`b_two`,
 ///   `mp_three`, `R_two_D_two`), in the Latin script only. One token stays
 ///   one word. A run of two or

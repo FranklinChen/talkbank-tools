@@ -47,7 +47,7 @@ enum PanicPattern {
 }
 
 impl PanicPattern {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Unwrap => "unwrap",
             Self::Expect => "expect",
@@ -59,7 +59,7 @@ impl PanicPattern {
     }
 
     /// All variants in stable order for table headers and totals.
-    fn all() -> &'static [Self] {
+    const fn all() -> &'static [Self] {
         &[
             Self::Unwrap,
             Self::Expect,
@@ -87,7 +87,7 @@ enum DirectoryClass {
 }
 
 impl DirectoryClass {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::TalkbankCore => "talkbank-core",
             Self::Batchalign => "batchalign",
@@ -114,7 +114,7 @@ impl DirectoryClass {
         }
     }
 
-    fn all() -> &'static [Self] {
+    const fn all() -> &'static [Self] {
         &[
             Self::TalkbankCore,
             Self::Batchalign,

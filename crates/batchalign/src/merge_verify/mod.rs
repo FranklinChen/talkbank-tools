@@ -8,7 +8,7 @@
 //! Tier semantics (human-calibrated against blind listening verdicts;
 //! measured 97.5% precision on the auto-trust tier):
 //!
-//! - AUTO_TRUST: trusted category AND ear YES AND pitch CHILD. The
+//! - `AUTO_TRUST`: trusted category AND ear YES AND pitch CHILD. The
 //!   verify `%com` flag is REWRITTEN to a machine-verified provenance
 //!   note (maintainer ruling: provenance survives in the transcript,
 //!   flags are never silently deleted).
@@ -77,7 +77,7 @@ pub enum VerifyCategory {
 impl VerifyCategory {
     /// Whether the ear sample calibrated this category as safe for
     /// silent trust when the remaining gates pass.
-    fn is_trusted(self) -> bool {
+    const fn is_trusted(self) -> bool {
         matches!(
             self,
             VerifyCategory::Other
@@ -162,6 +162,7 @@ pub enum TierOutcome {
 }
 
 /// Assign the calibrated tier for one verdict line.
+#[must_use]
 pub fn tier_outcome(verdict: &LineVerdict) -> TierOutcome {
     match verdict.category {
         VerifyCategory::Clock | VerifyCategory::Region => TierOutcome::Hold,
@@ -194,7 +195,7 @@ pub fn tier_outcome(verdict: &LineVerdict) -> TierOutcome {
 /// The guard arm above is structurally unreachable (`is_trusted`
 /// matches exactly those four variants); modeled as a typed dead end
 /// rather than a panic per the no-panic policy.
-fn unreachable_category() -> TierOutcome {
+const fn unreachable_category() -> TierOutcome {
     TierOutcome::Review
 }
 
@@ -347,7 +348,7 @@ pub enum MergeVerifyError {
 }
 
 /// Render a pitch band for provenance notes.
-fn pitch_label(pitch: PitchBand) -> &'static str {
+const fn pitch_label(pitch: PitchBand) -> &'static str {
     match pitch {
         PitchBand::Child => "child",
         PitchBand::Adult => "adult",
@@ -356,7 +357,7 @@ fn pitch_label(pitch: PitchBand) -> &'static str {
 }
 
 /// Render an ear verdict for provenance notes.
-fn ear_label(ear: EarVerdict) -> &'static str {
+const fn ear_label(ear: EarVerdict) -> &'static str {
     match ear {
         EarVerdict::Yes => "yes",
         EarVerdict::No => "no",

@@ -72,7 +72,8 @@ pub struct SpanWordPosition(usize);
 
 impl SpanWordPosition {
     /// The raw position, for diagnostics.
-    pub fn as_usize(self) -> usize {
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 }
@@ -119,7 +120,8 @@ pub struct UdTokenIndex(usize);
 impl UdTokenIndex {
     /// The raw position, for diagnostics and for indexing what the mapper
     /// produced per token.
-    pub fn as_usize(self) -> usize {
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 }
@@ -142,7 +144,8 @@ pub enum AlignedUd<'s> {
 impl<'s> AlignedUd<'s> {
     /// The syntactic words of the token, in order: the word itself, or the
     /// components of a multi-word token.
-    pub fn words(&self) -> &'s [UdWord] {
+    #[must_use]
+    pub const fn words(&self) -> &'s [UdWord] {
         match *self {
             Self::Word(word) => std::slice::from_ref(word),
             Self::Mwt { components, .. } => components,
@@ -179,17 +182,20 @@ pub struct WalkedUdToken<'a, 's> {
 
 impl<'s> WalkedUdToken<'_, 's> {
     /// The admitted token and, for a multiword token, its components.
-    pub fn ud(self) -> AlignedUd<'s> {
+    #[must_use]
+    pub const fn ud(self) -> AlignedUd<'s> {
         self.token.ud
     }
 
     /// The admitted syntactic words covered by this token.
-    pub fn words(self) -> &'s [UdWord] {
+    #[must_use]
+    pub const fn words(self) -> &'s [UdWord] {
         self.token.ud.words()
     }
 
     /// The syntactic word selected by the producer for this token's attachment.
-    pub fn representative(self) -> &'s UdWord {
+    #[must_use]
+    pub const fn representative(self) -> &'s UdWord {
         self.token.representative
     }
 }
@@ -376,12 +382,14 @@ impl<'s> UdTokens<'s> {
     }
 
     /// How many top-level tokens the sentence has.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.tokens.len()
     }
 
     /// Whether the sentence has no top-level token.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.tokens.is_empty()
     }
 
@@ -396,6 +404,7 @@ impl<'s> UdTokens<'s> {
     /// Where a syntactic word is, by its UD id: its token, and its place
     /// among the token's words (0 for a single word; a multi-word token's
     /// components count from its first).
+    #[must_use]
     pub fn locate(&self, id: UdWordId) -> Option<(UdTokenIndex, usize)> {
         let (at, _) = self.by_id.get(&id)?;
         let token = self.tokens.get(at.0)?;
@@ -443,7 +452,8 @@ impl<'s, W: WordSpace> UdAlignment<'s, W> {
     }
 
     /// The walk this alignment is over, for the `%mor` mapper.
-    pub fn tokens(&self) -> &UdTokens<'s> {
+    #[must_use]
+    pub const fn tokens(&self) -> &UdTokens<'s> {
         &self.tokens
     }
 
@@ -480,6 +490,7 @@ impl<'s, W: WordSpace> UdAlignment<'s, W> {
     /// The UD word the model made the sentence root, with the CHAT word it
     /// is in. `None` only for a sentence with no root word, which the
     /// `%mor` mapper rejects before any caller asks.
+    #[must_use]
     pub fn root(&self) -> Option<(W, &'s UdWord)> {
         self.tokens
             .by_id
@@ -514,17 +525,17 @@ pub struct AlignedWord<'a, 's, W> {
 
 impl<'a, 's, W: WordSpace> AlignedWord<'a, 's, W> {
     /// This word's index in the alignment's CHAT-side space.
-    pub fn index(&self) -> W {
+    pub const fn index(&self) -> W {
         self.index
     }
 
     /// The top-level token this word is aligned to.
-    pub fn token_index(&self) -> UdTokenIndex {
+    pub const fn token_index(&self) -> UdTokenIndex {
         self.position
     }
 
     /// The UD material this CHAT word covers.
-    pub fn ud(&self) -> AlignedUd<'s> {
+    pub const fn ud(&self) -> AlignedUd<'s> {
         self.token.ud
     }
 
@@ -532,7 +543,7 @@ impl<'a, 's, W: WordSpace> AlignedWord<'a, 's, W> {
     /// the word itself, or, for a multi-word token, the first component
     /// whose head lies outside the token (`a` of `al`, both of whose
     /// components attach to the following noun).
-    pub fn representative(&self) -> &'s UdWord {
+    pub const fn representative(&self) -> &'s UdWord {
         self.token.representative
     }
 
@@ -545,12 +556,12 @@ impl<'a, 's, W: WordSpace> AlignedWord<'a, 's, W> {
     }
 
     /// The UD word the representative's head is, if not the root.
-    pub fn head_word(&self) -> Option<&'s UdWord> {
+    pub const fn head_word(&self) -> Option<&'s UdWord> {
         self.token.head_word
     }
 
     /// The UD id of the representative's head, if not the root.
-    pub fn head_id(&self) -> Option<UdWordId> {
+    pub const fn head_id(&self) -> Option<UdWordId> {
         self.token.representative.head.word()
     }
 

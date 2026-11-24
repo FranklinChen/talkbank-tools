@@ -107,10 +107,12 @@ impl From<WhisperWindowsV2> for WindowWire {
 
 impl WhisperWindowsV2 {
     /// Source sampling rate shared by every observation.
-    pub fn sample_rate_hz(&self) -> SampleRateHzV2 {
+    #[must_use]
+    pub const fn sample_rate_hz(&self) -> SampleRateHzV2 {
         self.0.sample_rate_hz
     }
     /// Admitted windows in source order.
+    #[must_use]
     pub fn windows(&self) -> &[WhisperWindowV2] {
         &self.0.windows
     }

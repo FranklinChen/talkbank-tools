@@ -83,9 +83,10 @@ impl PackedBits {
         let checked = Self { words, length };
         let mut cleared = checked.clone();
         cleared.clear_past_length();
-        match cleared == checked {
-            true => Ok(checked),
-            false => Err(PackedBitsRefusal::BitPastLength { length }),
+        if cleared == checked {
+            Ok(checked)
+        } else {
+            Err(PackedBitsRefusal::BitPastLength { length })
         }
     }
 
@@ -125,7 +126,7 @@ impl PackedBits {
     }
 
     /// The declared length in bits.
-    pub(in crate::dp_align) fn length(&self) -> usize {
+    pub(in crate::dp_align) const fn length(&self) -> usize {
         self.length
     }
 

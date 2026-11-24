@@ -92,6 +92,7 @@ fn apply_utterance_language_override(
 
 /// If `text` is a tag-marker separator (comma, tag marker, vocative marker),
 /// return the corresponding [`Separator`] model type. Otherwise return `None`.
+#[must_use]
 pub fn tag_marker_separator(text: &str) -> Option<Separator> {
     match text {
         "," => Some(Separator::Comma {
@@ -119,7 +120,7 @@ pub fn tag_marker_separator(text: &str) -> Option<Separator> {
 /// word-level tokens. It has zero production callers in the current codebase
 /// (the ASR pipeline always uses word-level `WordDesc` tokens), but it
 /// preserves the JSON API contract for external callers who construct
-/// `TranscriptDescription` directly. The PyO3 bridge tests exercise this path.
+/// `TranscriptDescription` directly. The `PyO3` bridge tests exercise this path.
 fn build_text_utterance(
     parser: &TreeSitterParser,
     speaker: &str,

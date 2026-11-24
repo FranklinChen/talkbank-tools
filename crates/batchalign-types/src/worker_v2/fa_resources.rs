@@ -84,21 +84,21 @@ pub struct FaPreparationBindingV2 {
 pub enum FaAllocationBasisV2 {
     /// Virtual tensor lifetimes plus the qualified native CPU CTC layout.
     MmsCpu {
-        /// PyTorch that performed the virtual projection.
+        /// `PyTorch` that performed the virtual projection.
         torch_version: String,
         /// Source revision of the installed native CTC implementation.
         torchaudio_revision: String,
     },
     /// Loaded Whisper's encoder/decoder configuration and virtual tensors.
     Whisper {
-        /// PyTorch that performed the projection.
+        /// `PyTorch` that performed the projection.
         torch_version: String,
         /// Transformers that owns the loaded model implementation.
         transformers_version: String,
     },
     /// Loaded Qwen encoder/tokenizer configuration and virtual tensors.
     Qwen {
-        /// PyTorch that performed the projection.
+        /// `PyTorch` that performed the projection.
         torch_version: String,
         /// Transformers that owns the loaded model implementation.
         transformers_version: String,

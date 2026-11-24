@@ -158,6 +158,7 @@ pub enum MorClass {
 
 impl MorClass {
     /// The family of a `scat` or one side of a `dcat` value.
+    #[must_use]
     pub fn of(category: &str) -> Self {
         match category.split(':').next().unwrap_or(category) {
             "co" => Self::Communicator,
@@ -273,6 +274,7 @@ impl LexiconVerdicts {
     }
 
     /// Number of communicator verdicts.
+    #[must_use]
     pub fn communicator_count(&self) -> usize {
         self.forms
             .values()
@@ -281,6 +283,7 @@ impl LexiconVerdicts {
     }
 
     /// Number of noun verdicts.
+    #[must_use]
     pub fn noun_count(&self) -> usize {
         self.forms
             .values()
@@ -575,6 +578,7 @@ static EMBEDDED_ENGLISH: LazyLock<LexiconVerdicts> = LazyLock::new(|| {
 });
 
 /// The embedded English verdicts.
+#[must_use]
 pub fn embedded_english() -> &'static LexiconVerdicts {
     &EMBEDDED_ENGLISH
 }

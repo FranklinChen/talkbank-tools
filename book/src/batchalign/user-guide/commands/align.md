@@ -562,7 +562,7 @@ the same cached alignment evidence.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--media-dir PATH` | alongside `.cha` | Directory to search for audio files matching the `@Media` header stem |
+| `--media-dir PATH` | alongside `.cha` | Directory to search for the recording named like the transcript (which CHAT requires to equal its `@Media` name) |
 | `--utr-engine {rev,whisper,tencent}` | `rev` | UTR backend; `--help` lists the accepted values. `rev` needs Rev.AI credentials and has no Cantonese support; `whisper` is local; `tencent` uses the account's chosen Tencent engine (`engine.tencent.model`), which covers Chinese varieties and, for some engines, English. A rejection names the engines that would work for the file's language. |
 | `--utr-engine-custom NAME` |: | **Deprecated alias for `--utr-engine`**, still honoured, hidden from `--help`. |
 | `--utr` / `--no-utr` | enabled | Enable or skip the UTR pre-pass entirely |

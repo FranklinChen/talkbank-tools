@@ -24,14 +24,14 @@ use crate::worker::pool::WorkerPool;
 /// Carries no capability view: dispatch reads the selected worker's admitted
 /// report from the pool for each job, and test-echo workers answer every task.
 #[derive(Clone)]
-pub(crate) struct RunnerExecutionContext {
+pub struct RunnerExecutionContext {
     pub(super) pool: Arc<WorkerPool>,
     pub(super) cache: Arc<UtteranceCache>,
     pub(super) test_echo_mode: bool,
 }
 
 impl RunnerExecutionContext {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         pool: Arc<WorkerPool>,
         cache: Arc<UtteranceCache>,
         test_echo_mode: bool,
@@ -46,13 +46,13 @@ impl RunnerExecutionContext {
 
 /// Shared execution engine built on one resolved runtime context.
 #[derive(Clone)]
-pub(crate) struct ExecutionEngine {
+pub struct ExecutionEngine {
     pub(super) context: RunnerExecutionContext,
 }
 
 impl ExecutionEngine {
     /// Build one shared execution engine over a resolved runtime context.
-    pub(crate) fn new(context: RunnerExecutionContext) -> Self {
+    pub(crate) const fn new(context: RunnerExecutionContext) -> Self {
         Self { context }
     }
 
@@ -68,7 +68,7 @@ impl ExecutionEngine {
     /// in-flight workers from the pool before publishing the cancel and
     /// terminates them after; without this accessor, the backend has no way
     /// to reach the pool.
-    pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
+    pub(crate) const fn pool(&self) -> &Arc<WorkerPool> {
         &self.context.pool
     }
 }
@@ -84,7 +84,7 @@ impl ExecutionEngine {
 /// which is the architectural seam the host-facts migration introduced (see
 /// `book/src/batchalign/developer/host-facts.md`).
 #[derive(Clone)]
-pub(crate) struct DispatchHostContext {
+pub struct DispatchHostContext {
     trace_store: Arc<crate::trace_store::TraceStore>,
     config: Arc<ServerConfig>,
     /// The store's host snapshot: job sizing and the dispatch plans take the
@@ -195,10 +195,10 @@ impl ClaimedDispatch {
         }
     }
 
-    pub(super) fn job(&self) -> &Arc<RunnerJobSnapshot> {
+    pub(super) const fn job(&self) -> &Arc<RunnerJobSnapshot> {
         &self.job
     }
-    pub(super) fn host(&self) -> &DispatchHostContext {
+    pub(super) const fn host(&self) -> &DispatchHostContext {
         &self.host
     }
 
@@ -212,7 +212,7 @@ impl ClaimedDispatch {
 
 /// Shared server-owned host dependencies needed to build per-job runner tasks.
 #[derive(Clone)]
-pub(crate) struct ServerExecutionHost {
+pub struct ServerExecutionHost {
     pub(super) store: Arc<JobStore>,
     pub(super) engine: ExecutionEngine,
     pub(super) orchestrator: Arc<dyn QueuedJobOrchestrator>,
@@ -235,21 +235,21 @@ impl ServerExecutionHost {
     /// Access the underlying worker pool. Backends call this from
     /// `cancel_job` to detach and then terminate every in-flight worker
     /// registered to the cancelled job (see `worker/pool/job_tracker.rs`).
-    pub(crate) fn pool(&self) -> &Arc<WorkerPool> {
+    pub(crate) const fn pool(&self) -> &Arc<WorkerPool> {
         self.engine.pool()
     }
 }
 
 /// Shared direct-execution host dependencies needed to run one inline job.
 #[derive(Clone)]
-pub(crate) struct DirectExecutionHost {
+pub struct DirectExecutionHost {
     pub(super) store: Arc<JobStore>,
     pub(super) engine: ExecutionEngine,
 }
 
 impl DirectExecutionHost {
     /// Build one direct-execution host bundle around one execution engine.
-    pub(crate) fn new(store: Arc<JobStore>, engine: ExecutionEngine) -> Self {
+    pub(crate) const fn new(store: Arc<JobStore>, engine: ExecutionEngine) -> Self {
         Self { store, engine }
     }
 }
@@ -261,6 +261,9 @@ pub(super) struct JobDispatchRequest {
     pub(super) num_workers: NumWorkers,
 }
 
+// Reason: re-exports an item that is visible in this crate only; Clippy's
+// suggested `pub` does not compile (E0365).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) use crate::store::MemoryRequeueOutcome as MemoryGateRejectionDisposition;
 
 /// A whole job that dispatch declined to run, with the reason the run's
@@ -269,7 +272,7 @@ pub(crate) use crate::store::MemoryRequeueOutcome as MemoryGateRejectionDisposit
 /// A value, not a store write: dispatch hands it back to the consuming run
 /// scope, which alone holds the claim that may fail the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JobRefusal(String);
+pub struct JobRefusal(String);
 
 impl JobRefusal {
     /// Only the runner's routing refuses a whole job.
@@ -291,7 +294,7 @@ impl std::fmt::Display for JobRefusal {
 /// How command dispatch ended for a claimed run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "a refusal must reach the run scope that owns the claim"]
-pub(crate) enum DispatchEnd {
+pub enum DispatchEnd {
     /// Dispatch ran; every file it reached recorded its own terminal state.
     Dispatched,
     /// The whole job was refused before or during dispatch.
@@ -304,7 +307,7 @@ pub(crate) enum DispatchEnd {
 /// persists re-queues, computes backoff, or wakes its scheduler when a job
 /// cannot currently run.
 #[async_trait]
-pub(crate) trait QueuedJobOrchestrator: Send + Sync {
+pub trait QueuedJobOrchestrator: Send + Sync {
     /// Handle a host-memory rejection for one queued job. The runner logs
     /// what was requested and why it was refused; the orchestrator decides
     /// only what happens to the job.

@@ -186,7 +186,7 @@ fn recover_failure_category(
 /// A stored file row read as the one phase it describes, and what reading it
 /// found: whether the row is the phase's own image, held columns the phase
 /// does not own, or holds a value this build cannot read.
-pub(crate) enum RecoveredFilePhase {
+pub enum RecoveredFilePhase {
     /// The row is exactly its phase's column image.
     Exact(FilePhase),
     /// The row held columns its phase does not own (`dropped` says which):
@@ -222,10 +222,7 @@ impl RecoveredFilePhase {
 /// ([`RecoveredFilePhase::Foreign`]); columns the phase does not own are
 /// found by [`FilePhase::from_row`] ([`RecoveredFilePhase::Repairable`]). The
 /// caller reports and acts.
-pub(crate) fn recover_file_phase(
-    job_id: &str,
-    row: &crate::db::FileStatusRow,
-) -> RecoveredFilePhase {
+pub fn recover_file_phase(job_id: &str, row: &crate::db::FileStatusRow) -> RecoveredFilePhase {
     let (status, status_note) = recover_file_status(job_id, &row.filename, &row.status);
     let (error_category, category_note) =
         recover_failure_category(job_id, &row.filename, row.error_category.as_deref());
@@ -647,13 +644,16 @@ mod tests {
     /// `/corpus` and written under `/out`, or as a content-mode job.
     fn set_paths_mode(record: &mut NewJobRecord, on: bool) {
         record.paths_mode = on;
-        let under = |root: &str| match on {
-            true => record
-                .filenames
-                .iter()
-                .map(|name| format!("{root}/{name}"))
-                .collect(),
-            false => Vec::new(),
+        let under = |root: &str| {
+            if on {
+                record
+                    .filenames
+                    .iter()
+                    .map(|name| format!("{root}/{name}"))
+                    .collect()
+            } else {
+                Vec::new()
+            }
         };
         record.source_paths = under("/corpus");
         record.output_paths = under("/out");
@@ -920,8 +920,8 @@ mod tests {
     /// Guards: Startup retains written files and resets unfinished files only when current path authority admits execution.
     /// Kind: contract
     /// Not a type: Live fixture types cannot establish decoding of persisted rows or the subsequent SQLite rewrites under changed filesystem authority.
-    /// State: A private SQLite database and registry exercise actual row decoding and persistence. No worker or model is loaded.
-    /// Concurrency: Each mode owns its directory, database and actor. All mutations are awaited before reload and inspection.
+    /// State: Two persisted file rows distinguish an already written artifact from a processing file on startup with no allowed roots.
+    /// Concurrency: The content and path cases run sequentially in separate stores, with recovery completed before reload.
     #[tokio::test]
     async fn load_from_db_requeues_resumable_interrupted_jobs() {
         // On a server with no paths-mode folders: a content-mode job resumes;
@@ -970,14 +970,15 @@ mod tests {
                 .unwrap();
 
             let info = store.get(&JobId::from("job-1")).await.unwrap();
-            let (job_status, file_status, row_status, file_row) = match paths_mode {
-                false => (
+            let (job_status, file_status, row_status, file_row) = if !paths_mode {
+                (
                     JobStatus::Queued,
                     FileStatusKind::Queued,
                     "queued",
                     "queued",
-                ),
-                true => (JobStatus::Failed, FileStatusKind::Error, "failed", "error"),
+                )
+            } else {
+                (JobStatus::Failed, FileStatusKind::Error, "failed", "error")
             };
             assert_eq!(info.status, job_status, "paths mode {paths_mode}");
             let requeued_file = info

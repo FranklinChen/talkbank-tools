@@ -24,9 +24,9 @@ pub enum WhisperModelSource {
 /// Defaults are platform-aware:
 /// - On macOS the model directory is searched for a sibling
 ///   `<model>-encoder.mlmodelc` bundle; if present and the
-///   `whisper-rs-coreml` feature is enabled, CoreML acceleration kicks in
+///   `whisper-rs-coreml` feature is enabled, `CoreML` acceleration kicks in
 ///   automatically.
-/// - On Linux/Windows the path-suffix CoreML lookup is irrelevant and the
+/// - On Linux/Windows the path-suffix `CoreML` lookup is irrelevant and the
 ///   model loads CPU-only (or CUDA if `whisper-rs-cuda` feature is on).
 #[derive(Debug, Clone)]
 pub struct WhisperNativeConfig {
@@ -53,7 +53,8 @@ impl WhisperNativeConfig {
     /// New config pointing at the given model file. Other fields take
     /// the recommended pilot defaults: 8 threads, `--max-context 0`,
     /// transcribe (not translate).
-    pub fn for_model(model_path: PathBuf) -> Self {
+    #[must_use]
+    pub const fn for_model(model_path: PathBuf) -> Self {
         Self {
             model_path,
             source: WhisperModelSource::HostChosen,
@@ -70,7 +71,7 @@ impl WhisperNativeConfig {
     /// the pin over a file that never came from it, which is the weakest
     /// possible proof of a revision.
     #[cfg(feature = "whisper-rs-backend")]
-    fn pinned_default(model_path: PathBuf) -> Self {
+    const fn pinned_default(model_path: PathBuf) -> Self {
         Self {
             model_path,
             source: WhisperModelSource::PinnedDefault,
@@ -83,6 +84,7 @@ impl WhisperNativeConfig {
     /// Resolve the model path from the `BATCHALIGN_WHISPER_RS_MODEL` env
     /// var. Returns `None` if unset; callers can fall back to a default
     /// or surface a clear error.
+    #[must_use]
     pub fn from_env() -> Option<Self> {
         std::env::var_os("BATCHALIGN_WHISPER_RS_MODEL").map(|p| Self::for_model(PathBuf::from(p)))
     }
@@ -161,10 +163,10 @@ pub const DEFAULT_MODEL_REPO_NAME: &str = "whisper.cpp";
 /// NOTE (CoreML): a model is an artifact SET when the
 /// `whisper-rs-coreml` feature is on: acceleration needs a sibling
 /// `<model>-encoder.mlmodelc` bundle next to the `.bin`, which this
-/// single-file default cannot fetch. A CoreML build on the auto-fetched
-/// default silently runs without CoreML; supply
+/// single-file default cannot fetch. A `CoreML` build on the auto-fetched
+/// default silently runs without `CoreML`; supply
 /// `BATCHALIGN_WHISPER_RS_MODEL` pointing at a directory that carries
 /// both artifacts, or extend this to a `DefaultModel { repo, file,
-/// coreml_bundle }` set when CoreML prefetch lands.
+/// coreml_bundle }` set when `CoreML` prefetch lands.
 #[cfg(feature = "whisper-rs-backend")]
 pub const DEFAULT_MODEL_FILE: &str = "ggml-large-v3.bin";

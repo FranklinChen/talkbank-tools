@@ -243,7 +243,7 @@ async fn e2e_dummy_file_passthrough() {
     );
 }
 
-/// NoAlign file is returned unchanged for transcribe command.
+/// `NoAlign` file is returned unchanged for transcribe command.
 #[tokio::test]
 async fn e2e_noalign_file_passthrough() {
     let session = acquire_test_server_session().await;
@@ -281,7 +281,7 @@ async fn e2e_noalign_file_passthrough() {
 // Options propagation
 // ---------------------------------------------------------------------------
 
-/// override_media_cache option is accepted in the submission.
+/// `override_media_cache` option is accepted in the submission.
 #[tokio::test]
 async fn e2e_override_media_cache_option() {
     let session = acquire_test_server_session().await;
@@ -386,7 +386,7 @@ async fn e2e_transcribe_command() {
     assert_eq!(results.len(), 1);
 }
 
-/// Transcribe_s command completes via the server-side test-echo harness.
+/// `Transcribe_s` command completes via the server-side test-echo harness.
 #[tokio::test]
 async fn e2e_transcribe_s_command() {
     let session = acquire_test_server_session().await;

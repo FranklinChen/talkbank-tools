@@ -129,23 +129,17 @@ pub(in crate::chat_ops::fa) struct MeasuredBound {
 impl MeasuredBound {
     /// The later of two bounds, `self` on a tie: the one rule for a floor,
     /// which only ever rises.
-    pub(super) fn later(self, other: Self) -> Self {
-        match self.ms >= other.ms {
-            true => self,
-            false => other,
-        }
+    pub(super) const fn later(self, other: Self) -> Self {
+        if self.ms >= other.ms { self } else { other }
     }
 
     /// The earlier of two bounds, `self` on a tie: the one rule for a
     /// ceiling, which only ever falls.
-    pub(super) fn earlier(self, other: Self) -> Self {
-        match self.ms <= other.ms {
-            true => self,
-            false => other,
-        }
+    pub(super) const fn earlier(self, other: Self) -> Self {
+        if self.ms <= other.ms { self } else { other }
     }
 
-    fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
+    const fn placed_after(self, region_start: UtrUtteranceOrdinal) -> Self {
         Self {
             ms: self.ms,
             utterance: self.utterance.placed_after(region_start),
@@ -189,7 +183,7 @@ pub(in crate::chat_ops::fa) enum CorridorFloor {
 impl CorridorFloor {
     /// The floor in file milliseconds: the recording's start where no
     /// measurement bounds it.
-    pub(in crate::chat_ops::fa) fn ms(self) -> u64 {
+    pub(in crate::chat_ops::fa) const fn ms(self) -> u64 {
         match self {
             Self::FileStart | Self::MarkedOverlapUnbounded => 0,
             Self::PrecedingMeasured(bound) => bound.ms,
@@ -199,7 +193,7 @@ impl CorridorFloor {
     /// The floor raised to `bound` when `bound` is higher. A measured bound
     /// always replaces an unmeasured floor; two measured bounds keep the
     /// higher, the current one on a tie.
-    pub(super) fn raised_to(self, bound: MeasuredBound) -> Self {
+    pub(super) const fn raised_to(self, bound: MeasuredBound) -> Self {
         match self {
             Self::PrecedingMeasured(current) => Self::PrecedingMeasured(current.later(bound)),
             Self::FileStart | Self::MarkedOverlapUnbounded => Self::PrecedingMeasured(bound),
@@ -247,7 +241,7 @@ pub(in crate::chat_ops::fa) enum CorridorCeiling {
 impl CorridorCeiling {
     /// The ceiling in file milliseconds: the recording's end where no
     /// measurement bounds it.
-    pub(in crate::chat_ops::fa) fn ms(self, recording_end_ms: u64) -> u64 {
+    pub(in crate::chat_ops::fa) const fn ms(self, recording_end_ms: u64) -> u64 {
         match self {
             Self::FileEnd | Self::FollowingOverlaps { .. } => recording_end_ms,
             Self::FollowingMeasured(bound) => bound.ms,
@@ -256,7 +250,7 @@ impl CorridorCeiling {
 
     /// The ceiling lowered to `bound` when `bound` is lower; the mirror of
     /// [`CorridorFloor::raised_to`].
-    pub(super) fn lowered_to(self, bound: MeasuredBound) -> Self {
+    pub(super) const fn lowered_to(self, bound: MeasuredBound) -> Self {
         match self {
             Self::FollowingMeasured(current) => Self::FollowingMeasured(current.earlier(bound)),
             Self::FileEnd | Self::FollowingOverlaps { .. } => Self::FollowingMeasured(bound),
@@ -317,7 +311,7 @@ enum SearchScope {
 }
 
 impl SearchScope {
-    fn is_document(&self) -> bool {
+    const fn is_document(&self) -> bool {
         matches!(self, Self::Document)
     }
 }
@@ -402,7 +396,7 @@ impl FaSearchEnvelope {
         }))
     }
 
-    pub(super) fn order_corridor(
+    pub(super) const fn order_corridor(
         words: Vec<String>,
         floor: CorridorFloor,
         ceiling: CorridorCeiling,

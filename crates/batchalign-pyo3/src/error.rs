@@ -1,4 +1,4 @@
-//! Typed boundary errors for the Rust ↔ Python PyO3 interface.
+//! Typed boundary errors for the Rust ↔ Python `PyO3` interface.
 //!
 //! See `book/src/architecture/errors-and-validation/python-rust-errors.md`
 //! for the
@@ -88,11 +88,11 @@ create_exception!(
 
 /// One structured CHAT-validation entry surfaced through
 /// [`BatchalignBoundaryError::ChatValidation`]. Mirrors the
-/// `ValidationErrorEntry` TypedDict on the Python side so Python catch
+/// `ValidationErrorEntry` `TypedDict` on the Python side so Python catch
 /// sites see the same field shape regardless of whether the error
-/// originated in pure-Python code or crossed the PyO3 boundary.
+/// originated in pure-Python code or crossed the `PyO3` boundary.
 #[derive(Debug, Clone)]
-pub(crate) struct ValidationErrorEntry {
+pub struct ValidationErrorEntry {
     pub code: String,
     pub severity: String,
     pub line: Option<u32>,
@@ -127,13 +127,13 @@ impl ValidationErrorEntry {
 /// (`RequestBodyLimitLayer`) limit without grepping the message text.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // Awaiting first call site in batchalign's payload-too-large path.
-pub(crate) enum BodyLimitLayer {
+pub enum BodyLimitLayer {
     Inner,
     Outer,
 }
 
 impl BodyLimitLayer {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             BodyLimitLayer::Inner => "inner",
             BodyLimitLayer::Outer => "outer",
@@ -147,7 +147,7 @@ impl BodyLimitLayer {
 /// [`create_exception!`] declaration above and a Python-side import.
 #[derive(Debug)]
 #[allow(dead_code)] // Most variants are awaiting their first call site as Phase D sweeps the rest of pyo3/.
-pub(crate) enum BatchalignBoundaryError {
+pub enum BatchalignBoundaryError {
     /// CHAT validation produced a structured error list. Maps to
     /// `CHATValidationException` on the Python side; the entries
     /// populate `errors` on the raised exception so Python catch sites
@@ -169,7 +169,7 @@ pub(crate) enum BatchalignBoundaryError {
     /// invalid. Maps to `ConfigError`.
     ConfigInvalid { message: String },
 
-    /// The PyO3 boundary's body limit rejected the request. Maps to
+    /// The `PyO3` boundary's body limit rejected the request. Maps to
     /// `PayloadTooLargeError` and carries which layer fired.
     PayloadTooLarge {
         limit_layer: BodyLimitLayer,

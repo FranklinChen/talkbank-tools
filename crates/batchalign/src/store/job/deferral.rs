@@ -6,20 +6,20 @@ use crate::api::MachineTime;
 /// Persistence is attempted by the store before this value leaves it. Later
 /// cancellation or supersession still requires the normal store observations.
 #[derive(Debug)]
-pub(crate) struct DeferredRun {
+pub struct DeferredRun {
     retry_at: MachineTime,
 }
 
 impl DeferredRun {
-    pub(in crate::store) fn admitted(retry_at: MachineTime) -> Self {
+    pub(in crate::store) const fn admitted(retry_at: MachineTime) -> Self {
         Self { retry_at }
     }
 
-    pub(crate) fn deadline(&self) -> MachineTime {
+    pub(crate) const fn deadline(&self) -> MachineTime {
         self.retry_at
     }
 
-    pub(crate) fn into_deadline(self) -> MachineTime {
+    pub(crate) const fn into_deadline(self) -> MachineTime {
         self.retry_at
     }
 }
@@ -27,7 +27,7 @@ impl DeferredRun {
 /// A rejected requeue carries no authority to schedule replacement work.
 #[derive(Debug)]
 #[must_use = "only an admitted requeue can publish a deferred retry"]
-pub(crate) enum MemoryRequeueOutcome {
+pub enum MemoryRequeueOutcome {
     Requeued(DeferredRun),
     NoLongerRunnable,
 }

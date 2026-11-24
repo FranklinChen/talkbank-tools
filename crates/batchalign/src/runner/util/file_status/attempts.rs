@@ -26,7 +26,7 @@ use super::tracker::TerminalRecorded;
 use super::{FileRunTracker, FileStage};
 
 /// A file whose attempt is running, numbered from one.
-pub(crate) struct FileAttempts<'t, 'a> {
+pub struct FileAttempts<'t, 'a> {
     lifecycle: &'t FileRunTracker<'a>,
     number: u32,
     work_unit_kind: WorkUnitKind,
@@ -34,7 +34,7 @@ pub(crate) struct FileAttempts<'t, 'a> {
 }
 
 /// What a transient failure led to.
-pub(crate) enum AfterFailure<'t, 'a> {
+pub enum AfterFailure<'t, 'a> {
     /// The policy allows another attempt.
     Retry(RetryGrant<'t, 'a>),
     /// The file's terminal failure is recorded; nothing more runs.
@@ -42,7 +42,7 @@ pub(crate) enum AfterFailure<'t, 'a> {
 }
 
 /// Permission for one more attempt, held between a failure and its retry.
-pub(crate) struct RetryGrant<'t, 'a> {
+pub struct RetryGrant<'t, 'a> {
     attempts: FileAttempts<'t, 'a>,
     backoff: DurationMs,
     category: FailureCategory,

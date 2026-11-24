@@ -4,7 +4,7 @@
 //! - [`config`]: `WorkerRuntimeConfig`, `WorkerConfig`
 //! - [`protocol`]: Wire-level request/response envelopes, ready signals, constants
 //! - [`spawn`]: Command building and TCP daemon spawning
-//! - [`ipc`]: Request/response IPC methods (infer, batch_infer, execute_v2, health, capabilities)
+//! - [`ipc`]: Request/response IPC methods (infer, `batch_infer`, `execute_v2`, health, capabilities)
 //! - [`lifecycle`]: Startup helpers, shutdown, Drop, accessors
 
 pub mod config;
@@ -257,7 +257,7 @@ impl WorkerHandle {
 
     /// See [`RequestFlight`]. Read by `CheckedOutWorker::drop` to decide
     /// whether this worker is safe to return to the idle queue.
-    pub(crate) fn request_flight(&self) -> RequestFlight {
+    pub(crate) const fn request_flight(&self) -> RequestFlight {
         self.request_flight
     }
 }

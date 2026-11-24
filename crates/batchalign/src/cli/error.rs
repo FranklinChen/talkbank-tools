@@ -409,7 +409,7 @@ impl CliError {
     pub const EXIT_GENERAL: i32 = 1;
 
     /// The user supplied invalid arguments or paths that could be corrected
-    /// without changing the environment. Mirrors the BSD `sysexits.h` EX_USAGE
+    /// without changing the environment. Mirrors the BSD `sysexits.h` `EX_USAGE`
     /// convention (value 64 there, but we use a compact 2--6 range so that
     /// callers can test with simple numeric comparisons).
     pub const EXIT_USAGE: i32 = 2;
@@ -442,6 +442,7 @@ impl CliError {
     pub const EXIT_DIAGNOSED: i32 = 7;
 
     /// Stable process exit code for this error category.
+    #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::ChatAdmission(refusal) => match refusal.fault() {

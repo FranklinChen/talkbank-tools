@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from batchalign.inference.pyannote_local import LoadedPyannotePipeline
+from batchalign.tests._loaded_hosts import TEST_LOCAL_SPEAKER_GRAPH
 from batchalign.worker._loads import (
     FA_LOAD,
     SPEAKER_EMBEDDING_LOAD,
@@ -31,8 +32,12 @@ from batchalign.worker._model_loading.bootstrap import (
 from batchalign.worker._types import (
     InferTask,
     LoadAlreadyRecorded,
+    ModelStartup,
+    ModelTarget,
+    ProfileTarget,
     TaskLoad,
     TaskLoadRegistry,
+    TaskTarget,
     WorkerBootstrapRuntime,
     WorkerProfile,
     _state,
@@ -49,28 +54,39 @@ def _fresh_worker() -> Iterator[None]:
 
 
 @pytest.mark.parametrize(
-    ("profile", "task"),
+    "target",
     [
-        (WorkerProfile.GPU, None),
-        (WorkerProfile.STANZA, None),
-        (WorkerProfile.IO, None),
-        (None, InferTask.FA),
-        (None, InferTask.MORPHOSYNTAX),
+        ProfileTarget(WorkerProfile.GPU),
+        ProfileTarget(WorkerProfile.STANZA),
+        ProfileTarget(WorkerProfile.IO),
+        TaskTarget(InferTask.FA),
+        TaskTarget(InferTask.MORPHOSYNTAX),
     ],
 )
-def test_a_worker_starts_with_no_models(monkeypatch, profile, task) -> None:
+def test_a_worker_starts_with_no_models(
+    monkeypatch: pytest.MonkeyPatch, target: ModelTarget
+) -> None:
+    """Guards: Publishing any model target keeps loads empty and its inputs intact.
+    Kind: contract
+    Not a type: Startup implementation can still invoke a real loader before
+        publishing this target, despite carrying the same typed settings.
+    State: An isolated worker state and a refusing loader spy expose early loads.
+    Concurrency: The fixture restores process state before the next case.
+    """
+
     def refuse(*_args, **_kwargs) -> None:
         raise AssertionError("no model may load at startup")
 
     monkeypatch.setattr(
         "batchalign.worker._model_loading.bootstrap.record_load", refuse
     )
-    start_worker(
-        WorkerBootstrapRuntime(task=task, lang="eng", num_speakers=1, profile=profile)
-    )
+    bootstrap = WorkerBootstrapRuntime(lang="eng", num_speakers=1)
+    start_worker(ModelStartup(target, bootstrap))
 
     assert _state.ready is True
     assert _state.loads.completed() == frozenset()
+    assert _state.bootstrap is bootstrap
+    assert _state.command == target.label
 
 
 def test_two_speaker_models_are_two_loads() -> None:
@@ -110,18 +126,33 @@ def test_the_utterance_alias_is_not_a_task() -> None:
 
 def _gpu_worker() -> None:
     start_worker(
-        WorkerBootstrapRuntime(
-            task=None, lang="eng", num_speakers=1, profile=WorkerProfile.GPU
+        ModelStartup(
+            ProfileTarget(WorkerProfile.GPU),
+            WorkerBootstrapRuntime(lang="eng", num_speakers=1),
         )
     )
 
 
+def _stub_speaker_pipeline() -> LoadedPyannotePipeline:
+    return LoadedPyannotePipeline(
+        object(),
+        tempfile.TemporaryDirectory(),
+        TEST_LOCAL_SPEAKER_GRAPH,
+    )
+
+
 def test_each_speaker_model_is_built_once_by_its_own_load(monkeypatch) -> None:
+    """Guards: Each requested speaker model is constructed once by its own worker load.
+    Kind: contract
+    Not a type: Actual calls and registry reuse depend on the load sequence and observed constructor invocations.
+    State: Typed fake loaded pipeline and patched constructors count the independent worker loads.
+    Concurrency: Monkeypatch restores constructors after serial calls.
+    """
     builds: list[str] = []
 
     def build_pipeline() -> LoadedPyannotePipeline:
         builds.append("pyannote")
-        return LoadedPyannotePipeline(object(), tempfile.TemporaryDirectory())
+        return _stub_speaker_pipeline()
 
     def build_embedding() -> object:
         builds.append("embedding")
@@ -159,7 +190,13 @@ def test_each_speaker_model_is_built_once_by_its_own_load(monkeypatch) -> None:
 
 
 def test_the_local_runner_runs_on_the_pipeline_its_load_built(monkeypatch) -> None:
-    handle = LoadedPyannotePipeline(object(), tempfile.TemporaryDirectory())
+    """Guards: The local runner consumes the actual loaded pipeline handle selected by the task loader.
+    Kind: contract
+    Not a type: The Python callable boundary can substitute a different handle despite typed signatures.
+    State: A typed fake loaded handle and patched inference function observe the dispatched object.
+    Concurrency: Monkeypatch isolates the loader and worker functions.
+    """
+    handle = _stub_speaker_pipeline()
     monkeypatch.setattr(
         "batchalign.inference.pyannote_local.load_local_pyannote_pipeline",
         lambda: handle,

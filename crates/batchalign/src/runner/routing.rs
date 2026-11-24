@@ -262,7 +262,7 @@ pub(super) async fn dispatch_job_with_execution_context(
 /// The one route every job-level refusal in this router takes. It records
 /// nothing: the refusal travels back to the run scope, whose claim fails the
 /// run with this reason on the job and on every file left unfinished.
-pub(crate) fn refuse(job: &RunnerJobSnapshot, message: String) -> JobRefusal {
+pub fn refuse(job: &RunnerJobSnapshot, message: String) -> JobRefusal {
     warn!(
         job_id = %job.identity.job_id,
         correlation_id = %job.identity.correlation_id,

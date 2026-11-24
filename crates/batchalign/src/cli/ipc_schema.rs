@@ -54,6 +54,7 @@ macro_rules! register {
 /// frozen V1 worker surface still exists beside it.
 ///
 /// Returns a map of `layer_name → { type_name → Schema }`.
+#[must_use]
 pub fn generate_ipc_schema() -> BTreeMap<String, BTreeMap<String, Schema>> {
     let mut layers: BTreeMap<String, BTreeMap<String, Schema>> = BTreeMap::new();
 

@@ -6,6 +6,8 @@
 //! demuxers, so a container nobody has measured is refused rather than
 //! trusted.
 
+use std::num::NonZeroU32;
+
 use serde::Deserialize;
 
 use super::ProbeError;
@@ -27,6 +29,8 @@ pub(super) struct HeaderAnswer {
 #[derive(Debug, Deserialize)]
 struct HeaderStream {
     codec_name: String,
+    sample_rate: Option<String>,
+    channels: Option<u32>,
     /// The stream's own stated length, absent when the container states none
     /// per stream (Matroska).
     duration: Option<String>,
@@ -82,14 +86,14 @@ enum Unstated {
 /// [`HeaderAnswer::route`]. Exhaustive, so a new container must take a side on
 /// both questions.
 impl StatingContainer {
-    fn statement(self) -> Statement {
+    const fn statement(self) -> Statement {
         match self {
             Self::PcmWav | Self::Flac | Self::IsoMedia | Self::Ogg => Statement::AudioStream,
             Self::Matroska | Self::Asf => Statement::File,
         }
     }
 
-    fn when_unstated(self) -> Unstated {
+    const fn when_unstated(self) -> Unstated {
         match self {
             Self::PcmWav | Self::Flac => Unstated::Walk,
             Self::IsoMedia | Self::Ogg | Self::Matroska | Self::Asf => Unstated::Refuse,
@@ -120,7 +124,7 @@ pub enum MediaContainer {
     IsoMedia,
     /// Ogg: `ogg`.
     Ogg,
-    /// Matroska and WebM: `matroska,webm`.
+    /// Matroska and `WebM`: `matroska,webm`.
     Matroska,
     /// ASF (WMA): `asf`.
     Asf,
@@ -154,10 +158,13 @@ fn classify(container: MediaContainer, codec_name: &str) -> Classified {
         MediaContainer::Adts => Classified::Walk(WalkReason::Adts),
         // Every PCM codec ffmpeg knows is spelled `pcm_*`; a WAV holding
         // anything else has an estimated length.
-        MediaContainer::Wav => match codec_name.starts_with("pcm_") {
-            true => Classified::Stating(StatingContainer::PcmWav),
-            false => Classified::Walk(WalkReason::CompressedWav),
-        },
+        MediaContainer::Wav => {
+            if codec_name.starts_with("pcm_") {
+                Classified::Stating(StatingContainer::PcmWav)
+            } else {
+                Classified::Walk(WalkReason::CompressedWav)
+            }
+        }
         MediaContainer::Flac => Classified::Stating(StatingContainer::Flac),
         MediaContainer::IsoMedia => Classified::Stating(StatingContainer::IsoMedia),
         MediaContainer::Ogg => Classified::Stating(StatingContainer::Ogg),
@@ -166,40 +173,96 @@ fn classify(container: MediaContainer, codec_name: &str) -> Classified {
     }
 }
 
-/// A header answer admitted: a measured container and the first audio stream.
-struct AdmittedHeader {
-    container: MediaContainer,
+/// One selected audio stream and its original container header.
+#[derive(Debug)]
+pub(super) struct SelectedAudioHeader {
     stream: HeaderStream,
     format: HeaderFormat,
 }
 
+/// Nonzero output layout admitted directly from the selected audio stream.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::media) struct AudioLayout {
+    pub(in crate::media) sample_rate: NonZeroU32,
+    pub(in crate::media) channels: NonZeroU32,
+}
+
 impl HeaderAnswer {
-    /// Admit the answer, or refuse it: no audio stream, or an unmeasured
-    /// demuxer. The one reading for both questions asked of a header.
-    fn admit(self, input: &str) -> Result<AdmittedHeader, ProbeError> {
-        let Self { streams, format } = self;
-        let stream = streams
+    /// The stream that normal media decoding and measurement use.
+    pub(super) fn first(self, input: &str) -> Result<SelectedAudioHeader, ProbeError> {
+        let stream = self
+            .streams
             .into_iter()
             .next()
             .ok_or_else(|| ProbeError::NoAudioStream {
                 input: input.to_owned(),
             })?;
-        let container = MediaContainer::of_demuxer(&format.format_name).ok_or_else(|| {
-            ProbeError::UnmeasuredContainer {
-                input: input.to_owned(),
-                demuxer: format.format_name.clone(),
-            }
-        })?;
-        Ok(AdmittedHeader {
-            container,
+        Ok(SelectedAudioHeader {
             stream,
-            format,
+            format: self.format,
         })
     }
 
-    /// Which container this file is in.
+    /// Export must identify a single stream rather than choosing one of many.
+    pub(super) fn exactly_one(self, input: &str) -> Result<SelectedAudioHeader, ProbeError> {
+        let [stream]: [HeaderStream; 1] =
+            self.streams
+                .try_into()
+                .map_err(|streams: Vec<HeaderStream>| ProbeError::Unreadable {
+                    input: input.to_owned(),
+                    detail: format!("expected one audio stream, observed {}", streams.len()),
+                })?;
+        Ok(SelectedAudioHeader {
+            stream,
+            format: self.format,
+        })
+    }
+
     pub(super) fn container(self, input: &str) -> Result<MediaContainer, ProbeError> {
-        Ok(self.admit(input)?.container)
+        self.first(input)?.container(input)
+    }
+
+    pub(super) fn route(self, input: &str) -> Result<DurationRoute, ProbeError> {
+        self.first(input)?.route(input)
+    }
+}
+
+impl SelectedAudioHeader {
+    pub(super) fn codec(&self) -> &str {
+        &self.stream.codec_name
+    }
+
+    pub(super) fn layout(&self, input: &str) -> Result<AudioLayout, ProbeError> {
+        let unreadable = |detail: String| ProbeError::Unreadable {
+            input: input.to_owned(),
+            detail,
+        };
+        let rate = self
+            .stream
+            .sample_rate
+            .as_deref()
+            .ok_or_else(|| unreadable("missing audio sample rate".to_owned()))?;
+        let sample_rate = rate
+            .parse()
+            .map_err(|error: std::num::ParseIntError| unreadable(error.to_string()))?;
+        let channels = self
+            .stream
+            .channels
+            .and_then(NonZeroU32::new)
+            .ok_or_else(|| unreadable("missing or zero audio channels".to_owned()))?;
+        Ok(AudioLayout {
+            sample_rate,
+            channels,
+        })
+    }
+
+    pub(super) fn container(&self, input: &str) -> Result<MediaContainer, ProbeError> {
+        MediaContainer::of_demuxer(&self.format.format_name).ok_or_else(|| {
+            ProbeError::UnmeasuredContainer {
+                input: input.to_owned(),
+                demuxer: self.format.format_name.clone(),
+            }
+        })
     }
 
     /// Decide the route for this file.
@@ -219,23 +282,27 @@ impl HeaderAnswer {
     ///
     /// A walked container's stated length is never parsed, so whatever
     /// ffprobe printed for it cannot fail the probe.
-    pub(super) fn route(self, input: &str) -> Result<DurationRoute, ProbeError> {
-        let AdmittedHeader {
-            container,
-            stream,
-            format,
-        } = self.admit(input)?;
+    pub(super) fn route(&self, input: &str) -> Result<DurationRoute, ProbeError> {
+        self.route_for(self.container(input)?, input)
+    }
+
+    pub(super) fn route_for(
+        &self,
+        container: MediaContainer,
+        input: &str,
+    ) -> Result<DurationRoute, ProbeError> {
+        let Self { stream, format } = self;
         let container = match classify(container, &stream.codec_name) {
             Classified::Walk(reason) => return Ok(DurationRoute::Walk(reason)),
             Classified::Stating(container) => container,
         };
         let stated = match container.statement() {
-            Statement::AudioStream => stream.duration,
-            Statement::File => format.duration,
+            Statement::AudioStream => stream.duration.as_deref(),
+            Statement::File => format.duration.as_deref(),
         };
         match (stated, container.when_unstated()) {
             (Some(answer), _) => {
-                let length = stated_length(input, &answer)?;
+                let length = stated_length(input, answer)?;
                 AudioDuration::established(length, DurationBasis::Stated(container))
                     .map(DurationRoute::Stated)
                     .ok_or_else(|| ProbeError::EmptyAudio {
@@ -265,12 +332,11 @@ fn stated_length(input: &str, answer: &str) -> Result<DurationMs, ProbeError> {
     let seconds: f64 = answer.parse().map_err(|_| unreadable())?;
     // Bounded above so the cast below cannot saturate into a fabricated
     // length.
-    match seconds.is_finite() && (0.0..=u64::MAX as f64 / 1_000_000.0).contains(&seconds) {
-        true => {
-            let micros = (seconds * 1_000_000.0).round() as u64;
-            Ok(DurationMs(micros.div_ceil(1000)))
-        }
-        false => Err(unreadable()),
+    if seconds.is_finite() && (0.0..=u64::MAX as f64 / 1_000_000.0).contains(&seconds) {
+        let micros = (seconds * 1_000_000.0).round() as u64;
+        Ok(DurationMs(micros.div_ceil(1000)))
+    } else {
+        Err(unreadable())
     }
 }
 
@@ -293,6 +359,8 @@ mod tests {
         HeaderAnswer {
             streams: vec![HeaderStream {
                 codec_name: codec.to_owned(),
+                sample_rate: None,
+                channels: None,
                 duration: stream_duration.map(str::to_owned),
             }],
             format: HeaderFormat {
@@ -310,6 +378,11 @@ mod tests {
 
     /// The routing table, row by row. POLICY: each row is a measured choice
     /// with alternatives, which is what makes it worth pinning.
+    /// Guards: Measured demuxer and codec combinations choose the documented stated-or-walk route.
+    /// Kind: policy
+    /// Not a type: The observed demuxer, codec and available duration still require an explicit routing policy.
+    /// State: Synthetic headers for every supported demuxer and distinct WAV and FLAC branches.
+    /// Concurrency: Each header is independent and no tool is started.
     #[test]
     fn every_measured_demuxer_takes_its_route() {
         // MPEG audio is walked even when its header states a length: with a
@@ -352,6 +425,11 @@ mod tests {
     /// A container that states each stream's length is measured by its AUDIO
     /// stream's, not the file's: an MP4 whose video runs past its audio
     /// (ffprobe measured: file 10.0 s, audio stream 6.0 s) is 6 s of audio.
+    /// Guards: A selected video container measures its audio stream instead of the longer video timeline.
+    /// Kind: wire
+    /// Not a type: The container and audio stream can carry different durations in a real header answer.
+    /// State: Synthetic ISO media header with distinct 6 s audio and 10 s file durations.
+    /// Concurrency: The fixture is an owned in-memory answer.
     #[test]
     fn a_video_longer_than_its_audio_does_not_lengthen_the_audio() {
         let video = answer_with(
@@ -367,6 +445,11 @@ mod tests {
     }
 
     /// A zero length is refused where it is born, so no recording is empty.
+    /// Guards: A stated zero-duration stream cannot yield an admitted positive duration.
+    /// Kind: wire
+    /// Not a type: The ffprobe duration field can contain an external decimal representing empty audio.
+    /// State: One synthetic PCM header reporting zero seconds.
+    /// Concurrency: The test makes one pure admission call.
     #[test]
     fn a_stated_length_of_zero_is_empty_audio() {
         assert!(matches!(
@@ -377,6 +460,11 @@ mod tests {
 
     /// A container whose packets cannot be trusted to sum, and which states no
     /// length, is refused: neither route is exact for it.
+    /// Guards: A stating container with no reliable walk refuses absent duration by container name.
+    /// Kind: policy
+    /// Not a type: A valid container identifier and missing duration allow different measured fallback policies.
+    /// State: A synthetic Matroska header with no per-stream or file duration.
+    /// Concurrency: No native process is involved in the routing test.
     #[test]
     fn a_stating_container_that_states_nothing_is_refused() {
         let refused = answer("matroska,webm", "aac", None).route("x");
@@ -391,6 +479,11 @@ mod tests {
 
     /// A demuxer nobody has measured is refused by name, never trusted, by
     /// both questions asked of a header.
+    /// Guards: An unsupported demuxer is named in the refusal from both header questions.
+    /// Kind: wire
+    /// Not a type: The external tool may report a container outside the measured demuxer vocabulary.
+    /// State: Two synthetic AIFF responses test container identity and duration admission.
+    /// Concurrency: Each question consumes its own raw header values.
     #[test]
     fn an_unmeasured_demuxer_is_refused_by_name() {
         match answer("aiff", "pcm_s16be", Some("1.0")).route("x") {
@@ -409,6 +502,11 @@ mod tests {
     /// The container table, row by row: every measured demuxer names its
     /// container whatever codec it holds, and the name is the whole
     /// `format_name`, so a family's first member alone does not match.
+    /// Guards: Public container classification recognizes exact full demuxer names across the measured catalog.
+    /// Kind: wire
+    /// Not a type: Names from ffprobe are open text and can be truncated or spelled differently.
+    /// State: Synthetic header rows carry the full accepted demuxer names plus partial MOV.
+    /// Concurrency: No filesystem or tool process is used.
     #[test]
     fn every_measured_demuxer_names_its_container() {
         for (demuxer, codec, container) in [
@@ -436,6 +534,11 @@ mod tests {
         ));
     }
 
+    /// Guards: A header with no audio stream cannot become a duration route.
+    /// Kind: wire
+    /// Not a type: An external tool may return an empty audio array despite successful probing.
+    /// State: One synthetic header with no streams.
+    /// Concurrency: The input is process-local and immutable.
     #[test]
     fn a_file_without_audio_is_refused() {
         let silent = HeaderAnswer {
@@ -454,6 +557,11 @@ mod tests {
     /// Rounding is UP, from whole microseconds, so a stated length that is a
     /// whole number of milliseconds is not pushed a millisecond long by binary
     /// floating point, and a fractional one covers its last instant.
+    /// Guards: Fractional stated lengths round upward and invalid decimal or saturated ranges are refused.
+    /// Kind: wire
+    /// Not a type: External numeric strings can be malformed, nonfinite or finer than millisecond precision.
+    /// State: A fixed set of decimal strings and exact expected durations.
+    /// Concurrency: No media resources or async effects.
     #[test]
     fn stated_lengths_round_up_from_whole_microseconds() {
         assert_eq!(stated_length("x", "37.300000").unwrap(), DurationMs(37_300));

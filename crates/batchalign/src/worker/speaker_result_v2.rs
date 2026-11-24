@@ -10,7 +10,7 @@ use crate::api::AudioPositionSeconds;
 use crate::types::worker_v2::{
     ExecuteResponseV2, SpeakerInferenceEvidenceV2, SpeakerResultV2, SpeakerSegmentV2, TaskResultV2,
 };
-use crate::worker::execute_result_v2::{ExecuteFailureRead, require_success_result};
+use crate::worker::execute_result_v2::{ExecuteFailureRead, take_success_result};
 use batchalign_types::interval::AdmittedInterval;
 
 /// Why a V2 speaker execute response could not be read as speaker evidence.
@@ -48,11 +48,11 @@ impl From<ExecuteFailureRead> for SpeakerResultParseError {
     }
 }
 
-/// Parse one V2 speaker execute response into the typed segment list.
+/// Consume one V2 speaker execute response and take its admitted speaker payload.
 pub fn parse_speaker_result_v2(
-    response: &ExecuteResponseV2,
-) -> Result<&SpeakerResultV2, SpeakerResultParseError> {
-    let result = require_success_result(response, "speaker")?;
+    response: ExecuteResponseV2,
+) -> Result<SpeakerResultV2, SpeakerResultParseError> {
+    let result = take_success_result(response, "speaker")?;
 
     match result {
         TaskResultV2::FaPreparation(_) => Err(SpeakerResultParseError::UnexpectedPayload(
@@ -165,7 +165,7 @@ pub(crate) fn normalize_speaker_evidence_v2(
                 })
                 .collect::<Result<Vec<_>, String>>()?
         }
-        SpeakerInferenceEvidenceV2::Pyannote { segments } => segments.clone(),
+        SpeakerInferenceEvidenceV2::Pyannote { segments, .. } => segments.clone(),
     };
     segments.sort_by(|left, right| {
         (left.interval, left.speaker.as_str()).cmp(&(right.interval, right.speaker.as_str()))
@@ -182,12 +182,18 @@ mod tests {
         SpeakerResultV2, SpeakerSegmentV2, WorkerRequestIdV2,
     };
 
+    /// Guards: Local speaker replies preserve exact segment bounds and the loaded graph on the worker wire.
+    /// Kind: wire
+    /// Not a type: Externally produced JSON can omit digest evidence or supply malformed SHA-256 values.
+    /// State: Synthetic response bytes drive the actual worker payload decoder and speaker projection.
+    /// Concurrency: none
     #[test]
     fn parses_speaker_segments_from_typed_v2_result() {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-speaker-v2-1"),
             TaskResultV2::SpeakerResult(SpeakerResultV2 {
                 evidence: SpeakerInferenceEvidenceV2::Pyannote {
+                    loaded_graph: None,
                     segments: vec![SpeakerSegmentV2 {
                         interval: AdmittedInterval::admit_millis(0, 900).expect("ordered"),
                         speaker: "SPEAKER_1".into(),
@@ -197,13 +203,40 @@ mod tests {
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
-        let parsed = parse_speaker_result_v2(&response).expect("speaker result should parse");
-        let segments = normalize_speaker_evidence_v2(&parsed.evidence)
-            .expect("speaker evidence should normalize");
-        assert_eq!(segments[0].speaker, "SPEAKER_1");
-        assert_eq!(segments[0].interval.end_ms(), 900);
+        let mut wire = serde_json::to_value(response).expect("worker JSON");
+        let loaded_graph = serde_json::json!({
+            "pipeline_config_sha256": "1".repeat(64),
+            "segmentation_sha256": "2".repeat(64),
+            "embedding_sha256": "3".repeat(64),
+        });
+        assert!(wire["result"]["evidence"].get("loaded_graph").is_none());
+        for reported in [None, Some(loaded_graph.clone())] {
+            if let Some(graph) = &reported {
+                wire["result"]["evidence"]["loaded_graph"] = graph.clone();
+            }
+            let decoded = serde_json::from_value(wire.clone()).expect("admitted worker JSON");
+            let parsed = parse_speaker_result_v2(decoded).expect("speaker result should parse");
+            let segments = normalize_speaker_evidence_v2(&parsed.evidence)
+                .expect("speaker evidence should normalize");
+            assert_eq!(segments[0].speaker, "SPEAKER_1");
+            assert_eq!(segments[0].interval.end_ms(), 900);
+            let projected = serde_json::to_value(parsed.evidence).expect("speaker evidence JSON");
+            assert_eq!(projected.get("loaded_graph"), reported.as_ref());
+        }
+        for malformed in ["A".repeat(64), format!("{}x", "2".repeat(64))] {
+            wire["result"]["evidence"]["loaded_graph"]["segmentation_sha256"] =
+                serde_json::Value::String(malformed);
+            let refusal = serde_json::from_value::<ExecuteResponseV2>(wire.clone())
+                .expect_err("malformed graph digest");
+            assert!(refusal.to_string().contains("SHA-256"), "{refusal}");
+        }
     }
 
+    /// Guards: Completed hosted evidence normalizes exact second offsets into milliseconds in Rust.
+    /// Kind: contract
+    /// Not a type: Provider JSON fields and time-unit conversion remain concrete numeric semantics.
+    /// State: Synthetic provider job JSON feeds the real normalization adapter.
+    /// Concurrency: none
     #[test]
     fn normalizes_completed_pyannote_ai_evidence_without_python() {
         let evidence = SpeakerInferenceEvidenceV2::PyannoteAi {
@@ -226,6 +259,11 @@ mod tests {
     /// A pyannoteAI bound far past any recording (an epoch time in seconds)
     /// is refused, not saturated into a millisecond count; an inverted pair
     /// is refused by the same admission.
+    /// Guards: Provider epoch-like, reversed and negative offsets are refused with the correct offending segment index.
+    /// Kind: boundary
+    /// Not a type: Untrusted numeric JSON can fall outside the position domain or conflict at interval admission.
+    /// State: Synthetic hosted job results cover external numeric failure cases directly.
+    /// Concurrency: none
     #[test]
     fn a_pyannote_ai_bound_beyond_the_media_range_is_refused() {
         for (start, end) in [(1.7e9, 1.7e9 + 1.0), (2.0, 1.0)] {
@@ -240,12 +278,7 @@ mod tests {
             let error = normalize_speaker_evidence_v2(&evidence).expect_err("refused");
             assert!(error.contains("segment 0 is not an interval"), "{error}");
         }
-    }
 
-    /// A bound that is not a position (negative here) is refused when the
-    /// segment is read, naming the segment, not converted into a time.
-    #[test]
-    fn a_pyannote_ai_bound_that_is_not_a_position_is_refused() {
         let evidence = SpeakerInferenceEvidenceV2::PyannoteAi {
             job_id: SpeakerProviderJobIdV2::from("job-2"),
             output: serde_json::from_value(serde_json::json!({
@@ -262,8 +295,17 @@ mod tests {
         assert!(error.contains("segment 1 has invalid data"), "{error}");
     }
 
+    /// The regression this type exists for: a worker-reported protocol
+    /// failure (a Hugging Face Hub access denial, in the real 2026-09-02
+    /// incident) must come back as `Protocol { code, .. }`, never collapsed
+    /// into the same `UnexpectedPayload` shape as an ordinary shape mismatch.
+    /// Guards: A failed response carries its worker code and message while a successful translation payload is a speaker shape refusal.
+    /// Kind: policy
+    /// Not a type: Closed response variants cannot enforce the adapter's choices for diagnostics and task-specific payloads.
+    /// State: Synthetic success and failure responses carry exact alternative runtime values.
+    /// Concurrency: none
     #[test]
-    fn rejects_non_speaker_v2_payloads() {
+    fn a_protocol_failure_preserves_its_code_distinct_from_a_shape_mismatch() {
         let response = ExecuteResponseV2::success(
             WorkerRequestIdV2::from("req-speaker-v2-2"),
             TaskResultV2::TranslationResult(crate::types::worker_v2::TranslationResultV2 {
@@ -273,20 +315,13 @@ mod tests {
         );
 
         let error =
-            parse_speaker_result_v2(&response).expect_err("translation result should be rejected");
+            parse_speaker_result_v2(response).expect_err("translation result should be rejected");
         assert!(matches!(
             error,
             SpeakerResultParseError::UnexpectedPayload(_)
         ));
         assert!(error.to_string().contains("translation data"));
-    }
 
-    /// The regression this type exists for: a worker-reported protocol
-    /// failure (a Hugging Face Hub access denial, in the real 2026-09-02
-    /// incident) must come back as `Protocol { code, .. }`, never collapsed
-    /// into the same `UnexpectedPayload` shape as an ordinary shape mismatch.
-    #[test]
-    fn a_protocol_failure_preserves_its_code_distinct_from_a_shape_mismatch() {
         let response = ExecuteResponseV2::failure(
             WorkerRequestIdV2::from("req-speaker-v2-3"),
             ProtocolErrorCodeV2::ModelAccessDenied,
@@ -296,8 +331,8 @@ mod tests {
             NonNegativeSeconds::try_from(0.01).expect("fixture elapsed"),
         );
 
-        let error = parse_speaker_result_v2(&response)
-            .expect_err("a failed response is never speaker data");
+        let error =
+            parse_speaker_result_v2(response).expect_err("a failed response is never speaker data");
 
         match error {
             SpeakerResultParseError::Protocol(failure) => {

@@ -5,7 +5,7 @@ use crate::types::worker_v2::SpeakerEmbeddingBackendV2;
 
 /// An admission against a fresh ledger on the declared test host (14,000
 /// MB available, 8,000 MB reserve), and the directory holding it.
-pub(crate) fn test_admission() -> (tempfile::TempDir, LoadAdmission) {
+pub fn test_admission() -> (tempfile::TempDir, LoadAdmission) {
     let dir = tempfile::tempdir().expect("ledger dir");
     let host = crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default())
         .runtime_host()
@@ -32,7 +32,7 @@ fn reserved(admission: &LoadAdmission) -> MemoryMb {
         .active_reserved_mb
 }
 
-pub(crate) fn ready(request: &ExecuteRequestV2) -> ReadyRequest {
+pub fn ready(request: &ExecuteRequestV2) -> ReadyRequest {
     match super::super::fa_preparation::DispatchPreparation::begin(request)
         .expect("ordinary request")
     {
@@ -64,10 +64,7 @@ impl TaskLoader for DeclaredLoader {
         Ok(self.loads.record(admitted.confirm().await))
     }
 }
-pub(crate) async fn declared_invocation(
-    prepared: ReadyRequest,
-    admission: &LoadAdmission,
-) -> RunPermit {
+pub async fn declared_invocation(prepared: ReadyRequest, admission: &LoadAdmission) -> RunPermit {
     LoadPreparation {
         admission: admission.clone(),
         stall: LoadingStall::DEFAULT_ENSURE_TASK,
@@ -266,7 +263,7 @@ async fn fa_reports_admit_workspace_or_preserve_the_original_refusal() {
     assert_eq!(reserved(&admission), MemoryMb(0));
 }
 
-pub(crate) fn coref_request() -> ExecuteRequestV2 {
+pub fn coref_request() -> ExecuteRequestV2 {
     use crate::types::worker_v2::{
         CorefRequestV2, InferenceTaskV2, TaskRequestV2, WorkerArtifactIdV2, WorkerRequestIdV2,
     };

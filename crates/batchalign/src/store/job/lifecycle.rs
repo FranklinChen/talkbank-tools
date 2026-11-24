@@ -64,7 +64,7 @@ impl Job {
     }
 
     /// A queued or running job's inputs; `None` for a finished job.
-    pub(crate) fn active_inputs(&self) -> Option<&crate::store::JobInputs> {
+    pub(crate) const fn active_inputs(&self) -> Option<&crate::store::JobInputs> {
         match &self.execution.lifecycle {
             super::JobLifecycle::Active { inputs, .. } => Some(inputs),
             super::JobLifecycle::Finished { .. } => None,
@@ -194,7 +194,7 @@ impl Job {
     }
 
     /// Record the per-job worker count chosen for this run.
-    pub(crate) fn record_worker_count(&mut self, num_workers: usize) {
+    pub(crate) const fn record_worker_count(&mut self, num_workers: usize) {
         self.schedule.num_workers = Some(num_workers as i64);
     }
 
@@ -269,7 +269,7 @@ impl Job {
     ///
     /// We deliberately set `completed_at = Some(_)` here because that is what
     /// `recover_interrupted()` itself writes for the rows it recovers, and
-    /// downstream queries (e.g. dashboard "completed_at" projections) expect
+    /// downstream queries (e.g. dashboard "`completed_at`" projections) expect
     /// the field to be populated for any non-active row.  The recovery flow
     /// rewrites both `status` and `completed_at` when it transitions to
     /// `Queued`.
@@ -480,9 +480,10 @@ impl Job {
             .any(|file_status| file_status.status().is_resumable());
         if !resumable {
             let failed = self.any_terminal_files_failed();
-            let settlement = match failed {
-                true => super::Settlement::Failed,
-                false => super::Settlement::Completed,
+            let settlement = if failed {
+                super::Settlement::Failed
+            } else {
+                super::Settlement::Completed
             };
             let event = self.execution.lifecycle.settle(settlement);
             if self.accepted(event) && failed {

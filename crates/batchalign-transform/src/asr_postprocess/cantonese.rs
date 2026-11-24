@@ -12,7 +12,7 @@
 /// fullwidth comma, fullwidth exclamation, fullwidth question mark,
 /// left/right corner brackets, fullwidth colon, fullwidth semicolon,
 /// and ASCII whitespace.
-fn is_cjk_punct_or_space(c: char) -> bool {
+const fn is_cjk_punct_or_space(c: char) -> bool {
     c == '\u{3000}' // ideographic space
         || is_cjk_punctuation(c)
         || c.is_ascii_whitespace()
@@ -22,9 +22,10 @@ fn is_cjk_punct_or_space(c: char) -> bool {
 /// ideographic comma and period, fullwidth comma, exclamation mark, question
 /// mark, colon and semicolon, and the left and right corner brackets.
 ///
-/// The one owner of this set; FunASR unit admission in batchalign-pyo3 uses
+/// The one owner of this set; `FunASR` unit admission in batchalign-pyo3 uses
 /// it too.
-pub fn is_cjk_punctuation(c: char) -> bool {
+#[must_use]
+pub const fn is_cjk_punctuation(c: char) -> bool {
     matches!(
         c,
         '\u{3001}' // ideographic comma
@@ -50,6 +51,7 @@ pub fn is_cjk_punctuation(c: char) -> bool {
 /// `聯係` reached CHAT as `聯係` rather than `聯繫`. Normalization happens once
 /// per run, before this stage, through
 /// [`super::han_script::HanScriptNormalization::admit`].
+#[must_use]
 pub fn cantonese_char_tokens(text: &str) -> Vec<String> {
     text.chars()
         .filter(|c| !is_cjk_punct_or_space(*c))

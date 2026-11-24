@@ -2,7 +2,7 @@
 //! taxonomy, and one operation that turns a Python request into a serialized
 //! [`ExecuteResponseV2`].
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) for the per-task
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) for the per-task
 //! Python callers; this module owns only what all of them share.
 //!
 //! The ASR, FA and media executors each used to carry a private copy of this
@@ -27,7 +27,7 @@ use crate::worker_artifacts::{ArtifactFailure, validate_attachment_descriptors};
 /// Every way executing a V2 request can fail, and the protocol code each maps
 /// to. One owner for a mapping that executors previously wrote out by hand at
 /// each of their dispatch sites.
-pub(crate) enum ExecuteFailure {
+pub enum ExecuteFailure {
     /// A prepared artifact was missing or unreadable.
     Artifact(ArtifactFailure),
     /// The request shape was wrong for the task.
@@ -140,7 +140,7 @@ impl TransientQuestion {
     }
 
     /// The failure a yes answer makes of the runner's error.
-    fn failure(self, message: String) -> ExecuteFailure {
+    const fn failure(self, message: String) -> ExecuteFailure {
         match self {
             Self::ModelDownload => ExecuteFailure::ModelDownloadFailed(message),
             Self::DeviceOutOfMemory => ExecuteFailure::DeviceOutOfMemory(message),
@@ -242,7 +242,7 @@ impl From<ArtifactFailure> for ExecuteFailure {
 /// this refuses a payload handed to the WRONG executor. It replaced nine
 /// hand-written two-arm matches across the executor files, each with its own
 /// copy of the message.
-pub(crate) fn extract_task_payload<'a, T>(
+pub fn extract_task_payload<'a, T>(
     request: &'a ExecuteRequestV2,
     project: impl for<'r> Fn(&'r TaskRequestV2) -> Option<&'r T>,
     label: &str,
@@ -263,7 +263,7 @@ pub(crate) fn extract_task_payload<'a, T>(
 /// and half of them stringified every exception into a runtime failure, so a
 /// gated model or an unsupported language was reported as a crash on those
 /// paths and correctly on the others.
-pub(crate) struct LoadedRunner(Py<PyAny>);
+pub struct LoadedRunner(Py<PyAny>);
 
 impl LoadedRunner {
     /// The runner of a host whose load Python resolved before calling: a text
@@ -273,7 +273,7 @@ impl LoadedRunner {
     /// request's load once, at its boundary (`batchalign.worker._execute_v2`),
     /// and refuses an absent one as `model_unavailable` there, so an executor
     /// is only ever called with what a load built.
-    pub(crate) fn of_host(runner: Py<PyAny>) -> Self {
+    pub(crate) const fn of_host(runner: Py<PyAny>) -> Self {
         Self(runner)
     }
 
@@ -315,7 +315,7 @@ fn host_attribute<'py>(
 /// would otherwise run a model the request did not ask for. One check, here,
 /// replaced a separate optional runner per backend, each with its own "not
 /// loaded" message.
-pub(crate) fn admit_loaded_host<B>(
+pub fn admit_loaded_host<B>(
     host: &Bound<'_, PyAny>,
     requested: B,
     label: &str,
@@ -359,7 +359,7 @@ where
 
 /// Read one typed field of a loaded host, as [`parse_host_output`] reads a
 /// runner's answer.
-pub(crate) fn parse_host_attribute<T: serde::de::DeserializeOwned>(
+pub fn parse_host_attribute<T: serde::de::DeserializeOwned>(
     host: &Bound<'_, PyAny>,
     name: &str,
     label: &str,
@@ -377,7 +377,7 @@ fn parse_execute_request(request: &Bound<'_, PyAny>) -> PyResult<ExecuteRequestV
 /// The `"invalid <label> host output"` wording is a contract the Python test
 /// matrix asserts on, so it has one owner here rather than a copy per executor
 /// per failure mode.
-pub(crate) fn parse_host_output<T: serde::de::DeserializeOwned>(
+pub fn parse_host_output<T: serde::de::DeserializeOwned>(
     response: &Bound<'_, PyAny>,
     label: &str,
 ) -> Result<T, ExecuteFailure> {
@@ -398,7 +398,7 @@ pub(crate) fn parse_host_output<T: serde::de::DeserializeOwned>(
 /// "validate, then run" has no other signature to travel through. Derefs to
 /// the request so executors read fields as before.
 #[derive(Clone, Copy)]
-pub(crate) struct ValidatedRequestV2<'a>(&'a ExecuteRequestV2);
+pub struct ValidatedRequestV2<'a>(&'a ExecuteRequestV2);
 
 impl std::ops::Deref for ValidatedRequestV2<'_> {
     type Target = ExecuteRequestV2;
@@ -461,7 +461,7 @@ fn validate_request(request: &ExecuteRequestV2) -> Result<ValidatedRequestV2<'_>
 ///   previously threaded through every response call by hand; a caller passing
 ///   a fresh `Instant` would have reported a plausible near-zero duration that
 ///   nothing could distinguish from a fast task.
-pub(crate) fn execute_request_v2<F>(request: &Bound<'_, PyAny>, run: F) -> PyResult<String>
+pub fn execute_request_v2<F>(request: &Bound<'_, PyAny>, run: F) -> PyResult<String>
 where
     F: FnOnce(ValidatedRequestV2<'_>) -> Result<TaskResultV2, ExecuteFailure>,
 {

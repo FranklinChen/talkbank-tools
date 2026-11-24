@@ -1,7 +1,7 @@
 # File Name Matching
 
 **Status:** Current
-**Last updated:** 2026-09-29 15:29 EDT
+**Last updated:** 2026-11-17 21:32 EST
 
 batchalign3 finds a transcript's recording by name. Commands that read audio
 for an existing transcript (`align`, speaker identification, remote staging)
@@ -26,6 +26,31 @@ comparison belongs to CHAT validation: chatter reports a different name as
 E531, a name in another Unicode form as W109, and a name that differs only in
 letter case as W110 (chatter book: *File Names and @Media*). batchalign3
 checks the recording side.
+
+## Why the names must agree
+
+This is TalkBank policy, settled long before batchalign3, and CLAN CHECK
+enforces it as error 157 ("Media file name has to match datafile name"). A
+transcript and its recording share one name, apart from the extension, for
+three reasons:
+
+- **The collections are organized by name.** The media hierarchy mirrors the
+  transcript hierarchy, so a recording is found from its transcript's place
+  and name alone, without a lookup table that could fall out of step.
+- **Tools write and read the name.** CLAN's `medialine` writes the `@Media`
+  line from the transcript's file name, CLAN plays a recording by the
+  `@Media` name, and batchalign3 searches for the transcript's own name.
+  These agree only because the two names are equal.
+- **Collections are checked in both directions.** Every transcript must have
+  its recording and every recording its transcript; pairing them by name
+  is what makes that check possible.
+
+The one exception is a recording hosted elsewhere: `@Media` may then hold a
+full `http://` or `https://` address.
+
+The practical consequence is that a rename is never of one file. Rename the
+transcript and its recording together, and change the `@Media` name to
+match.
 
 ## How batchalign3 matches
 

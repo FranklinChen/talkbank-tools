@@ -40,7 +40,7 @@ fn removal_keeps_entries_it_was_not_asked_to_remove() {
 /// source, and shutdown authority belongs only to the matching server instance.
 /// Kind: boundary
 /// Not a type: registry JSON and the owner's external liveness select among
-/// skip/reap/refuse/adopt policies before a CompatibleEntry can be issued.
+/// skip/reap/refuse/adopt policies before a `CompatibleEntry` can be issued.
 /// State: decoded synthetic entries and declared owner observations replace live PID queries.
 /// Concurrency: no process, registry file or environment is shared or changed.
 #[test]

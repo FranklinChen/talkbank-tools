@@ -10,7 +10,7 @@ use super::super::JobStore;
 
 /// Result of attempting to renew the local queue lease heartbeat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeaseRenewalOutcome {
+pub enum LeaseRenewalOutcome {
     /// The lease is still active and was renewed.
     Renewed,
     /// The lease should no longer be renewed.

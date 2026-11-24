@@ -21,7 +21,7 @@ pub(super) struct RecordedUtterance {
 }
 
 impl RecordedUtterance {
-    pub(super) fn new(
+    pub(super) const fn new(
         utterance: UtteranceIdx,
         words: NonEmptyWords,
         window: FaWindow,
@@ -37,7 +37,7 @@ impl RecordedUtterance {
         }
     }
 
-    pub(super) fn window(&self) -> FaWindow {
+    pub(super) const fn window(&self) -> FaWindow {
         self.window
     }
 
@@ -152,7 +152,7 @@ impl GroupPopulation {
 }
 
 /// A view produced only by a population that owns both the words and window.
-pub(crate) struct SourceUtterance<'a> {
+pub struct SourceUtterance<'a> {
     utterance: UtteranceIdx,
     window: FaWindow,
     words: &'a [FaWord],
@@ -163,25 +163,25 @@ pub(crate) struct SourceUtterance<'a> {
 }
 
 impl<'a> SourceUtterance<'a> {
-    pub(crate) fn first_word(&self) -> WordIdx {
+    pub(crate) const fn first_word(&self) -> WordIdx {
         self.first_word
     }
-    pub(crate) fn last_word(&self) -> WordIdx {
+    pub(crate) const fn last_word(&self) -> WordIdx {
         self.last_word
     }
-    pub(crate) fn utterance(&self) -> UtteranceIdx {
+    pub(crate) const fn utterance(&self) -> UtteranceIdx {
         self.utterance
     }
-    pub(crate) fn window(&self) -> FaWindow {
+    pub(crate) const fn window(&self) -> FaWindow {
         self.window
     }
-    pub(crate) fn words(&self) -> &'a [FaWord] {
+    pub(crate) const fn words(&self) -> &'a [FaWord] {
         self.words
     }
-    pub(in crate::chat_ops::fa) fn localization(&self) -> Localization {
+    pub(in crate::chat_ops::fa) const fn localization(&self) -> Localization {
         self.localization
     }
-    pub(in crate::chat_ops::fa) fn original_bullet(&self) -> &FaOriginalBulletTrace {
+    pub(in crate::chat_ops::fa) const fn original_bullet(&self) -> &FaOriginalBulletTrace {
         self.original_bullet
     }
 }

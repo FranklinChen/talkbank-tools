@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 //! Numeric core for Whisper lexical alignment. Python owns attention
-//! normalization and filtering, then admits a cost matrix through PyO3.
+//! normalization and filtering, then admits a cost matrix through `PyO3`.
 //! This crate produces open-begin, fixed-end frame indices without a model
 //! or tensor runtime. Frame-to-seconds conversion uses the caller's model geometry.
 
@@ -64,11 +64,13 @@ impl CostMatrix {
     }
 
     /// Row-major view of the values.
+    #[must_use]
     pub fn values(&self) -> &[f32] {
         &self.values
     }
 
     /// Consume into the row-major value buffer.
+    #[must_use]
     pub fn into_values(self) -> Vec<f32> {
         self.values
     }
@@ -116,16 +118,19 @@ pub struct LexicalFrameAlignment {
 
 impl LexicalFrameAlignment {
     /// Align every row while allowing the first row to start after frame zero.
+    #[must_use]
     pub fn align(matrix: CostMatrix) -> Self {
         warp(matrix).into_alignment()
     }
 
     /// One bounded, monotone frame index per input row, in input row order.
+    #[must_use]
     pub fn row_entries(&self) -> &[usize] {
         &self.row_entries
     }
 
     /// Transfer the completed frame indices to the caller without copying them.
+    #[must_use]
     pub fn into_row_entries(self) -> Vec<usize> {
         self.row_entries
     }
@@ -189,7 +194,7 @@ mod tests {
 
     /// Guards: A cheap suffix may skip its audio prefix while retaining both labels and the fixed endpoint.
     /// Kind: policy
-    /// Not a type: Private WarpedPath binds the completed traceback to its matrix, but cannot select the cheapest suffix or the intended open-begin endpoint rule from numerical costs.
+    /// Not a type: Private `WarpedPath` binds the completed traceback to its matrix, but cannot select the cheapest suffix or the intended open-begin endpoint rule from numerical costs.
     /// State: None. One admitted synthetic matrix exercises the pure alignment and consuming frame transfer.
     /// Concurrency: None. Matrix, traceback and result are owned by this call.
     #[test]
@@ -207,7 +212,7 @@ mod tests {
 
     /// Guards: The DP cost equals independently enumerated legal paths for every small signed matrix, with bounded monotone row entries.
     /// Kind: measurement
-    /// Not a type: CostMatrix admits finite shape-consistent inputs and Step closes move alternatives, but the compiler cannot prove DP optimality or the numerical row-entry projection.
+    /// Not a type: `CostMatrix` admits finite shape-consistent inputs and Step closes move alternatives, but the compiler cannot prove DP optimality or the numerical row-entry projection.
     /// State: None. Pure matrices cover every sign pattern through 3 by 3; one source-bound traceback supplies both the measured cost and consumed projection.
     /// Concurrency: None. Every matrix and completed path is local to one iteration.
     #[test]
@@ -276,7 +281,7 @@ mod tests {
 
     /// Guards: NaN, both infinities and overflowing declared dimensions are refused before alignment.
     /// Kind: boundary
-    /// Not a type: The PyO3 adapter receives runtime NumPy dimensions and f32 bits. CostMatrix is the sole admission edge, whose refusal of those raw representations requires observation.
+    /// Not a type: The `PyO3` adapter receives runtime `NumPy` dimensions and f32 bits. `CostMatrix` is the sole admission edge, whose refusal of those raw representations requires observation.
     /// State: None. Raw numerical buffers exercise admission without a Python process or model.
     /// Concurrency: None. Each malformed buffer and constructor result is local.
     #[test]
@@ -295,7 +300,7 @@ mod tests {
 
     /// Guards: A zero-length text axis produces the exact Empty shape diagnostic.
     /// Kind: boundary
-    /// Not a type: A NumPy array can arrive with a zero dimension. Private admitted matrices prevent downstream use, while the raw-to-admitted constructor must still refuse the external shape accurately.
+    /// Not a type: A `NumPy` array can arrive with a zero dimension. Private admitted matrices prevent downstream use, while the raw-to-admitted constructor must still refuse the external shape accurately.
     /// State: None. An empty value buffer represents the shape admission case directly.
     /// Concurrency: None. The constructor reads no shared state.
     #[test]

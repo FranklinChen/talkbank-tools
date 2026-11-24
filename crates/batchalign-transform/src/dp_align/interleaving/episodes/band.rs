@@ -30,7 +30,7 @@ impl Row {
             .flatten()
     }
 
-    fn slots(&self) -> Range<usize> {
+    const fn slots(&self) -> Range<usize> {
         self.first..self.first + self.scores.len()
     }
 
@@ -101,26 +101,26 @@ impl std::fmt::Debug for PreparedLiteralSearch<'_, '_> {
 }
 
 impl<'graph, 'source> PreparedLiteralSearch<'graph, 'source> {
-    pub(super) fn graph(&self) -> &'graph Graph {
+    pub(super) const fn graph(&self) -> &'graph Graph {
         self.graph
     }
-    pub(super) fn source(&self) -> &'graph [&'source str] {
+    pub(super) const fn source(&self) -> &'graph [&'source str] {
         self.source
     }
-    pub(super) fn reference(&self) -> &'source [String] {
+    pub(super) const fn reference(&self) -> &'source [String] {
         self.reference
     }
-    pub(super) fn mode(&self) -> crate::dp_align::LiteralMatchMode {
+    pub(super) const fn mode(&self) -> crate::dp_align::LiteralMatchMode {
         self.mode
     }
     pub(super) fn matches(&self, source: usize, reference: usize) -> bool {
         self.mode
             .matches_words(self.source[source], &self.reference[reference])
     }
-    pub(super) fn preparation(&self) -> usize {
+    pub(super) const fn preparation(&self) -> usize {
         self.preparation
     }
-    pub(super) fn feasible(&self) -> usize {
+    pub(super) const fn feasible(&self) -> usize {
         self.feasible
     }
 

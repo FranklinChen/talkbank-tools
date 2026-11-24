@@ -20,19 +20,19 @@ use crate::error::AlignmentSourceBindingFailure;
 use crate::types::traces::FaOriginalBulletTrace;
 
 mod population;
-pub(crate) use population::SourceUtterance;
+pub use population::SourceUtterance;
 use population::{GroupPopulation, RecordedUtterance};
 
 /// A working document and the source evidence captured from that same document.
 #[derive(Clone)]
-pub(crate) struct SourceBoundDocument {
+pub struct SourceBoundDocument {
     file: ChatFile,
     source: SourceCensus,
     identity: SourceIdentity,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SourceIdentity(std::sync::Arc<SourceIdentityMarker>);
+pub struct SourceIdentity(std::sync::Arc<SourceIdentityMarker>);
 
 #[derive(Debug)]
 struct SourceIdentityMarker;
@@ -47,17 +47,17 @@ impl SourceIdentity {
     }
 }
 
-pub(crate) struct SourceBoundUtrInput<'source> {
+pub struct SourceBoundUtrInput<'source> {
     file: &'source ChatFile,
     identity: SourceIdentity,
 }
 
 impl SourceBoundUtrInput<'_> {
-    pub(crate) fn document(&self) -> &ChatFile {
+    pub(crate) const fn document(&self) -> &ChatFile {
         self.file
     }
 
-    pub(crate) fn identity(&self) -> &SourceIdentity {
+    pub(crate) const fn identity(&self) -> &SourceIdentity {
         &self.identity
     }
 
@@ -280,7 +280,7 @@ impl SingleSpan {
 /// One request's share of a group: the consecutive words it aligns and the
 /// window they are aligned against.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct GroupUnit<'g> {
+pub struct GroupUnit<'g> {
     /// The words, a contiguous slice of the group's words.
     words: &'g [FaWord],
     /// The window, within the engine budget.
@@ -295,10 +295,10 @@ impl<'g> GroupUnit<'g> {
         }
     }
 
-    pub(crate) fn words(self) -> &'g [FaWord] {
+    pub(crate) const fn words(self) -> &'g [FaWord] {
         self.words
     }
-    pub(crate) fn window(self) -> FaWindow {
+    pub(crate) const fn window(self) -> FaWindow {
         self.window
     }
     pub(crate) fn from_piece(piece: &'g super::AnchoredPiece) -> Self {
@@ -318,7 +318,7 @@ impl<'g> GroupUnit<'g> {
 /// The requests one group is executed as, by shape: a single group's one
 /// request, or an anchored group's pieces. A shape rather than a list, so a
 /// consumer matches it and a single group's one request needs no allocation.
-pub(crate) enum GroupUnits<'g> {
+pub enum GroupUnits<'g> {
     /// A single group's one request over all its words.
     Whole(GroupUnit<'g>),
     /// An anchored partition, including explicit unavailable word ranges.
@@ -328,7 +328,7 @@ pub(crate) enum GroupUnits<'g> {
 }
 
 #[cfg(test)]
-pub(crate) enum GroupRequestIter<'g> {
+pub enum GroupRequestIter<'g> {
     Whole(std::option::IntoIter<GroupUnit<'g>>),
     Declared(Pieces<'g>),
     Resource(ResourceParts<'g>),
@@ -424,7 +424,7 @@ impl FaGroup {
         }
     }
     /// Only the resource planner can produce this closed source geometry.
-    pub(crate) fn from_resource_split(split: ResourceSplit) -> Self {
+    pub(crate) const fn from_resource_split(split: ResourceSplit) -> Self {
         Self {
             span: GroupSpan::Resource(split),
         }
@@ -456,7 +456,7 @@ impl FaGroup {
     /// An anchored group for unit tests of dispatch and injection; the split
     /// still comes from `AnchoredSplit::plan`, so its pieces are real.
     #[cfg(test)]
-    pub(crate) fn anchored_test_fixture(split: AnchoredSplit) -> Self {
+    pub(crate) const fn anchored_test_fixture(split: AnchoredSplit) -> Self {
         Self {
             span: GroupSpan::Anchored(split),
         }
@@ -464,7 +464,7 @@ impl FaGroup {
 
     /// The whole audio the group covers: its one window, or the utterance
     /// window an anchored split partitions.
-    pub(crate) fn window(&self) -> FaWindow {
+    pub(crate) const fn window(&self) -> FaWindow {
         match &self.span {
             GroupSpan::Single(single) => single.window,
             GroupSpan::Anchored(split) => split.window(),
@@ -473,11 +473,13 @@ impl FaGroup {
     }
 
     /// How the group's audio is presented to the aligner.
-    pub fn span(&self) -> &GroupSpan {
+    #[must_use]
+    pub const fn span(&self) -> &GroupSpan {
         &self.span
     }
 
     /// The group's words, in the order injection consumes timings.
+    #[must_use]
     pub fn words(&self) -> GroupWords<'_> {
         match &self.span {
             GroupSpan::Single(single) => GroupWords::Single(single.population.words().iter()),
@@ -490,6 +492,7 @@ impl FaGroup {
     }
 
     /// How many words the group holds.
+    #[must_use]
     pub fn word_count(&self) -> usize {
         match &self.span {
             GroupSpan::Single(single) => single.population.words().len(),
@@ -500,6 +503,7 @@ impl FaGroup {
 
     /// The utterances the group covers, in file order: one for an anchored
     /// group, by construction.
+    #[must_use]
     pub fn utterance_indices(&self) -> Vec<UtteranceIdx> {
         match &self.span {
             GroupSpan::Single(single) => single.population.utterance_indices(),
@@ -510,6 +514,7 @@ impl FaGroup {
 
     /// Whether every utterance of the group may take its timing from its
     /// existing `%wor` tier: the one rule both FA paths reuse a group by.
+    #[must_use]
     pub fn is_reusable_from(&self, reusable_utterances: &std::collections::HashSet<usize>) -> bool {
         let utterances = self.utterance_indices();
         !utterances.is_empty()
@@ -519,11 +524,13 @@ impl FaGroup {
     }
 
     /// Start of the group's whole audio span (ms).
+    #[must_use]
     pub fn audio_start_ms(&self) -> u64 {
         self.window().audio_start().get()
     }
 
     /// End of the group's whole audio span (ms).
+    #[must_use]
     pub fn audio_end_ms(&self) -> u64 {
         self.window().end().get()
     }
@@ -573,7 +580,7 @@ struct LabelBytes(usize);
 
 impl LabelBytes {
     /// Count one label's UTF-8 bytes. The boundary: raw text in, budget out.
-    fn of(text: &str) -> Self {
+    const fn of(text: &str) -> Self {
         Self(text.len())
     }
 
@@ -584,12 +591,12 @@ impl LabelBytes {
 
     /// The two groups' labels together, saturating rather than wrapping so an
     /// absurd input cannot make an oversized group look small.
-    fn saturating_add(self, other: Self) -> Self {
+    const fn saturating_add(self, other: Self) -> Self {
         Self(self.0.saturating_add(other.0))
     }
 
     /// Whether this many labels is more than one group may carry.
-    fn exceeds_group_cap(self) -> bool {
+    const fn exceeds_group_cap(self) -> bool {
         self.0 > MAX_GROUP_LABEL_BYTES
     }
 }
@@ -621,7 +628,7 @@ pub struct Grouping {
     pub windows_clamped: usize,
 }
 
-/// Group utterances from a ChatFile into FA segments.
+/// Group utterances from a `ChatFile` into FA segments.
 ///
 /// The target bounds joins and trailing padding only. A valid utterance above
 /// that target remains one unchanged candidate, with no merge or padding
@@ -641,6 +648,7 @@ pub struct Grouping {
 /// * `anchors` - Word anchors from the UTR pass over this same document, or
 ///   [`AnchorIndex::not_observed`] when none ran. Absence of anchors cannot
 ///   turn an aggregation preference into refusal of a supplied utterance.
+#[must_use]
 pub fn group_utterances(
     chat_file: &ChatFile,
     target: crate::types::engines::FaAggregationTarget,
@@ -659,7 +667,7 @@ pub fn group_utterances(
 /// Exercise the anchored partition policy against an explicitly declared
 /// fixture capacity. Engine aggregation preferences cannot call this path.
 #[cfg(test)]
-pub(crate) fn group_with_declared_window_limit(
+pub fn group_with_declared_window_limit(
     chat_file: &ChatFile,
     capacity_ms: u64,
     recording: &Recording,
@@ -682,7 +690,7 @@ enum WindowPolicy {
 }
 
 impl WindowPolicy {
-    fn target(self) -> Ms {
+    const fn target(self) -> Ms {
         match self {
             Self::Aggregation(target) => Ms(target.milliseconds()),
             #[cfg(test)]
@@ -762,9 +770,10 @@ fn group_with_policy(
                 && let Some(previous) = pending.take()
             {
                 let (start, end) = (bullet.timing.start_ms, bullet.timing.end_ms);
-                let bound = match start < end && end <= total_audio_ms {
-                    true => TrailingBound::Before(FileMs::new(start)),
-                    false => TrailingBound::Unknown,
+                let bound = if start < end && end <= total_audio_ms {
+                    TrailingBound::Before(FileMs::new(start))
+                } else {
+                    TrailingBound::Unknown
                 };
                 groups.push(previous.finish(bound));
             }
@@ -1097,7 +1106,7 @@ impl MergeSeparation {
     /// as inverted or past the recording once still bounded the padding at
     /// its claimed start, letting the group reach into the refused
     /// utterance's probable speech.
-    fn trailing_bound(&self, start: FileMs) -> TrailingBound {
+    const fn trailing_bound(&self, start: FileMs) -> TrailingBound {
         match self {
             Self::Unmerged(_) => TrailingBound::Before(start),
             #[cfg(test)]
@@ -1123,7 +1132,7 @@ impl From<WindowFault> for MergeSeparation {
 /// Every `WindowFault` carries its own figures; only `PastRecording` needs the
 /// window's start, which the fault does not record. Exhaustive, so a new fault
 /// cannot be recorded without a variant.
-fn fault_refusal(fault: WindowFault, window_start: FileMs) -> RefusedWindow {
+const fn fault_refusal(fault: WindowFault, window_start: FileMs) -> RefusedWindow {
     match fault {
         WindowFault::Empty { at } => RefusedWindow::Empty { at_ms: at.get() },
         WindowFault::Inverted { start, end } => RefusedWindow::Inverted {
@@ -1213,7 +1222,7 @@ enum TrailingBound {
 
 impl TrailingBound {
     /// Where padding must stop, or `None` when there must be none.
-    fn padding_limit(self) -> Option<FileMs> {
+    const fn padding_limit(self) -> Option<FileMs> {
         match self {
             Self::Before(at) | Self::EndOfRecording(at) => Some(at),
             Self::Unknown => None,
@@ -1299,6 +1308,7 @@ impl PendingGroup {
 /// (headers, comments) are not counted, and neither is an utterance not in
 /// the recording ([`RecordingPresence::NotInRecording`]): it needs no
 /// timing, so it is not untimed work for recovery to do.
+#[must_use]
 pub fn count_utterance_timing(chat_file: &ChatFile) -> (usize, usize) {
     let (mut timed, mut untimed) = (0, 0);
     for line in &chat_file.lines {

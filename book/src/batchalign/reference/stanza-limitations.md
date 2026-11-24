@@ -138,6 +138,22 @@ redistribution must carry its applicable attribution and conditions. BA3's
 CLI distribution downloads model resources separately.
 [NLM terms](https://lhncbc.nlm.nih.gov/LSG/Docs/termsAndConditions.html).
 
+### Rust golden snapshot adjudication
+
+The 1.15.1 candidate re-accepted eleven Rust morphotag snapshots under
+`crates/batchalign/tests/ml_golden/snapshots/`. Several had not been re-run
+since Stanza 1.14.0, so their diffs fold three causes together. Each changed
+`%mor` line belongs to one of them:
+
+| Cause | Lines | Verdict |
+| --- | --- | --- |
+| BA3 stopped writing feature values the analysis does not have (`f5f42352`, the `Slot::Empty` rendering) | `run-Part-Pres-S` to `run-Part-Pres`, `eat-Inf-S` to `eat-Inf`, `cat-Plur-Acc` to `cat-Plur`, `grande-S1` to `grande-S`, `nice-S1` to `nice`, and the other dropped `-S`, `-S1` and `-Acc` suffixes on participles, infinitives, imperatives, adjectives and English nouns | Correct. UD gives English nouns no case and infinitives no number; the old suffixes were filled-in defaults, not analysis. |
+| Model changes that match UD | `ja` from `verb` to `intj`; `work` in "it's working" from `noun` to `verb`; `stop` in "don't stop" from `Fin-Imp` to `Inf` | Correct. |
+| Model changes judged wrong | `Kinder` lemmatized as `kindern` instead of `Kind`; in `ich möchte wake@s up@s jetzt`, `möchte` changed from `aux` (subjunctive) to a main `verb` (indicative) with `wake` as its object | Regressions in German analysis of code-switched input. Which Stanza release introduced each is not yet separated: that needs the same snapshots run on the 1.15.0 baseline at the same BA3 source. They are recorded here, not accepted as expected answers. |
+
+Until each regression has an owned expected-failure check, a snapshot that
+changes these two lines back is an improvement to adjudicate, not a failure.
+
 ### Workaround dispositions after 1.15.1 qualification
 
 These dispositions retain each observation's exact scope. Package confirmation
@@ -151,7 +167,7 @@ has its own entry in `CONFIRMED_STANZA_VERSIONS`.
 | Defect 4 control-token leak | Retired since 1.12.0. Preserve its recorded history and focused surviving upstream control. |
 | Defects 6 and 7 Italian mis-splits | Five strict Defect-6 count failures remain. Three stale count marks were removed after both 1.15.0 and 1.15.1 satisfied those predicates. Curated POS/lemma/features and dependency repairs require per-row unmitigated evidence before retirement. |
 | Defect 8 compound repair | Existing managed Italian controls pass. Raw analysis of each supported compound/context remains the retirement obligation. |
-| Defects 9–11 English content rules | Historical per-rule evidence remains scoped to its recorded versions. Check each rule's linguistic and source-context obligation before proposing removal. |
+| Defects 9-11 English content rules | Historical per-rule evidence remains scoped to its recorded versions. Check each rule's linguistic and source-context obligation before proposing removal. |
 | Defect 12 Greek loading repair | Primary and retained-cache managed Greek jobs load successfully. Unpatched checkpoint/catalog behavior across supported assets remains to be established for retirement. |
 
 The three removed Italian xfail marks are test-policy cleanup. Their former

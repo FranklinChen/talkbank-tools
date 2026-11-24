@@ -198,6 +198,15 @@ operator overrides directly from `ServerConfig` (NOT from
 needs to distinguish "operator explicitly set X" from "fell through
 to recommendation").
 
+The result is a `ConfigValidation { warnings, verdict }`: the warnings
+either outcome may carry, and a `StartupVerdict` that is `Admitted` or
+`Refused(ConfigError)`. A caller deciding whether to boot must match the
+verdict, so there is no error list to forget to check and no empty
+refusal. `doctor --check` folds the validation and its warning policy
+(`--warnings-as-errors`) into one `CheckOutcome` (`Refused`,
+`WarningsFatal`, `Warned`, `Clean`), from which both its message and its
+exit status follow.
+
 Today's findings:
 
 - **Warnings** (non-fatal): override contradicts recommendation in a

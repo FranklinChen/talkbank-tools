@@ -35,6 +35,39 @@ identity named the installed wheel (found 2026-10-01). `-P` removes only that
 entry: an editable development install reaches its source through a `.pth`
 file and still works. Tested on a real interpreter in `worker/python.rs`.
 
+### Python launch admission
+
+Python admits one launch before claiming stdout or starting a parent watch,
+refreshing model resources, or loading optional dependencies. A model worker
+requires one task or profile. Echo can use either or an explicit untargeted
+case. Both modes use the target they received for health and the TCP registry
+projection. The ready envelope retains its existing fields.
+
+A stdio launch carries the checked supervisor PID and arms the kernel watch
+before startup. A TCP launch carries its bind host and fixed or automatic
+port. The started worker retains the pre-import runtime identity for readiness
+and the original serving choice and effective thread count. Later task loads
+use the carried bootstrap settings. A request with no override reuses the
+settings directly.
+
+```mermaid
+flowchart TD
+    argv["Worker argv and injected settings"] --> admit{"Admit one launch"}
+    admit -- invalid --> rejected["Reject before startup effects"]
+    admit -- stdio --> parent["Arm the admitted supervisor"]
+    admit -- TCP --> binding["Carry the admitted bind request"]
+    parent --> setup["Observe pre-import runtime identity"]
+    binding --> setup
+    setup --> publish["Publish admitted target and model settings"]
+    publish --> running["Enter the admitted serving loop"]
+    running --> report["Send ready and health or register TCP"]
+    running --> prepare["Reuse bootstrap settings for task loads"]
+```
+
+The server's Python discovery also shares one ordered candidate search across
+the sibling and ancestor-venv paths. An exact path that occurs in both
+locations gets a single existence and import attempt per resolution.
+
 ### Admitted startup and submitted work
 
 The startup reader decodes one private ready wire representation. Its admitted

@@ -15,7 +15,7 @@ pub(in crate::fa) struct PreparationWorkPermit {
 }
 
 impl PreparationWorkPermit {
-    pub(super) fn attempt(&self) -> uuid::Uuid {
+    pub(super) const fn attempt(&self) -> uuid::Uuid {
         self.attempt
     }
 }

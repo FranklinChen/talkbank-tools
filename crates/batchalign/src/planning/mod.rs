@@ -7,11 +7,11 @@ use crate::recipe_runner::runtime::discover_inputs_for_job;
 use crate::recipe_runner::work_unit::{PlannedWorkUnit, TextWorkUnit};
 use crate::store::RunnerJobSnapshot;
 
-pub(crate) use crate::recipe_runner::materialize::PlannedArtifactSet;
+pub use crate::recipe_runner::materialize::PlannedArtifactSet;
 
 /// Immutable execution input for one job.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JobPlan {
+pub struct JobPlan {
     /// Authoritative command model entry for the released command.
     pub spec: &'static CatalogEntry,
     /// Typed work units derived from the runner snapshot.
@@ -21,7 +21,7 @@ pub(crate) struct JobPlan {
 }
 
 /// Build one immutable job plan from the current runner snapshot.
-pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, PlanningError> {
+pub fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, PlanningError> {
     let spec = command_model::command_spec(job.dispatch.command);
     let inputs = discover_inputs_for_job(job);
     let work_units = plan_work_units(spec.planner, &inputs)?;
@@ -44,7 +44,7 @@ pub(crate) fn build_job_plan(job: &RunnerJobSnapshot) -> Result<JobPlan, Plannin
 }
 
 /// Return the planned output artifacts for one source display path.
-pub(crate) fn artifact_set_for_source<'a>(
+pub fn artifact_set_for_source<'a>(
     plan: &'a JobPlan,
     source_display_path: &DisplayPath,
 ) -> Option<&'a PlannedArtifactSet> {
@@ -53,7 +53,7 @@ pub(crate) fn artifact_set_for_source<'a>(
         .find(|artifacts| artifacts.source() == source_display_path)
 }
 
-fn primary_display_path_for_work_unit(work_unit: &PlannedWorkUnit) -> &DisplayPath {
+const fn primary_display_path_for_work_unit(work_unit: &PlannedWorkUnit) -> &DisplayPath {
     match work_unit {
         PlannedWorkUnit::Text(TextWorkUnit { source })
         | PlannedWorkUnit::MediaAnalysis(

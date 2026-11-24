@@ -9,12 +9,12 @@
       "const": "whisper"
     },
     {
-      "description": "MMS Wave2Vec forced alignment.",
+      "description": "MMS `Wave2Vec` forced alignment.",
       "type": "string",
       "const": "wave2vec"
     },
     {
-      "description": "Cantonese Wave2Vec forced alignment.",
+      "description": "Cantonese `Wave2Vec` forced alignment.",
       "type": "string",
       "const": "wav2vec_canto"
     },

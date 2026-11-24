@@ -108,7 +108,7 @@ fn discover_files_in_dir(
 
 /// Walk a directory and return paths matching the given extensions.
 ///
-/// The batchalign server's `POST /jobs` endpoint in paths_mode requires individual
+/// The batchalign server's `POST /jobs` endpoint in `paths_mode` requires individual
 /// file paths in `source_paths`. This command bridges the gap between the user
 /// picking a folder and the API needing file paths.
 #[tauri::command]
@@ -116,7 +116,9 @@ fn discover_files(dir: String, extensions: Vec<String>) -> Result<Vec<String>, S
     discover_files_in_dir(Path::new(&dir), &extensions).map_err(|error| error.to_string())
 }
 
-fn main() {
+/// A failure to start the window is returned, so the process exits with the
+/// error printed rather than by a panic.
+fn main() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -131,7 +133,6 @@ fn main() {
             config::write_config,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running batchalign desktop");
 }
 
 #[cfg(test)]

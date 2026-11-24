@@ -59,7 +59,7 @@ impl<'source> PreparedFuzzyWord<'source> {
     }
 }
 
-/// Preserve the public MatchMode threshold's existing comparison semantics.
+/// Preserve the public `MatchMode` threshold's existing comparison semantics.
 /// Range validation remains the caller's policy (for example UTR's typed
 /// threshold); this preparation does not reinterpret legacy float inputs.
 #[derive(Clone, Copy)]
@@ -68,7 +68,7 @@ pub(super) struct FuzzyComparison {
 }
 
 impl FuzzyComparison {
-    pub(super) fn new(threshold: f64) -> Self {
+    pub(super) const fn new(threshold: f64) -> Self {
         Self { threshold }
     }
 }

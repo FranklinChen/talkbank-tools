@@ -7,45 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-/// A validated lowercase SHA-256 digest.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
-#[serde(transparent)]
-pub struct Sha256Digest(String);
-
-impl Sha256Digest {
-    /// Canonical lowercase hexadecimal representation.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for Sha256Digest {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            Ok(Self(value))
-        } else {
-            Err("runtime digest must be 64 lowercase hexadecimal characters".into())
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Sha256Digest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        String::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
+use batchalign_types::evidence::Sha256Digest;
 
 /// Runtime identity proven by the current ready-handshake schema.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -99,12 +61,14 @@ impl<'de> Deserialize<'de> for WorkerRuntimeIdentity {
 
 impl WorkerRuntimeIdentity {
     /// Python semantic version reported by the executing interpreter.
+    #[must_use]
     pub fn python_version(&self) -> &str {
         &self.python_version
     }
 
     /// Content digest of the resolved Python executable.
-    pub fn python_executable_sha256(&self) -> &Sha256Digest {
+    #[must_use]
+    pub const fn python_executable_sha256(&self) -> &Sha256Digest {
         &self.python_executable_sha256
     }
 }
@@ -125,7 +89,7 @@ pub(crate) struct ObservedWorkerRuntimes {
 /// Keeps both identities, and its message names the components that differ
 /// with both values, so a refusal says what changed. It used to be converted
 /// to a variant that carried neither, and the 2026-11-05 refusal (a worker
-/// whose distribution inventory changed because loading FunASR extended
+/// whose distribution inventory changed because loading `FunASR` extended
 /// `sys.path` before it observed its identity) had to be found by experiment.
 #[derive(Debug)]
 pub struct WorkerRuntimeMismatch {
@@ -246,63 +210,81 @@ impl ObservedWorkerRuntimes {
 mod tests {
     use super::*;
 
-    fn identity_json(schema: u8, executable_digest: &str) -> String {
-        format!(
-            r#"{{"schema_version":{schema},"python_version":"3.13.12","python_executable_sha256":"{executable_digest}","batchalign_package_tree_sha256":"{}","batchalign_core_extension_sha256":"{}","distribution_inventory_sha256":"{}"}}"#,
-            "b".repeat(64),
-            "c".repeat(64),
-            "d".repeat(64),
-        )
+    fn worker_report(executable_digest: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "python_version": "3.14.0",
+            "python_executable_sha256": executable_digest,
+            "batchalign_package_tree_sha256": "b".repeat(64),
+            "batchalign_core_extension_sha256": "c".repeat(64),
+            "distribution_inventory_sha256": "d".repeat(64),
+        })
     }
 
+    /// Guards: Runtime admission requires the current schema and every digest.
+    /// A successful identity serializes exactly the declared evidence fields.
+    /// Kind: wire
+    /// Not a type: Valid fields are private after admission. Incoming JSON can
+    /// still omit, rename or corrupt evidence, and serialization can leak fields.
+    /// State: One valid report feeds both the round trip and single-field mutations.
+    /// Concurrency: All reports are local values. No live process or path is read.
     #[test]
-    fn invalid_schema_or_digest_cannot_construct_runtime_identity() {
-        for json in [
-            identity_json(2, &"a".repeat(64)),
-            identity_json(1, "not-a-digest"),
+    fn runtime_wire_admits_exactly_the_reported_evidence() {
+        enum WireFault {
+            FutureSchema,
+            InvalidExecutableDigest,
+            ForeignPath,
+            MissingExtensionDigest,
+        }
+
+        let report = worker_report(&"a".repeat(64));
+        let admitted: WorkerRuntimeIdentity = serde_json::from_value(report.clone()).unwrap();
+        assert_eq!(serde_json::to_value(admitted).unwrap(), report);
+
+        for fault in [
+            WireFault::FutureSchema,
+            WireFault::InvalidExecutableDigest,
+            WireFault::ForeignPath,
+            WireFault::MissingExtensionDigest,
         ] {
-            assert!(serde_json::from_str::<WorkerRuntimeIdentity>(&json).is_err());
+            let mut value = report.clone();
+            let fields = value.as_object_mut().unwrap();
+            match fault {
+                WireFault::FutureSchema => {
+                    fields.insert("schema_version".into(), serde_json::json!(2));
+                }
+                WireFault::InvalidExecutableDigest => {
+                    fields.insert(
+                        "python_executable_sha256".into(),
+                        serde_json::json!("not-a-digest"),
+                    );
+                }
+                WireFault::ForeignPath => {
+                    fields.insert("path".into(), serde_json::json!("/tmp/python"));
+                }
+                WireFault::MissingExtensionDigest => {
+                    fields.remove("batchalign_core_extension_sha256");
+                }
+            }
+            assert!(serde_json::from_value::<WorkerRuntimeIdentity>(value).is_err());
         }
     }
 
+    /// Guards: Repeated runtime reports reuse the pinned identity. A differing
+    /// identity preserves the original receipt and names the differing component.
+    /// Kind: policy
+    /// Not a type: Two actual admitted values can differ despite having the same
+    /// type. The registry must compare those values and render the real difference.
+    /// State: The test owns one registry and two independently admitted reports.
+    /// Concurrency: A private registry exercises the normal admission method in
+    /// deterministic order with no competing writers or live worker.
     #[test]
-    fn schema_one_refuses_unknown_fields_instead_of_silently_reinterpreting_them() {
-        let json = identity_json(1, &"a".repeat(64)).replace("}", ",\"path\":\"/tmp/python\"}");
-
-        assert!(serde_json::from_str::<WorkerRuntimeIdentity>(&json).is_err());
-    }
-
-    #[test]
-    fn schema_one_requires_the_loaded_native_extension_digest() {
-        let mut value: serde_json::Value =
-            serde_json::from_str(&identity_json(1, &"a".repeat(64))).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("batchalign_core_extension_sha256");
-
-        assert!(serde_json::from_value::<WorkerRuntimeIdentity>(value).is_err());
-    }
-
-    #[test]
-    fn serialized_runtime_identity_contains_evidence_but_no_paths() {
-        let identity: WorkerRuntimeIdentity =
-            serde_json::from_str(&identity_json(1, &"a".repeat(64))).unwrap();
-
-        let serialized = serde_json::to_string(&identity).unwrap();
-
-        assert!(serialized.contains("python_executable_sha256"));
-        assert!(serialized.contains("batchalign_core_extension_sha256"));
-        assert!(!serialized.contains("path"));
-    }
-
-    #[test]
-    fn observed_runtime_registry_refuses_a_second_runtime_identity() {
+    fn runtime_pin_retains_the_admitted_report_and_names_a_refusal() {
         let registry = ObservedWorkerRuntimes::default();
-        let first: WorkerRuntimeIdentity =
-            serde_json::from_str(&identity_json(1, &"a".repeat(64))).unwrap();
-        let second: WorkerRuntimeIdentity =
-            serde_json::from_str(&identity_json(1, &"d".repeat(64))).unwrap();
+        let original_digest = "a".repeat(64);
+        let different_digest = "d".repeat(64);
+        let first = serde_json::from_value(worker_report(&original_digest)).unwrap();
+        let second = serde_json::from_value(worker_report(&different_digest)).unwrap();
 
         registry.admit(&first).unwrap();
         registry.admit(&first).unwrap();
@@ -311,30 +293,11 @@ mod tests {
         assert_eq!(*mismatch.expected, first);
         assert_eq!(*mismatch.observed, second);
         assert_eq!(registry.receipts(), vec![first]);
-    }
-
-    /// The refusal names exactly the component that differs, with both
-    /// values, and nothing that matched: what an operator needs to find the
-    /// cause without reproducing it.
-    #[test]
-    fn a_refusal_names_the_component_that_differs() {
-        let registry = ObservedWorkerRuntimes::default();
-        let first: WorkerRuntimeIdentity =
-            serde_json::from_str(&identity_json(1, &"a".repeat(64))).unwrap();
-        let second: WorkerRuntimeIdentity =
-            serde_json::from_str(&identity_json(1, &"d".repeat(64))).unwrap();
-        registry.admit(&first).unwrap();
-
-        let message = crate::worker::error::WorkerError::from(registry.admit(&second).unwrap_err())
-            .to_string();
-
         assert_eq!(
-            message,
+            crate::worker::error::WorkerError::from(mismatch).to_string(),
             format!(
                 "worker runtime identity differs from the runtime pinned by this server: \
-                 python_executable_sha256 pinned {}, worker {}",
-                "a".repeat(64),
-                "d".repeat(64)
+                 python_executable_sha256 pinned {original_digest}, worker {different_digest}"
             )
         );
     }

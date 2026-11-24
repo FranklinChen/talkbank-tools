@@ -6,7 +6,7 @@ use super::*;
 struct MatchRank(usize);
 
 impl MatchRank {
-    fn after(prefix: usize) -> Self {
+    const fn after(prefix: usize) -> Self {
         Self(prefix + 1)
     }
 }
@@ -35,7 +35,7 @@ enum Multiplicity {
 }
 
 impl Multiplicity {
-    fn observe(&mut self) {
+    const fn observe(&mut self) {
         *self = match self {
             Self::Empty => Self::Unique,
             Self::Unique | Self::Competing => Self::Competing,
@@ -48,7 +48,7 @@ pub(super) const EDGE_PAYLOAD_BYTES: usize =
     std::mem::size_of::<Edge>() + 2 * std::mem::size_of::<MatchRank>();
 
 impl<'input> Candidates<'input> {
-    pub(super) fn bind(reference: &'input [String], edges: Vec<Edge>) -> Self {
+    pub(super) const fn bind(reference: &'input [String], edges: Vec<Edge>) -> Self {
         Self { reference, edges }
     }
 

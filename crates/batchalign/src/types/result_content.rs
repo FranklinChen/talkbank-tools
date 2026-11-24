@@ -14,7 +14,8 @@ pub struct ArtifactDigest(blake3::Hash);
 
 impl ArtifactDigest {
     /// Identity computed by a BLAKE3 producer, not unchecked hexadecimal text.
-    pub fn from_hash(hash: blake3::Hash) -> Self {
+    #[must_use]
+    pub const fn from_hash(hash: blake3::Hash) -> Self {
         Self(hash)
     }
 }
@@ -108,6 +109,7 @@ impl From<&str> for ResultContent {
 
 impl ResultContent {
     /// Borrow text only when the wire actually carries text. No lossy fallback.
+    #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(text),
@@ -116,7 +118,8 @@ impl ResultContent {
     }
 
     /// Whether a result has no content; binary descriptors are always nonempty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         match self {
             Self::Text(text) => text.is_empty(),
             Self::Binary(_) => false,

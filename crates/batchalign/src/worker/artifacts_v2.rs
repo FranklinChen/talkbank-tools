@@ -21,9 +21,9 @@ use crate::chat_ops::fa::coordinates::FaWindow;
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
 use crate::media::window::{DecodedFrames, EmptySegment};
 use crate::types::worker_v2::{
-    ArtifactRefV2, ByteLengthV2, ByteOffsetV2, ChannelCountV2, FrameCountV2,
-    PreparedAudioEncodingV2, PreparedAudioRefV2, PreparedTextEncodingV2, PreparedTextRefV2,
-    SampleRateHzV2, WorkerArtifactIdV2, WorkerArtifactPathV2,
+    ByteLengthV2, ByteOffsetV2, ChannelCountV2, FrameCountV2, PreparedAudioEncodingV2,
+    PreparedAudioRefV2, PreparedTextEncodingV2, PreparedTextRefV2, SampleRateHzV2,
+    WorkerArtifactIdV2, WorkerArtifactPathV2,
 };
 
 /// Directory names used inside one prepared-artifact root.
@@ -83,13 +83,9 @@ impl PreparedArtifactStoreV2 {
     }
 
     /// Return the filesystem root for this store.
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    /// Create an inline JSON attachment without touching the filesystem.
-    pub fn inline_json(&self, id: WorkerArtifactIdV2, value: serde_json::Value) -> ArtifactRefV2 {
-        ArtifactRefV2::InlineJson(crate::types::worker_v2::InlineJsonRefV2 { id, value })
     }
 
     /// Write mono or multi-channel float32 PCM audio and return the descriptor.
@@ -339,298 +335,16 @@ impl PreparedArtifactRuntimeV2 {
     }
 
     /// Borrow the file-backed store owned by this runtime.
-    pub(crate) fn store(&self) -> &PreparedArtifactStoreV2 {
+    pub(crate) const fn store(&self) -> &PreparedArtifactStoreV2 {
         &self.store
     }
 
-    /// Return the store root for diagnostics and tests.
+    /// The artifact directory while this runtime owns it.
     #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         self.store.root()
     }
-
-    /// Return the outer scratch directory kept alive by this runtime.
-    #[cfg(test)]
-    pub(crate) fn scratch_root(&self) -> &Path {
-        self._scratch_dir.path()
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::chat_ops::fa::coordinates::{Ms, Recording};
-    use crate::media::tools::MediaTool;
-    // Named only here: the production path receives a reason from
-    // `DecodedFrames::measure_f32le` and never spells the type.
-    use crate::media::window::EmptyReason;
-    use crate::time::FileMs;
-
-    /// The reason a decode of `byte_len` bytes reports, FROM THE MEASUREMENT.
-    ///
-    /// The only way a test can obtain an [`EmptyReason`], and since 2026-09-07
-    /// the only way anything can: the variants were public, and the message
-    /// test below wrote the struct literal, so it asserted a reason nothing had
-    /// measured and would have gone on passing after the measurement stopped
-    /// producing that reason at all. Going through the producer makes the same
-    /// test evidence about the pair.
-    fn measured_reason(byte_len: u64) -> EmptyReason {
-        match DecodedFrames::measure_f32le(byte_len) {
-            DecodedFrames::None(reason) => reason,
-            DecodedFrames::Frames(frames) => {
-                panic!("expected an empty decode of {byte_len} bytes, got {frames} whole frames")
-            }
-        }
-    }
-
-    /// Create a temporary prepared-artifact store for unit tests.
-    fn test_store() -> (PreparedArtifactStoreV2, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = PreparedArtifactStoreV2::new(dir.path()).expect("prepared artifact store");
-        (store, dir)
-    }
-
-    /// Create a scoped prepared-artifact runtime for unit tests.
-    fn test_runtime() -> PreparedArtifactRuntimeV2 {
-        PreparedArtifactRuntimeV2::new("artifacts").expect("prepared artifact runtime")
-    }
-
-    #[test]
-    fn creates_expected_directory_layout() {
-        let runtime = test_runtime();
-        assert!(runtime.root().join(AUDIO_DIR_NAME).is_dir());
-        assert!(runtime.root().join(TEXT_DIR_NAME).is_dir());
-        assert!(runtime.scratch_root().is_dir());
-    }
-
-    #[test]
-    fn writes_prepared_audio_descriptor_and_pcm_bytes() {
-        let (store, _dir) = test_store();
-        let id = WorkerArtifactIdV2::from("audio-ref-1");
-        let descriptor = store
-            .write_prepared_audio_f32le(
-                &id,
-                &[0.25, -0.5, 1.0, 0.0],
-                SampleRateHzV2(16_000),
-                ChannelCountV2(2),
-            )
-            .expect("write prepared audio");
-
-        assert_eq!(descriptor.id, id);
-        assert_eq!(descriptor.channels, 2);
-        assert_eq!(descriptor.frame_count, 2);
-        assert_eq!(descriptor.byte_len, 16);
-
-        let bytes = fs::read(Path::new(descriptor.path.as_ref())).expect("read prepared pcm");
-        let expected: Vec<u8> = [0.25_f32, -0.5_f32, 1.0_f32, 0.0_f32]
-            .into_iter()
-            .flat_map(f32::to_le_bytes)
-            .collect();
-        assert_eq!(bytes, expected);
-    }
-
-    #[test]
-    fn rejects_audio_when_sample_count_does_not_match_channels() {
-        let (store, _dir) = test_store();
-        let error = store
-            .write_prepared_audio_f32le(
-                &WorkerArtifactIdV2::from("audio-ref-2"),
-                &[0.1, 0.2, 0.3],
-                SampleRateHzV2(16_000),
-                ChannelCountV2(2),
-            )
-            .expect_err("misaligned sample count should fail");
-
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn writes_prepared_text_descriptor_and_json_bytes() {
-        let (store, _dir) = test_store();
-        let id = WorkerArtifactIdV2::from("text-ref-1");
-        let descriptor = store
-            .write_prepared_text_json(&id, &serde_json::json!({"words": ["hello", "world"]}))
-            .expect("write prepared text");
-
-        assert_eq!(descriptor.id, id);
-        assert_eq!(descriptor.encoding, PreparedTextEncodingV2::Utf8Json);
-
-        let raw = fs::read_to_string(Path::new(descriptor.path.as_ref())).expect("read text");
-        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse text json");
-        assert_eq!(parsed, serde_json::json!({"words": ["hello", "world"]}));
-        assert_eq!(descriptor.byte_offset, 0);
-        assert_eq!(descriptor.byte_len, raw.len() as u64);
-    }
-
-    #[tokio::test]
-    async fn extracts_prepared_audio_segment_with_ffmpeg() {
-        let (store, dir) = test_store();
-        let wav_path = dir.path().join("tone.wav");
-        let ffmpeg_out = MediaTool::Ffmpeg
-            .async_command()
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:sample_rate=16000",
-                "-t",
-                "0.25",
-                wav_path.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await
-            .expect("ffmpeg process should run");
-        if !ffmpeg_out.status.success() {
-            eprintln!("skipping: could not generate test wav");
-            return;
-        }
-
-        let descriptor = store
-            .extract_prepared_audio_segment_f32le(
-                &WorkerArtifactIdV2::from("audio-segment-ref"),
-                &wav_path,
-                fixture_window(250, 0, 100),
-            )
-            .await
-            .expect("extract prepared audio segment");
-
-        assert_eq!(descriptor.channels, 1);
-        assert_eq!(descriptor.sample_rate_hz, 16_000);
-        assert!(descriptor.frame_count.0 > 0);
-        assert!(descriptor.byte_len.0 > 0);
-        assert!(Path::new(descriptor.path.as_ref()).exists());
-    }
-
-    /// A window `start..end` inside a fixture recording of `recording_ms`.
-    fn fixture_window(recording_ms: u64, start: u64, end: u64) -> FaWindow {
-        let recording = Recording::of_duration(Ms(recording_ms)).expect("non-empty recording");
-        FaWindow::within(&recording, FileMs::new(start), FileMs::new(end))
-            .expect("window inside the recording")
-    }
-
-    /// Helper: generate a short tone WAV for artifact tests.
-    async fn write_test_tone_wav(path: &std::path::Path, duration_s: f32) {
-        let out = MediaTool::Ffmpeg
-            .async_command()
-            .args([
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                "sine=frequency=440:sample_rate=16000",
-                "-t",
-                &format!("{duration_s}"),
-                path.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await
-            .expect("ffmpeg process should run");
-        assert!(
-            out.status.success(),
-            "ffmpeg should generate the artifact test tone: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    /// Regression test for the Croatian/PWA empty-audio-segment crash.
-    ///
-    /// When an FA group's timestamps extend past the end of the audio file,
-    /// ffmpeg exits with code 0 but writes zero bytes.  Before the fix, this
-    /// produced a 0-frame descriptor that caused Wave2Vec to crash with
-    /// "Kernel size can't be greater than actual input size".  After the fix,
-    /// the extractor returns `PreparedArtifactErrorV2::EmptyAudioSegment`.
-    #[tokio::test]
-    async fn extract_returns_empty_audio_segment_error_when_segment_past_end_of_file() {
-        let (store, dir) = test_store();
-        let wav_path = dir.path().join("short.wav");
-        // Generate a 0.1-second WAV, valid range is 0..100ms.
-        write_test_tone_wav(&wav_path, 0.1).await;
-
-        // Request a segment (500ms..600ms) entirely past the end of the file.
-        let result = store
-            .extract_prepared_audio_segment_f32le(
-                &WorkerArtifactIdV2::from("empty-audio-test"),
-                &wav_path,
-                // Inside a recording CLAIMED to be a second long, while the
-                // file really holds 100 ms: the one assumption the window's
-                // type cannot carry (that its recording was measured from
-                // this file) is what this test deliberately breaks.
-                fixture_window(1_000, 500, 600),
-            )
-            .await;
-
-        let Err(PreparedArtifactErrorV2::EmptyAudioSegment(segment)) = result else {
-            panic!("expected EmptyAudioSegment error, got: {result:?}");
-        };
-        // The window travels whole, so the test can assert it as one value
-        // rather than pattern-matching two loose integers out of the variant.
-        assert_eq!(segment.window.audio_start().get(), 500);
-        assert_eq!(segment.window.end().get(), 600);
-        // And the reason is the one the measurement actually saw. This is the
-        // real past-the-end case, so ffmpeg writes nothing at all; the value
-        // says that rather than the message asserting it, and the expectation
-        // comes from the same measurement rather than from a literal.
-        assert_eq!(segment.reason, measured_reason(0));
-    }
-
-    /// The message states the reason that was measured and does not assert a
-    /// cause the measurement cannot know.
-    ///
-    /// This variant's message, and the one on
-    /// `RequestBuildErrorV2::EmptyAudioSegment`, both used to end with "past
-    /// the end of the file". A truncated write produces the same zero whole
-    /// frames from a window well inside the file, so the claim was a guess
-    /// wearing the grammar of a fact. A partial frame is the case that proves
-    /// it: bytes WERE written, so the segment plainly was not past the end.
-    #[test]
-    fn an_empty_segment_reports_what_was_measured_not_a_guessed_cause() {
-        let window = fixture_window(1_000, 0, 100);
-        let rendered = PreparedArtifactErrorV2::EmptyAudioSegment(EmptySegment {
-            path: "clip.wav".to_owned(),
-            window,
-            // Three bytes of a four-byte sample, obtained by MEASURING three
-            // bytes rather than by asserting what that measurement would say.
-            reason: measured_reason(3),
-        })
-        .to_string();
-
-        assert!(
-            rendered.contains("less than one 4-byte sample"),
-            "the message should carry what the decoder wrote: {rendered}"
-        );
-        assert!(
-            !rendered.contains("past the end"),
-            "the message must not assert a cause nothing measured: {rendered}"
-        );
-    }
-
-    #[test]
-    fn builds_inline_json_attachment_without_filesystem_write() {
-        let (store, dir) = test_store();
-        let attachment = store.inline_json(
-            WorkerArtifactIdV2::from("inline-ref-1"),
-            serde_json::json!({"utterances": [{"words": ["hi"]}]}),
-        );
-
-        let ArtifactRefV2::InlineJson(inline) = attachment else {
-            panic!("expected inline json attachment");
-        };
-        assert_eq!(inline.id, "inline-ref-1");
-        assert_eq!(
-            inline.value,
-            serde_json::json!({"utterances": [{"words": ["hi"]}]})
-        );
-
-        let files: Vec<_> = walkdir::WalkDir::new(dir.path())
-            .min_depth(1)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .collect();
-        assert!(
-            files.is_empty(),
-            "inline attachments should not create files"
-        );
-    }
-}
+mod tests;

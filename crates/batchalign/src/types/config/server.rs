@@ -162,7 +162,7 @@ pub struct ServerConfig {
     /// Operator override for the maximum Python worker processes per
     /// `(profile, lang, engine)` key. `None` (the canonical
     /// post-migration form) means "use the built-in pool default
-    /// (DEFAULT_MAX_WORKERS_PER_KEY = 8)". `Some(n)` applies
+    /// (`DEFAULT_MAX_WORKERS_PER_KEY` = 8)". `Some(n)` applies
     /// uniformly across every profile (the legacy single-knob shape);
     /// the host-facts pipeline carries this through
     /// `ConfigOverrides::max_workers_per_key_by_profile` (each of
@@ -260,7 +260,7 @@ pub struct ServerConfig {
     pub audio_task_timeout_s: Option<PositiveSeconds>,
 
     /// Override, in seconds, of the transport ceiling for lightweight
-    /// analysis tasks (OpenSMILE, AVQI). Absent: 120. A legacy `0` is read as
+    /// analysis tasks (`OpenSMILE`, AVQI). Absent: 120. A legacy `0` is read as
     /// absent.
     #[serde(
         default,
@@ -360,11 +360,11 @@ pub(crate) fn default_host() -> String {
     "127.0.0.1".to_string()
 }
 
-pub(crate) fn default_true() -> bool {
+pub(crate) const fn default_true() -> bool {
     true
 }
 
-pub(crate) fn default_job_ttl_days() -> JobTtlDays {
+pub(crate) const fn default_job_ttl_days() -> JobTtlDays {
     JobTtlDays::literal::<7>()
 }
 
@@ -377,23 +377,23 @@ pub(crate) const DEFAULT_WORKER_STARTUP_STALL_S: u64 = 300;
 /// Default on-demand load stall window, seconds (`ensure_task_stall_s`).
 pub(crate) const DEFAULT_ENSURE_TASK_STALL_S: u64 = 120;
 
-pub(crate) fn default_worker_health_interval_s() -> PositiveSeconds {
+pub(crate) const fn default_worker_health_interval_s() -> PositiveSeconds {
     PositiveSeconds::literal::<DEFAULT_WORKER_HEALTH_INTERVAL_S>()
 }
 
-pub(crate) fn default_max_concurrent_worker_startups() -> WorkerStartupLimit {
+pub(crate) const fn default_max_concurrent_worker_startups() -> WorkerStartupLimit {
     WorkerStartupLimit::literal::<1>()
 }
 
-pub(crate) fn default_worker_startup_stall_s() -> PositiveSeconds {
+pub(crate) const fn default_worker_startup_stall_s() -> PositiveSeconds {
     PositiveSeconds::literal::<DEFAULT_WORKER_STARTUP_STALL_S>()
 }
 
-pub(crate) fn default_ensure_task_stall_s() -> PositiveSeconds {
+pub(crate) const fn default_ensure_task_stall_s() -> PositiveSeconds {
     PositiveSeconds::literal::<DEFAULT_ENSURE_TASK_STALL_S>()
 }
 
-pub(crate) fn default_max_body_bytes_mb() -> MemoryMb {
+pub(crate) const fn default_max_body_bytes_mb() -> MemoryMb {
     // 500 files of CHAT text from large corpora (e.g. childes-eng-uk,
     // childes-other) routinely exceed 100 MB when the CLI ships content
     // (`paths_mode=false`). 512 MB is the observed ceiling for a
@@ -402,19 +402,19 @@ pub(crate) fn default_max_body_bytes_mb() -> MemoryMb {
     MemoryMb(512)
 }
 
-pub(crate) fn default_memory_gate_timeout_s() -> PositiveSeconds {
+pub(crate) const fn default_memory_gate_timeout_s() -> PositiveSeconds {
     PositiveSeconds::literal::<120>()
 }
 
-pub(crate) fn default_memory_gate_poll_s() -> MemoryGatePollSeconds {
+pub(crate) const fn default_memory_gate_poll_s() -> MemoryGatePollSeconds {
     MemoryGatePollSeconds::literal::<5>()
 }
 
-pub(crate) fn default_memory_warning_mb() -> MemoryMb {
+pub(crate) const fn default_memory_warning_mb() -> MemoryMb {
     MemoryMb(4096)
 }
 
-pub(crate) fn default_local_lease_ttl() -> LeaseTtl {
+pub(crate) const fn default_local_lease_ttl() -> LeaseTtl {
     LeaseTtl::DEFAULT
 }
 
@@ -462,19 +462,22 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// How long a starting worker may go without advancing: the one
     /// boundary from `worker_startup_stall_s` to its type.
-    pub fn worker_startup_stall(&self) -> crate::worker::LoadingStall {
+    #[must_use]
+    pub const fn worker_startup_stall(&self) -> crate::worker::LoadingStall {
         crate::worker::LoadingStall::new(self.worker_startup_stall_s)
     }
 
     /// How long an on-demand load may go without advancing: the one
     /// boundary from `ensure_task_stall_s` to its type.
-    pub fn ensure_task_stall(&self) -> crate::worker::LoadingStall {
+    #[must_use]
+    pub const fn ensure_task_stall(&self) -> crate::worker::LoadingStall {
         crate::worker::LoadingStall::new(self.ensure_task_stall_s)
     }
 
     /// The operator's transport-ceiling overrides, as the worker layer reads
     /// them.
-    pub fn task_timeouts(&self) -> TaskTimeoutOverrides {
+    #[must_use]
+    pub const fn task_timeouts(&self) -> TaskTimeoutOverrides {
         TaskTimeoutOverrides {
             audio: self.audio_task_timeout_s,
             analysis: self.analysis_task_timeout_s,

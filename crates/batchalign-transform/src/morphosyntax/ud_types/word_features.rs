@@ -26,7 +26,7 @@ use std::fmt;
 /// other names are kept (and written back by [`WordFeatures`]'s `Display`) but
 /// nothing looks them up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FeatName {
+pub enum FeatName {
     VerbForm,
     Aspect,
     Mood,
@@ -143,12 +143,14 @@ pub struct FeatValue<'a> {
 
 impl<'a> FeatValue<'a> {
     /// The value as written (`Plur`).
-    pub fn text(self) -> &'a str {
+    #[must_use]
+    pub const fn text(self) -> &'a str {
         self.text
     }
 
     /// Where the value came from.
-    pub fn source(self) -> FeatSource {
+    #[must_use]
+    pub const fn source(self) -> FeatSource {
         self.source
     }
 }
@@ -234,7 +236,8 @@ impl WordFeatures {
     }
 
     /// Whether the word has no features.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -287,6 +290,7 @@ impl CuratedFeats {
 
     /// A table's FEATS string (`Mood=Imp|Number=Sing`), checked at compile
     /// time when used in a constant (every table is one).
+    #[must_use]
     pub const fn new(feats: &'static str) -> Self {
         let bytes = feats.as_bytes();
         let mut i = 0;

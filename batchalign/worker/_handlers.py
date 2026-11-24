@@ -187,9 +187,11 @@ def _capabilities() -> CapabilitiesResponse:
     # Rev.AI path when the control plane has already injected credentials.
     from batchalign.worker._model_loading.asr import resolve_injected_revai_api_key
 
+    bootstrap = _state.bootstrap
     has_revai_key = bool(
-        (_state.bootstrap and _state.bootstrap.revai_api_key)
-        or resolve_injected_revai_api_key()
+        bootstrap.revai_api_key
+        if bootstrap is not None
+        else resolve_injected_revai_api_key()
     )
 
     has_whisper = _module_importable("whisper")

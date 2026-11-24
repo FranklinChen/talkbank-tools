@@ -47,7 +47,7 @@ fn proved_matches(evidence: &UtrUtteranceAlignmentEvidence) -> Vec<&AdmittedUtrW
     }
 }
 
-fn overlaps(info: &UtrUtteranceInfo) -> bool {
+const fn overlaps(info: &UtrUtteranceInfo) -> bool {
     info.has_lazy_overlap || info.has_ca_overlap
 }
 

@@ -31,7 +31,7 @@ use crate::morphosyntax::{UdId, UdPunctable, UdSentence, UniversalPos};
 /// Whether an isolated word with this Stanza category takes the lexicon's
 /// communicator reading. Exhaustive so a new category is a decision, not a
 /// fall-through.
-fn evidence_overturns(upos: UniversalPos) -> bool {
+const fn evidence_overturns(upos: UniversalPos) -> bool {
     match upos {
         // A predicate or a name stands on its own.
         UniversalPos::Verb

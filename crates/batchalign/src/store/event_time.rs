@@ -26,23 +26,25 @@ pub struct EventTime(MachineTime);
 
 impl EventTime {
     /// Read by the store from its clock. The one production constructor.
-    pub(super) fn from_store_clock(now: MachineTime) -> Self {
+    pub(super) const fn from_store_clock(now: MachineTime) -> Self {
         Self(now)
     }
 
     /// A fixed instant for a test that drives the store or a sink directly.
     #[cfg(test)]
-    pub(crate) fn fixed(at: MachineTime) -> Self {
+    pub(crate) const fn fixed(at: MachineTime) -> Self {
         Self(at)
     }
 
     /// The instant, for storing or comparing.
-    pub fn instant(self) -> MachineTime {
+    #[must_use]
+    pub const fn instant(self) -> MachineTime {
         self.0
     }
 
     /// The instant `delay` after this event: the one place a deadline is
     /// derived from an event (a file's retry, a job's requeue).
+    #[must_use]
     pub fn deadline_after(self, delay: std::time::Duration) -> MachineTime {
         self.0.plus(delay)
     }

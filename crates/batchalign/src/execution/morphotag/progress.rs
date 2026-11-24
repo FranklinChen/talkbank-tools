@@ -59,7 +59,7 @@ const STALL_REPUBLISH_INTERVAL: Duration = Duration::from_secs(120);
 const REPORT_CHANNEL_DEPTH: usize = 256;
 
 /// Owns one job's batch-progress accounting and publishing.
-pub(crate) struct BatchProgressReporter {
+pub struct BatchProgressReporter {
     /// Kept so [`Self::port`] can hand out clones.
     tx: Option<mpsc::Sender<ProgressReport>>,
     /// Explicit shutdown signal for the drain task.
@@ -115,7 +115,7 @@ impl BatchProgressReporter {
 /// `MorphosyntaxParams` to the chunk dispatch, so it deliberately knows only
 /// its own file identity and nothing about jobs, stores or sinks.
 #[derive(Clone)]
-pub(crate) struct BackendProgressPort {
+pub struct BackendProgressPort {
     source_id: DisplayPath,
     tx: mpsc::Sender<ProgressReport>,
 }
@@ -312,39 +312,16 @@ mod tests {
         LanguageCode3::try_new(code).expect("valid test language")
     }
 
-    /// The reporter must publish a mid-flight file's utterance counts.
-    ///
-    /// This is what gives an operator watching a single long file a
-    /// denominator, and a live ML test cannot assert it reliably because a fast
-    /// file emits only its final event.
-    #[tokio::test]
-    async fn reporter_publishes_per_file_counts() {
-        let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone());
-
-        let port = reporter
-            .port(DisplayPath::from("a.cha"))
-            .expect("a fresh reporter must hand out ports");
-        // Mid-flight: 40 of 100 utterances done in this file's only chunk.
-        port.declare_group_total(&lang("eng"), UtteranceCount(100));
-        port.report(&lang("eng"), BatchChunkIndex(0), &event(40, 100));
-        reporter.finish().await;
-
-        let file_writes = sink.progress();
-        let write = file_writes
-            .iter()
-            .find(|w| w.filename == "a.cha")
-            .expect("an incomplete file must get per-file utterance counts");
-        assert_eq!(write.current, Some(40));
-        assert_eq!(write.total, Some(100));
-        assert_eq!(write.stage, FileStage::Analyzing);
-    }
-
     /// A file whose chunks are all finished must not get another per-file write.
     ///
     /// Its row is about to go terminal and the store refuses progress on a
     /// terminal file, so sending would be noise that only shows up as a refused
     /// write. The job-level snapshot still counts it.
+    /// Guards: Complete chunk reports do not rewrite final file progress.
+    /// Kind: contract
+    /// Not a type: The reporter must act on real queued completion counts and its sink can observe an erroneous write.
+    /// State: A private reporter task, typed chunk messages and recording sink exercise the drain.
+    /// Concurrency: Finish joins the reporter before checking writes.
     #[tokio::test]
     async fn a_finished_file_gets_no_further_per_file_write() {
         let sink = Arc::new(RecordingSink::default());
@@ -363,25 +340,37 @@ mod tests {
         );
     }
 
-    /// Chunk keying survives the whole path, not just the ledger: two chunks of
-    /// one file sum instead of overwriting.
+    /// Guards: One reporter publishes the correct independent totals for one and two chunks.
+    /// Kind: contract
+    /// Not a type: Asynchronous chunk reports can be summed under the wrong source or overwrite another chunk.
+    /// State: A private reporter task receives two file populations and publishes to a recording sink.
+    /// Concurrency: Finish drains the messages before checking each final total.
     #[tokio::test]
-    async fn two_chunks_of_one_file_sum_through_the_reporter() {
+    async fn reporter_sums_single_and_multiple_chunks_per_file() {
         let sink = Arc::new(RecordingSink::default());
         let reporter = BatchProgressReporter::spawn(sink.clone());
-
-        let port = reporter
-            .port(DisplayPath::from("big.cha"))
-            .expect("port must exist");
-        port.declare_group_total(&lang("eng"), UtteranceCount(548));
-        port.report(&lang("eng"), BatchChunkIndex(0), &event(150, 274));
-        port.report(&lang("eng"), BatchChunkIndex(1), &event(120, 274));
+        for (name, total, chunks) in [
+            ("single.cha", 100, &[(40, 100)][..]),
+            ("multiple.cha", 548, &[(150, 274), (120, 274)][..]),
+        ] {
+            let port = reporter.port(DisplayPath::from(name)).unwrap();
+            port.declare_group_total(&lang("eng"), UtteranceCount(total));
+            for (index, &(current, size)) in chunks.iter().enumerate() {
+                port.report(
+                    &lang("eng"),
+                    BatchChunkIndex(index as u32),
+                    &event(current, size),
+                );
+            }
+        }
         reporter.finish().await;
-
         let writes = sink.progress();
-        let write = writes.last().expect("big.cha must get a write");
-        assert_eq!(write.total, Some(548), "chunk totals must sum");
-        assert_eq!(write.current, Some(270));
+        for (name, total, current) in [("single.cha", 100, 40), ("multiple.cha", 548, 270)] {
+            let write = writes.iter().rfind(|entry| entry.filename == name).unwrap();
+            assert_eq!(write.total, Some(total));
+            assert_eq!(write.current, Some(current));
+            assert_eq!(write.stage, FileStage::Analyzing);
+        }
     }
 
     /// `finish()` must not wait for outstanding ports.
@@ -391,6 +380,11 @@ mod tests {
     /// the channel never closed and `finish()` hung forever. Production happened
     /// to be safe (the fanout is joined before `finish`), which is the worst kind
     /// of safe.
+    /// Guards: Reporter finish drains queued messages while extant ports become inert.
+    /// Kind: contract
+    /// Not a type: The real channel can remain open or accept post-shutdown sends even though the reporter owns its finish handle.
+    /// State: A live reporter actor, one held port and a recording sink witness shutdown and late input.
+    /// Concurrency: A bounded join observes publication before sending through the retired port.
     #[tokio::test]
     async fn finish_does_not_wait_for_outstanding_ports() {
         let sink = Arc::new(RecordingSink::default());
@@ -411,12 +405,18 @@ mod tests {
             1,
             "the queued reports must still be published on shutdown"
         );
-        drop(port);
+        port.report(&lang("eng"), BatchChunkIndex(0), &event(20, 50));
+        assert_eq!(sink.progress().len(), 1, "a retired port has no effect");
     }
 
     /// A model load the request triggered is not utterance progress: neither
     /// its growth (KiB, which would read as utterances) nor its phases reach
     /// the file's counts.
+    /// Guards: Model load growth and phases never overwrite utterance progress.
+    /// Kind: wire
+    /// Not a type: Worker events may interleave bytes and utterance quantities under the same active chunk.
+    /// State: A private reporter receives one valid count and two typed worker load events.
+    /// Concurrency: Finish drains all events before reading the sink.
     #[tokio::test]
     async fn model_load_progress_is_not_utterance_progress() {
         let sink = Arc::new(RecordingSink::default());
@@ -444,19 +444,5 @@ mod tests {
         let write = writes.last().expect("a.cha must get a write");
         assert_eq!(write.current, Some(10));
         assert_eq!(write.total, Some(100));
-    }
-
-    /// Ports are refused after `finish`, so a late report cannot resurrect a
-    /// finished job's progress.
-    #[tokio::test]
-    async fn a_dropped_port_reports_nothing() {
-        let sink = Arc::new(RecordingSink::default());
-        let reporter = BatchProgressReporter::spawn(sink.clone());
-        let port = reporter.port(DisplayPath::from("a.cha")).expect("port");
-        reporter.finish().await;
-
-        // The drain is gone; this must be dropped, not panic or block.
-        port.report(&lang("eng"), BatchChunkIndex(0), &event(10, 100));
-        assert!(sink.progress().is_empty());
     }
 }

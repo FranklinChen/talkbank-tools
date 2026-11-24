@@ -141,9 +141,9 @@ flowchart LR
     window["Recording-bounded FaWindow"] --> conversion
     full["Full-file execution context"] --> bound["BoundedRequest<br/>recording + whole-file window"]
     bound -->|"cache or inference"| conversion
-    conversion -->|"full-file route"| fullresult["FullRecognition<br/>conversion + recording + route"]
+    conversion -->|"full-file route"| fullresult["FullRecognition<br/>conversion + route"]
     fullresult --> prepared["PreparedRecognition<br/>normalized tokens + windows + producer"]
-    plan["Planned partial windows + execution context"] --> pending["PendingWindow<br/>cache key or segment + response"]
+    plan["Planned partial windows + execution context<br/>+ NonRevAsrBackend"] --> pending["PendingWindow<br/>cache key or segment + response"]
     pending --> conversion
     conversion -->|"next planned window"| pending
     conversion -->|"plan exhausted"| partial["CompletedPartialRecognition<br/>nonempty conversions"]
@@ -162,6 +162,21 @@ flowchart LR
     prepared -.->|"cannot attach unrelated observation"| completed
     conversion -.->|"refused tokens are retained, not timed"| refused["Typed refusals<br/>index + reason"]
 ```
+
+**What each engine reads.** A pass reads the recording bound once, before
+any cache lookup, and hands it to whichever route runs. The context carries
+a `UtrRecognizer`: the engine together with its input, derived from the
+engine once in `UtrRecognizer::new`, with private fields so no context can
+pair an engine with the other engine's input. Rev.AI's input is an
+`OriginalRecording` (the file as found, minted only by the media resolution
+that found it), so its content-keyed evidence is shared by the initial and
+the fallback pass. A worker-hosted engine's input is its `NonRevAsrBackend`,
+and it reads the prepared WAV inside `AudioContext`. The partial route starts
+only from a worker input, cuts its windows from the prepared WAV whose
+duration bounds them, and recognizes them through `infer_worker_utr`, so no
+segment can reach Rev.AI; the required-cache gate also matches on the input,
+not on engine names. The fallback pass used to hand Rev.AI the prepared WAV,
+which for an mp3 or mp4 missed the evidence the first pass had paid for.
 
 UTR observations now carry the identity minted by `SourceBoundDocument` and
 `recover_timing` rejects observations from another source before retaining them.
@@ -2746,6 +2761,23 @@ probe now walks MPEG audio and ADTS AAC packet by packet and reads a stated
 length only from containers measured to state it exactly; see
 [Recording Duration](media-conversion.md#recording-duration-mediaprobe).
 
+The initial UTR pass, fallback UTR and FA use the prepared file's retained
+duration or probe refusal. Whole-file UTR takes an entire-recording window from
+the positive duration. Partial UTR and FA use the same bound to admit their
+individual windows. A refusal stops an operation that needs the recording
+bound and retains the original reason. Timing-only refresh and pass-through
+can finish without asking for that bound.
+
+```mermaid
+flowchart TD
+    timing["Timing-only refresh or pass-through"] --> output["Write media-free output"]
+    path["Operation needs a recording bound"] --> read["Read retained recording result"]
+    read -->|Positive duration| recording["Recording"]
+    read -->|Probe refused| refusal["Report the original probe refusal"]
+    recording --> whole["Whole-file UTR window"]
+    recording --> windows["Admit partial UTR and FA windows"]
+```
+
 If those warnings appear on a recording's final seconds again, compare the
 probed length (logged at debug as `Probed audio duration` with its basis)
 against a full decode before suspecting the engine.
@@ -2755,10 +2787,10 @@ The window keeps that proof all the way to the decode. `FaInferItem.window`,
 `extract_audio_segment` and `Transcode::window` all carry an `FaWindow` rather
 than millisecond integers. When ffmpeg reports decoding errors, a windowed
 transcode judges the decode against the window's own length, since the window
-is proven inside the recording; only a whole-file transcode probes the source
-(once). Previously the proof was erased to integers at the worker boundary and
-every damaged window re-walked the whole file to learn its length. What the
-proof does not cover is stated on `Transcode::window`.
+is proven inside the recording. A whole-file transcode can require source
+duration to judge damage. Alignment conversion carries its admitted source
+header into that calculation. `Transcode::window` documents the limits of
+the window proof.
 `FaWindow::within` also refuses an empty window (`WindowFault::Empty`), so
 non-emptiness is decided in one place.
 

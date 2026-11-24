@@ -19,7 +19,7 @@ use talkbank_model::model::dependent_tier::mor::{MorFeature, MorFeatureShapeErro
 
 /// One row of the table: scat code (POS prefix as a flat string, interned
 /// at use-site by [`super::synthesize`]) plus zero or more flat features.
-pub(crate) struct SynthesisRule {
+pub struct SynthesisRule {
     pub(crate) scat: &'static str,
     pub(crate) features: SmallVec<[MorFeature; 1]>,
 }
@@ -40,7 +40,7 @@ impl SynthesisRule {
 
 /// Map a `FormType` to its synthesis rule. Exhaustive match, adding a
 /// `FormType` variant without updating this is a compile error.
-pub(crate) fn scat_synthesis(form_type: &FormType) -> Result<SynthesisRule, MorFeatureShapeError> {
+pub fn scat_synthesis(form_type: &FormType) -> Result<SynthesisRule, MorFeatureShapeError> {
     Ok(match form_type {
         FormType::B => SynthesisRule::bare("bab"),
         FormType::C => SynthesisRule::bare("chi"),

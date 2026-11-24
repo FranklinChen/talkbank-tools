@@ -92,7 +92,7 @@ struct Postprocessed {
 /// the step itself (`resolve_abbreviations`) and carried to CHAT assembly, so
 /// the output's stamp records what ran, not what was asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AbbreviationMerging {
+pub enum AbbreviationMerging {
     /// The job did not ask for the merge; the words are as recognized.
     NotRequested,
     /// The merge ran over the speaker-attributed words.
@@ -149,7 +149,7 @@ struct Analyzed {
 /// run, so they travel here, beside the document, and are reported whatever
 /// its standing.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct TranscribeOutput {
+pub struct TranscribeOutput {
     /// The generated document, admitted or diagnosed.
     pub(crate) document: ProducedOutput,
     /// Requested work it does not carry, in the order it was recorded.
@@ -384,7 +384,7 @@ enum MorphosyntaxTail {
 
 impl MorphosyntaxTail {
     /// Whether the stage runs, for the progress total.
-    fn runs(&self) -> bool {
+    const fn runs(&self) -> bool {
         matches!(self, Self::Run)
     }
 }
@@ -451,7 +451,7 @@ fn prepare_tail<P: TranscribePlan>(
 }
 
 /// Run the transcribe pipeline for a single audio file.
-pub(crate) async fn run_transcribe_pipeline(
+pub async fn run_transcribe_pipeline(
     audio_path: &Path,
     services: PipelineServices<'_>,
     opts: &TranscribeOptions,
@@ -511,7 +511,7 @@ async fn run_transcribe_pipeline_with_rev_inference<'a>(
 }
 
 /// Replay options cannot be supplied to the live entry point.
-pub(crate) async fn run_transcribe_pipeline_with_legacy_replay<'a>(
+pub async fn run_transcribe_pipeline_with_legacy_replay<'a>(
     replay: AdmittedLegacyTranscribeReplay,
     execution: TranscribeUtsegExecution,
     services: PipelineServices<'a>,
@@ -753,13 +753,14 @@ fn progress_stage_for_stage(stage: StageId) -> FileStage {
 /// The dedicated speaker engine to run after recognition, if any: the plan's,
 /// when recognition produced something to attribute. An empty response has no
 /// words to label, so no engine runs for it.
-fn dedicated_diarization_to_run(
+const fn dedicated_diarization_to_run(
     speakers: crate::transcribe::SpeakerPlan,
     response: &AsrResponse,
 ) -> Option<SpeakerBackendV2> {
-    match response.tokens.is_empty() {
-        true => None,
-        false => speakers.dedicated(),
+    if response.tokens.is_empty() {
+        None
+    } else {
+        speakers.dedicated()
     }
 }
 
@@ -1115,7 +1116,7 @@ async fn stage_run_localized_morphosyntax<P: TranscribePlan>(
 }
 
 /// Transcribe's morphosyntax parameters, whatever the document's standing.
-fn transcribe_morphosyntax_params(
+const fn transcribe_morphosyntax_params(
     empty_mwt: &crate::chat_ops::morphosyntax_ops::MwtDict,
 ) -> MorphosyntaxParams<'_> {
     MorphosyntaxParams {
@@ -1152,9 +1153,10 @@ fn analysed_with_records<D: crate::morphosyntax::report::WrittenDocument>(
     output: crate::morphosyntax::report::MorphosyntaxOutput<D>,
 ) -> Result<crate::morphosyntax::report::FinishedMorphosyntax<D>, ServerError> {
     let finished = output.finish().map_err(ServerError::from)?;
-    match finished.exclusions.is_empty() {
-        true => Ok(finished),
-        false => Err(ServerError::UnexpectedMorphologyReport),
+    if finished.exclusions.is_empty() {
+        Ok(finished)
+    } else {
+        Err(ServerError::UnexpectedMorphologyReport)
     }
 }
 
@@ -1216,7 +1218,7 @@ use inference::{stage_asr_infer, stage_speaker_diarization};
 #[cfg(test)]
 use preprocessing::prepare_asr_chunks_with_snapshot;
 use preprocessing::stage_asr_postprocess;
-pub(crate) use preprocessing::{
+pub use preprocessing::{
     apply_prechat_segmentations, build_prechat_utseg_items, prepare_asr_chunks,
     resolve_abbreviations,
 };

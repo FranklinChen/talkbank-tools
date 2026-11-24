@@ -12,7 +12,7 @@ pub struct LiveDirectJobClient<'a> {
 }
 
 impl<'a> LiveDirectJobClient<'a> {
-    pub fn new(session: &'a super::LiveDirectSession) -> Self {
+    pub const fn new(session: &'a super::LiveDirectSession) -> Self {
         Self { session }
     }
 

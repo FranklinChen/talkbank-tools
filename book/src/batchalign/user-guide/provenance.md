@@ -1,13 +1,15 @@
 # Processing Provenance
 
 **Status:** Current
-**Last updated:** 2026-10-21 14:20 EDT
+**Last updated:** 2026-11-24
 
 ## What is provenance?
 
 Every time batchalign3 processes a CHAT file, it records what it did in a
 `@Comment` header. This creates a machine-readable processing history
-inside the file itself.
+inside the file itself. On files with linked media, BA3 writes its comments
+after `@Media`. Reprocessing also moves adjacent BA3 stamps and ASR warnings
+from older runs to that position.
 
 ## Format
 

@@ -20,7 +20,7 @@ const MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// The projected-ASR producer admitted by the first replay format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LegacyProjectedAsrProducer {
+pub enum LegacyProjectedAsrProducer {
     /// A BA3 `AsrResponse` projected from Rev.AI output.
     RevAi,
 }
@@ -34,7 +34,7 @@ impl LegacyProjectedAsrProducer {
 }
 
 /// Exact inputs for authoring one immutable replay manifest.
-pub(crate) struct LegacyReplayManifestRequest<'a> {
+pub struct LegacyReplayManifestRequest<'a> {
     pub(crate) recording_id: &'a str,
     pub(crate) media_path: &'a Path,
     pub(crate) asr_response_path: &'a Path,
@@ -47,7 +47,7 @@ pub(crate) struct LegacyReplayManifestRequest<'a> {
 /// Construction is private to [`admit_legacy_replay_manifest`], so pipeline
 /// code cannot receive an unfingerprinted response or mismatched media.
 #[derive(Clone, Debug)]
-pub(crate) struct AdmittedLegacyTranscribeReplay {
+pub struct AdmittedLegacyTranscribeReplay {
     recording_id: String,
     media_path: PathBuf,
     asr_response: AsrResponse,
@@ -65,7 +65,7 @@ impl AdmittedLegacyTranscribeReplay {
         &self.media_path
     }
 
-    pub(crate) fn asr_response(&self) -> &AsrResponse {
+    pub(crate) const fn asr_response(&self) -> &AsrResponse {
         &self.asr_response
     }
 
@@ -107,7 +107,7 @@ impl Blake3Digest {
 /// Fingerprint any file with the same digest algorithm used by replay
 /// manifests. Kept at this evidence boundary so run receipts and manifests do
 /// not drift to different hashing recipes.
-pub(crate) fn file_blake3_hex(path: &Path) -> Result<String, LegacyReplayError> {
+pub fn file_blake3_hex(path: &Path) -> Result<String, LegacyReplayError> {
     Ok(Blake3Digest::from_path(path)?.0)
 }
 
@@ -197,7 +197,7 @@ struct CanonicalTurn {
 
 /// Failures while authoring or admitting projected replay evidence.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LegacyReplayError {
+pub enum LegacyReplayError {
     #[error("could not read replay artifact {path}: {source}")]
     Read {
         path: PathBuf,
@@ -249,7 +249,7 @@ pub(crate) enum LegacyReplayError {
 }
 
 /// Author a manifest binding projected artifacts to exact source-media bytes.
-pub(crate) fn write_legacy_replay_manifest(
+pub fn write_legacy_replay_manifest(
     request: LegacyReplayManifestRequest<'_>,
     output_path: &Path,
 ) -> Result<(), LegacyReplayError> {
@@ -295,7 +295,7 @@ pub(crate) fn write_legacy_replay_manifest(
 }
 
 /// Validate every fingerprint and construct the replay-only admitted state.
-pub(crate) fn admit_legacy_replay_manifest(
+pub fn admit_legacy_replay_manifest(
     manifest_path: &Path,
 ) -> Result<AdmittedLegacyTranscribeReplay, LegacyReplayError> {
     let manifest_bytes =

@@ -1,7 +1,7 @@
 //! One comparison: extraction, one whole-file alignment, and every metric and
 //! per-utterance view derived from it.
 //!
-//! Extraction and POS are owned by a ComparedDocument. Conformed sides borrow
+//! Extraction and POS are owned by a `ComparedDocument`. Conformed sides borrow
 //! that document; one alignment borrows both sides and immediately resolves
 //! aligner indices into source-word references. Its render operation consumes
 //! those bound steps to produce metrics and views.
@@ -55,14 +55,14 @@ enum WordPlacement {
 }
 
 impl Slot {
-    fn at(position: ComparePosition) -> Self {
+    const fn at(position: ComparePosition) -> Self {
         Self::Word {
             position,
             placement: WordPlacement::At,
         }
     }
 
-    fn after(position: ComparePosition) -> Self {
+    const fn after(position: ComparePosition) -> Self {
         Self::Word {
             position,
             placement: WordPlacement::After,
@@ -229,7 +229,7 @@ enum GoldPlacement {
 }
 
 impl GoldPlacement {
-    fn deleted(self) -> Self {
+    const fn deleted(self) -> Self {
         match self {
             Self::NothingToPlace | Self::Unplaced => Self::Unplaced,
             Self::Placed(run) => Self::Placed(run),
@@ -265,7 +265,7 @@ struct Run {
 }
 
 impl MajorityRun {
-    fn starting(main: UtteranceIndex<Main>) -> Self {
+    const fn starting(main: UtteranceIndex<Main>) -> Self {
         let run = Run { main, matched: 1 };
         Self {
             best: run,
@@ -274,21 +274,23 @@ impl MajorityRun {
     }
 
     fn with(self, main: UtteranceIndex<Main>) -> Self {
-        let current = match self.current.main == main {
-            true => Run {
+        let current = if self.current.main == main {
+            Run {
                 main,
                 matched: self.current.matched + 1,
-            },
-            false => Run { main, matched: 1 },
+            }
+        } else {
+            Run { main, matched: 1 }
         };
-        let best = match current.matched > self.best.matched {
-            true => current,
-            false => self.best,
+        let best = if current.matched > self.best.matched {
+            current
+        } else {
+            self.best
         };
         Self { best, current }
     }
 
-    fn main_utterance(self) -> UtteranceIndex<Main> {
+    const fn main_utterance(self) -> UtteranceIndex<Main> {
         self.best.main
     }
 }
@@ -512,6 +514,7 @@ pub(in crate::compare) fn conform_file_words(chat_file: &ChatFile) -> (Vec<Strin
 /// aligned ONCE over the whole file (see [`WholeFileAlignment`]).
 ///
 /// Returns per-utterance comparison annotations and aggregate metrics.
+#[must_use]
 pub fn compare(
     main_file: &ChatFile,
     gold_file: &ChatFile,

@@ -18,6 +18,7 @@
 //! by value, so a rung that looks somewhere has recorded it by construction.
 //! There is no `push`, and nothing to forget.
 
+use std::collections::{HashMap, hash_map::Entry};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -34,7 +35,7 @@ use crate::store::RunnerJobSnapshot;
 /// recorded itself, which is exactly the property that broke. These can be
 /// compared, counted and asserted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SearchedPlace {
+pub enum SearchedPlace {
     /// An explicit `--media-dir` root, with the corpus subdir mapped under it.
     MediaDirRoot { root: PathBuf, subdir: String },
     /// Beside the transcript on the execution host, optionally preceded by
@@ -63,13 +64,14 @@ pub(crate) enum SearchedPlace {
     ServerMediaRoot { root: PathBuf },
 }
 
+#[derive(PartialEq, Eq, Hash)]
 struct SearchDirectory {
     root: PathBuf,
     subdir: PathBuf,
 }
 
 impl SearchDirectory {
-    fn at(root: PathBuf) -> Self {
+    const fn at(root: PathBuf) -> Self {
         Self {
             root,
             subdir: PathBuf::new(),
@@ -166,9 +168,10 @@ impl fmt::Display for SearchedPlace {
 }
 
 /// A search in progress: the stem being looked for, and everywhere looked.
-pub(crate) struct MediaSearch {
+pub struct MediaSearch {
     stem: String,
     searched: Vec<SearchedPlace>,
+    completed: HashMap<SearchDirectory, DirectoryMiss>,
     /// What a place held that was not the media but belongs in the error if
     /// nothing is found: a file spelled differently, a directory that
     /// could not be listed. Neither stops the search, because a host with a
@@ -177,41 +180,44 @@ pub(crate) struct MediaSearch {
     notes: Vec<Missed>,
 }
 
+/// Once a lookup finishes without a recording, the same root/subdir pair
+/// cannot hold a second vacant entry during this search.
+struct DirectoryMiss;
+
 impl MediaSearch {
     pub(crate) fn for_stem(stem: impl Into<String>) -> Self {
         Self {
             stem: stem.into(),
             searched: Vec::new(),
+            completed: HashMap::new(),
             notes: Vec::new(),
         }
     }
 
-    /// Search one place, recording it.
-    ///
-    /// The ONLY search primitive. It takes the place by value and records it
-    /// before looking, so "every place searched appears in the report" is true
-    /// by construction rather than by everyone remembering a `push`.
-    ///
-    /// A place already tried is skipped rather than searched again. That is
-    /// only expressible because places are values: in paths_mode with no
-    /// `--media-dir`, the adjacency rung and the final fallback are the same
-    /// directory, and the old chain probed it twice under nine extensions.
+    /// Try the unobserved directories this rung denotes. A rung is recorded
+    /// only when it actually attempts a lookup. Distinct rungs can refer to
+    /// the same directory; the vacant entry owns its one outstanding lookup.
     pub(crate) async fn try_place(
         &mut self,
         place: SearchedPlace,
     ) -> Result<Option<PathBuf>, UnresolvedMedia> {
-        if self.searched.contains(&place) {
-            return Ok(None);
-        }
         let directories = place.directories();
-        self.searched.push(place);
+        let mut unrecorded_place = Some(place);
         for directory in directories {
+            let Entry::Vacant(pending) = self.completed.entry(directory) else {
+                continue;
+            };
             let stem = self.stem.clone();
-            match crate::media::access::access(directory.root, move |root| {
-                MediaExtensions::find_under(root.path(), &directory.subdir, &stem)
+            let SearchDirectory { root, subdir } = pending.key();
+            let subdir = subdir.clone();
+            let observation = crate::media::access::access(root.clone(), move |root| {
+                MediaExtensions::find_under(root.path(), &subdir, &stem)
             })
-            .await
-            {
+            .await;
+            if let Some(place) = unrecorded_place.take() {
+                self.searched.push(place);
+            }
+            match observation {
                 Ok(MediaLookup::Found(found)) => return Ok(Some(found)),
                 Ok(MediaLookup::Missed(missed)) => self.notes.push(missed),
                 Ok(MediaLookup::Absent)
@@ -222,6 +228,7 @@ impl MediaSearch {
                     });
                 }
             }
+            pending.insert(DirectoryMiss);
         }
         Ok(None)
     }
@@ -259,23 +266,14 @@ mod tests {
         std::fs::write(path, b"media").expect("write");
     }
 
-    #[tokio::test]
-    async fn a_place_that_is_searched_is_recorded() {
-        // The property the previous shape could not hold: one rung searched
-        // and recorded nothing, and no test could notice, because the record
-        // was a `Vec<String>` a caller had to remember to push to.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut search = MediaSearch::for_stem("absent");
-        let place = SearchedPlace::ServerMediaRoot {
-            root: dir.path().to_path_buf(),
-        };
-        assert_eq!(search.try_place(place.clone()).await.unwrap(), None);
-        assert_eq!(search.places(), [place]);
-    }
-
     /// A file spelled differently does not end the search (a
     /// case-sensitive host would move on), the next place's exact file is used, and the near miss
     /// is kept for the error in case nothing else turns up.
+    /// Guards: An exact later root wins while earlier case-mismatch evidence remains reportable.
+    /// Kind: contract
+    /// Not a type: The filesystem can contain a valid but differently spelled recording beside other roots.
+    /// State: Two real temporary roots with alternate spellings and a later exact match.
+    /// Concurrency: The two lookups share only their owned search state.
     #[tokio::test]
     async fn a_near_miss_is_reported_and_the_search_moves_on() {
         let first = tempfile::tempdir().expect("tempdir");
@@ -304,72 +302,89 @@ mod tests {
         assert_eq!(found, Some(second.path().join("talk.mp3")));
     }
 
+    /// Guards: Alternate rungs reuse one completed lookup of the same directory.
+    /// Kind: contract
+    /// Not a type: Independently configured routes can resolve to the same
+    /// root and subdir after filesystem options are supplied.
+    /// State: A private directory gains a matching recording after the first miss.
+    /// Concurrency: The second rung runs only after the first result is known.
     #[tokio::test]
     async fn a_repeated_place_is_not_searched_twice() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let transcript = dir.path().join("talk.cha");
-        write(&transcript);
-        let place = SearchedPlace::TranscriptAdjacent {
-            transcript: transcript.clone(),
-            media_dir: None,
-        };
         let mut search = MediaSearch::for_stem("talk");
-        assert!(search.try_place(place.clone()).await.unwrap().is_none());
-        assert!(search.try_place(place).await.unwrap().is_none());
-        assert_eq!(search.places().len(), 1, "the second attempt was skipped");
+        let root = dir.path().to_path_buf();
+        assert_eq!(
+            search
+                .try_place(SearchedPlace::ServerMediaRoot { root: root.clone() })
+                .await
+                .unwrap(),
+            None
+        );
+        write(&root.join("talk.wav"));
+        assert_eq!(
+            search
+                .try_place(SearchedPlace::TranscriptAdjacent {
+                    transcript: root.join("talk.cha"),
+                    media_dir: None,
+                })
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(search.places(), [SearchedPlace::ServerMediaRoot { root }]);
     }
 
-    #[tokio::test]
-    async fn adjacency_finds_media_beside_the_transcript() {
-        // Covers what `resolve_audio_for_chat` used to test before it became
-        // dead: the commonest case, a recording sitting next to its transcript.
-        let dir = tempfile::tempdir().expect("tempdir");
-        write(&dir.path().join("talk.wav"));
-        let mut search = MediaSearch::for_stem("talk");
-        let found = search
-            .try_place(SearchedPlace::TranscriptAdjacent {
-                transcript: dir.path().join("talk.cha"),
-                media_dir: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(found, Some(dir.path().join("talk.wav")));
-    }
-
-    #[tokio::test]
-    async fn a_server_media_root_is_searched_flat() {
-        // The media_roots fallback, likewise.
-        let root = tempfile::tempdir().expect("tempdir");
-        write(&root.path().join("ACWT01a.wav"));
-        let mut search = MediaSearch::for_stem("ACWT01a");
-        let found = search
-            .try_place(SearchedPlace::ServerMediaRoot {
-                root: root.path().to_path_buf(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(found, Some(root.path().join("ACWT01a.wav")));
-    }
-
+    /// Guards: Explicit media roots precede the transcript directory, and
+    /// flat fallback and adjacency, with or without a media directory, can
+    /// each find an exact recording.
+    /// Kind: contract
+    /// Not a type: Two independently configured and populated roots can each
+    /// contain a different exact recording for the same stem.
+    /// State: One media directory and one transcript directory with real entries.
+    /// Concurrency: Each attempt starts a fresh search over its declared state.
     #[tokio::test]
     async fn media_dir_is_tried_before_the_transcript_directory() {
         let media = tempfile::tempdir().expect("tempdir");
         let corpus = tempfile::tempdir().expect("tempdir");
-        write(&media.path().join("talk.mp3"));
-        write(&corpus.path().join("talk.wav"));
-
+        let media_file = media.path().join("talk.mp3");
+        let beside_file = corpus.path().join("talk.wav");
+        write(&media_file);
+        write(&beside_file);
+        let flat = SearchedPlace::ServerMediaRoot {
+            root: media.path().to_owned(),
+        };
+        let beside = SearchedPlace::TranscriptAdjacent {
+            transcript: corpus.path().join("talk.cha"),
+            media_dir: Some(media.path().to_owned()),
+        };
+        for (place, expected) in [(flat, &media_file), (beside.clone(), &media_file)] {
+            let mut search = MediaSearch::for_stem("talk");
+            assert_eq!(
+                search.try_place(place).await.unwrap().as_ref(),
+                Some(expected)
+            );
+        }
+        std::fs::remove_file(media_file).expect("remove first match");
         let mut search = MediaSearch::for_stem("talk");
-        let found = search
-            .try_place(SearchedPlace::TranscriptAdjacent {
-                transcript: corpus.path().join("talk.cha"),
-                media_dir: Some(media.path().to_path_buf()),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(found, Some(media.path().join("talk.mp3")));
+        assert_eq!(
+            search.try_place(beside).await.unwrap(),
+            Some(beside_file.clone())
+        );
+        // The commonest case: no media directory, the recording beside the
+        // transcript.
+        let mut search = MediaSearch::for_stem("talk");
+        let adjacent = SearchedPlace::TranscriptAdjacent {
+            transcript: corpus.path().join("talk.cha"),
+            media_dir: None,
+        };
+        assert_eq!(search.try_place(adjacent).await.unwrap(), Some(beside_file));
     }
 
+    /// Guards: An explicit root/subdir route finds the correct recording under nested directories.
+    /// Kind: contract
+    /// Not a type: The supplied mapping can pair a real root with a differently nested result.
+    /// State: A private mapped root containing a named nested recording.
+    /// Concurrency: There is only one owned search and no concurrent mutation.
     #[tokio::test]
     async fn a_subdir_is_joined_under_the_root() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -385,6 +400,11 @@ mod tests {
         assert_eq!(found, Some(root.path().join("French/Newcastle/d01.mp3")));
     }
 
+    /// Guards: Diagnostic rendering names the actual root or transcript associated with each tried role.
+    /// Kind: wire
+    /// Not a type: Formatting can misstate operator-facing paths even when the search and role are well typed.
+    /// State: Three distinct values projected into their exact diagnostic strings.
+    /// Concurrency: The fixtures are read-only values without filesystem effects.
     #[test]
     fn every_place_renders_a_distinct_sentence() {
         // The message is derived from the value, so a place cannot describe
@@ -446,7 +466,7 @@ pub(super) fn media_search_subdir(filename: &str, media_subdir: &str) -> String 
 /// transcript's own `@Media` header distinguishes "the recording is missing"
 /// from "this transcript was published without one".
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnresolvedMedia {
+pub struct UnresolvedMedia {
     /// The operator-facing explanation, naming every place searched.
     pub message: String,
 }
@@ -458,7 +478,7 @@ pub(crate) struct UnresolvedMedia {
 /// when `speaker-identify` needed the same six rungs. Copying them would have
 /// been the third place this workspace states where a corpus keeps its media,
 /// and the copies would have drifted the first time a rung was added.
-pub(crate) async fn resolve_transcript_media(
+pub async fn resolve_transcript_media(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     filename: &str,
@@ -643,9 +663,8 @@ pub(crate) async fn resolve_transcript_media(
     }
 
     if original_audio_path.is_none() {
-        // Identical to the paths_mode rung above when no `--media-dir` was
-        // given, and `try_place` skips a place it has already searched, so the
-        // nine probes that pair used to repeat no longer happen.
+        // Prior rungs may already cover either directory here. The search
+        // carries their completed lookups even when this rung has a different label.
         original_audio_path = search
             .try_place(SearchedPlace::TranscriptAdjacent {
                 transcript: read_path.to_path_buf(),

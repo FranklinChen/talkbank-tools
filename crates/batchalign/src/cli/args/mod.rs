@@ -138,7 +138,7 @@ pub enum Commands {
     Jobs(JobsArgs),
     /// View, export, or clear run logs.
     Logs(LogsArgs),
-    /// Emit Rust-server OpenAPI schema.
+    /// Emit Rust-server `OpenAPI` schema.
     Openapi(OpenapiArgs),
     /// Emit JSON Schema for Rust→Python IPC types.
     IpcSchema(IpcSchemaArgs),
@@ -222,6 +222,7 @@ pub enum InputKind {
 
 impl InputKind {
     /// Whether a lowercased, dot-free extension is an input for this command.
+    #[must_use]
     pub fn accepts(self, extension: &str) -> bool {
         match self {
             Self::Chat => extension == "cha",
@@ -237,6 +238,7 @@ impl InputKind {
 
 impl CommonOpts {
     /// Extract the stable processing profile for one command.
+    #[must_use]
     pub fn command_profile(cmd: &Commands) -> CommandProfile {
         match cmd {
             Commands::Convert(_) => CommandProfile {

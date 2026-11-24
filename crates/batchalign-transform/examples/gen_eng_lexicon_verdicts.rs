@@ -1,7 +1,7 @@
 //! Regenerate `data/eng_lexicon_verdicts.json` from a checkout of `TalkBank/mor`.
 //!
 //! Usage:
-//!     cargo run -p batchalign-transform --example gen_eng_lexicon_verdicts -- \
+//!     cargo run -p batchalign-transform --example `gen_eng_lexicon_verdicts` -- \
 //!         <mor-checkout>/eng/eng/lex <mor-commit-sha> crates/batchalign-transform/data/eng_lexicon_verdicts.json
 //!
 //! Every `.cut` file in the directory is parsed (failing closed on a malformed

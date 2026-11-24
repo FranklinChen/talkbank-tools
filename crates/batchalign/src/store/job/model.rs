@@ -171,6 +171,7 @@ pub struct JobRuntimeControl {
 impl JobRuntimeControl {
     /// A job's runtime state when it enters this process, newly submitted
     /// or recovered: not cancelled, no runner, its first run.
+    #[must_use]
     pub fn unclaimed() -> Self {
         Self {
             cancel_token: CancellationToken::new(),

@@ -28,6 +28,7 @@ import select
 import signal
 import sys
 import threading
+from dataclasses import dataclass
 from enum import Enum
 
 L = logging.getLogger("batchalign.worker")
@@ -114,12 +115,26 @@ def _terminate_self() -> None:
             os.kill(os.getpid(), signal.SIGKILL)
 
 
-def watch_supervisor(supervisor_pid: int) -> None:
+@dataclass(frozen=True, slots=True)
+class SupervisorPid:
+    """Admitted positive Unix pid_t to pass to the kernel's exit watch."""
+
+    value: int
+
+    def __post_init__(self) -> None:
+        if not 0 < self.value <= 2**31 - 1:
+            raise ValueError(
+                "--supervisor-pid must be a positive PID (at most 2147483647)"
+            )
+
+
+def watch_supervisor(supervisor: SupervisorPid) -> None:
     """Terminate this worker when ``supervisor_pid`` exits.
 
     Arms the watch before returning, so a supervisor that is already gone ends
     the worker here rather than leaving it running unwatched.
     """
+    supervisor_pid = supervisor.value
     try:
         watch = _arm_exit_watch(supervisor_pid)
     except SupervisorGone:

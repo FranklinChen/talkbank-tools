@@ -31,6 +31,7 @@ from batchalign.inference.speaker import (
 from batchalign.inference.types import Wave2VecWordAlignment
 from batchalign.tests._asr_model_pins import request_models
 from batchalign.tests._loaded_hosts import (
+    TEST_LOCAL_SPEAKER_GRAPH,
     asr_loads,
     diarization,
     fa_loads,
@@ -363,13 +364,14 @@ def _speaker_loads(backend: SpeakerBackendV2) -> TaskLoadRegistry:
     ) -> SpeakerResponse:
         return SpeakerResponse(
             evidence=LocalPyannoteSpeakerEvidence(
+                loaded_graph=TEST_LOCAL_SPEAKER_GRAPH,
                 segments=[
                     SpeakerSegment(
                         start_ms=0,
                         end_ms=1000,
                         speaker=f"pyannote-{sample_rate_hz}-{num_speakers}-{audio.shape[0]}",
                     )
-                ]
+                ],
             )
         )
 

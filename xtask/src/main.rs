@@ -42,7 +42,16 @@ const SPECIAL_PATH_PREFIXES: &[(&str, &str)] = &[("spec/tools/", "spec-tools")];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AffectedMode {
+    /// List the affected packages and special targets; run nothing.
     Packages,
+    /// Run one cargo command over them.
+    Run(RunMode),
+}
+
+/// The cargo command an affected run executes. A separate type from
+/// [`AffectedMode`] so the runners cannot be handed `Packages`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
     Check,
     Clippy,
     Test,
@@ -52,9 +61,9 @@ impl AffectedMode {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "packages" => Some(Self::Packages),
-            "check" => Some(Self::Check),
-            "clippy" => Some(Self::Clippy),
-            "test" => Some(Self::Test),
+            "check" => Some(Self::Run(RunMode::Check)),
+            "clippy" => Some(Self::Run(RunMode::Clippy)),
+            "test" => Some(Self::Run(RunMode::Test)),
             _ => None,
         }
     }
@@ -243,15 +252,18 @@ fn run_affected_rust(mode: AffectedMode) -> Result<()> {
     let scope = inspect_changes()?;
     print_scope(&scope);
 
-    if mode == AffectedMode::Packages {
-        for package in &scope.impacted_packages {
-            println!("{package}");
+    let mode = match mode {
+        AffectedMode::Packages => {
+            for package in &scope.impacted_packages {
+                println!("{package}");
+            }
+            for target in &scope.special_targets {
+                println!("+{target}");
+            }
+            return Ok(());
         }
-        for target in &scope.special_targets {
-            println!("+{target}");
-        }
-        return Ok(());
-    }
+        AffectedMode::Run(mode) => mode,
+    };
 
     run_workspace_mode(mode, scope.full_workspace, &scope.impacted_packages)?;
     for target in &scope.special_targets {
@@ -582,19 +594,18 @@ fn run_command(command: &[String], cwd: &Path) -> Result<()> {
     }
 }
 
-fn run_workspace_mode(mode: AffectedMode, full_workspace: bool, impacted: &[String]) -> Result<()> {
+fn run_workspace_mode(mode: RunMode, full_workspace: bool, impacted: &[String]) -> Result<()> {
     if !full_workspace && impacted.is_empty() {
         println!("==> affected-rust: skipping main workspace command");
         return Ok(());
     }
 
     let mut command: Vec<String> = match mode {
-        AffectedMode::Packages => unreachable!(),
-        AffectedMode::Check => vec!["cargo", "check", "--all-targets"]
+        RunMode::Check => vec!["cargo", "check", "--all-targets"]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        AffectedMode::Clippy => vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+        RunMode::Clippy => vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -602,7 +613,7 @@ fn run_workspace_mode(mode: AffectedMode, full_workspace: bool, impacted: &[Stri
         // and prefer it; the runner is banned and uninstalled in this
         // workspace, so the probe spawned a subprocess that could only fail in
         // order to take the branch it would always take.
-        AffectedMode::Test => vec!["cargo", "test", "--no-fail-fast"]
+        RunMode::Test => vec!["cargo", "test", "--no-fail-fast"]
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -620,17 +631,16 @@ fn run_workspace_mode(mode: AffectedMode, full_workspace: bool, impacted: &[Stri
     run_command(&command, repo_root())
 }
 
-fn run_special(mode: AffectedMode, target: &str) -> Result<()> {
+fn run_special(mode: RunMode, target: &str) -> Result<()> {
     if target != "spec-tools" {
         return Err(format!("unsupported special target: {target}").into());
     }
 
     let cwd = repo_root().join("spec").join("tools");
     let command: Vec<String> = match mode {
-        AffectedMode::Packages => unreachable!(),
-        AffectedMode::Check => vec!["cargo", "check", "--all-targets"],
-        AffectedMode::Clippy => vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
-        AffectedMode::Test => vec!["cargo", "test", "--no-fail-fast"],
+        RunMode::Check => vec!["cargo", "check", "--all-targets"],
+        RunMode::Clippy => vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+        RunMode::Test => vec!["cargo", "test", "--no-fail-fast"],
     }
     .into_iter()
     .map(str::to_owned)

@@ -69,7 +69,7 @@ impl RecordingPresence {
 /// the main-bullet policy and the timing obligations were bound to the input
 /// as parsed. From here on no stage can read such an utterance's timing as an
 /// anchor, a window or reusable word timing. Returns what it removed.
-pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> StrippedOffRecordTiming {
+pub fn strip_off_record_timing(chat_file: &mut ChatFile) -> StrippedOffRecordTiming {
     let mut stripped = StrippedOffRecordTiming {
         bullets: 0,
         timed_utterances: 0,
@@ -100,7 +100,7 @@ pub(crate) fn strip_off_record_timing(chat_file: &mut ChatFile) -> StrippedOffRe
 /// What [`strip_off_record_timing`] removed from the utterances not in the
 /// recording. Built only there, from what it saw before removing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StrippedOffRecordTiming {
+pub struct StrippedOffRecordTiming {
     /// Main-tier bullets removed.
     bullets: usize,
     /// Utterances that carried any timing (a bullet, or timed words on the
@@ -110,13 +110,13 @@ pub(crate) struct StrippedOffRecordTiming {
 
 impl StrippedOffRecordTiming {
     /// Main-tier bullets removed, for the log.
-    pub(crate) fn bullets(self) -> usize {
+    pub(crate) const fn bullets(self) -> usize {
         self.bullets
     }
 
     /// What kind of timing was removed, or `None` when there was none: the
     /// one place the two counts are read together.
-    pub(crate) fn removed(self) -> Option<crate::error::OffRecordTiming> {
+    pub(crate) const fn removed(self) -> Option<crate::error::OffRecordTiming> {
         match (self.timed_utterances, self.bullets) {
             (0, _) => None,
             (_, 0) => Some(crate::error::OffRecordTiming::WordTimingOnly),

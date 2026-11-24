@@ -29,7 +29,7 @@ use crate::store::RunnerFilesystemConfig;
 
 /// A judged CHAT document with what the writer must report beside it.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ChatOutput {
+pub struct ChatOutput {
     /// The judged CHAT document.
     pub(crate) document: ProducedOutput,
     /// Requested work the document does not carry, reported with the
@@ -47,7 +47,7 @@ pub(crate) struct ChatOutput {
 /// spans and floats). Nothing compares two of these for equality outside tests,
 /// and a total equality on a document is not a thing this type needs to claim.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum FileOutput {
+pub enum FileOutput {
     /// A CHAT document, written through the provenance gate so a re-run that
     /// changes only the `[fc-ba3 ...]` timestamp does not touch the file.
     ///
@@ -74,7 +74,7 @@ pub(crate) enum FileOutput {
 /// refusal means the bytes are wrong, an I/O error means the disk is. The
 /// control plane classifies both as system failures, not bad client input.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum OutputWriteFailure {
+pub enum OutputWriteFailure {
     /// A producer could not bind the output to the submitted command.
     #[error(transparent)]
     Planning(#[from] crate::recipe_runner::planner::PlanningError),
@@ -92,7 +92,7 @@ pub(crate) enum OutputWriteFailure {
 
 impl OutputWriteFailure {
     /// Classify this failure for the control plane.
-    pub(crate) fn category(&self) -> FailureCategory {
+    pub(crate) const fn category(&self) -> FailureCategory {
         match self {
             Self::Refused(_) | Self::Io(_) | Self::Planning(_) | Self::ContentKind(_) => {
                 FailureCategory::System
@@ -127,7 +127,7 @@ impl OutputWriteFailure {
 /// The borrowed input identity determines which source receives completion.
 /// Only the successful writer constructs this consuming receipt.
 #[derive(Debug)]
-pub(crate) struct WrittenOutput<'a> {
+pub struct WrittenOutput<'a> {
     source: OutputSourceIdentity<'a>,
     outcome: WrittenOutcome,
 }
@@ -195,7 +195,7 @@ impl WrittenOutput<'_> {
 /// because the provenance gate is a CHAT-specific policy with its own reasons,
 /// and because the naming and staging behaviour it pins is what `align` and
 /// `transcribe` have always done.
-pub(crate) async fn write_primary_chat_output_artifact<'a>(
+pub async fn write_primary_chat_output_artifact<'a>(
     outputs: SourceOutputs<'a>,
     output: ChatOutput,
 ) -> Result<WrittenOutput<'a>, OutputWriteFailure> {
@@ -246,7 +246,7 @@ pub(crate) async fn write_primary_chat_output_artifact<'a>(
 /// The single writeback seam for every audio-backed command. Both arms derive
 /// the output path from the catalog's own `output_policy`, so a command's
 /// artifact name is stated once, in the catalog, whichever kind it writes.
-pub(crate) async fn write_primary_output_artifact<'a>(
+pub async fn write_primary_output_artifact<'a>(
     outputs: SourceOutputs<'a>,
     output: FileOutput,
 ) -> Result<WrittenOutput<'a>, OutputWriteFailure> {
@@ -374,8 +374,8 @@ mod tests {
         );
     }
 
-    /// A valid NoAlign source retains exact bytes through the real writer.
-    /// Guards: A valid NoAlign pass-through keeps its exact source bytes through publication.
+    /// A valid `NoAlign` source retains exact bytes through the real writer.
+    /// Guards: A valid `NoAlign` pass-through keeps its exact source bytes through publication.
     /// Kind: contract
     /// Not a type: The admitted unchanged-source proof cannot establish actual primary and staged file bytes after the writer adapter.
     /// State: An isolated root supplies actual requested and staged CHAT writes and byte reads. Native source admission supplies the unchanged-document proof. No input audio, model or registry runs.
@@ -435,7 +435,7 @@ mod tests {
         );
     }
 
-    /// Guards: Declaring NoAlign still refuses invalid retained morphology in the source document.
+    /// Guards: Declaring `NoAlign` still refuses invalid retained morphology in the source document.
     /// Kind: boundary
     /// Not a type: A source declaration cannot establish whether actual retained mor/gra tiers satisfy CHAT admission before an unchanged-source proof exists.
     /// State: None

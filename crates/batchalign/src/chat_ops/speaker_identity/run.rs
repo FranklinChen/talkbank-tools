@@ -70,7 +70,7 @@ pub enum UtteranceTiming {
 }
 
 impl UtteranceTiming {
-    fn start(self) -> Option<FileMs> {
+    const fn start(self) -> Option<FileMs> {
         match self {
             Self::Untimed | Self::Rejected => None,
             Self::Invalid { start, .. } => Some(start),
@@ -78,7 +78,7 @@ impl UtteranceTiming {
         }
     }
 
-    fn end(self) -> Option<FileMs> {
+    const fn end(self) -> Option<FileMs> {
         match self {
             Self::Untimed | Self::Rejected => None,
             Self::Invalid { end, .. } => Some(end),
@@ -115,7 +115,7 @@ impl EmbeddingRequest {
     /// Build a request fixture after tests have created located spans through
     /// the same [`PreparedPcm`] transition production uses.
     #[cfg(test)]
-    pub(crate) fn for_test(spans: Vec<RequestedSpan>) -> Self {
+    pub(crate) const fn for_test(spans: Vec<RequestedSpan>) -> Self {
         Self { spans }
     }
 }

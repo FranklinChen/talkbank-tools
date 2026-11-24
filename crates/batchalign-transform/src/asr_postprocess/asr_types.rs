@@ -85,6 +85,7 @@ impl AsrRawText {
     }
 
     /// Borrows the raw ASR text for read-only inspection.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -135,6 +136,7 @@ impl AsrNormalizedText {
     }
 
     /// Borrows the normalized text for read-only inspection.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -157,11 +159,13 @@ impl AsrNormalizedText {
     }
 
     /// Returns a lowercase copy of the inner text.
+    #[must_use]
     pub fn to_lowercase(&self) -> String {
         self.0.to_lowercase()
     }
 
     /// Returns `true` if the text starts with the given pattern.
+    #[must_use]
     pub fn starts_with(&self, pat: char) -> bool {
         self.0.starts_with(pat)
     }
@@ -246,7 +250,7 @@ fn structural_check(
 ///
 /// `TreeSitterParser` is `!Send + !Sync` (uses `RefCell` internally)
 /// and carries a grammar-init cost per construction, so keeping one
-/// per thread is the standard pattern. The thread_local initializer
+/// per thread is the standard pattern. The `thread_local` initializer
 /// cannot recover from grammar-load failure; in that environmental
 /// impossibility, first access on a thread will panic, documented in
 /// the parent plan's risk list.
@@ -265,12 +269,14 @@ where
 
 impl ChatWordText {
     /// Borrows the word text for read-only use.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.text
     }
 
     /// What the text parsed to.
-    pub fn content(&self) -> &ChatWordContent {
+    #[must_use]
+    pub const fn content(&self) -> &ChatWordContent {
         &self.content
     }
 
@@ -406,7 +412,8 @@ pub struct SpeakerIndex(pub usize);
 
 impl SpeakerIndex {
     /// Returns the inner `usize` value.
-    pub fn as_usize(self) -> usize {
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 }

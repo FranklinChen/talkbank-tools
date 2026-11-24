@@ -14,7 +14,7 @@
 //! Idle queues hold complete native-worker and capacity owners. Read-only views
 //! expose their actual contents. Checkout registers change notifications before
 //! observing availability, then owns a departure from its original queue.
-//! Consuming TrackedCheckout::run binds the actual exchange result to return.
+//! Consuming `TrackedCheckout::run` binds the actual exchange result to return.
 //! Dropping unfinished work retires its handle and original slot.
 //!
 //! ## Module layout
@@ -55,6 +55,7 @@ mod rss_observer;
 pub(crate) mod shared_gpu;
 mod shutdown;
 mod spawn_runtime;
+mod standalone;
 pub mod status;
 mod task_load;
 mod worker_plan;
@@ -68,6 +69,7 @@ pub use fa_preparation::{
 pub use checkout::CheckedOutWorker;
 pub(crate) use model_plan::GpuRoute;
 pub use model_plan::{GpuModelPlan, GpuRouteRefusal, GpuTask, PlanMismatch};
+pub(crate) use standalone::StandaloneWorker;
 pub use status::{WorkerSummaryEntry, WorkerTransport};
 pub(crate) use task_load::TaskLoads;
 pub use task_load::{
@@ -256,7 +258,7 @@ impl EngineSelection {
     }
 
     /// Typed engine details consumed by Rust-side admission logic.
-    pub(super) fn overrides(&self) -> &EngineOverrides {
+    pub(super) const fn overrides(&self) -> &EngineOverrides {
         &self.0
     }
 
@@ -342,11 +344,13 @@ pub struct LoadedCapabilities {
 
 impl LoadedCapabilities {
     /// The task that was loaded before this report was taken.
-    pub fn task(&self) -> InferTask {
+    #[must_use]
+    pub const fn task(&self) -> InferTask {
         self.task
     }
 
     /// The admitted post-load report.
+    #[must_use]
     pub fn reports(&self) -> &WorkerEngineReports {
         &self.reports
     }
@@ -514,9 +518,14 @@ const DEFAULT_CHECKOUT_WAIT_REPORT_INTERVAL: PositiveSeconds = PositiveSeconds::
 impl PoolConfig {
     /// A pool with every field at its default except `runtime`, which
     /// carries the host decisions (tier, device) the caller resolved.
+    #[must_use]
     pub fn with_runtime(runtime: WorkerRuntimeConfig) -> Self {
+        Self::with_runtime_and_python(runtime, resolve_python_executable())
+    }
+
+    const fn with_runtime_and_python(runtime: WorkerRuntimeConfig, python_path: String) -> Self {
         Self {
-            python_path: resolve_python_executable(),
+            python_path,
             health_check_interval_s: PositiveSeconds::literal::<30>(),
             startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             test_echo: false,
@@ -536,17 +545,36 @@ impl PoolConfig {
     /// ([`HostSnapshot::for_tests`](crate::host_facts::HostSnapshot::for_tests)):
     /// its admission gates, spawn guard, ledger and eviction read that host,
     /// so they run in tests and decide the same way on every machine.
+    #[must_use]
     pub fn for_tests() -> Self {
         Self::with_runtime(WorkerRuntimeConfig::for_tests())
+    }
+
+    /// Carry a fixture's interpreter into the pool without discovering it again.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_tests_with_python(python_path: String) -> Self {
+        Self::with_runtime_and_python(WorkerRuntimeConfig::for_tests(), python_path)
     }
 }
 
 impl PoolConfig {
+    /// Whether this pool's workers host models: an echo pool's workers build
+    /// nothing, so their loads take no memory lease.
+    pub(crate) const fn model_hosting(&self) -> ModelHosting {
+        if self.test_echo {
+            ModelHosting::TestEcho
+        } else {
+            ModelHosting::Models
+        }
+    }
+
     /// Resolved global worker cap. Returns `self.max_total_workers`
     /// directly; production fills it from `EffectiveConfig`, tests
     /// from `DEFAULT_MAX_TOTAL_WORKERS_FOR_TESTS` via
     /// `PoolConfig::for_tests()`.
-    pub fn effective_max_total_workers(&self) -> usize {
+    #[must_use]
+    pub const fn effective_max_total_workers(&self) -> usize {
         self.max_total_workers
     }
 
@@ -637,7 +665,7 @@ impl WorkerGroup {
     /// race-tolerant: a concurrent spawn that flips the answer
     /// between this load and the downstream `compare_exchange`
     /// re-races at the CAS, and the gates themselves are stateless
-    /// so a stale ColdStart classification cannot cause incorrect
+    /// so a stale `ColdStart` classification cannot cause incorrect
     /// admission.
     pub(super) fn is_empty(&self) -> bool {
         self.total.count() == 0
@@ -681,7 +709,7 @@ pub(super) enum WorkerRejectionKind {
 }
 
 impl WorkerRejectionCounters {
-    fn counter(&self, kind: WorkerRejectionKind) -> &AtomicU64 {
+    const fn counter(&self, kind: WorkerRejectionKind) -> &AtomicU64 {
         match kind {
             WorkerRejectionKind::PerKeyCap => &self.per_key_cap,
             WorkerRejectionKind::MemoryGuard => &self.memory_guard,
@@ -757,7 +785,7 @@ pub struct WorkerPool {
     pub(super) rejection_counters: WorkerRejectionCounters,
     /// Pool-wide capacity and its global-refund event. The producer carries
     /// the original permit through speculative admission and worker lifetime.
-    /// SpawnOutcome retains the actual deferral cause for selecting global
+    /// `SpawnOutcome` retains the actual deferral cause for selecting global
     /// refunds, worker changes or queue availability. See pool/capacity.rs.
     spawn_permits: capacity::GlobalCapacity,
     /// The runtime every worker process this pool creates is bound to.
@@ -827,7 +855,7 @@ impl WorkerPool {
     /// The Tencent engine this server's account chose, which every Tencent
     /// plan the server resolves reads, so a request's pin and the pin its
     /// worker was spawned with cannot name different engines.
-    pub(crate) fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
+    pub(crate) const fn tencent_engine(&self) -> &crate::model_manifest::TencentEngineSetting {
         self.config.runtime.provider_accounts.tencent_engine()
     }
 
@@ -836,12 +864,12 @@ impl WorkerPool {
     /// Exposed so the test-echo dispatch path (which bypasses workers
     /// entirely) can honor the same pacing knob integration tests use to
     /// hold race windows open.
-    pub(crate) fn test_delay_ms(&self) -> u64 {
+    pub(crate) const fn test_delay_ms(&self) -> u64 {
         self.config.test_delay_ms
     }
 
     /// The host-chosen bootstrap mode for local workers.
-    pub fn bootstrap_mode(&self) -> WorkerBootstrapMode {
+    pub const fn bootstrap_mode(&self) -> WorkerBootstrapMode {
         self.config.runtime.bootstrap_mode
     }
 
@@ -1031,7 +1059,10 @@ impl WorkerPool {
     /// dispatches to them: into one shared process per key, or by exclusive
     /// checkout from up to `max_workers_per_key` processes. The same value
     /// the worker is launched with (`--serving`), so the two cannot disagree.
-    pub(crate) fn serving(&self, target: WorkerTarget) -> crate::worker::serving::WorkerServing {
+    pub(crate) const fn serving(
+        &self,
+        target: WorkerTarget,
+    ) -> crate::worker::serving::WorkerServing {
         crate::worker::serving::WorkerServing::decide(target.profile_kind(), &self.config.runtime)
     }
 
@@ -1040,7 +1071,7 @@ impl WorkerPool {
     ///
     /// Used by the morphosyntax batch dispatcher to decide how many chunks
     /// to split a single-language batch into for concurrent inference.
-    pub fn max_workers_per_key_for(&self, profile: WorkerProfile) -> usize {
+    pub const fn max_workers_per_key_for(&self, profile: WorkerProfile) -> usize {
         self.config.max_workers_per_key.get(profile)
     }
 
@@ -1048,8 +1079,8 @@ impl WorkerPool {
     ///
     /// Used by the morphosyntax batch dispatcher to bound the number of
     /// concurrent language groups, preventing deadlock when the number of
-    /// languages × workers_per_key exceeds the global cap.
-    pub fn effective_max_total_workers(&self) -> usize {
+    /// languages × `workers_per_key` exceeds the global cap.
+    pub const fn effective_max_total_workers(&self) -> usize {
         self.config.effective_max_total_workers()
     }
 

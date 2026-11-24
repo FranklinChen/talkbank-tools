@@ -107,14 +107,14 @@ fn split_after_third_word(
 }
 
 /// Guards: malformed retained CHAT is refused before pending work exists, and
-/// a valid no-work source retains its original bytes.
+/// a valid no-work source retains its original bytes through both admission routes.
 /// Kind: boundary
 /// Not a type: actual CHAT bytes must earn source admission through the parser
 /// and validator before collection can hold a valid document.
 /// State: pure admitted source observations own synthetic CHAT and no worker resources.
 /// Concurrency: none
-#[test]
-fn collected_sources_preserve_refusals_and_no_work_bytes() {
+#[tokio::test]
+async fn collected_sources_preserve_refusals_and_no_work_bytes() {
     let retrace = VALID.replace("hello world .", "<the dog> [///] .");
     let corrupt_mor = VALID.replace("@End", "%mor:\tnoun| .\n@End");
     let bad_header = "@UTF8\n@Begin\n@Options:\tdummy\n*CHI:\thello .\n@End\n";
@@ -148,6 +148,22 @@ fn collected_sources_preserve_refusals_and_no_work_bytes() {
             );
         }
     }
+    let original = VALID.replace("*CHI:", "@Comment:\tstable spacing   \n*CHI:");
+    let named = TextBatchFileInput::new("same.cha", original.clone());
+    let admitted = AdmittedTextSource::admit(&crate::chat_parser(), &named).unwrap();
+    let output = run_admitted_text_source(
+        admitted,
+        &LanguageCode3::eng(),
+        hooks,
+        async |_| -> Result<Vec<Result<(), ItemFailure<std::convert::Infallible>>>, ServerError> {
+            panic!("a no-work source cannot reach inference")
+        },
+    )
+    .await;
+    let [result]: [crate::text_batch::TextBatchFileResult; 1] =
+        output.try_into().expect("one result");
+    assert_eq!(result.filename, named.filename);
+    assert_eq!(result.result.unwrap().as_str(), original);
 }
 
 /// Guards: applied output carries its actual engine provenance and refuses a

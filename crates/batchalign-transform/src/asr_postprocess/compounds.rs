@@ -44,6 +44,7 @@ static COMPOUNDS: LazyLock<HashSet<(&'static str, &'static str)>> = LazyLock::ne
 /// ```text
 /// ["air", "plane", "is", "here"] → ["airplane", "is", "here"]
 /// ```
+#[must_use]
 pub fn merge_compounds(elements: &[AsrElement]) -> Vec<AsrElement> {
     let mut result: Vec<AsrElement> = Vec::with_capacity(elements.len());
     let mut i = 0;

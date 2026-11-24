@@ -285,7 +285,7 @@ Provenance is injected into the CHAT AST, not the serialized text:
    name, is removed from `ChatFile.lines`
 2. A new `Line::Header { Header::Comment { BulletContent } }` is inserted
    after the last constant participant header (`@ID`, `@Birth of`,
-   `@Birthplace of`, or `@L1 of`)
+   `@Birthplace of`, or `@L1 of`) and the optional `@Media` header
 3. The file is then serialized normally via `to_chat_string()`
 
 This ensures provenance comments participate in proper CHAT serialization
@@ -472,7 +472,10 @@ When the same command is run again on the same file:
 1. `inject_provenance()` scans all `Line::Header` entries
 2. Any `Header::Comment` holding a stamp for that command, under either
    stamp name, is removed
-3. The new comment is inserted after the last constant participant header
+3. An exclusive insertion slot moves any adjacent BA3 stamps or unchecked-ASR
+   warnings from immediately before `@Media` to immediately after it and places
+   the new comment after the participant and media declarations. A write that
+   corrects this order survives provenance-only write suppression.
 
 This means re-running morphotag replaces the morphotag comment but
 preserves any align or transcribe comments. The processing history

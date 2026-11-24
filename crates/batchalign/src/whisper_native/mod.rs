@@ -36,6 +36,7 @@ pub use batchalign_fa_core as fa_dtw;
 /// resource was deallocated, and a Rust `static` cache would otherwise
 /// outlive them (observed as SIGABRT-after-success, 2026-07-29).
 /// Returns whether anything was released; safe to call repeatedly.
+#[must_use]
 pub fn shutdown() -> bool {
     #[cfg(feature = "whisper-rs-backend")]
     {
@@ -58,7 +59,9 @@ pub struct ProcessGuard;
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        shutdown();
+        // A drop has no caller to tell; whether anything was released does
+        // not change what happens next.
+        let _released = shutdown();
     }
 }
 

@@ -165,7 +165,7 @@ struct LocalJobOrchestrator {
 }
 
 impl LocalJobOrchestrator {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             memory_gate_retry_policy: RetryPolicy {
                 max_attempts: 1,
@@ -211,7 +211,7 @@ pub(crate) struct LocalServerBackend {
     hostname: Option<String>,
 }
 
-fn local_control_plane_info() -> JobControlPlaneInfo {
+const fn local_control_plane_info() -> JobControlPlaneInfo {
     JobControlPlaneInfo::local()
 }
 

@@ -7,18 +7,18 @@ use crate::store::{
     CompletedFileOutput, ContentInput, FileCompletion, FileFailureRecord, InputKind, Job,
 };
 
-pub(crate) struct PendingFile;
-pub(crate) struct ProcessingFile {
+pub struct PendingFile;
+pub struct ProcessingFile {
     started_at: MachineTime,
 }
 
 /// A declared CHAT file whose operations depend on its preparation phase.
-pub(crate) struct ChatFileFixture<State> {
+pub struct ChatFileFixture<State> {
     input: ContentInput,
     state: State,
 }
 
-pub(crate) struct PlannedFile {
+pub struct PlannedFile {
     declaration: FileDeclaration,
 }
 
@@ -125,27 +125,27 @@ struct NamedWork {
     work: FileWork,
 }
 
-pub(crate) struct Queued {
+pub struct Queued {
     work: Vec<NamedWork>,
 }
-pub(crate) struct Running;
-pub(crate) struct Failed;
-pub(crate) struct Deferred;
+pub struct Running;
+pub struct Failed;
+pub struct Deferred;
 
-pub(crate) trait OwnsClaim {}
+pub trait OwnsClaim {}
 impl OwnsClaim for Running {}
 impl OwnsClaim for Deferred {}
-pub(crate) struct AwaitingRelease;
+pub struct AwaitingRelease;
 
 /// Fields stay private throughout preparation. Raw release consumes the proof.
-pub(crate) struct JobFixture<State> {
+pub struct JobFixture<State> {
     job: Job,
     state: State,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("duplicate fixture input {0}")]
-pub(crate) struct DuplicateFixtureInput(DisplayPath);
+pub struct DuplicateFixtureInput(DisplayPath);
 
 impl JobFixture<Queued> {
     /// The first file is required. Every name is admitted once before setup.

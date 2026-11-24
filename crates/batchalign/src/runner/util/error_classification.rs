@@ -29,7 +29,7 @@ fn truncate_tail(s: &str, max_chars: usize) -> &str {
 }
 
 /// Classify worker errors into control-plane failure categories.
-pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
+pub const fn classify_worker_error(error: &WorkerError) -> FailureCategory {
     match error {
         WorkerError::Stalled { .. } => FailureCategory::WorkerTimeout,
         WorkerError::HealthCheckFailed(_) => FailureCategory::WorkerTimeout,
@@ -103,7 +103,7 @@ pub(crate) fn classify_worker_error(error: &WorkerError) -> FailureCategory {
 /// actionable, so it is a bootstrap failure, like a model that will not
 /// load; a host that will not report its memory, a ledger the coordinator
 /// cannot read or write, and a server shutting down are system failures.
-fn memory_guard_category(guard: &MemoryGuardError) -> FailureCategory {
+const fn memory_guard_category(guard: &MemoryGuardError) -> FailureCategory {
     match guard {
         MemoryGuardError::ExceedsHost { .. } => FailureCategory::WorkerBootstrap,
         MemoryGuardError::LedgerUnusable(_)
@@ -114,7 +114,7 @@ fn memory_guard_category(guard: &MemoryGuardError) -> FailureCategory {
 
 /// The failure category of a refusal: the input's fault is a validation
 /// failure, a tool's a system failure.
-fn refusal_category(fault: crate::error::RefusalFault) -> FailureCategory {
+const fn refusal_category(fault: crate::error::RefusalFault) -> FailureCategory {
     match fault {
         crate::error::RefusalFault::InvalidInput => FailureCategory::Validation,
         crate::error::RefusalFault::ToolFailure => FailureCategory::System,
@@ -122,7 +122,7 @@ fn refusal_category(fault: crate::error::RefusalFault) -> FailureCategory {
 }
 
 /// Classify server-side orchestration errors into control-plane failure categories.
-pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
+pub fn classify_server_error(error: &ServerError) -> FailureCategory {
     match error {
         ServerError::TranscriptBuild(error) => {
             use batchalign_transform::build_chat::TranscriptBuildError;
@@ -289,7 +289,7 @@ pub(crate) fn classify_server_error(error: &ServerError) -> FailureCategory {
 ///
 /// `command_label` is the human-readable command name (e.g. "Alignment",
 /// "Morphosyntax"). `filename` is the file that failed.
-pub(crate) fn user_facing_error(
+pub fn user_facing_error(
     category: FailureCategory,
     command_label: &str,
     filename: &str,
@@ -520,16 +520,22 @@ mod tests {
     /// no audio failed every file with "internal error, try restarting the
     /// job", because the probe's typed verdict had been rendered to a string
     /// and could only classify as `System`.
+    /// Guards: Source refusals name the affected file and classify differently from a missing host tool.
+    /// Kind: policy
+    /// Not a type: Failure policy chooses retryability and which source detail the user message preserves.
+    /// State: Pure typed ffprobe outcomes and paths, without executing a tool or opening a file.
+    /// Concurrency: The classifier and message rendering have no shared effects.
     #[test]
     fn unreadable_audio_names_the_file_and_a_missing_ffprobe_stays_internal() {
         use crate::error::RecordingDurationError;
         use crate::media::probe::ProbeError;
 
-        let refused =
-            ServerError::RecordingDuration(RecordingDurationError::Probe(ProbeError::Refused {
+        let refused = ServerError::RecordingDuration(RecordingDurationError(std::sync::Arc::new(
+            ProbeError::Refused {
                 input: "/audio/empty.mp3".to_owned(),
                 diagnostics: "Invalid data found when processing input".to_owned(),
-            }));
+            },
+        )));
         let category = classify_server_error(&refused);
         assert_eq!(category, FailureCategory::Validation);
         assert!(!((category).retryability() == crate::types::scheduling::Retryability::Retryable));
@@ -539,20 +545,21 @@ mod tests {
             "the user must be told which file could not be read: {message}"
         );
 
-        let zero_length =
-            ServerError::RecordingDuration(RecordingDurationError::Probe(ProbeError::EmptyAudio {
+        let zero_length = ServerError::RecordingDuration(RecordingDurationError(
+            std::sync::Arc::new(ProbeError::EmptyAudio {
                 input: "/audio/silent.mp3".to_owned(),
-            }));
+            }),
+        ));
         assert_eq!(
             classify_server_error(&zero_length),
             FailureCategory::Validation
         );
 
-        let missing = ServerError::RecordingDuration(RecordingDurationError::Probe(
+        let missing = ServerError::RecordingDuration(RecordingDurationError(std::sync::Arc::new(
             ProbeError::FfprobeMissing {
                 input: "/audio/fine.mp3".to_owned(),
             },
-        ));
+        )));
         assert_eq!(classify_server_error(&missing), FailureCategory::System);
     }
 

@@ -35,7 +35,8 @@ pub struct ManualClock {
 
 impl ManualClock {
     /// A clock reading `now` until it is moved.
-    pub fn at(now: MachineTime) -> Self {
+    #[must_use]
+    pub const fn at(now: MachineTime) -> Self {
         Self {
             now: std::sync::Mutex::new(now),
         }

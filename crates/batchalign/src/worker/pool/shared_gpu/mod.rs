@@ -17,14 +17,14 @@ mod routes;
 mod stdio;
 mod tcp;
 
-pub(crate) use routes::Retirement;
-pub(crate) use stdio::SharedGpuWorker;
-pub(crate) use tcp::SharedGpuTcpWorker;
+pub use routes::Retirement;
+pub use stdio::SharedGpuWorker;
+pub use tcp::SharedGpuTcpWorker;
 
 use tokio::sync::Semaphore;
 
 use crate::types::worker_v2::ExecuteResponseV2;
-pub(crate) use crate::worker::EnsureTaskResponse;
+pub use crate::worker::EnsureTaskResponse;
 
 /// Convert a `gpu_thread_pool_size` value into a permit count for the
 /// dispatch semaphore. Floor at 1 (zero permits would deadlock every
@@ -42,19 +42,19 @@ pub(super) fn dispatch_permits_from(gpu_thread_pool_size: u32) -> usize {
 pub(super) mod envelopes {
     /// Helper envelope for deserializing `{"op": "execute_v2", "response": {...}}`.
     #[derive(serde::Deserialize)]
-    pub(crate) struct ExecuteResponseV2Envelope {
+    pub struct ExecuteResponseV2Envelope {
         pub(crate) response: super::ExecuteResponseV2,
     }
 
     /// Helper envelope for deserializing `{"op": "capabilities", "response": {...}}`.
     #[derive(serde::Deserialize)]
-    pub(crate) struct CapabilitiesResponseEnvelope {
+    pub struct CapabilitiesResponseEnvelope {
         pub(crate) response: crate::worker::WorkerCapabilities,
     }
 
     /// Helper envelope for deserializing `{"op": "ensure_task", "response": {...}}`.
     #[derive(serde::Deserialize)]
-    pub(crate) struct EnsureTaskResponseEnvelope {
+    pub struct EnsureTaskResponseEnvelope {
         pub(crate) response: super::EnsureTaskResponse,
     }
 }

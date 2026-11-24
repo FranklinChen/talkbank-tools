@@ -260,7 +260,7 @@ export interface paths {
         /**
          * List audio/video files available on this server's configured media volumes.
          * @description The CLI uses this to let users browse remote media before submitting a job
-         *     that references files by name (media_files field in `JobSubmission`). Results
+         *     that references files by name (`media_files` field in `JobSubmission`). Results
          *     come from the `MediaResolver` walk cache (60 s TTL) so repeated calls are
          *     cheap even over NFS mounts.
          */
@@ -468,7 +468,7 @@ export interface components {
             task: string;
         };
         /**
-         * @description Standard error response body, matching FastAPI's `HTTPException` format.
+         * @description Standard error response body, matching `FastAPI`'s `HTTPException` format.
          *
          *     All non-2xx responses from the server use this shape so that clients
          *     can parse errors uniformly. The one exception is
@@ -648,7 +648,7 @@ export interface components {
         FilePayload: {
             /** @description Full CHAT file text. */
             content: string;
-            /** @description Original filename (e.g. "01DM_18.cha"). */
+            /** @description Original filename (e.g. "`01DM_18.cha`"). */
             filename: components["schemas"]["DisplayPath"];
         };
         /**
@@ -1279,8 +1279,8 @@ export interface components {
         JobSubmission: {
             /**
              * @description Absolute paths to "before" files for incremental processing
-             *     (paths_mode only). When non-empty, the diff engine compares each
-             *     before file against its corresponding source_path and only
+             *     (`paths_mode` only). When non-empty, the diff engine compares each
+             *     before file against its corresponding `source_path` and only
              *     reprocesses changed utterances.
              *
              *     Must be the same length as `source_paths` when non-empty. A null entry
@@ -1296,7 +1296,7 @@ export interface components {
              *     overhead when off.
              */
             debug_traces?: boolean;
-            /** @description Human-readable filenames for display (paths_mode only, optional). */
+            /** @description Human-readable filenames for display (`paths_mode` only, optional). */
             display_names?: string[];
             /** @description CHAT files to process. */
             files?: components["schemas"]["FilePayload"][];
@@ -1314,9 +1314,9 @@ export interface components {
              *     (`frontend/src/components/process/jobPlan.ts`).
              */
             lang: components["schemas"]["LanguageSpec"];
-            /** @description Media filenames for the server to resolve from media_roots (transcribe only). */
+            /** @description Media filenames for the server to resolve from `media_roots` (transcribe only). */
             media_files?: string[];
-            /** @description Key into server's media_mappings config (e.g. "childes-data"). */
+            /** @description Key into server's `media_mappings` config (e.g. "childes-data"). */
             media_mapping?: components["schemas"]["MediaMappingKey"];
             /** @description Subdirectory under the mapped root (e.g. "Eng-NA/MacWhinney/0young-ASR"). */
             media_subdir?: components["schemas"]["RepoRelativePath"];
@@ -1324,13 +1324,13 @@ export interface components {
             num_speakers?: components["schemas"]["NumSpeakers"];
             /** @description Typed command options (engine selections, processing flags, etc.). */
             options: unknown;
-            /** @description Absolute paths to write output files to (paths_mode only). */
+            /** @description Absolute paths to write output files to (`paths_mode` only). */
             output_paths?: components["schemas"]["ClientPath"][];
-            /** @description When true, server reads/writes files directly via source_paths/output_paths. */
+            /** @description When true, server reads/writes files directly via `source_paths/output_paths`. */
             paths_mode?: boolean;
             /** @description Client's input directory path (for dashboard display). */
             source_dir?: components["schemas"]["ClientPath"];
-            /** @description Absolute paths to read input files from (paths_mode only). */
+            /** @description Absolute paths to read input files from (`paths_mode` only). */
             source_paths?: components["schemas"]["ClientPath"][];
         };
         /** @description What one output judgement found, bounded, with the bar it was held to. */

@@ -54,6 +54,7 @@ impl ConstituencyParse {
     }
 
     /// Word-to-utterance-group assignments for `num_words` words.
+    #[must_use]
     pub fn assignments(&self, num_words: usize) -> Vec<usize> {
         compute_assignments(&self.trees, num_words)
     }

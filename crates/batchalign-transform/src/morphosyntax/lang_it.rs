@@ -37,7 +37,7 @@ use crate::morphosyntax::{
 /// lemma / feats and runs it through the normal
 /// `map_ud_word` pipeline to produce a correct `Mor`.
 #[derive(Debug, Clone)]
-pub(crate) struct MisSplitOverride {
+pub struct MisSplitOverride {
     /// The input token text that Stanza mis-analyzes. Matched
     /// case-insensitively against the MWT Range parent's `text`
     /// field (i.e., the original input word before any split).
@@ -58,7 +58,7 @@ pub(crate) struct MisSplitOverride {
 /// `_cases/italian.py`. When a new Stanza-mis-split case surfaces
 /// in production, add one row here plus a regression test in
 /// `morphosyntax/mod.rs` tests.
-pub(crate) const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
+pub const IT_MIS_SPLIT_OVERRIDES: &[MisSplitOverride] = &[
     // Defect 6: verb: `parla → par + la` (2sg/3sg indicative, also
     // 2sg imperative: Stanza's analysis varies by context but the
     // override is the same: `parlare` is the correct lemma either
@@ -355,7 +355,7 @@ pub fn try_handle_italian_range_override(
 /// historical single-chunk output is sufficient and the clitic
 /// decomposition isn't worth spelling out.
 #[derive(Debug, Clone)]
-pub(crate) struct CliticSpec {
+pub struct CliticSpec {
     /// Surface text of the clitic (`me`, `mi`, `la`, `lo`, …).
     pub text: &'static str,
     /// UD lemma for the clitic. Italian UD tends to use the
@@ -364,7 +364,7 @@ pub(crate) struct CliticSpec {
     /// UD POS. Typically `Pron`; `Adv` only for `ne` in some
     /// analyses.
     pub upos: UniversalPos,
-    /// UD feats for the clitic: number, person, gender, PronType, etc.
+    /// UD feats for the clitic: number, person, gender, `PronType`, etc.
     pub feats: CuratedFeats,
     /// UD dependency relation from this clitic to the main verb:
     /// `obj` for direct-object clitics (`la`, `lo`, `le`, `li`),
@@ -389,9 +389,9 @@ pub(crate) struct CliticSpec {
 /// not exist anywhere in the workspace: a doc value that outlived
 /// the thing it described.)
 #[derive(Debug, Clone)]
-pub(crate) struct CompoundImperativeOverride {
+pub struct CompoundImperativeOverride {
     /// Surface form Stanza received, matched case-insensitively
-    /// against the UdWord's `text` field.
+    /// against the `UdWord`'s `text` field.
     pub surface: &'static str,
     /// The correct verb lemma (e.g. `dare` for `dammela`,
     /// `portare` for `portalo`).
@@ -449,7 +449,7 @@ const CLITIC_LE: CliticSpec = CliticSpec {
 /// mis-classifications. Conservative seed, only two surfaces
 /// confirmed via direct Stanza observation (2026-04-23 probes).
 /// Extension is mechanical: one row per newly-observed surface.
-pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
+pub const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
     // dammela / dammelo (dare + me + la/lo): direct probe observation
     //: Stanza mid-sentence tags ADJ with lemma=`dammelo`.
     CompoundImperativeOverride {
@@ -546,7 +546,7 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
 ];
 
 /// Look up a potential mid-sentence compound imperative override
-/// for a single UdWord.
+/// for a single `UdWord`.
 ///
 /// The gate is two-pronged: Stanza must have tagged the word with
 /// a POS we have seen indicate mis-classification (ADJ, NOUN, or
@@ -573,7 +573,7 @@ pub(crate) const IT_COMPOUND_IMPERATIVES: &[CompoundImperativeOverride] = &[
 /// allowlist entry would only be over-matched if a real word
 /// shares spelling with one of the entries, no such collisions
 /// are known for current entries. Each entry also preserves the
-/// original UdWord's head/deprel for the main chunk so GRA
+/// original `UdWord`'s head/deprel for the main chunk so GRA
 /// reindexing stays consistent.
 fn check_italian_compound_imperative(
     text: &str,
@@ -599,7 +599,7 @@ fn compound_imperative_for_surface(text: &str) -> Option<&'static CompoundImpera
 }
 
 /// Apply a compound-imperative override by synthesizing the main
-/// verb UdWord plus one UdWord per post-clitic, mapping each
+/// verb `UdWord` plus one `UdWord` per post-clitic, mapping each
 /// through `map_ud_word`, and stacking the clitics onto
 /// the main `Mor`.
 ///
@@ -682,7 +682,7 @@ pub fn try_handle_italian_single_override(
 /// slice of components with component 0's POS/lemma/feats replaced,
 /// then passes the rewritten slice to `assemble_mors`.
 #[derive(Debug, Clone)]
-pub(crate) struct ComponentRewriteOverride {
+pub struct ComponentRewriteOverride {
     /// The Range parent text Stanza mis-analyzes. Matched
     /// case-insensitively. Example: `"dagliela"`.
     pub joined_text: &'static str,
@@ -698,7 +698,7 @@ pub(crate) struct ComponentRewriteOverride {
 /// allowlist; each entry is seeded from a specific direct-probe
 /// observation against Stanza. See the module docstring for the
 /// scope trade-off.
-pub(crate) const IT_COMPONENT_REWRITES: &[ComponentRewriteOverride] = &[
+pub const IT_COMPONENT_REWRITES: &[ComponentRewriteOverride] = &[
     // Defect 9: `dagliela` (imperative `dare` + `glie` + `la`):
     // Stanza emits `da/ADP/da + glie/PRON/gli + la/PRON/la`. The
     // expansion is shape-correct (3 pieces for a 3-piece clitic

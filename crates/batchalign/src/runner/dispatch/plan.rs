@@ -327,7 +327,7 @@ impl BenchmarkDispatchPlan {
 /// Typed plan for media-analysis dispatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MediaAnalysisDispatchPlan {
-    /// OpenSMILE needs the selected feature-set string.
+    /// `OpenSMILE` needs the selected feature-set string.
     Opensmile {
         /// Resource-aware execution profile for the command's remaining workload.
         kernel_plan: CommandKernelPlan,
@@ -357,7 +357,7 @@ pub(crate) enum MediaAnalysisDispatchPlan {
 impl MediaAnalysisDispatchPlan {
     /// The GPU-profile engines these jobs' requests name: diarization's
     /// speaker backend; none for openSMILE and AVQI, which run on IO workers.
-    pub(crate) fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
+    pub(crate) const fn gpu_models(&self) -> crate::worker::pool::GpuModelPlan {
         match self {
             Self::Diarize { backend, .. } => {
                 crate::worker::pool::GpuModelPlan::diarization(*backend)

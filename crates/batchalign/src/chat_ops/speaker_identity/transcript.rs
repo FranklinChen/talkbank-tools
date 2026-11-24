@@ -30,6 +30,7 @@ impl TierSelection {
     ///
     /// The emptiness question is answered HERE, once, at the boundary, so no
     /// later code has to remember what an empty list meant.
+    #[must_use]
     pub fn from_option(tiers: &[String]) -> Self {
         if tiers.is_empty() {
             Self::AllTiers
@@ -51,6 +52,7 @@ impl TierSelection {
     }
 
     /// The tiers as they are recorded in the evidence's provenance.
+    #[must_use]
     pub fn recorded(&self) -> Vec<String> {
         match self {
             Self::AllTiers => vec!["*".to_owned()],
@@ -70,6 +72,7 @@ impl TierSelection {
 /// `utterance_index` counts utterances of the SELECTED tiers in transcript
 /// order, and `line` is the one-based line of the main tier, so a reader can go
 /// straight to it.
+#[must_use]
 pub fn read_utterances(chat_file: &ChatFile, tiers: &TierSelection) -> Vec<TranscriptUtterance> {
     let mut collected = Vec::new();
     for (line_idx, line) in chat_file.lines.as_slice().iter().enumerate() {

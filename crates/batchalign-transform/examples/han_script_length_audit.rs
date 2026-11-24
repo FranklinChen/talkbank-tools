@@ -12,15 +12,15 @@
 //! 1. **Every Han code point** the pipeline treats as an ideograph, converted
 //!    one at a time. This settles the single-character dictionaries
 //!    exhaustively, with no external data.
-//! 2. **Every key and every value of the OpenCC dictionaries that the `s2hk`
+//! 2. **Every key and every value of the `OpenCC` dictionaries that the `s2hk`
 //!    and `s2tw` chains use**, when their text files are passed as arguments. This is how
 //!    the multi-character (phrase) entries get measured, because the embedded
 //!    tables are not enumerable through `ferrous-opencc`'s public API.
 //!
-//! The dictionary files are OpenCC's own, in its `data/dictionary` directory
+//! The dictionary files are `OpenCC`'s own, in its `data/dictionary` directory
 //! (`STPhrases.txt`, `STCharacters.txt`, `HKVariants.txt`, `TWVariants.txt`,
 //! and `HKVariantsPhrases.txt` or `CJK_Compatibility_Ideographs.txt` where an
-//! OpenCC release has them). The `ferrous-opencc` crate ships these files in
+//! `OpenCC` release has them). The `ferrous-opencc` crate ships these files in
 //! its `assets/dictionaries` directory. Each line is
 //! `key<TAB>value[ value...]`, and `#` starts a comment.
 //!
@@ -95,7 +95,7 @@ fn audit_han_code_points() -> Audit {
     audit
 }
 
-/// Sweep one OpenCC dictionary text file: every key and every value variant.
+/// Sweep one `OpenCC` dictionary text file: every key and every value variant.
 fn audit_dictionary(path: &str) -> std::io::Result<Audit> {
     let text = std::fs::read_to_string(path)?;
     let mut audit = Audit::default();

@@ -37,7 +37,7 @@ impl GlobalCapacity {
         }
     }
 
-    pub(super) fn host(&self) -> &crate::host_facts::RuntimeHost {
+    pub(super) const fn host(&self) -> &crate::host_facts::RuntimeHost {
         &self.host
     }
 
@@ -155,7 +155,7 @@ impl ReservedWorkerSlot {
         }
     }
 
-    pub(super) fn started(self, handle: WorkerHandle) -> StartedWorker {
+    pub(super) const fn started(self, handle: WorkerHandle) -> StartedWorker {
         StartedWorker {
             reservation: self,
             handle,
@@ -278,7 +278,7 @@ impl DepartedWorker<WorkerHandle> {
         home.idle.publish(worker);
         home.worker_returned.notify_one();
     }
-    pub(super) fn retiring(self) -> RetiringWorker {
+    pub(super) const fn retiring(self) -> RetiringWorker {
         RetiringWorker { _worker: self }
     }
 }
@@ -298,7 +298,7 @@ pub(super) struct ObservedIdleWorker {
     pid: crate::worker::WorkerPid,
 }
 impl ObservedIdleWorker {
-    pub(super) fn pid(&self) -> crate::worker::WorkerPid {
+    pub(super) const fn pid(&self) -> crate::worker::WorkerPid {
         self.pid
     }
     pub(super) fn take(self) -> Option<DepartedWorker<WorkerHandle>> {

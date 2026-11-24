@@ -43,6 +43,7 @@ pub enum CorrespondenceAdmission {
 impl CorrespondenceAdmission {
     /// Observe only common correspondences under the production proof caps.
     /// This producer never computes an arbitrarily selected inspection path.
+    #[must_use]
     pub fn observe(payload: &[String], reference: &[String], mode: MatchMode) -> Self {
         uninterrupted(Self::observe_controlled(
             payload,
@@ -71,12 +72,13 @@ pub struct CorrespondenceBudget {
 }
 
 impl CorrespondenceBudget {
-    fn candidate_edges(edge_limit: usize) -> Self {
+    const fn candidate_edges(edge_limit: usize) -> Self {
         Self { edge_limit }
     }
 
     /// The original caller's denied allowance, in candidate edges.
-    pub fn limit(self) -> usize {
+    #[must_use]
+    pub const fn limit(self) -> usize {
         self.edge_limit
     }
 }
@@ -96,6 +98,7 @@ impl CommonCorrespondences {
 
 impl CorrespondenceAnalysis {
     /// Prove common matches and attempt the original diagnostic path separately.
+    #[must_use]
     pub fn observe(payload: &[String], reference: &[String], mode: MatchMode) -> Self {
         uninterrupted(Self::observe_controlled(
             payload,
@@ -124,6 +127,7 @@ impl CorrespondenceAnalysis {
 
     /// Completed inspection, if available; refusal is not an empty path.
     /// Inspection is never authority to use selected pairs as timing evidence.
+    #[must_use]
     pub fn selected(&self) -> Option<&[AlignResult]> {
         match &self.inspection {
             InspectionAdmission::Complete(complete) => Some(complete.path()),
@@ -132,12 +136,14 @@ impl CorrespondenceAnalysis {
     }
 
     /// Inspection refusal is independent of common proof admission.
-    pub fn inspection(&self) -> &InspectionAdmission {
+    #[must_use]
+    pub const fn inspection(&self) -> &InspectionAdmission {
         &self.inspection
     }
 
     /// Read the producer's bounded proof, not a consumer-selected certainty flag.
-    pub fn admission(&self) -> &CorrespondenceAdmission {
+    #[must_use]
+    pub const fn admission(&self) -> &CorrespondenceAdmission {
         &self.admission
     }
 }

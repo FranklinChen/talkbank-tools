@@ -8,7 +8,7 @@ use super::super::JobStore;
 use crate::ws::WsEvent;
 
 /// Persisted file-level status update written through to SQLite.
-pub(crate) struct PersistedFileUpdate<'a> {
+pub struct PersistedFileUpdate<'a> {
     /// Filename within the parent job.
     pub filename: &'a str,
     /// The file's phase after the transition; its whole column set is
@@ -19,7 +19,7 @@ pub(crate) struct PersistedFileUpdate<'a> {
 }
 
 /// Attempt-start facts persisted for one file work unit.
-pub(crate) struct AttemptStartRecord<'a> {
+pub struct AttemptStartRecord<'a> {
     /// Filename for the attempt row.
     pub filename: &'a str,
     /// Kind of work unit being attempted.
@@ -29,7 +29,7 @@ pub(crate) struct AttemptStartRecord<'a> {
 }
 
 /// Attempt-finish facts persisted for one file work unit.
-pub(crate) struct AttemptFinishRecord<'a> {
+pub struct AttemptFinishRecord<'a> {
     /// Filename for the attempt row.
     pub filename: &'a str,
     /// Final attempt outcome.
@@ -45,7 +45,7 @@ pub(crate) struct AttemptFinishRecord<'a> {
 /// Which lease transition is being persisted, named in the warning when the
 /// write fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeaseWrite {
+pub enum LeaseWrite {
     /// The local queue claimed the job.
     #[cfg(test)]
     Claim,

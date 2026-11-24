@@ -11,22 +11,22 @@
         clippy::unimplemented
     )
 )]
-//! PyO3 worker runtime for batchalign3.
+//! `PyO3` worker runtime for batchalign3.
 //!
 //! This crate is the thin Rust↔Python boundary for batchalign3's ML worker
 //! processes. Python workers are stateless inference endpoints; this crate
 //! provides:
 //!
 //! - `worker_protocol`: IPC message dispatch (health, capabilities, infer,
-//!   batch_infer, execute_v2)
+//!   `batch_infer`, `execute_v2`)
 //! - `worker_asr_exec`: ASR execution (Whisper, HK providers)
 //! - `worker_fa_exec`: Forced alignment execution
-//! - `worker_media_exec`: Speaker diarization, OpenSMILE, AVQI
+//! - `worker_media_exec`: Speaker diarization, `OpenSMILE`, AVQI
 //! - `worker_text_exec`: Batched text-task executor control plane
 //! - `worker_text_results`: Text task result normalization + token alignment
 //! - `worker_artifacts`: Prepared artifact loading from IPC attachments
 //! - `cantonese_asr_bridge`: HK/Cantonese provider projection + normalization,
-//!   with FunASR segment admission in its `funasr_projection` child module
+//!   with `FunASR` segment admission in its `funasr_projection` child module
 //!
 //! **See also:** [Interface Map](../../INTERFACE_MAP.md) for unified documentation of all
 //! Python/Rust boundaries, including Python caller locations and schema definitions.
@@ -100,7 +100,7 @@ fn is_padding_value(value: &str) -> bool {
     batchalign_types::worker_v2::PaddingValue::admit(value).is_some()
 }
 
-/// batchalign_core: Rust worker runtime for batchalign3.
+/// `batchalign_core`: Rust worker runtime for batchalign3.
 #[pymodule]
 fn batchalign_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_rust_tracing();

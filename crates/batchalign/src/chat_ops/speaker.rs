@@ -61,15 +61,18 @@ pub(crate) struct SpeakerProjectionParts {
 
 impl SpeakerProjection {
     /// Inspect observations without granting access to projected chunks.
-    pub fn observations(&self) -> &SpeakerProjectionEvidence {
+    #[must_use]
+    pub const fn observations(&self) -> &SpeakerProjectionEvidence {
         &self.evidence
     }
     /// Derive the historical projection counters from the observations.
+    #[must_use]
     pub fn stats(&self) -> SpeakerProjectionStats {
         self.evidence.stats()
     }
 
     /// Consume observations under an explicit best-effort output policy.
+    #[must_use]
     pub fn admit(self, policy: SpeakerProjectionPolicy) -> AdmittedSpeakerProjection {
         AdmittedSpeakerProjection {
             chunks: self.chunks,
@@ -80,11 +83,13 @@ impl SpeakerProjection {
 
 impl AdmittedSpeakerProjection {
     /// Read chunks admitted with the accompanying review evidence.
+    #[must_use]
     pub fn chunks(&self) -> &[PreparedMonologueChunk] {
         &self.chunks
     }
     /// Read the producer-owned evidence and its selected policy.
-    pub fn evidence(&self) -> &AdmittedSpeakerProjectionEvidence {
+    #[must_use]
+    pub const fn evidence(&self) -> &AdmittedSpeakerProjectionEvidence {
         &self.evidence
     }
 
@@ -100,12 +105,12 @@ impl AdmittedSpeakerProjection {
 pub(crate) struct DiarizationSpeakerIndex(usize);
 
 impl DiarizationSpeakerIndex {
-    fn flatten(self) -> SpeakerIndex {
+    const fn flatten(self) -> SpeakerIndex {
         SpeakerIndex(self.0)
     }
 
     /// Stable anonymous-track number used by speaker-turn artifacts.
-    pub(crate) fn as_usize(self) -> usize {
+    pub(crate) const fn as_usize(self) -> usize {
         self.0
     }
 }
@@ -123,15 +128,42 @@ pub(crate) struct DiarizationLabelCoordinates {
 impl DiarizationLabelCoordinates {
     /// Build a closed coordinate system from every observed model label.
     pub(crate) fn from_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Self {
-        let index_by_label = labels
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<String>>()
-            .into_iter()
-            .enumerate()
-            .map(|(index, label)| (label, DiarizationSpeakerIndex(index)))
+        let lexical_labels = labels.into_iter().map(|label| (label, ())).collect();
+        let index_by_label = Self::number(lexical_labels)
+            .map(|(index, (label, ()))| (label.to_owned(), index))
             .collect();
         Self { index_by_label }
+    }
+
+    /// Number worker intervals by their real label in lexical order, carrying
+    /// the typed interval into the resulting track without another map lookup.
+    pub(crate) fn numbered_turns(
+        segments: &[crate::types::worker_v2::SpeakerSegmentV2],
+    ) -> impl Iterator<
+        Item = (
+            DiarizationSpeakerIndex,
+            batchalign_types::interval::AdmittedInterval,
+        ),
+    > {
+        let mut by_label = BTreeMap::<&str, Vec<_>>::new();
+        for segment in segments {
+            by_label
+                .entry(segment.speaker.as_str())
+                .or_default()
+                .push(segment.interval);
+        }
+        Self::number(by_label).flat_map(|(index, (_, intervals))| {
+            intervals.into_iter().map(move |interval| (index, interval))
+        })
+    }
+
+    fn number<T>(
+        ordered: BTreeMap<&str, T>,
+    ) -> impl Iterator<Item = (DiarizationSpeakerIndex, (&str, T))> {
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| (DiarizationSpeakerIndex(index), source))
     }
 
     /// Resolve one label into the shared anonymous-speaker coordinate system.

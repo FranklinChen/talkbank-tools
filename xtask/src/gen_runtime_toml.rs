@@ -123,7 +123,7 @@ pub fn generate_runtime_toml() -> String {
 }
 
 /// Resolve the path to `batchalign/runtime_constants.toml` relative to
-/// the xtask manifest dir (workspace root + "batchalign/runtime_constants.toml").
+/// the xtask manifest dir (workspace root + `batchalign/runtime_constants.toml`).
 fn toml_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../batchalign/runtime_constants.toml")
 }

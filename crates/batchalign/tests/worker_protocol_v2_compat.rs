@@ -101,6 +101,12 @@ fn roundtrip_fixture(schema: &str, raw: Value) -> Value {
     }
 }
 
+/// Guards: Each canonical JSON fixture survives Rust decode and encode exactly.
+/// Kind: wire
+/// Not a type: The external JSON files and Rust's serializers can differ
+/// in names, discriminants, or fields despite valid in-memory models.
+/// State: Read the checked-in bytes without starting a worker or daemon.
+/// Concurrency: The test reads only immutable fixture files.
 #[test]
 fn worker_protocol_v2_fixtures_roundtrip_in_rust() {
     let manifest = load_manifest();

@@ -4,7 +4,7 @@
 //!
 //! One wire vocabulary for every emitter and every reader: the Rust-owned
 //! request dispatcher (`batchalign-pyo3`), the Python request loops (which
-//! build their envelopes through the same PyO3 function), and the three Rust
+//! build their envelopes through the same `PyO3` function), and the three Rust
 //! readers (the sequential stdio handle, the sequential TCP handle and the
 //! shared GPU reader).
 
@@ -57,6 +57,7 @@ impl WorkerErrorKind {
 
     /// The wire spelling. Serialization and parsing both go through this one
     /// table, so the two directions cannot disagree.
+    #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Runtime => "runtime",
@@ -77,6 +78,7 @@ impl WorkerErrorKind {
     /// A bootstrap or download failure may leave a model half loaded, so the
     /// worker stops serving: a stdio worker exits, and a TCP daemon closes the
     /// connection the error was written on.
+    #[must_use]
     pub const fn worker_after(self) -> WorkerAfterError {
         match self {
             Self::Bootstrap | Self::Download | Self::AccessDenied => WorkerAfterError::Exits,
@@ -85,6 +87,7 @@ impl WorkerErrorKind {
     }
 
     /// Parse a wire spelling; `None` for anything this protocol does not name.
+    #[must_use]
     pub fn from_wire(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.wire_name() == text)
     }

@@ -50,7 +50,7 @@ impl PreparedWorkers {
     /// through [`Self::host_for`], which resolves it with an app's
     /// configuration.
     #[cfg(test)]
-    pub(crate) fn host(&self) -> &Arc<crate::host_facts::HostSnapshot> {
+    pub(crate) const fn host(&self) -> &Arc<crate::host_facts::HostSnapshot> {
         &self.host
     }
 
@@ -85,6 +85,7 @@ impl PreparedWorkers {
     }
 
     /// The infer tasks behind the current capability view.
+    #[must_use]
     pub fn infer_tasks(&self) -> Vec<InferTask> {
         self.capability_snapshot().infer_tasks().to_vec()
     }
@@ -108,7 +109,8 @@ impl PreparedWorkers {
     ///
     /// Exposed for server-only code that needs direct pool access (e.g.,
     /// building [`AppState`](crate::state::AppState)).
-    pub fn pool(&self) -> &Arc<WorkerPool> {
+    #[must_use]
+    pub const fn pool(&self) -> &Arc<WorkerPool> {
         &self.pool
     }
 }
@@ -228,7 +230,7 @@ mod tests {
         PoolConfig {
             test_echo: true,
             runtime: crate::worker::handle::WorkerRuntimeConfig::for_tests_on(host),
-            ..PoolConfig::for_tests()
+            ..PoolConfig::for_tests_with_python("unused-interpreter".to_owned())
         }
     }
 
@@ -241,14 +243,21 @@ mod tests {
         }
     }
 
-    /// A pool whose runtime reads another host than the one it is prepared
-    /// on is refused at composition, so the two cannot disagree later.
+    /// Guards: Preparation and app composition refuse a conflicting host
+    /// reserve and preserve the admitted host when the configuration agrees.
+    /// Kind: policy
+    /// Not a type: Two independently resolved host configurations can each be valid
+    /// while disagreeing on the reserve, so composition checks them together.
+    /// State: Two explicit synthetic host snapshots. Discovery is disabled.
+    /// Concurrency: The private pool is shut down after the checks.
     #[tokio::test]
-    async fn a_pool_on_another_host_is_refused_at_composition() {
-        let prepared_on = Arc::new(HostSnapshot::for_tests(&no_headroom()));
-        let elsewhere = HostSnapshot::for_tests(&ServerConfig::default());
+    async fn composition_preserves_the_prepared_workers_host() {
+        let config = no_headroom();
+        let host = Arc::new(HostSnapshot::for_tests(&config));
+        let other_config = ServerConfig::default();
+        let elsewhere = HostSnapshot::for_tests(&other_config);
         let refused = prepare_workers(
-            prepared_on.clone(),
+            host.clone(),
             echo_pool_on(&elsewhere),
             RegistryDiscovery::Ignore,
         )
@@ -258,30 +267,22 @@ mod tests {
             Err(crate::error::ServerError::Validation(_))
         ));
 
-        let prepared = prepare_workers(
-            prepared_on.clone(),
-            echo_pool_on(&prepared_on),
-            RegistryDiscovery::Ignore,
-        )
-        .await
-        .expect("a pool on its own host");
-        assert!(Arc::ptr_eq(prepared.host(), &prepared_on));
-    }
-
-    /// An app over prepared workers takes their machine, resolved with its
-    /// own configuration, and is refused a configuration that would keep a
-    /// different reserve than the workers it dispatches to.
-    #[tokio::test]
-    async fn an_app_configuration_must_resolve_the_workers_host() {
-        let host = Arc::new(HostSnapshot::for_tests(&no_headroom()));
-        let workers = prepare_workers(host.clone(), echo_pool_on(&host), RegistryDiscovery::Ignore)
-            .await
-            .expect("prepared");
-        let same = workers.host_for(&no_headroom()).expect("same reserve");
-        assert_eq!(same.runtime_host(), host.runtime_host());
+        let prepared =
+            prepare_workers(host.clone(), echo_pool_on(&host), RegistryDiscovery::Ignore)
+                .await
+                .expect("prepared");
+        assert!(Arc::ptr_eq(prepared.host(), &host));
+        assert_eq!(
+            prepared
+                .host_for(&config)
+                .expect("same reserve")
+                .runtime_host(),
+            host.runtime_host()
+        );
         assert!(matches!(
-            workers.host_for(&ServerConfig::default()),
+            prepared.host_for(&other_config),
             Err(crate::error::ServerError::Validation(_))
         ));
+        prepared.pool().shutdown().await;
     }
 }

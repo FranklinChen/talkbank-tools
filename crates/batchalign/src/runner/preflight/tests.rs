@@ -21,7 +21,7 @@ fn media_pending(root: &PathsFixture, name: &str) -> Vec<PendingJobFile> {
 /// Not a type: path authority proves containment and identity, while the file
 /// can be absent when Tokio later observes its metadata.
 /// State: an isolated existing parent admits a missing child. The real metadata
-/// call supplies NotFound, so a pure observation double would miss this adapter.
+/// call supplies `NotFound`, so a pure observation double would miss this adapter.
 /// Concurrency: a unique directory prevents another test from supplying the file.
 #[tokio::test]
 async fn media_validate_missing_file() {
@@ -39,7 +39,7 @@ async fn media_validate_missing_file() {
 
 /// Guards: a real zero-length recording is refused before format admission.
 /// Kind: boundary
-/// Not a type: the private NonemptyMedia constructor must still classify the
+/// Not a type: the private `NonemptyMedia` constructor must still classify the
 /// zero length supplied by the actual filesystem adapter before format admission.
 /// State: one empty .wav in an isolated directory exercises Tokio metadata.
 /// A fabricated Nonempty observation would bypass the boundary being checked.
@@ -127,13 +127,15 @@ impl MediaObserver for DeniedMetadata {
 }
 
 /// Guards: recording the source-bound preflight rejection persists one failed
-/// FileSetup attempt and the corresponding file error with the actual reason.
+/// `FileSetup` attempt and the corresponding file error with the actual reason,
+/// and the snapshot handed to dispatch no longer lists the rejected file, so no
+/// dispatcher, planner or worker-count rule can reach it.
 /// Kind: boundary
 /// Not a type: ownership fixes the source pairing and recording order, while
 /// the SQLite adapter must still write these exact fields and the
-/// controlled PermissionDenied observation must retain its diagnostic meaning.
+/// controlled `PermissionDenied` observation must retain its diagnostic meaning.
 /// State: one SQLite database and registry exercise real recording effects.
-/// DeniedMetadata supplies the observation, so no media file or decoder is needed.
+/// `DeniedMetadata` supplies the observation, so no media file or decoder is needed.
 /// Concurrency: the temporary database, admitted paths and run claim are isolated.
 #[tokio::test]
 async fn preflight_media_failure_records_setup_attempt() {
@@ -156,7 +158,11 @@ async fn preflight_media_failure_records_setup_attempt() {
     let run = ClaimedDispatch::for_run(&claim);
     let observed = ObservedPreflight::observe_with(run, &DeniedMetadata).await;
     let ready = observed.record().await;
-    assert!(ready.into_inputs().files().is_empty());
+    let inputs = ready.into_inputs();
+    assert!(
+        inputs.job().pending_files.is_empty(),
+        "dispatch must see only accepted files"
+    );
     let attempts = db
         .load_attempts_for_job("job-media-preflight")
         .await

@@ -38,7 +38,7 @@ pub(crate) struct MediaListQuery {
 /// List audio/video files available on this server's configured media volumes.
 ///
 /// The CLI uses this to let users browse remote media before submitting a job
-/// that references files by name (media_files field in `JobSubmission`). Results
+/// that references files by name (`media_files` field in `JobSubmission`). Results
 /// come from the `MediaResolver` walk cache (60 s TTL) so repeated calls are
 /// cheap even over NFS mounts.
 #[utoipa::path(

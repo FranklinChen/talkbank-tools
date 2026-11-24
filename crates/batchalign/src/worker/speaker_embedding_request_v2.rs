@@ -216,7 +216,7 @@ pub fn parse_speaker_embedding_response_v2(
 }
 
 /// A short label for a result variant, for the "returned X data" refusals.
-fn result_kind(result: &TaskResultV2) -> &'static str {
+const fn result_kind(result: &TaskResultV2) -> &'static str {
     match result {
         TaskResultV2::FaPreparation(_) => "FA preparation",
         TaskResultV2::WhisperChunkResult(_) => "ASR chunk",

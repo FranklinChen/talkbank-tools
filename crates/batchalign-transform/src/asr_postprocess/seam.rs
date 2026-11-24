@@ -47,12 +47,14 @@ pub struct WindowOrdinal(usize);
 
 impl WindowOrdinal {
     /// The ordinal of one window in the recognizer's window sequence.
-    pub fn new(ordinal: usize) -> Self {
+    #[must_use]
+    pub const fn new(ordinal: usize) -> Self {
         Self(ordinal)
     }
 
     /// The ordinal as a count from zero.
-    pub fn as_usize(self) -> usize {
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
         self.0
     }
 }
@@ -89,6 +91,7 @@ pub struct SeamAmbiguity {
 impl SeamAmbiguity {
     /// Record that the later window's copy of `text` at seam `seam_ms` was
     /// dropped and the earlier window's copy at `kept` was kept.
+    #[must_use]
     pub fn new(
         seam_ms: i64,
         text: &str,
@@ -104,22 +107,26 @@ impl SeamAmbiguity {
     }
 
     /// Where the seam is, in milliseconds.
-    pub fn seam_ms(&self) -> i64 {
+    #[must_use]
+    pub const fn seam_ms(&self) -> i64 {
         self.seam_ms
     }
 
     /// The repeated text.
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
     /// The window whose copy was dropped.
-    pub fn dropped_from(&self) -> WindowOrdinal {
+    #[must_use]
+    pub const fn dropped_from(&self) -> WindowOrdinal {
         self.dropped_from
     }
 
     /// Where the kept copy lies.
-    pub fn kept(&self) -> AdmittedInterval {
+    #[must_use]
+    pub const fn kept(&self) -> AdmittedInterval {
         self.kept
     }
 
@@ -131,7 +138,7 @@ impl SeamAmbiguity {
     /// utterance boundary fell exactly there. The kept copy itself is
     /// strictly positive in seconds, and a sub-millisecond copy that rounds
     /// to zero length intersects nothing and takes the fallback placement.
-    fn kept_overlaps(&self, word: &super::AsrWord) -> bool {
+    const fn kept_overlaps(&self, word: &super::AsrWord) -> bool {
         matches!(
             (word.start_ms, word.end_ms),
             (Some(start), Some(end)) if start < self.kept.end_ms() && end > self.kept.start_ms()
@@ -146,6 +153,7 @@ impl SeamAmbiguity {
     /// several words) and a character that would break or restructure the
     /// comment line is written as its code point, by the same rule a dropped
     /// token's comment uses.
+    #[must_use]
     pub fn comment_text(&self) -> String {
         format!(
             "batchalign window seam at {} ms: repeated {} kept once, review here",

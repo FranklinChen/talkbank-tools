@@ -30,7 +30,7 @@ enum WideStructDisposition {
 }
 
 impl WideStructDisposition {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::BoundaryShim => "boundary shim",
             Self::TransportRecord => "transport record",
@@ -546,15 +546,6 @@ const WIDE_STRUCT_ALLOWANCES: &[WideStructAllowance] = &[
         disposition: WideStructDisposition::TransportRecord,
         reason: "worker registry snapshot entry; the newest field is the build identity of the \
                  binary that started the daemon, which discovery requires before adopting it",
-    },
-    WideStructAllowance {
-        path: "crates/batchalign/tests/common/test_worker_pool.rs",
-        struct_name: "ConfigKey",
-        max_fields: 14,
-        max_bool_fields: 2,
-        disposition: WideStructDisposition::TransportRecord,
-        reason: "test-only cache key; its width is the width of the WorkerConfig it keys on, so \
-                 it tracks that struct rather than growing on its own",
     },
 ];
 

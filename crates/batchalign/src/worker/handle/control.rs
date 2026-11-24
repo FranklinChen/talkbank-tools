@@ -12,11 +12,11 @@ use crate::worker::{
 };
 
 mod sealed {
-    pub(crate) trait Sealed {}
-    pub(crate) trait Operation {}
+    pub trait Sealed {}
+    pub trait Operation {}
 }
 
-pub(crate) trait ExpectedReply: sealed::Sealed + Send {
+pub trait ExpectedReply: sealed::Sealed + Send {
     type Reply;
     fn wait(&self) -> ResponseWait;
     fn admit(
@@ -25,17 +25,17 @@ pub(crate) trait ExpectedReply: sealed::Sealed + Send {
     ) -> Result<ControlCompletion<Self::Reply>, WorkerError>;
 }
 
-/// Only real request producers implement this effect capability. ExpectedLoad
+/// Only real request producers implement this effect capability. `ExpectedLoad`
 /// is an observation descriptor, so it can inspect bytes without loading a model.
-pub(crate) trait ControlOperation: ExpectedReply + sealed::Operation {
+pub trait ControlOperation: ExpectedReply + sealed::Operation {
     fn request(&self) -> WorkerRequest<'_>;
 }
 
-pub(crate) struct ControlCompletion<Reply> {
+pub struct ControlCompletion<Reply> {
     reply: Result<Reply, WorkerError>,
 }
 impl<Reply> ControlCompletion<Reply> {
-    fn answered(reply: Result<Reply, WorkerError>) -> Self {
+    const fn answered(reply: Result<Reply, WorkerError>) -> Self {
         Self { reply }
     }
     fn map<Next>(self, map: impl FnOnce(Reply) -> Next) -> ControlCompletion<Next> {
@@ -49,7 +49,7 @@ impl<Reply> ControlCompletion<Reply> {
 }
 
 /// Progress has no representation in an operation's terminal input.
-pub(crate) enum ControlTerminal {
+pub enum ControlTerminal {
     Infer(InferResponse),
     BatchInfer(BatchInferResponse),
     Execute(ExecuteResponseV2),
@@ -107,23 +107,23 @@ impl From<WorkerResponse> for ControlFrame {
     }
 }
 
-pub(crate) struct Health;
-pub(crate) struct Capabilities {
+pub struct Health;
+pub struct Capabilities {
     request_id: ControlRequestId,
 }
-pub(crate) struct Infer<'a> {
+pub struct Infer<'a> {
     request: &'a InferRequest,
 }
-pub(crate) struct ExpectedInfer;
-pub(crate) struct BatchInfer<'a> {
+pub struct ExpectedInfer;
+pub struct BatchInfer<'a> {
     request: &'a BatchInferRequest,
     expected: ExpectedBatch,
 }
-pub(crate) struct ExpectedBatch {
+pub struct ExpectedBatch {
     items: usize,
 }
 impl ExpectedBatch {
-    pub(crate) fn new(items: usize) -> Self {
+    pub(crate) const fn new(items: usize) -> Self {
         Self { items }
     }
 }
@@ -136,12 +136,12 @@ impl Capabilities {
     }
 }
 impl<'a> Infer<'a> {
-    pub(crate) fn new(request: &'a InferRequest) -> Self {
+    pub(crate) const fn new(request: &'a InferRequest) -> Self {
         Self { request }
     }
 }
 impl<'a> BatchInfer<'a> {
-    pub(crate) fn new(request: &'a BatchInferRequest) -> Self {
+    pub(crate) const fn new(request: &'a BatchInferRequest) -> Self {
         Self {
             request,
             expected: ExpectedBatch::new(request.items.len()),
@@ -150,18 +150,18 @@ impl<'a> BatchInfer<'a> {
 }
 
 /// This describes a desired observation and confers no request-sending capability.
-pub(crate) struct ExpectedLoad {
+pub struct ExpectedLoad {
     task: InferTask,
     stall: LoadingStall,
 }
 impl ExpectedLoad {
-    pub(crate) fn new(task: InferTask, stall: LoadingStall) -> Self {
+    pub(crate) const fn new(task: InferTask, stall: LoadingStall) -> Self {
         Self { task, stall }
     }
 }
 
 /// The actual load owns its grant through matching terminal admission.
-pub(crate) struct Loading {
+pub struct Loading {
     admitted: crate::worker::pool::AdmittedLoad,
     expected: ExpectedLoad,
     request_id: ControlRequestId,
@@ -177,12 +177,12 @@ impl Loading {
     }
 }
 
-pub(crate) struct CompletedLoad {
+pub struct CompletedLoad {
     admitted: crate::worker::pool::AdmittedLoad,
     response: EnsureTaskResponse,
 }
 impl CompletedLoad {
-    pub(crate) fn response(&self) -> &EnsureTaskResponse {
+    pub(crate) const fn response(&self) -> &EnsureTaskResponse {
         &self.response
     }
     pub(crate) async fn confirm(self) -> crate::worker::pool::ConfirmedLoad {

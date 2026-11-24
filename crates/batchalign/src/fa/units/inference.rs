@@ -11,7 +11,7 @@ pub(super) struct RetainUnitResults<'sink> {
 }
 
 impl<'sink> RetainUnitResults<'sink> {
-    pub(super) fn new(
+    pub(super) const fn new(
         progress: ReplyProgress,
         services: crate::fa::FaServices<'sink>,
         fallback_events: &'sink mut Vec<FaFallbackEventTrace>,

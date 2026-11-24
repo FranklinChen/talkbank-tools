@@ -89,7 +89,7 @@ impl From<PermitRejected> for AdmissionRejection {
 /// Sustained saturation produces O(log N) WARN events instead of N.
 /// The monotonic `spawn_rejections_total` counter on the pool is the
 /// authoritative observability surface; the log is a coarse signal.
-pub(super) fn should_log_saturation(rejection_count: u64) -> bool {
+pub(super) const fn should_log_saturation(rejection_count: u64) -> bool {
     rejection_count.is_power_of_two()
 }
 
@@ -169,7 +169,7 @@ impl WorkerPool {
             .clone()
     }
 
-    /// Try to atomically claim a spawn slot in a group via compare_exchange.
+    /// Try to atomically claim a spawn slot in a group via `compare_exchange`.
     ///
     /// Checks two limits:
     /// 1. Per-key cap: `max_workers_per_key.get(group.profile)`
@@ -393,7 +393,7 @@ impl WorkerPool {
     }
 }
 
-fn worker_config_for_key(
+pub(super) fn worker_config_for_key(
     pool_config: &super::PoolConfig,
     key: &WorkerKey,
 ) -> Result<WorkerConfig, WorkerError> {

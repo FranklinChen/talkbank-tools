@@ -760,7 +760,7 @@ fn test_process_raw_asr_golden_cantonese() {
 }
 
 /// Taiwanese recognition arrives in simplified characters; the pipeline
-/// writes Taiwan traditional, the script of TalkBank's Taiwanese corpora,
+/// writes Taiwan traditional, the script of `TalkBank`'s Taiwanese corpora,
 /// with each word keeping its timing and no Cantonese table applied.
 #[test]
 fn test_process_raw_asr_taiwanese_becomes_taiwan_traditional() {
@@ -1051,7 +1051,7 @@ fn stripped_empty_words_removed() {
 
 // ── Split pipeline equivalence tests ────────────────────────────────
 
-/// Verify that the split pipeline (pre_expansion → expand → finalize)
+/// Verify that the split pipeline (`pre_expansion` → expand → finalize)
 /// produces identical output to the monolithic `prepare_asr_chunks`.
 #[test]
 fn split_pipeline_matches_monolithic_simple() {

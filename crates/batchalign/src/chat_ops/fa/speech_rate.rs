@@ -25,7 +25,8 @@ pub struct WordsPerSecond(f64);
 
 impl WordsPerSecond {
     /// The rate itself, for logging and for reporting a refusal.
-    pub fn get(self) -> f64 {
+    #[must_use]
+    pub const fn get(self) -> f64 {
         self.0
     }
 }
@@ -78,15 +79,17 @@ pub enum SpeechRate {
 
 impl SpeechRate {
     /// What `words` in `span` would demand of a speaker.
+    #[must_use]
     pub fn of(words: usize, span: Ms) -> Self {
         match (words, span) {
             (0, _) => Self::NoWords,
             (words, Ms(0)) => Self::NoAudio { words },
             (words, Ms(ms)) => {
                 let rate = WordsPerSecond(words as f64 / (ms as f64 / 1000.0));
-                match rate.0 > HUMAN_CEILING_WPS {
-                    true => Self::Impossible { rate, words, span },
-                    false => Self::Plausible(rate),
+                if rate.0 > HUMAN_CEILING_WPS {
+                    Self::Impossible { rate, words, span }
+                } else {
+                    Self::Plausible(rate)
                 }
             }
         }
@@ -96,7 +99,8 @@ impl SpeechRate {
     ///
     /// Named for the question a caller is actually asking, so the answer does
     /// not depend on remembering which way the comparison runs.
-    pub fn is_possible(&self) -> bool {
+    #[must_use]
+    pub const fn is_possible(&self) -> bool {
         match self {
             Self::Plausible(_) | Self::NoWords => true,
             Self::Impossible { .. } | Self::NoAudio { .. } => false,

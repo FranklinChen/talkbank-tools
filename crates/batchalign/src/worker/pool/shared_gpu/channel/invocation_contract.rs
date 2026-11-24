@@ -108,7 +108,7 @@ async fn submitted_work_retains_capacity_after_its_caller_ends() {
 /// Guards: cancelling an incomplete real write retires its pending ownership
 /// and stream before another invocation can reuse the transport.
 /// Kind: contract
-/// Not a type: an AsyncWrite can accept a prefix and then suspend, so actual
+/// Not a type: an `AsyncWrite` can accept a prefix and then suspend, so actual
 /// partial bytes and future cancellation determine transport uncertainty.
 /// State: a one-byte duplex pipe forces partial output with a real batch lease.
 /// Concurrency: the test owns the channel, both pipe halves and isolated ledger.

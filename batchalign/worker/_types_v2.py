@@ -28,6 +28,7 @@ from batchalign.inference._domain_types import (
     SpeakerId,
     TranslationBackend,
 )
+from batchalign.inference._speaker_model_evidence import SpeakerLoadedModelGraph
 from batchalign.worker._types import (
     FiniteNonNegativeFloat,
     ReportedEngineName,
@@ -1684,6 +1685,7 @@ class LocalPyannoteSpeakerEvidenceV2(BaseModel):
 
     kind: Literal["pyannote"] = "pyannote"
     segments: list[SpeakerSegmentV2]
+    loaded_graph: SpeakerLoadedModelGraph | None = None
 
 
 SpeakerInferenceEvidenceV2: TypeAlias = Annotated[

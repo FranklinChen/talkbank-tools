@@ -138,6 +138,7 @@ pub struct CorefRawResponse {
 /// ```
 ///
 /// Positional: element `i` corresponds to word `i` in the sentence.
+#[must_use]
 pub fn build_bracket_annotation(words: &[Vec<ChainRef>]) -> String {
     let mut parts = Vec::with_capacity(words.len());
     for word_chains in words {
@@ -168,6 +169,7 @@ pub fn build_bracket_annotation(words: &[Vec<ChainRef>]) -> String {
 ///
 /// This is the bridge between the typed data model and the serialized
 /// `%xcoref` tier content.
+#[must_use]
 pub fn raw_to_bracket_response(raw: &CorefRawResponse) -> CorefResponse {
     CorefResponse {
         annotations: raw
@@ -229,11 +231,11 @@ pub enum CorefOutcomeKind {
         /// The annotation text that was injected, for audit.
         annotation: String,
     },
-    /// Worker response referred to a sentence_idx that maps to a
+    /// Worker response referred to a `sentence_idx` that maps to a
     /// `line_idx` outside `chat_file.lines`. This is always a
     /// worker-contract violation.
     SentenceIndexOutOfBounds {
-        /// Worker-reported sentence_idx that could not be resolved.
+        /// Worker-reported `sentence_idx` that could not be resolved.
         sentence_idx: usize,
         /// Line index the orchestrator mapped it to, but which is
         /// out of range.
@@ -253,6 +255,7 @@ impl CorefOutcome {
     /// `ChainsInjected`) return `None`: surfacing them per-utterance
     /// would flood the reporting tier for every document. Only true
     /// anomalies return a record.
+    #[must_use]
     pub fn to_decision_record(&self) -> Option<crate::decisions::DecisionRecord> {
         use crate::decisions::{CorefStrategy, DecisionRecord, DecisionStrategy};
         match &self.kind {
@@ -287,7 +290,7 @@ impl CorefOutcome {
 // ---------------------------------------------------------------------------
 
 /// Result of [`collect_coref_payloads`]: the document-level batch item,
-/// plus line_indices for result mapping, plus typed NotApplicable
+/// plus `line_indices` for result mapping, plus typed `NotApplicable`
 /// outcomes for any utterance that was not dispatched.
 pub struct CorefPayloadCollection {
     /// The document-level batch item (all non-empty sentences).
@@ -295,15 +298,16 @@ pub struct CorefPayloadCollection {
     /// `line_indices[i]` is the index into `chat_file.lines` for
     /// sentence `i` in the batch item.
     pub line_indices: Vec<usize>,
-    /// Utterances that were classified NotApplicable (empty content).
+    /// Utterances that were classified `NotApplicable` (empty content).
     pub not_applicable: Vec<CorefOutcome>,
 }
 
-/// Collect coref payloads from all utterances in a ChatFile.
+/// Collect coref payloads from all utterances in a `ChatFile`.
 ///
 /// Empty utterances (no extractable words) are classified as
 /// [`CorefOutcomeKind::NotApplicable`]: visible in reports rather than
 /// silently dropped.
+#[must_use]
 pub fn collect_coref_payloads(chat_file: &ChatFile) -> CorefPayloadCollection {
     let mut sentences = Vec::new();
     let mut line_indices = Vec::new();
@@ -385,7 +389,7 @@ pub fn inject_coref(
 // Result application
 // ---------------------------------------------------------------------------
 
-/// Apply coref results to a ChatFile (sparse injection).
+/// Apply coref results to a `ChatFile` (sparse injection).
 ///
 /// `results` maps `line_idx` to annotation text. Only lines whose indices
 /// are in the map get a `%xcoref` tier, utterances without coreference
@@ -402,7 +406,7 @@ pub fn apply_coref_results(chat_file: &mut ChatFile, results: &HashMap<usize, St
 /// `dispatched_line_indices` is the `line_indices` field from the
 /// [`CorefPayloadCollection`] that produced this dispatch, i.e., the
 /// line indices of every utterance that was sent to the worker. Any
-/// dispatched line_idx that does NOT appear in `results` is classified
+/// dispatched `line_idx` that does NOT appear in `results` is classified
 /// as [`CorefOutcomeKind::NoChainsForSentence`] (the common expected
 /// case).
 ///

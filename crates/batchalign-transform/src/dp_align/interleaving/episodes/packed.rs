@@ -51,7 +51,7 @@ fn summary(bits: &[u64]) -> Vec<usize> {
     }
     result
 }
-fn before(bits: &[u64], summary: &[usize], k: usize) -> usize {
+const fn before(bits: &[u64], summary: &[usize], k: usize) -> usize {
     summary[k / 64]
         + if k.is_multiple_of(64) {
             0

@@ -97,10 +97,10 @@ impl<'relation, 'source> ReferenceCapacity<'relation, 'source> {
         }))
     }
 
-    pub(super) fn work(&self) -> usize {
+    pub(super) const fn work(&self) -> usize {
         self.work
     }
-    pub(super) fn cells(&self) -> usize {
+    pub(super) const fn cells(&self) -> usize {
         self.prefix.len() + self.suffix.len()
     }
 

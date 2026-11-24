@@ -37,7 +37,7 @@ pub struct CheckedOutWorker {
     worker: DepartedWorker<WorkerHandle>,
 }
 impl CheckedOutWorker {
-    fn from_departed(worker: DepartedWorker<WorkerHandle>) -> Self {
+    const fn from_departed(worker: DepartedWorker<WorkerHandle>) -> Self {
         Self { worker }
     }
     fn finish<T>(self, outcome: &Result<T, WorkerError>) {
@@ -140,7 +140,7 @@ pub(super) mod tests {
     /// Kind: contract
     /// Not a type: Consuming retirement prevents reuse of an emptied checkout. Whether bytes were written and a response remains unread is actual transport state, so the real in-flight adapter and its Drop disposition must still agree.
     /// State: A private shell stub emits admitted ready bytes and never answers the request. The real pipe establishes an in-flight request. Typed slot publication replaces invented counts; the shared declared-effect producer owns the admitted request and model lease without loading a model.
-    /// Concurrency: The fixture owns its subprocess and pool. One explicit poll establishes Pending without elapsed-time assumptions. WorkerHandle owns signal teardown on cancellation and assertion failure.
+    /// Concurrency: The fixture owns its subprocess and pool. One explicit poll establishes Pending without elapsed-time assumptions. `WorkerHandle` owns signal teardown on cancellation and assertion failure.
     #[tokio::test]
     async fn dropping_an_in_flight_checkout_discards_rather_than_requeues() {
         let (group, mut worker) = admitted_checkout().await;

@@ -73,12 +73,10 @@ with open("worker-imports.log", "w") as imports:
 PY
 ```
 
-`test_worker_import_boundary.py` runs in the ordinary Python suite: three
-fresh echo subprocesses reject Torch, Transformers, and Stanza imports while
-exercising ready, health, and shutdown. It asserts the import boundary rather
-than a machine-dependent timing threshold. It loads no models and requires
-no network. The separate utterance-loader and serving-mode tests verify that
-actual model requests and CUDA/CPU policy still select their intended paths.
+The [model-free launch contract](testing.md#python-worker-launch-contracts)
+runs fresh echo processes across the CPU profiles and both serving modes.
+It observes ready, health and shutdown while refusing imports of Torch,
+Transformers and Stanza. The import fence needs no models or network.
 
 ## Python: `py-spy`
 

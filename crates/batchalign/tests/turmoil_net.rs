@@ -196,8 +196,8 @@ fn serve_health_only(sim: &mut turmoil::Sim<'_>) {
 // Real app setup (requires Python test-echo workers)
 // ---------------------------------------------------------------------------
 
-/// Holds the real tokio runtime that hosts AppState background actors
-/// (JobRegistry, RuntimeSupervisor). Must outlive `sim.run()`, dropping
+/// Holds the real tokio runtime that hosts `AppState` background actors
+/// (`JobRegistry`, `RuntimeSupervisor`). Must outlive `sim.run()`, dropping
 /// it kills the actors.
 ///
 /// The owned guard makes the resource constraint part of the fixture state:
@@ -215,7 +215,7 @@ struct RealAppHandle {
 static REAL_APP_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl RealAppHandle {
-    fn take_router(&mut self) -> Router {
+    const fn take_router(&mut self) -> Router {
         self.router.take().expect("router already taken")
     }
 }
@@ -418,7 +418,7 @@ async fn post_empty(
     Ok(resp)
 }
 
-/// Submit a job and return its job_id.
+/// Submit a job and return its `job_id`.
 async fn submit_and_get_id(
     client: &Client<TurmoilConnector, axum::body::Body>,
     submission: &JobSubmission,
@@ -429,7 +429,7 @@ async fn submit_and_get_id(
     Ok(info["job_id"].as_str().expect("job_id").to_string())
 }
 
-/// Submit a job, wait for completion, return the job_id.
+/// Submit a job, wait for completion, return the `job_id`.
 async fn submit_and_complete(
     client: &Client<TurmoilConnector, axum::body::Body>,
 ) -> Result<String, TurmoilError> {
@@ -709,7 +709,7 @@ fn rapid_reconnection_burst_after_restart() -> turmoil::Result {
 }
 
 /// 5 rapid partition/repair cycles. Models intermittent Tailscale
-/// connectivity on fleet machines with unstable WiFi.
+/// connectivity on fleet machines with unstable `WiFi`.
 #[test]
 fn network_flap_rapid_partition_cycles() -> turmoil::Result {
     let mut sim = turmoil::Builder::new()
@@ -739,7 +739,7 @@ fn network_flap_rapid_partition_cycles() -> turmoil::Result {
     sim.run()
 }
 
-/// Response held for 10s then released, models slow WiFi.
+/// Response held for 10s then released, models slow `WiFi`.
 /// a user's machine on congested network.
 #[test]
 fn slow_response_eventually_arrives() -> turmoil::Result {
@@ -878,7 +878,7 @@ fn real_app_sse_nonexistent_job_returns_404() -> turmoil::Result {
 }
 
 /// Real health endpoint reports actual version and worker state.
-/// After 2026-03-30 incident where health showed live_workers: 0 incorrectly.
+/// After 2026-03-30 incident where health showed `live_workers`: 0 incorrectly.
 #[test]
 fn real_app_health_reports_workers() -> turmoil::Result {
     let python = crate::prerequisite::PythonWorker::require().interpreter();
@@ -1455,7 +1455,7 @@ fn concurrent_poll_same_job() -> turmoil::Result {
     sim.run()
 }
 
-/// Health endpoint reports active_jobs > 0 during processing.
+/// Health endpoint reports `active_jobs` > 0 during processing.
 #[test]
 fn health_accurate_during_processing() -> turmoil::Result {
     let python = crate::prerequisite::PythonWorker::require().interpreter();

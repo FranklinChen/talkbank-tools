@@ -130,7 +130,7 @@ pub struct UnitProgressV2 {
 
 impl UnitProgressV2 {
     /// `completed` of `total` items done; refused when `completed > total`.
-    pub fn new(completed: u32, total: u32) -> Result<Self, ProgressRefusalV2> {
+    pub const fn new(completed: u32, total: u32) -> Result<Self, ProgressRefusalV2> {
         if completed <= total {
             Ok(Self { completed, total })
         } else {
@@ -212,7 +212,7 @@ impl RequestProgressV2 {
 
     /// The request whose work this is.
     #[must_use]
-    pub fn request_id(&self) -> &WorkerRequestIdV2 {
+    pub const fn request_id(&self) -> &WorkerRequestIdV2 {
         &self.request_id
     }
 
@@ -224,7 +224,7 @@ impl RequestProgressV2 {
 
     /// How many of the request's items are done.
     #[must_use]
-    pub fn progress(&self) -> UnitProgressV2 {
+    pub const fn progress(&self) -> UnitProgressV2 {
         self.progress
     }
 }

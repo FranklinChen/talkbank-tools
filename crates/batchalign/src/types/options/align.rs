@@ -67,6 +67,7 @@ impl Default for AlignOptions {
 
 impl AlignOptions {
     /// Return the effective FA engine after applying any shared `fa` override.
+    #[must_use]
     pub fn effective_fa_engine(&self) -> FaEngineName {
         self.common.engine_overrides.fa.unwrap_or(self.fa_engine)
     }
@@ -78,6 +79,7 @@ impl AlignOptions {
     /// cannot conjure a pass that was not requested: `--engine-overrides
     /// '{"utr":...}'` says WHICH engine, not WHETHER, exactly as the `fa` and
     /// `asr` overrides do.
+    #[must_use]
     pub fn effective_utr_engine(&self) -> Option<UtrEngine> {
         let requested = self.utr.engine.as_ref()?;
         Some(

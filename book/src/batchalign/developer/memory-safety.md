@@ -475,6 +475,27 @@ stateDiagram-v2
   daemon: a reconnection asks again, the daemon answers at once, and the new
   proof takes a new lease.
 
+The [text command boundary](../architecture/command-lifecycles.md#text-worker-submission)
+owns submission before the pool acquires a `RunPermit`. The retry loop owns
+the worker packet for the lifetime of its own attempts. A stopped job cannot
+construct the next attempt. A jobless operation awaits its own result.
+
+```mermaid
+flowchart TD
+    packet["Retry loop owns the worker packet"] --> gate{"Does a job token already report cancellation?"}
+    gate -->|Yes| stopped["Return cancellation before creating the attempt"]
+    gate -->|No token or active token| start["Create the worker attempt"]
+    start -->|Terminal outcome| terminal["Return the worker outcome"]
+    start -->|Transient refusal| backoff["Policy admits a cancellable delay"]
+    start -->|Token fires| stop_active["Drop the caller's attempt future"]
+    backoff -->|Delay completes| gate
+    backoff -->|Token fires| stopped
+```
+
+After submission, the transport determines when its pending resources can be
+released. A waiter timing out in shared serving leaves the original pending
+owner eligible for an identical reply rejoin under the transport rules above.
+
 #### The residency table
 
 `Residency::of(task, engines)` (`worker/residency.rs`) is the one table.

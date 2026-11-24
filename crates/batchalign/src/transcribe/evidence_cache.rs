@@ -14,12 +14,15 @@ use crate::params::CachePolicy;
 use crate::types::worker_v2::{SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2};
 use crate::worker::speaker_result_v2::normalize_speaker_evidence_v2;
 
+mod producer;
 mod trace;
+pub use producer::SpeakerInferenceReply;
+use producer::{SpeakerEvidenceProducer, SpeakerWorkerInvocation};
 #[cfg(test)]
 use trace::SPEAKER_SEGMENT_DIGEST_REVISION;
 #[cfg(test)]
-pub(crate) use trace::SpeakerEvidenceCacheOutcome;
-pub(crate) use trace::{SpeakerEvidenceTrace, SpeakerProjectionRevision};
+pub use trace::SpeakerEvidenceCacheOutcome;
+pub use trace::{SpeakerEvidenceTrace, SpeakerProjectionRevision};
 use trace::{SpeakerEvidenceTraceSeed, SpeakerSegmentsDigest};
 
 const RAW_SPEAKER_EVIDENCE_SCHEMA_VERSION: u32 = 1;
@@ -79,11 +82,11 @@ impl PreparedSpeakerProviderMedia {
         })
     }
 
-    async fn verify(self) -> Result<Vec<u8>, SpeakerEvidenceCacheError> {
+    async fn verify(&self) -> Result<Vec<u8>, SpeakerEvidenceCacheError> {
         let bytes = tokio::fs::read(&self.source_path).await?;
         if SpeakerAudioSourceDigest::from_bytes(&bytes) != self.source_digest {
             return Err(SpeakerEvidenceCacheError::ProviderMediaDrift(
-                self.source_path,
+                self.source_path.clone(),
             ));
         }
         Ok(bytes)
@@ -113,7 +116,7 @@ struct DerivedSpeakerEvidenceKeyMaterial<'a> {
 /// speaker backend, and the speaker cache task's namespace type keep any other
 /// identity (an ASR engine's included) from scoping speaker-model evidence.
 #[derive(Debug, Clone)]
-pub(crate) struct SpeakerEvidenceModelRevision(BuildOwnedNamespace);
+pub struct SpeakerEvidenceModelRevision(BuildOwnedNamespace);
 
 impl SpeakerEvidenceModelRevision {
     pub(crate) fn for_backend(backend: SpeakerBackendV2) -> Self {
@@ -148,7 +151,7 @@ impl CacheNamespace for SpeakerEvidenceModelRevision {
 /// value invalidates only derived segments and deliberately preserves paid raw
 /// evidence. The cache enforces that too: its segments task takes this type.
 #[derive(Debug, Clone)]
-pub(crate) struct SpeakerNormalizationRevision(BuildOwnedNamespace);
+pub struct SpeakerNormalizationRevision(BuildOwnedNamespace);
 
 impl CacheNamespace for SpeakerNormalizationRevision {
     fn namespace(&self) -> &str {
@@ -157,7 +160,7 @@ impl CacheNamespace for SpeakerNormalizationRevision {
 }
 
 impl SpeakerNormalizationRevision {
-    fn current() -> Self {
+    const fn current() -> Self {
         Self(BuildOwnedNamespace::literal(SPEAKER_NORMALIZATION_REVISION))
     }
 
@@ -177,7 +180,7 @@ impl SpeakerNormalizationRevision {
 /// change inference semantics are owned here so downstream stages cannot
 /// accidentally invent partial cache keys.
 #[derive(Debug, Clone)]
-pub(crate) struct SpeakerEvidenceRequest {
+pub struct SpeakerEvidenceRequest {
     raw_cache_key: CacheKey,
     derived_cache_key: CacheKey,
     provider_media: PreparedSpeakerProviderMedia,
@@ -218,21 +221,21 @@ impl SpeakerEvidenceRequest {
         })
     }
 
-    pub(crate) fn cache_key(&self) -> &CacheKey {
+    #[cfg(test)]
+    const fn cache_key(&self) -> &CacheKey {
         &self.raw_cache_key
     }
 
     fn trace_seed(&self) -> SpeakerEvidenceTraceSeed {
         SpeakerEvidenceTraceSeed {
-            trace_schema_version: 1,
-            source_media_blake3: self.provider_media.source_digest.0.clone(),
+            source_media_blake3: self.provider_media.source_digest.clone(),
             audio_preparation_revision: SPEAKER_AUDIO_PREPARATION_REVISION,
             backend: self.backend,
             expected_speakers: self.expected_speakers.map(|count| count.0),
             model_revision: self.model_revision.as_str().to_owned(),
-            raw_evidence_key: self.raw_cache_key.to_string(),
+            raw_evidence_key: self.raw_cache_key.clone(),
             normalization_revision: self.normalization_revision.as_str().to_owned(),
-            derived_evidence_key: self.derived_cache_key.to_string(),
+            derived_evidence_key: self.derived_cache_key.clone(),
         }
     }
 
@@ -245,18 +248,19 @@ impl SpeakerEvidenceRequest {
         self
     }
 
-    async fn lookup(
-        &self,
-        cache: &UtteranceCache,
+    async fn lookup<'scope>(
+        &'scope self,
+        cache: &'scope UtteranceCache,
         policy: CachePolicy,
-    ) -> Result<SpeakerEvidenceLookup, SpeakerEvidenceCacheError> {
+    ) -> Result<SpeakerEvidenceLookup<'scope>, SpeakerEvidenceCacheError> {
         let lease = InferenceLease::acquire(&self.raw_cache_key, cache).await;
         match policy {
             CachePolicy::SkipCache if !lease.observed_commit_while_waiting() => {
                 return Ok(SpeakerEvidenceLookup::Miss(SpeakerEvidenceMiss {
-                    request: self.clone(),
+                    request: self,
+                    cache,
                     reason: SpeakerEvidenceMissReason::ForcedRefresh,
-                    _lease: lease,
+                    lease,
                 }));
             }
             CachePolicy::UseCache | CachePolicy::RequireCache | CachePolicy::SkipCache => {}
@@ -274,10 +278,7 @@ impl SpeakerEvidenceRequest {
                 serde_json::from_value(stored).map_err(|error| {
                     SpeakerEvidenceCacheError::InvalidCachedEvidence(error.to_string())
                 })?;
-            envelope.validate_for(self)?;
-            return Ok(SpeakerEvidenceLookup::DerivedHit(
-                ValidatedSpeakerEvidence::new(envelope.segments),
-            ));
+            return Ok(SpeakerEvidenceLookup::DerivedHit(envelope.admit_for(self)?));
         }
 
         let stored_raw = cache
@@ -292,11 +293,9 @@ impl SpeakerEvidenceRequest {
                 serde_json::from_value(stored).map_err(|error| {
                     SpeakerEvidenceCacheError::InvalidCachedEvidence(error.to_string())
                 })?;
-            let segments = envelope.validate_and_normalize_for(self)?;
-            store_derived_evidence(self, cache, &segments).await?;
-            return Ok(SpeakerEvidenceLookup::RawHit(
-                ValidatedSpeakerEvidence::new(segments),
-            ));
+            let evidence = envelope.admit_for(self)?;
+            store_derived_evidence(self, cache, &evidence).await?;
+            return Ok(SpeakerEvidenceLookup::RawHit(evidence));
         }
 
         match policy {
@@ -309,9 +308,10 @@ impl SpeakerEvidenceRequest {
         }
 
         Ok(SpeakerEvidenceLookup::Miss(SpeakerEvidenceMiss {
-            request: self.clone(),
+            request: self,
+            cache,
             reason: SpeakerEvidenceMissReason::NotFound,
-            _lease: lease,
+            lease,
         }))
     }
 
@@ -366,11 +366,10 @@ fn derived_cache_key(
 ///
 /// A hit contains only replayable evidence. Only the miss variant contains the
 /// state transition that can authorize an inference call.
-#[derive(Debug)]
-enum SpeakerEvidenceLookup {
+enum SpeakerEvidenceLookup<'scope> {
     DerivedHit(ValidatedSpeakerEvidence),
     RawHit(ValidatedSpeakerEvidence),
-    Miss(SpeakerEvidenceMiss),
+    Miss(SpeakerEvidenceMiss<'scope>),
 }
 
 /// The only service boundary accepted by the production evidence resolver.
@@ -379,16 +378,16 @@ enum SpeakerEvidenceLookup {
 /// it with the V2 speaker worker adapter. Both therefore exercise the same
 /// cache-hit/miss and commit control flow.
 #[async_trait::async_trait]
-pub(crate) trait SpeakerEvidenceInference: Sync {
+pub trait SpeakerEvidenceInference: Sync {
     async fn infer(
         &self,
         run: VerifiedSpeakerEvidenceRun,
-    ) -> Result<SpeakerInferenceEvidenceV2, ServerError>;
+    ) -> Result<SpeakerInferenceReply, ServerError>;
 }
 
 /// Stable causal origin of the speaker evidence used for one projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SpeakerEvidenceSource {
+pub enum SpeakerEvidenceSource {
     ReplayedDerived,
     DerivedFromRaw,
     Inferred(SpeakerEvidenceMissReason),
@@ -396,14 +395,18 @@ pub(crate) enum SpeakerEvidenceSource {
 
 /// How one request acquired validated speaker evidence.
 #[derive(Debug)]
-pub(crate) struct SpeakerEvidenceResolution {
+pub struct SpeakerEvidenceResolution {
     evidence: ValidatedSpeakerEvidence,
     source: SpeakerEvidenceSource,
     trace_seed: SpeakerEvidenceTraceSeed,
 }
 
 impl SpeakerEvidenceResolution {
-    pub(crate) fn source(&self) -> SpeakerEvidenceSource {
+    pub(crate) const fn cache_key(&self) -> &CacheKey {
+        &self.trace_seed.raw_evidence_key
+    }
+
+    pub(crate) const fn source(&self) -> SpeakerEvidenceSource {
         self.source
     }
 
@@ -418,42 +421,29 @@ impl SpeakerEvidenceResolution {
 
 /// Resolve evidence through the same cache-or-infer state machine in tests and
 /// production.
-pub(crate) async fn resolve_speaker_evidence<I: SpeakerEvidenceInference>(
+pub async fn resolve_speaker_evidence<I: SpeakerEvidenceInference>(
     request: &SpeakerEvidenceRequest,
     cache: &UtteranceCache,
     policy: CachePolicy,
     inference: &I,
 ) -> Result<SpeakerEvidenceResolution, SpeakerEvidenceResolutionError> {
-    let trace_seed = request.trace_seed();
     match request.lookup(cache, policy).await? {
         SpeakerEvidenceLookup::DerivedHit(evidence) => Ok(SpeakerEvidenceResolution {
             evidence,
             source: SpeakerEvidenceSource::ReplayedDerived,
-            trace_seed,
+            trace_seed: request.trace_seed(),
         }),
         SpeakerEvidenceLookup::RawHit(evidence) => Ok(SpeakerEvidenceResolution {
             evidence,
             source: SpeakerEvidenceSource::DerivedFromRaw,
-            trace_seed,
+            trace_seed: request.trace_seed(),
         }),
-        SpeakerEvidenceLookup::Miss(miss) => {
-            let authorization = miss.authorize_billable_inference();
-            let (run, permit) = authorization.into_run();
-            let reason = permit.reason();
-            let verified_run = run.verify().await?;
-            let raw_evidence = inference.infer(verified_run).await?;
-            let evidence = permit.commit(cache, raw_evidence).await?;
-            Ok(SpeakerEvidenceResolution {
-                evidence,
-                source: SpeakerEvidenceSource::Inferred(reason),
-                trace_seed,
-            })
-        }
+        SpeakerEvidenceLookup::Miss(miss) => miss.execute(inference).await,
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SpeakerEvidenceResolutionError {
+pub enum SpeakerEvidenceResolutionError {
     #[error(transparent)]
     Evidence(#[from] SpeakerEvidenceCacheError),
     #[error(transparent)]
@@ -462,18 +452,24 @@ pub(crate) enum SpeakerEvidenceResolutionError {
 
 /// Speaker turns that passed cache-envelope and timing validation.
 #[derive(Debug, Clone)]
-pub(crate) struct ValidatedSpeakerEvidence {
+pub struct ValidatedSpeakerEvidence {
     segments: Vec<SpeakerSegmentV2>,
     segments_digest: SpeakerSegmentsDigest,
+    producer: SpeakerEvidenceProducer,
 }
 
 impl ValidatedSpeakerEvidence {
-    fn new(segments: Vec<SpeakerSegmentV2>) -> Self {
+    fn admit(
+        segments: Vec<SpeakerSegmentV2>,
+        producer: SpeakerEvidenceProducer,
+    ) -> Result<Self, SpeakerEvidenceCacheError> {
+        validate_segments(&segments)?;
         let segments_digest = SpeakerSegmentsDigest::from_segments(&segments);
-        Self {
+        Ok(Self {
             segments,
             segments_digest,
-        }
+            producer,
+        })
     }
 
     pub(crate) fn segments(&self) -> &[SpeakerSegmentV2] {
@@ -487,58 +483,24 @@ impl ValidatedSpeakerEvidence {
 
 /// Why no reusable entry was returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SpeakerEvidenceMissReason {
+pub enum SpeakerEvidenceMissReason {
     NotFound,
     ForcedRefresh,
 }
 
-/// A proven cache miss. Its fields are private so other modules cannot forge
-/// permission to call the inference service.
-#[derive(Debug)]
-struct SpeakerEvidenceMiss {
-    request: SpeakerEvidenceRequest,
+/// A proven miss that owns inference authority for one request and cache.
+struct SpeakerEvidenceMiss<'scope> {
+    request: &'scope SpeakerEvidenceRequest,
+    cache: &'scope UtteranceCache,
     reason: SpeakerEvidenceMissReason,
-    _lease: InferenceLease,
-}
-
-impl SpeakerEvidenceMiss {
-    fn authorize_billable_inference(self) -> SpeakerInferenceAuthorization {
-        SpeakerInferenceAuthorization {
-            request: self.request,
-            reason: self.reason,
-            _lease: self._lease,
-        }
-    }
-}
-
-/// Capability required by the raw speaker-inference function.
-///
-/// The only constructor consumes [`SpeakerEvidenceMiss`]. A cache hit has no
-/// route to this type, so it cannot accidentally fall through to a paid call.
-#[derive(Debug)]
-struct SpeakerInferenceAuthorization {
-    request: SpeakerEvidenceRequest,
-    reason: SpeakerEvidenceMissReason,
-    _lease: InferenceLease,
-}
-
-/// Single-use capability accepted by the live speaker inference boundary.
-///
-/// Its field is private, so only a proven cache miss can create it. The
-/// inference trait consumes the capability, which rules out issuing a second
-/// paid request from the same authorization.
-#[derive(Debug)]
-struct AuthorizedSpeakerEvidenceRun {
-    provider_media: PreparedSpeakerProviderMedia,
-    backend: SpeakerBackendV2,
-    expected_speakers: Option<NumSpeakers>,
+    lease: InferenceLease,
 }
 
 /// Exact source bytes and request semantics admitted for one speaker run.
 ///
 /// Construction rereads and verifies the source after cache authorization.
 /// The live adapter consumes these bytes, not a separately supplied path.
-pub(crate) struct VerifiedSpeakerEvidenceRun {
+pub struct VerifiedSpeakerEvidenceRun {
     source_bytes: Vec<u8>,
     backend: SpeakerBackendV2,
     expected_speakers: Option<NumSpeakers>,
@@ -550,79 +512,44 @@ impl VerifiedSpeakerEvidenceRun {
     }
 }
 
-impl AuthorizedSpeakerEvidenceRun {
-    async fn verify(self) -> Result<VerifiedSpeakerEvidenceRun, SpeakerEvidenceCacheError> {
-        Ok(VerifiedSpeakerEvidenceRun {
-            source_bytes: self.provider_media.verify().await?,
-            backend: self.backend,
-            expected_speakers: self.expected_speakers,
-        })
-    }
-}
-
-impl SpeakerInferenceAuthorization {
-    fn into_run(self) -> (AuthorizedSpeakerEvidenceRun, SpeakerEvidenceCommitPermit) {
-        let Self {
-            request,
-            reason,
-            _lease,
-        } = self;
-        let run = AuthorizedSpeakerEvidenceRun {
-            provider_media: request.provider_media.clone(),
-            backend: request.backend,
-            expected_speakers: request.expected_speakers,
-        };
-        (
-            run,
-            SpeakerEvidenceCommitPermit {
-                request,
-                reason,
-                _lease,
-            },
-        )
-    }
-}
-
-/// Capability to durably commit exactly the evidence produced by one
-/// authorized speaker-inference run.
-#[derive(Debug)]
-struct SpeakerEvidenceCommitPermit {
-    request: SpeakerEvidenceRequest,
-    reason: SpeakerEvidenceMissReason,
-    _lease: InferenceLease,
-}
-
-impl SpeakerEvidenceCommitPermit {
-    fn reason(&self) -> SpeakerEvidenceMissReason {
-        self.reason
-    }
-
-    async fn commit(
+impl SpeakerEvidenceMiss<'_> {
+    /// Verify the source, submit once, and publish the reply back to the cache
+    /// that authorized it. The caller never holds a detached commit permit.
+    async fn execute<I: SpeakerEvidenceInference>(
         self,
-        cache: &UtteranceCache,
-        raw_evidence: SpeakerInferenceEvidenceV2,
-    ) -> Result<ValidatedSpeakerEvidence, SpeakerEvidenceCacheError> {
-        validate_evidence_backend(&raw_evidence, self.request.backend)?;
-        let segments = normalize_speaker_evidence_v2(&raw_evidence)
-            .map_err(SpeakerEvidenceCacheError::InvalidCachedEvidence)?;
-        validate_segments(&segments)?;
+        inference: &I,
+    ) -> Result<SpeakerEvidenceResolution, SpeakerEvidenceResolutionError> {
+        let run = VerifiedSpeakerEvidenceRun {
+            source_bytes: self.request.provider_media.verify().await?,
+            backend: self.request.backend,
+            expected_speakers: self.request.expected_speakers,
+        };
+        let reply = inference.infer(run).await?;
+        let (invocation, evidence) = reply.into_parts();
         let envelope = StoredRawSpeakerEvidence {
             schema_version: RAW_SPEAKER_EVIDENCE_SCHEMA_VERSION,
             request_fingerprint: self.request.raw_cache_key.to_string(),
-            evidence: raw_evidence,
+            evidence,
+            invocation: Some(invocation),
         };
-        let value = serde_json::to_value(&envelope)?;
-        cache
+        let evidence = envelope.normalize_for(self.request.backend)?;
+        let value = serde_json::to_value(&envelope).map_err(SpeakerEvidenceCacheError::from)?;
+        self.cache
             .put(
                 self.request.raw_cache_key.as_str(),
                 tasks::SPEAKER_DIARIZATION_RAW_EVIDENCE,
                 &self.request.model_revision,
                 &value,
             )
-            .await?;
-        store_derived_evidence(&self.request, cache, &segments).await?;
-        self._lease.mark_committed();
-        Ok(ValidatedSpeakerEvidence::new(segments))
+            .await
+            .map_err(SpeakerEvidenceCacheError::from)?;
+        store_derived_evidence(self.request, self.cache, &evidence).await?;
+        self.lease.mark_committed();
+        Ok(SpeakerEvidenceResolution {
+            evidence,
+            source: SpeakerEvidenceSource::Inferred(self.reason),
+            trace_seed: self.request.trace_seed(),
+        })
     }
 }
 
@@ -631,13 +558,16 @@ struct StoredRawSpeakerEvidence {
     schema_version: u32,
     request_fingerprint: String,
     evidence: SpeakerInferenceEvidenceV2,
+    // Pre-receipt rows carry the raw backend result without its worker request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    invocation: Option<SpeakerWorkerInvocation>,
 }
 
 impl StoredRawSpeakerEvidence {
-    fn validate_and_normalize_for(
+    fn admit_for(
         &self,
         request: &SpeakerEvidenceRequest,
-    ) -> Result<Vec<SpeakerSegmentV2>, SpeakerEvidenceCacheError> {
+    ) -> Result<ValidatedSpeakerEvidence, SpeakerEvidenceCacheError> {
         if self.schema_version != RAW_SPEAKER_EVIDENCE_SCHEMA_VERSION {
             return Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
                 "schema version {} does not match {}",
@@ -649,11 +579,20 @@ impl StoredRawSpeakerEvidence {
                 "request fingerprint does not match cache key".to_owned(),
             ));
         }
-        validate_evidence_backend(&self.evidence, request.backend)?;
+        self.normalize_for(request.backend)
+    }
+
+    fn normalize_for(
+        &self,
+        backend: SpeakerBackendV2,
+    ) -> Result<ValidatedSpeakerEvidence, SpeakerEvidenceCacheError> {
+        let producer = SpeakerEvidenceProducer::from_raw(self.invocation.clone(), &self.evidence);
+        if !producer.matches_backend(backend) {
+            return Err(backend_refusal(backend));
+        }
         let segments = normalize_speaker_evidence_v2(&self.evidence)
             .map_err(SpeakerEvidenceCacheError::InvalidCachedEvidence)?;
-        validate_segments(&segments)?;
-        Ok(segments)
+        ValidatedSpeakerEvidence::admit(segments, producer)
     }
 }
 
@@ -663,13 +602,16 @@ struct StoredDerivedSpeakerEvidence {
     raw_evidence_fingerprint: String,
     normalization_revision: String,
     segments: Vec<SpeakerSegmentV2>,
+    // Older normalized entries did not retain their producer observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer: Option<SpeakerEvidenceProducer>,
 }
 
 impl StoredDerivedSpeakerEvidence {
-    fn validate_for(
-        &self,
+    fn admit_for(
+        self,
         request: &SpeakerEvidenceRequest,
-    ) -> Result<(), SpeakerEvidenceCacheError> {
+    ) -> Result<ValidatedSpeakerEvidence, SpeakerEvidenceCacheError> {
         if self.schema_version != DERIVED_SPEAKER_EVIDENCE_SCHEMA_VERSION {
             return Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
                 "derived schema version {} does not match {}",
@@ -686,21 +628,25 @@ impl StoredDerivedSpeakerEvidence {
                 "derived normalization revision does not match request".to_owned(),
             ));
         }
-        validate_segments(&self.segments)
+        let producer = self.producer.unwrap_or(SpeakerEvidenceProducer::Unrecorded);
+        if !producer.matches_backend(request.backend) {
+            return Err(backend_refusal(request.backend));
+        }
+        ValidatedSpeakerEvidence::admit(self.segments, producer)
     }
 }
 
 async fn store_derived_evidence(
     request: &SpeakerEvidenceRequest,
     cache: &UtteranceCache,
-    segments: &[SpeakerSegmentV2],
+    evidence: &ValidatedSpeakerEvidence,
 ) -> Result<(), SpeakerEvidenceCacheError> {
-    validate_segments(segments)?;
     let envelope = StoredDerivedSpeakerEvidence {
         schema_version: DERIVED_SPEAKER_EVIDENCE_SCHEMA_VERSION,
         raw_evidence_fingerprint: request.raw_cache_key.to_string(),
         normalization_revision: request.normalization_revision.as_str().to_owned(),
-        segments: segments.to_vec(),
+        segments: evidence.segments.clone(),
+        producer: Some(evidence.producer.clone()),
     };
     cache
         .put(
@@ -713,27 +659,10 @@ async fn store_derived_evidence(
     Ok(())
 }
 
-fn validate_evidence_backend(
-    evidence: &SpeakerInferenceEvidenceV2,
-    backend: SpeakerBackendV2,
-) -> Result<(), SpeakerEvidenceCacheError> {
-    let matches = matches!(
-        (evidence, backend),
-        (
-            SpeakerInferenceEvidenceV2::PyannoteAi { .. },
-            SpeakerBackendV2::PyannoteAi
-        ) | (
-            SpeakerInferenceEvidenceV2::Pyannote { .. },
-            SpeakerBackendV2::Pyannote
-        )
-    );
-    if matches {
-        Ok(())
-    } else {
-        Err(SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
-            "speaker evidence provenance does not match requested backend {backend:?}"
-        )))
-    }
+fn backend_refusal(backend: SpeakerBackendV2) -> SpeakerEvidenceCacheError {
+    SpeakerEvidenceCacheError::InvalidCachedEvidence(format!(
+        "speaker evidence provenance does not match requested backend {backend:?}"
+    ))
 }
 
 fn validate_segments(segments: &[SpeakerSegmentV2]) -> Result<(), SpeakerEvidenceCacheError> {
@@ -757,7 +686,7 @@ fn validate_segments(segments: &[SpeakerSegmentV2]) -> Result<(), SpeakerEvidenc
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SpeakerEvidenceCacheError {
+pub enum SpeakerEvidenceCacheError {
     #[error("could not read prepared audio for speaker evidence: {0}")]
     Io(#[from] std::io::Error),
     #[error("speaker evidence cache failed: {0}")]

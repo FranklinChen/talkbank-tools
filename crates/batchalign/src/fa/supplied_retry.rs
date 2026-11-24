@@ -229,7 +229,7 @@ async fn infer_missing_input(
     }
     if let Some(raw) = projection.raw_evidence {
         super::cache_storage::store_unit_evidence(
-            context.services.pipeline.cache,
+            context.services.recording_cache,
             &projection.timings,
             raw,
         )

@@ -79,19 +79,19 @@ pub(super) struct FaAdmission {
 /// `MissingTimingRegenerationEvidence` take one, so no other code can assert
 /// an obligation from a bare span.
 #[derive(Clone)]
-pub(crate) struct OutstandingTiming {
+pub struct OutstandingTiming {
     header_location: talkbank_model::Location,
     origin: TimingObligationOrigin,
 }
 
 impl OutstandingTiming {
     /// Where the declaration that owes timing is.
-    pub(crate) fn header_location(&self) -> talkbank_model::Location {
+    pub(crate) const fn header_location(&self) -> talkbank_model::Location {
         self.header_location
     }
 
     /// Why the source owes it.
-    pub(crate) fn origin(&self) -> TimingObligationOrigin {
+    pub(crate) const fn origin(&self) -> TimingObligationOrigin {
         self.origin
     }
 }
@@ -208,7 +208,7 @@ impl AlignableMedia {
 /// processed FA result cannot carry a document reconciled any other way
 /// (Chatter's `reconcile_media_timing` is public; its state alone is not
 /// enough to build one of these).
-pub(crate) struct ReconciledOutput(MediaTimingState);
+pub struct ReconciledOutput(MediaTimingState);
 
 impl ReconciledOutput {
     /// Borrow the reconciled document.
@@ -289,7 +289,7 @@ impl FaAdmission {
 }
 
 /// The source disposition and model remain one owned value across retries.
-pub(crate) struct FaWorkingDocument {
+pub struct FaWorkingDocument {
     disposition: FaWorkingDisposition,
     main_bullets: crate::chat_ops::fa::MainBulletAuthority,
 }
@@ -301,7 +301,7 @@ enum FaWorkingDisposition {
 
 /// Constructible only from Chatter's source-bound admission. Outside callers
 /// cannot pair an unchecked model with a free-standing admission token.
-pub(crate) struct ActiveFaDocument {
+pub struct ActiveFaDocument {
     file: crate::chat_ops::fa::SourceBoundDocument,
     admission: FaAdmission,
     anchors: crate::chat_ops::fa::AnchorIndex,
@@ -310,7 +310,7 @@ pub(crate) struct ActiveFaDocument {
 
 /// One recognizer pass retained with the source that it observed.
 #[derive(Debug)]
-pub(crate) struct RetainedUtrPass {
+pub struct RetainedUtrPass {
     pub(super) pass: crate::api::UtrPass,
     pub(super) observation: crate::chat_ops::fa::utr::UtrObservation,
     pub(super) producer: crate::provenance::UtrProducer,
@@ -344,7 +344,7 @@ impl FaWorkingDocument {
     /// Test access to a preserved source; production reaches it through the
     /// route (`NoRecordingRoute::PassThrough`).
     #[cfg(test)]
-    pub(crate) fn unchanged(&self) -> Option<&AdmittedSourceChat<'static>> {
+    pub(crate) const fn unchanged(&self) -> Option<&AdmittedSourceChat<'static>> {
         match &self.disposition {
             FaWorkingDisposition::Preserved(source) => Some(source),
             FaWorkingDisposition::Active(_) => None,
@@ -354,7 +354,7 @@ impl FaWorkingDocument {
     /// Test access to the active model; production reaches it through the
     /// route (`ActiveAlignment::active_mut`), which has no preserved case.
     #[cfg(test)]
-    pub(crate) fn active_mut(&mut self) -> Option<&mut ActiveFaDocument> {
+    pub(crate) const fn active_mut(&mut self) -> Option<&mut ActiveFaDocument> {
         match &mut self.disposition {
             FaWorkingDisposition::Preserved(_) => None,
             FaWorkingDisposition::Active(active) => Some(active),
@@ -437,7 +437,7 @@ impl ActiveFaDocument {
 /// refresh ran before any cache was consulted, so nothing could ask for a
 /// re-alignment of such a file short of deleting its `%wor` by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RealignmentRequest {
+pub enum RealignmentRequest {
     /// Reuse complete retained timing; read the recording only where words
     /// are untimed.
     NotRequested,
@@ -464,7 +464,7 @@ impl From<crate::params::CachePolicy> for RealignmentRequest {
 /// Media resolution used to run before this decision for every file, so a
 /// complete `%wor` file or a declared no-op whose recording was not where the
 /// search looked failed although nothing on its route reads audio.
-pub(crate) enum AlignRoute {
+pub enum AlignRoute {
     /// Nothing on this route reads audio: the file task for it holds no
     /// recording, by type.
     WithoutRecording(NoRecordingRoute),
@@ -474,7 +474,7 @@ pub(crate) enum AlignRoute {
 }
 
 /// The two routes that finish a file without opening its recording.
-pub(crate) enum NoRecordingRoute {
+pub enum NoRecordingRoute {
     /// `@Options: NoAlign`: the source is returned byte for byte. No worker
     /// request either.
     PassThrough(AdmittedSourceChat<'static>),
@@ -525,7 +525,7 @@ impl AlignRoute {
 
 /// Proof that a file's every alignable word carries reusable `%wor` timing
 /// and no re-alignment was asked for. Issued only by [`AlignRoute::decide`].
-pub(crate) struct CompleteWor {
+pub struct CompleteWor {
     document: ActiveFaDocument,
     main_bullets: crate::chat_ops::fa::MainBulletAuthority,
 }
@@ -547,7 +547,7 @@ impl CompleteWor {
 /// An active file whose alignment needs the recording, with the prior it is
 /// aligned against when one was declared. Issued only by
 /// [`AlignRoute::decide`]; the file task holds one across retries.
-pub(crate) struct ActiveAlignment {
+pub struct ActiveAlignment {
     document: ActiveFaDocument,
     main_bullets: crate::chat_ops::fa::MainBulletAuthority,
     before: Option<super::RetainedFaPrior>,
@@ -566,12 +566,12 @@ impl ActiveAlignment {
     }
 
     /// The model, for the UTR pre-pass to mutate.
-    pub(crate) fn active_mut(&mut self) -> &mut ActiveFaDocument {
+    pub(crate) const fn active_mut(&mut self) -> &mut ActiveFaDocument {
         &mut self.document
     }
 
     /// The declared prior, when the run is incremental.
-    pub(crate) fn before(&self) -> Option<&super::RetainedFaPrior> {
+    pub(crate) const fn before(&self) -> Option<&super::RetainedFaPrior> {
         self.before.as_ref()
     }
 
@@ -588,7 +588,7 @@ impl ActiveAlignment {
 }
 
 #[cfg(test)]
-pub(crate) fn read_fa_source(text: &str) -> Result<FaWorkingDocument, ServerError> {
+pub fn read_fa_source(text: &str) -> Result<FaWorkingDocument, ServerError> {
     read_fa_source_named(
         text,
         TranscriptName::Anonymous,
@@ -605,7 +605,7 @@ enum AdmittedAlignmentSource<'source> {
     NeverTimed(PendingTimingChatFile),
 }
 
-pub(crate) fn read_fa_source_named(
+pub fn read_fa_source_named(
     text: &str,
     name: TranscriptName<'_>,
     policy: crate::chat_ops::fa::MainBulletPolicy,
@@ -859,6 +859,11 @@ mod tests {
 %wor:\thello \u{15}0_200\u{15} world \u{15}200_500\u{15} .\n\
 @End\n";
 
+    /// Guards: Completed recovery passes retain distinct producer, tokens and correspondence in emitted evidence.
+    /// Kind: journey
+    /// Not a type: Serializable real evidence can lose or conflate observations across two completed passes.
+    /// State: Two timed recognition results, source CHAT and private debug sidecars.
+    /// Concurrency: Each write completes before subsequent inspection.
     #[tokio::test]
     async fn recovery_passes_keep_their_own_tokens_correspondence_and_producer() {
         use crate::api::AudioPositionSeconds;
@@ -1046,6 +1051,11 @@ mod tests {
         );
     }
 
+    /// Guards: Full recovery after abandoned partial recognition keeps both original per-window and final evidence.
+    /// Kind: journey
+    /// Not a type: A second valid recognition can incorrectly displace partial bytes that remain reportable.
+    /// State: One actual source, retained partial/full observations and a sidecar writer.
+    /// Concurrency: One owner carries the outcomes to a private file.
     #[tokio::test]
     async fn abandoned_partial_recognition_survives_full_recovery_and_sidecar() {
         use crate::api::AudioPositionSeconds;
@@ -1144,6 +1154,11 @@ mod tests {
         assert_eq!(pass["tokens"].as_array().unwrap().len(), 2);
     }
 
+    /// Guards: UTR evidence from another source identity cannot be applied.
+    /// Kind: transcript
+    /// Not a type: Two individually admitted transcripts can provide unrelated evidence to the same callback.
+    /// State: Separate valid CHAT inputs with different bound source identities.
+    /// Concurrency: The callback owns its independent evidence.
     #[tokio::test]
     async fn recovery_rejects_utr_evidence_from_a_different_source_identity() {
         let mut working = read_named(&never_aligned("@Media:\tsample, audio\n"))
@@ -1188,6 +1203,11 @@ mod tests {
         ));
     }
 
+    /// Guards: Original supplied bullets survive recovery and omission of an utterance is a source-binding failure.
+    /// Kind: transcript
+    /// Not a type: A transformed valid document may silently lose an utterance used as an original timing witness.
+    /// State: Original and changed CHAT, timed tokens and exact retained bullet trace.
+    /// Concurrency: Source-owned evidence is read without ambient state.
     #[tokio::test]
     async fn source_bullets_survive_recovery_and_missing_utterances_are_refused() {
         use crate::chat_ops::fa::coordinates::{Ms, Recording};
@@ -1281,6 +1301,11 @@ mod tests {
         );
     }
 
+    /// Guards: Moving a working window preserves the original supplied bullet in its trace.
+    /// Kind: transcript
+    /// Not a type: Prepared timing can move legitimately while the trace still owes the original answer.
+    /// State: A prepared source with differing original and working endpoints.
+    /// Concurrency: The fixture owns the entire preparation.
     #[test]
     fn original_supplied_bullet_is_not_replaced_by_the_working_window() {
         use crate::chat_ops::fa::coordinates::{Ms, Recording};
@@ -1322,6 +1347,11 @@ mod tests {
         );
     }
 
+    /// Guards: Identical lexical sources keep their independent supplied timing bounds.
+    /// Kind: transcript
+    /// Not a type: Equal tokens do not establish that two transcripts supplied identical timing bytes.
+    /// State: Two actual CHAT documents with equal words and distinct original bullets.
+    /// Concurrency: Both source owners remain independent.
     #[test]
     fn identical_words_in_independent_sources_keep_their_own_bullets() {
         use crate::chat_ops::fa::coordinates::{Ms, Recording};
@@ -1352,6 +1382,11 @@ mod tests {
         }
     }
 
+    /// Guards: Pending timing reports missing localization and preserves the admitted partial-output policy.
+    /// Kind: transcript
+    /// Not a type: Actual corrupt words and lexical material can leave a timing obligation unresolved.
+    /// State: One source requiring timing and its recorded projection outcome.
+    /// Concurrency: The source and result are in-memory values.
     #[test]
     fn pending_timing_reports_missing_localization_without_write_authority() {
         use crate::chat_ops::fa::AnchorIndex;
@@ -1462,6 +1497,11 @@ mod tests {
         );
     }
 
+    /// Guards: Word-only regeneration remains pending across retries and cannot publish an untimed result.
+    /// Kind: transcript
+    /// Not a type: Successively derived actual models can still omit the only original timing support.
+    /// State: A word-timed source and two distinct attempted projections.
+    /// Concurrency: The original admitted input is owned by the fixture.
     #[test]
     fn word_only_regeneration_is_pending_across_retries_and_cannot_write_untimed_output() {
         let word_only = SOURCE.replace(" . \u{15}0_500\u{15}", " .");
@@ -1570,6 +1610,11 @@ mod tests {
             .count()
     }
 
+    /// Guards: Both complete and partial valid word tiers remain available on repeated attempts.
+    /// Kind: transcript
+    /// Not a type: Retaining a source model does not establish which actual word tiers survive the attempt projection.
+    /// State: Two legitimate word-tier populations and repeated attempts from one each.
+    /// Concurrency: No side effects beyond the working copies.
     #[test]
     fn active_plan_retains_complete_and_partial_valid_word_tiers_across_attempts() {
         for source in [
@@ -1592,6 +1637,11 @@ mod tests {
         }
     }
 
+    /// Guards: The regeneration exemption removes broken word tiers and preserves validation of retained material.
+    /// Kind: transcript
+    /// Not a type: Raw CHAT can contain both exempt word-tier faults and independent retained faults.
+    /// State: Synthetic tier corruption, valid controls and actual admission snapshots.
+    /// Concurrency: The test holds its own source variants.
     #[test]
     fn regeneration_removes_corrupt_word_tiers_but_does_not_exempt_retained_faults() {
         let corrupt_words = SOURCE.replace("0_200", "invalid");
@@ -1628,6 +1678,11 @@ mod tests {
         }
     }
 
+    /// Guards: Source preservation refuses retained faults and provides no mutation route.
+    /// Kind: transcript
+    /// Not a type: A valid policy request still has to be applied to actual CHAT header and tier bytes.
+    /// State: Two preservation-triggering inputs and corrupt retained-timing controls.
+    /// Concurrency: Inputs are immutable and separate.
     #[test]
     fn preservation_has_no_mutation_route_or_word_regeneration_exemption() {
         let no_align = SOURCE
@@ -1646,6 +1701,11 @@ mod tests {
         assert!(read_fa_source(&ca.replace("0_200", "invalid")).is_err());
     }
 
+    /// Guards: Named FA rejects wrong recording names and admits the correctly named source.
+    /// Kind: transcript
+    /// Not a type: The name from CHAT and the filesystem filename enter admission from independent sources.
+    /// State: Synthetic named transcripts with a matching and mismatched stem.
+    /// Concurrency: The fixture owns all text and names.
     #[test]
     fn named_admission_refuses_media_filename_mismatch_before_any_working_state() {
         let error = read_fa_source_named(
@@ -1704,6 +1764,11 @@ mod tests {
     /// failed "timed CHAT has no @Media declaration", reported as an internal
     /// error to restart; one with `@Media: name, audio` was refused E544, the
     /// condition align exists to remove. Only `, unlinked` got through.
+    /// Guards: Pre-alignment admission distinguishes unlinked, linked and unsupported source states.
+    /// Kind: transcript
+    /// Not a type: Actual CHAT header, timing and filename fields can express different eligibility cases.
+    /// State: A matrix of textual declarations and real parser admission outcomes.
+    /// Concurrency: Each case owns independent bytes.
     #[test]
     fn admission_admits_the_pre_alignment_states_and_refuses_the_rest_before_any_work() {
         // Admitted: unlinked owes nothing; linked-without-timing owes timing.
@@ -1784,6 +1849,11 @@ mod tests {
     /// a message naming the note and the remedies instead of failing the
     /// output gate's generic E544. Under `keep` and `exact` the note's
     /// bullet is written as given, which is timing: nothing more is owed.
+    /// Guards: A note-only source owes useful timing unless the note retains it.
+    /// Kind: transcript
+    /// Not a type: A real transcript note can be timed even though no spoken material is localizable.
+    /// State: Synthetic named CHAT, note bullets and original remedy diagnostics.
+    /// Concurrency: Owned source values enter each route separately.
     #[test]
     fn a_linked_source_timed_only_on_a_note_owes_timing_unless_the_note_keeps_it() {
         use crate::chat_ops::fa::MainBulletPolicy;
@@ -1869,6 +1939,11 @@ mod tests {
     /// other refusal of the same source stands, with its own finding and
     /// without E544 (regeneration admission deferred it), and a file align
     /// will not change keeps its E544.
+    /// Guards: Never-timed admission exempts only the intended media-linkage rule.
+    /// Kind: transcript
+    /// Not a type: Raw source may violate unrelated validation rules beside the eligible linkage diagnostic.
+    /// State: Distinct invalid CHAT inputs and their actual validator codes.
+    /// Concurrency: No mutation or external validation service.
     #[test]
     fn the_never_timed_admission_exempts_only_the_linkage_obligation() {
         let linked = never_aligned("@Media:\tsample, audio\n");
@@ -1924,6 +1999,11 @@ mod tests {
     /// UTR, so a linked source with no timing could never be written: it is
     /// refused at admission, as input, instead of after FA. The same source
     /// under `unlinked` owes nothing and is admitted.
+    /// Guards: Exact supplied bullets reject a linked untimed source while keeping the supported policies.
+    /// Kind: transcript
+    /// Not a type: A requested bullet policy and raw source timing are independent until admission relates them.
+    /// State: Two keep policies over a named transcript without usable bullets.
+    /// Concurrency: Pure validation of test-owned bytes.
     #[test]
     fn exact_bullets_refuse_a_linked_untimed_source_before_any_work() {
         use crate::chat_ops::fa::MainBulletPolicy;
@@ -1970,6 +2050,11 @@ mod tests {
     /// document is timed, and what admission refuses, the transition refuses
     /// too. This is the mirror's only guard until the pinned Chatter exposes
     /// the transition's precondition as a type (see [`AlignableMedia`]).
+    /// Guards: FA admission and the media/timing transition accept the same valid header population.
+    /// Kind: transcript
+    /// Not a type: The actual raw declarations can disagree with an independently implemented transition contract.
+    /// State: Known source variants and their post-alignment CHAT from the real transition.
+    /// Concurrency: All declared examples are test-owned.
     #[test]
     fn admitted_media_is_exactly_what_the_transition_accepts() {
         let parser = crate::chat_parser();
@@ -2030,6 +2115,11 @@ mod tests {
     /// document and the request: a complete `%wor` file is refreshed without
     /// the recording, the same file under a re-alignment request needs it,
     /// a partly timed file needs it, and a declared no-op is passed through.
+    /// Guards: The actual source and realignment request choose audio, refresh or pass-through.
+    /// Kind: transcript
+    /// Not a type: Source words and tiers must first be observed before classifying a requested command.
+    /// State: Admitted CHAT fixtures paired with distinct cache-derived policies.
+    /// Concurrency: The test owns the policy and each transcript.
     #[test]
     fn the_route_is_decided_at_admission_from_the_document_and_the_request() {
         const COMPLETE: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -2077,6 +2167,11 @@ mod tests {
 
     /// The request is read from the FA cache policy: skipping the cache is
     /// the one way to ask for a complete file to be aligned again.
+    /// Guards: Only explicit skip-cache requests opt into realignment.
+    /// Kind: policy
+    /// Not a type: Different valid cache modes need an intentional mapping to the separate alignment request.
+    /// State: Pure cache modes and expected realignment selections.
+    /// Concurrency: No storage or workers.
     #[test]
     fn a_realignment_request_is_the_skip_cache_policy() {
         use crate::params::CachePolicy;

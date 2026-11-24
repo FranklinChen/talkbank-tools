@@ -578,7 +578,7 @@ pub const DUMMY_CHAT: &str = "\
 @End
 ";
 
-/// CHAT content with @Options: NoAlign header.
+/// CHAT content with @Options: `NoAlign` header.
 pub const NOALIGN_CHAT: &str = "\
 @UTF8
 @Begin
@@ -674,7 +674,7 @@ pub fn default_options_for(command: &str) -> CommandOptions {
 /// Submit a content-mode job, poll to completion, return all file results.
 ///
 /// Uses the `transcribe` command (goes through `process` path, compatible
-/// with test-echo workers that don't advertise infer_tasks).
+/// with test-echo workers that don't advertise `infer_tasks`).
 pub async fn run_job_to_completion(
     client: &reqwest::Client,
     base_url: &str,
@@ -702,7 +702,7 @@ pub async fn run_job_to_completion(
 /// default for it is the smallest count that asks a real question. Every other
 /// command carries one speaker, which is what the old single literal meant for
 /// them and still means.
-fn speakers_for_command(command: batchalign::api::ReleasedCommand) -> NumSpeakers {
+const fn speakers_for_command(command: batchalign::api::ReleasedCommand) -> NumSpeakers {
     match command {
         batchalign::api::ReleasedCommand::TranscribeS => NumSpeakers(2),
         _ => NumSpeakers(1),

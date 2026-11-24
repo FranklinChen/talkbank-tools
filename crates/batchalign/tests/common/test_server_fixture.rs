@@ -128,7 +128,7 @@ enum FixtureCommand {
         /// `None`, the fixture's canned test-echo config is used.
         ///
         /// Boxed because `ServerConfig` is large (~560 bytes); keeping it
-        /// inline made `FixtureCommand` lopsided (clippy::large_enum_variant).
+        /// inline made `FixtureCommand` lopsided (`clippy::large_enum_variant`).
         config_override: Box<Option<ServerConfig>>,
         reply: oneshot::Sender<Result<(SessionId, SessionSnapshot), String>>,
     },
@@ -185,7 +185,7 @@ impl TestServerSession {
         &self.base_url
     }
 
-    pub fn client(&self) -> &reqwest::Client {
+    pub const fn client(&self) -> &reqwest::Client {
         &self.client
     }
 

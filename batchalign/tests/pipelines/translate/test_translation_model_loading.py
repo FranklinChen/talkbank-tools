@@ -358,13 +358,11 @@ def _load_translate_engine_fixture(
     """
     from batchalign.worker._model_loading.translation import load_translation_engine
     from batchalign.worker._types import (
-        InferTask,
         WorkerBootstrapRuntime,
     )
 
     translation = load_translation_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.TRANSLATE,
             lang="spa",
             num_speakers=1,
             engine_overrides={"translate": engine_wire_name},
@@ -514,15 +512,19 @@ class TestSeamlessRuntimeInvariants:
         # and the callable together. The batch-infer handler in
         # ``_infer_hosts.py`` refuses work while it is None, so the
         # loader must satisfy that.
+        """Guards: Seamless load reports the engine that actually supplied the callable.
+        Kind: contract
+        Not a type: Having a typed translation host cannot ensure which real model was selected.
+        State: Opt-in integration with the installed Seamless model and its observed engine name.
+        Concurrency: The fixture uses its own load result; model setup follows the integration markers.
+        """
         from batchalign.worker._model_loading.translation import load_translation_engine
         from batchalign.worker._types import (
-            InferTask,
             WorkerBootstrapRuntime,
         )
 
         translation = load_translation_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.TRANSLATE,
                 lang="spa",
                 num_speakers=1,
                 engine_overrides={"translate": "seamless"},
@@ -541,15 +543,19 @@ class TestSeamlessRuntimeInvariants:
         # one on Seamless) must be able to load each independently
         # without the Google load polluting Seamless state or vice
         # versa. Test the transition explicitly.
+        """Guards: Loading Seamless after Google leaves both backend identities available.
+        Kind: contract
+        Not a type: A callable host can still share mutable backend state with another loaded adapter.
+        State: Two actual translation loaders in one opt-in process, with no job submitted.
+        Concurrency: The same process loads them in order and retains both host values.
+        """
         from batchalign.worker._model_loading.translation import load_translation_engine
         from batchalign.worker._types import (
-            InferTask,
             WorkerBootstrapRuntime,
         )
 
         translation = load_translation_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.TRANSLATE,
                 lang="spa",
                 num_speakers=1,
                 engine_overrides={"translate": "google"},
@@ -564,7 +570,6 @@ class TestSeamlessRuntimeInvariants:
 
         translation = load_translation_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.TRANSLATE,
                 lang="spa",
                 num_speakers=1,
                 engine_overrides={"translate": "seamless"},
@@ -649,15 +654,19 @@ class TestNllbRuntimeInvariants:
     """Loader-state contract + backend-switching contract."""
 
     def test_backend_loader_populates_state(self) -> None:
+        """Guards: NLLB load reports the engine identity associated with its callable.
+        Kind: contract
+        Not a type: A successful typed translation return could still name a different loaded backend.
+        State: Opt-in NLLB integration loads the model and observes the reported engine.
+        Concurrency: Each case holds a separate load result in its marked integration process.
+        """
         from batchalign.worker._model_loading.translation import load_translation_engine
         from batchalign.worker._types import (
-            InferTask,
             WorkerBootstrapRuntime,
         )
 
         translation = load_translation_engine(
             WorkerBootstrapRuntime(
-                task=InferTask.TRANSLATE,
                 lang="spa",
                 num_speakers=1,
                 engine_overrides={"translate": "nllb"},

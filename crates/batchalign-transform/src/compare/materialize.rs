@@ -213,6 +213,7 @@ fn replace_or_add_mor_tier(chat_file: &mut ChatFile, utterance_index: usize, mor
 /// This keeps compare projection in the CHAT AST:
 /// - exact utterance matches copy aligned dependent tiers wholesale
 /// - full gold-word coverage without exact utterance identity still projects `%mor`
+#[must_use]
 pub fn project_gold_structurally(
     main_file: &ChatFile,
     gold_file: &ChatFile,

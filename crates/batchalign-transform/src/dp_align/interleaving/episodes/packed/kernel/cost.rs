@@ -31,7 +31,8 @@ impl PackedSearchStage {
         Self::Traceback,
     ];
     /// Diagnostic spelling.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Preparation => "preparation",
             Self::Forward => "forward",
@@ -56,7 +57,8 @@ pub enum PackedSearchStatus {
 }
 impl PackedSearchStatus {
     /// Diagnostic spelling.
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Completed => "completed",
             Self::Refused(_) => "refused",
@@ -78,12 +80,13 @@ pub enum PackedSearchWork {
 }
 impl PackedSearchWork {
     /// Known lower bound on reserved/charged abstract operations, not time.
-    pub fn lower_bound(self) -> u128 {
+    #[must_use]
+    pub const fn lower_bound(self) -> u128 {
         match self {
             Self::Exact(units) | Self::AtLeast(units) => units,
         }
     }
-    fn plus(self, other: Self) -> Self {
+    const fn plus(self, other: Self) -> Self {
         match (self, other) {
             (Self::Exact(a), Self::Exact(b)) => match a.checked_add(b) {
                 Some(total) => Self::Exact(total),
@@ -111,43 +114,53 @@ pub struct PackedSearchCost {
 }
 impl PackedSearchCost {
     /// Observed completion or refusal, not a certificate.
-    pub fn status(&self) -> PackedSearchStatus {
+    #[must_use]
+    pub const fn status(&self) -> PackedSearchStatus {
         self.status
     }
     /// Stage of the last checkpoint/operation.
-    pub fn last_stage(&self) -> PackedSearchStage {
+    #[must_use]
+    pub const fn last_stage(&self) -> PackedSearchStage {
         self.last_stage
     }
     /// Projected source population.
-    pub fn source_words(&self) -> usize {
+    #[must_use]
+    pub const fn source_words(&self) -> usize {
         self.source_words
     }
     /// Projected reference population.
-    pub fn reference_words(&self) -> usize {
+    #[must_use]
+    pub const fn reference_words(&self) -> usize {
         self.reference_words
     }
     /// Actual source graph population.
-    pub fn graph_nodes(&self) -> usize {
+    #[must_use]
+    pub const fn graph_nodes(&self) -> usize {
         self.graph_nodes
     }
     /// Admitted checkpoint stride.
-    pub fn checkpoint_stride(&self) -> usize {
+    #[must_use]
+    pub const fn checkpoint_stride(&self) -> usize {
         self.checkpoint_stride
     }
     /// Admitted conservative storage payload, not process RSS.
-    pub fn reserved_score_units(&self) -> usize {
+    #[must_use]
+    pub const fn reserved_score_units(&self) -> usize {
         self.reserved_score_units
     }
     /// Geometric maximum packed words per viable row.
-    pub fn profile_width_bound(&self) -> usize {
+    #[must_use]
+    pub const fn profile_width_bound(&self) -> usize {
         self.profile_width_bound
     }
     /// Maximum width of rows actually produced in the observed prefix.
-    pub fn peak_profile_words(&self) -> usize {
+    #[must_use]
+    pub const fn peak_profile_words(&self) -> usize {
         self.peak_profile_words
     }
     /// Reserved/charged diagnostic work by stage.
-    pub fn charged(&self, stage: PackedSearchStage) -> PackedSearchWork {
+    #[must_use]
+    pub const fn charged(&self, stage: PackedSearchStage) -> PackedSearchWork {
         self.charged[stage as usize]
     }
     /// Total charged work. Preparation includes prospective metadata reserves.
@@ -189,7 +202,7 @@ impl<'p, 'g, 's, 'c, C: WorkControl + ?Sized> Ledger<'p, 'g, 's, 'c, C> {
             peak: Cell::new(0),
         }
     }
-    pub(super) fn plan(&self) -> &'p Plan<'g, 's> {
+    pub(super) const fn plan(&self) -> &'p Plan<'g, 's> {
         self.plan
     }
     /// Counting cannot refuse execution. Cancellation and proof/resource
@@ -199,7 +212,7 @@ impl<'p, 'g, 's, 'c, C: WorkControl + ?Sized> Ledger<'p, 'g, 's, 'c, C> {
         let charged = &self.charged[S::ID as usize];
         charged.set(charged.get().plus(PackedSearchWork::Exact(units as u128)));
     }
-    pub(super) fn stage<S: Stage>(&self) -> Scope<'_, 'p, 'g, 's, 'c, C, S> {
+    pub(super) const fn stage<S: Stage>(&self) -> Scope<'_, 'p, 'g, 's, 'c, C, S> {
         Scope {
             ledger: self,
             stage: PhantomData,

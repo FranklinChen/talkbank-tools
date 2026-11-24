@@ -19,7 +19,7 @@
 //! | loaded | [`LoadedModelV2`] | the same pair, plus what the runtime saw |
 //! | composition | [`AsrRequestedModelsV2`] / [`AsrModelIdentityV2`] | which models an engine needs, by role |
 //!
-//! Requested and observed are deliberately NOT one field. A ModelScope loader
+//! Requested and observed are deliberately NOT one field. A `ModelScope` loader
 //! is given a tag and can report no commit at all; a cloud provider is given a
 //! parameter and reports nothing. Collapsing the two would force those cases to
 //! invent an observation, which is the defect this module exists to remove.
@@ -49,7 +49,7 @@ use crate::domain::{InvalidStampSafeText, StampJoiner, StampSafeText};
 // Identifier and revision newtypes
 // ---------------------------------------------------------------------------
 
-/// A model identifier as BA3 names it: a Hugging Face repo id, a ModelScope
+/// A model identifier as BA3 names it: a Hugging Face repo id, a `ModelScope`
 /// repo id, a ggml file name, or a provider's own service name.
 ///
 /// Stamp-safe text, because provenance records it byte for byte.
@@ -72,7 +72,7 @@ impl ModelIdV2 {
 
     /// The identifier as stamp-safe text, for writing into a provenance field.
     #[must_use]
-    pub fn as_stamp_text(&self) -> &StampSafeText {
+    pub const fn as_stamp_text(&self) -> &StampSafeText {
         &self.0
     }
 }
@@ -279,13 +279,13 @@ impl schemars::JsonSchema for ContentDigestV2 {
     }
 }
 
-/// A release tag as a hub publishes it, for example ModelScope's `v2.0.4`.
+/// A release tag as a hub publishes it, for example `ModelScope`'s `v2.0.4`.
 ///
-/// A tag is NOT a commit and is never recorded as one. ModelScope's public API
+/// A tag is NOT a commit and is never recorded as one. `ModelScope`'s public API
 /// exposes no commit behind a tag (checked 2026-09-15: the revisions endpoint
 /// returns tag names and timestamps only, and the tag and branch endpoints do
 /// not exist), so a tag is the most exact thing that can honestly be said
-/// about those models. If ModelScope later exposes the commit, the manifest
+/// about those models. If `ModelScope` later exposes the commit, the manifest
 /// pins that instead and this variant stops being used for it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -306,7 +306,7 @@ impl RevisionTagV2 {
 
     /// The tag as stamp-safe text.
     #[must_use]
-    pub fn as_stamp_text(&self) -> &StampSafeText {
+    pub const fn as_stamp_text(&self) -> &StampSafeText {
         &self.0
     }
 }
@@ -371,7 +371,7 @@ impl ProviderParameterV2 {
 
     /// The parameter as stamp-safe text.
     #[must_use]
-    pub fn as_stamp_text(&self) -> &StampSafeText {
+    pub const fn as_stamp_text(&self) -> &StampSafeText {
         &self.0
     }
 }
@@ -468,7 +468,7 @@ pub enum ObservedRevisionV2 {
         /// The observed digest.
         digest: ContentDigestV2,
     },
-    /// The runtime exposes no revision at all. True of every ModelScope loader
+    /// The runtime exposes no revision at all. True of every `ModelScope` loader
     /// and every cloud provider; provider-side drift is invisible, and this
     /// variant is how the type says so rather than inventing a value.
     NotExposed,
@@ -607,7 +607,7 @@ impl AsrModelRoleV2 {
 
     /// The role name as stamp-safe text, checked at compile time.
     #[must_use]
-    pub fn stamp_name(self) -> StampSafeText {
+    pub const fn stamp_name(self) -> StampSafeText {
         match self {
             Self::Asr => const { StampSafeText::from_static(AsrModelRoleV2::Asr.wire_name()) },
             Self::Aligner => {
@@ -646,9 +646,9 @@ pub enum AsrCompositionShapeV2 {
     Whisper,
     /// Qwen3-ASR: the model and its forced aligner.
     Qwen,
-    /// FunASR Paraformer: the model, its voice-activity and punctuation models.
+    /// `FunASR` Paraformer: the model, its voice-activity and punctuation models.
     Paraformer,
-    /// FunASR SenseVoice: the model and its voice-activity model.
+    /// `FunASR` `SenseVoice`: the model and its voice-activity model.
     SenseVoice,
     /// whisper.cpp in-process: one ggml weights file.
     NativeWhisper,
@@ -664,7 +664,7 @@ impl AsrCompositionShapeV2 {
     /// The shapes one backend may report.
     ///
     /// Exhaustive over the backend, with no catch-all, so a new ASR backend
-    /// must say which compositions it can produce. FunAudio is the one backend
+    /// must say which compositions it can produce. `FunAudio` is the one backend
     /// with two: `funaudio` spans materially different models, and which one
     /// runs depends on the checkpoint the request selected.
     #[must_use]
@@ -733,7 +733,7 @@ pub enum AsrRequestedModelsV2 {
         /// The forced aligner loaded with it.
         aligner: RequestedModelV2,
     },
-    /// FunASR Paraformer, with its voice-activity and punctuation models.
+    /// `FunASR` Paraformer, with its voice-activity and punctuation models.
     Paraformer {
         /// The Paraformer checkpoint.
         asr: RequestedModelV2,
@@ -742,9 +742,9 @@ pub enum AsrRequestedModelsV2 {
         /// The punctuation model.
         punc: RequestedModelV2,
     },
-    /// FunASR SenseVoice, with its voice-activity model.
+    /// `FunASR` `SenseVoice`, with its voice-activity model.
     SenseVoice {
-        /// The SenseVoice checkpoint.
+        /// The `SenseVoice` checkpoint.
         asr: RequestedModelV2,
         /// The voice-activity model.
         vad: RequestedModelV2,
@@ -874,7 +874,7 @@ pub enum AsrModelIdentityV2 {
         /// The forced aligner loaded with it.
         aligner: LoadedModelV2,
     },
-    /// FunASR Paraformer, with its voice-activity and punctuation models.
+    /// `FunASR` Paraformer, with its voice-activity and punctuation models.
     Paraformer {
         /// The Paraformer checkpoint that ran.
         asr: LoadedModelV2,
@@ -883,9 +883,9 @@ pub enum AsrModelIdentityV2 {
         /// The punctuation model.
         punc: LoadedModelV2,
     },
-    /// FunASR SenseVoice, with its voice-activity model.
+    /// `FunASR` `SenseVoice`, with its voice-activity model.
     SenseVoice {
-        /// The SenseVoice checkpoint that ran.
+        /// The `SenseVoice` checkpoint that ran.
         asr: LoadedModelV2,
         /// The voice-activity model.
         vad: LoadedModelV2,
@@ -959,7 +959,7 @@ impl AsrModelIdentityV2 {
     /// Total: every composition has at least one model, and `models()` puts
     /// the primary role first in every arm.
     #[must_use]
-    pub fn primary(&self) -> (AsrModelRoleV2, &LoadedModelV2) {
+    pub const fn primary(&self) -> (AsrModelRoleV2, &LoadedModelV2) {
         match self {
             Self::Whisper { asr }
             | Self::Qwen { asr, .. }
@@ -1053,7 +1053,7 @@ impl AsrModelIdentityV2 {
 /// Whether what a worker observed can follow from what was asked.
 ///
 /// The whole matrix, written out. An exact pin must be observed exactly; a tag
-/// may come back unexposed (ModelScope) or as the commit behind it if a hub
+/// may come back unexposed (`ModelScope`) or as the commit behind it if a hub
 /// ever exposes one; a provider parameter can only come back unexposed; and an
 /// unpinned model MUST come back with a commit, which is the entire point of
 /// leaving it unpinned rather than refusing the job.
@@ -1312,7 +1312,7 @@ mod tests {
         ));
     }
 
-    /// FunAudio is the one backend with two legal compositions, because the
+    /// `FunAudio` is the one backend with two legal compositions, because the
     /// checkpoint decides which models load.
     #[test]
     fn funaudio_admits_both_of_its_compositions_and_nothing_else() {
@@ -1328,7 +1328,7 @@ mod tests {
         }
     }
 
-    /// A tag may come back unexposed, and that is not a defect: ModelScope
+    /// A tag may come back unexposed, and that is not a defect: `ModelScope`
     /// tells the loader nothing. A provider parameter likewise. But an exact
     /// pin that comes back unexposed IS a defect, because the loader was
     /// supposed to prove what it loaded.
@@ -1428,7 +1428,7 @@ mod tests {
         );
     }
 
-    /// A ModelScope model stamps the TAG it was pinned to, because that is the
+    /// A `ModelScope` model stamps the TAG it was pinned to, because that is the
     /// most exact thing that can honestly be said about it.
     #[test]
     fn an_unexposed_revision_stamps_what_was_requested() {

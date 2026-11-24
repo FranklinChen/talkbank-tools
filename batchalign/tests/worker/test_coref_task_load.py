@@ -34,7 +34,10 @@ from batchalign.worker._model_loading.bootstrap import (
 from batchalign.worker._types import (
     BatchInferRequest,
     InferTask,
+    ModelStartup,
+    ProfileTarget,
     TaskLoad,
+    TaskTarget,
     WorkerBootstrapRuntime,
     WorkerProfile,
     _state,
@@ -98,8 +101,10 @@ def _fresh_worker(monkeypatch) -> Iterator[None]:
     _state.__init__()  # type: ignore[misc]
 
 
-def _coref_worker(lang: str) -> WorkerBootstrapRuntime:
-    return WorkerBootstrapRuntime(task=InferTask.COREF, lang=lang, num_speakers=1)
+def _coref_worker(lang: str) -> ModelStartup:
+    return ModelStartup(
+        TaskTarget(InferTask.COREF), WorkerBootstrapRuntime(lang=lang, num_speakers=1)
+    )
 
 
 def _coref_request(tmp_path: Path, name: str) -> ExecuteRequestV2:
@@ -168,9 +173,16 @@ def test_ensure_task_prepares_the_model_and_releases_it() -> None:
 
 
 def test_ensure_task_prepares_the_model_on_a_profile_worker() -> None:
+    """Guards: A Stanza profile launches empty and initializes exactly one coref host when requested.
+    Kind: contract
+    Not a type: A valid profile can take an incorrect lazy-load route and initialise a model early.
+    State: The isolated worker fixture substitutes a counting pipeline while executing real load logic.
+    Concurrency: The fixture restores process-local worker state after the case.
+    """
     start_worker(
-        WorkerBootstrapRuntime(
-            task=None, lang="eng", num_speakers=1, profile=WorkerProfile.STANZA
+        ModelStartup(
+            ProfileTarget(WorkerProfile.STANZA),
+            WorkerBootstrapRuntime(lang="eng", num_speakers=1),
         )
     )
     assert _CountingPipeline.constructions == []

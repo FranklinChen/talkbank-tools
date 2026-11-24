@@ -11,7 +11,7 @@ use crate::worker::InferTask;
 /// Map a V2 inference task enum to the pool's infer-task vocabulary: the
 /// task a worker serving it is bootstrapped for. Total: every V2 task has a
 /// host.
-pub(super) fn infer_task_for_execute_v2(task: InferenceTaskV2) -> InferTask {
+pub(super) const fn infer_task_for_execute_v2(task: InferenceTaskV2) -> InferTask {
     match task {
         InferenceTaskV2::Morphosyntax => InferTask::Morphosyntax,
         InferenceTaskV2::Utseg => InferTask::Utseg,
@@ -71,7 +71,7 @@ pub(super) fn execute_request_overrides(request: &ExecuteRequestV2) -> EngineOve
     }
 }
 
-pub(super) fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
+pub(super) const fn asr_backend_engine(backend: AsrBackendV2) -> AsrEngineName {
     match backend {
         AsrBackendV2::LocalWhisper => AsrEngineName::Whisper,
         AsrBackendV2::WhisperHub => AsrEngineName::WhisperHub,
@@ -100,7 +100,7 @@ mod tests {
         }
     }
 
-    /// Guards: the wire forced_alignment task selects the infrastructure FA host.
+    /// Guards: the wire `forced_alignment` task selects the infrastructure FA host.
     /// Kind: policy
     /// Not a type: the wire and pool task vocabularies have different variants,
     /// and the many-to-one host mapping remains an explicit semantic choice.

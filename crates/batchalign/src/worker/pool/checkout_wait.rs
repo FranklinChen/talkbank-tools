@@ -54,7 +54,7 @@ use crate::worker::error::WorkerError;
 /// Told when pool work under this task starts and stops waiting, and for
 /// what: a saturated pool, or host memory. Implemented by the runner, which
 /// owns file progress.
-pub(crate) trait PoolWaitObserver: Send + Sync {
+pub trait PoolWaitObserver: Send + Sync {
     /// A wait for `wait` began.
     fn waiting(&self, wait: PoolWait);
     /// That wait ended: it was served, failed, or was dropped.
@@ -72,7 +72,7 @@ tokio::task_local! {
 ///
 /// Worker startup captures this observation before moving to the pool's
 /// runtime, then reinstalls it for the lifetime of that startup.
-pub(crate) async fn observing_pool_waits<F: Future>(
+pub async fn observing_pool_waits<F: Future>(
     observer: Arc<dyn PoolWaitObserver>,
     work: F,
 ) -> F::Output {
@@ -81,7 +81,7 @@ pub(crate) async fn observing_pool_waits<F: Future>(
 
 /// Whether a wait is being shown to a file's progress.
 #[derive(Clone)]
-pub(crate) enum Observation {
+pub enum Observation {
     /// The task has an observer; it is told when the wait begins and when it
     /// ends.
     Reported(Arc<dyn PoolWaitObserver>),
@@ -127,7 +127,7 @@ impl Observation {
 /// Owns the visible lifetime of a loading operation. Dropping the operation,
 /// including on cancellation or refusal, closes its observation. Request
 /// progress cannot be passed to this port.
-pub(crate) struct ObservedModelLoad(Observation);
+pub struct ObservedModelLoad(Observation);
 
 impl ObservedModelLoad {
     pub(crate) fn begin() -> Self {
@@ -165,7 +165,7 @@ impl Drop for ObservedModelLoad {
 /// A queued host-memory wait's observer: the file task it runs under, told
 /// the wait is for host memory. Built where the wait begins, inside the
 /// task, so the task local is read there.
-pub(crate) struct MemoryWaitObserver(Observation);
+pub struct MemoryWaitObserver(Observation);
 
 impl MemoryWaitObserver {
     /// The observer of the task this runs in.
@@ -274,14 +274,14 @@ pub(super) struct GroupCounts {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use std::sync::Mutex;
 
     use super::*;
 
     /// Records what it is told, in order.
     #[derive(Default)]
-    pub(crate) struct RecordingObserver {
+    pub struct RecordingObserver {
         pub(crate) events: Mutex<Vec<&'static str>>,
         pub(crate) loads: Mutex<Vec<crate::store::ModelLoadChange>>,
     }

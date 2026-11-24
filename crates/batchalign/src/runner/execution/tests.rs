@@ -33,7 +33,7 @@ fn build_empty_host() -> DirectExecutionHost {
     DirectExecutionHost::new(store, engine)
 }
 
-/// Guards: an ID absent from the current registry produces JobNotInLocalStore.
+/// Guards: an ID absent from the current registry produces `JobNotInLocalStore`.
 /// Kind: boundary
 /// Not a type: the consuming claim graph starts only after the actor observes
 /// the registry. A lookup can miss or a job can be deleted before that observation.

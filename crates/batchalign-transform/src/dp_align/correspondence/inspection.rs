@@ -19,6 +19,7 @@ pub struct CompletedInspection {
 }
 impl CompletedInspection {
     /// Read-only diagnostic path, never common-correspondence authority.
+    #[must_use]
     pub fn path(&self) -> &[AlignResult] {
         &self.path
     }
@@ -44,19 +45,23 @@ pub struct InspectionBudget {
 }
 impl InspectionBudget {
     /// Which operation was denied.
-    pub fn kind(self) -> InspectionLimit {
+    #[must_use]
+    pub const fn kind(self) -> InspectionLimit {
         self.kind
     }
     /// Fixed production limit in that operation's unit.
-    pub fn limit(self) -> usize {
+    #[must_use]
+    pub const fn limit(self) -> usize {
         self.limit
     }
     /// Completed/reserved work, or peak score cells admitted so far.
-    pub fn used(self) -> usize {
+    #[must_use]
+    pub const fn used(self) -> usize {
         self.used
     }
     /// Known requirement of the denied operation, saturated on overflow.
-    pub fn required_at_least(self) -> usize {
+    #[must_use]
+    pub const fn required_at_least(self) -> usize {
         self.required_at_least
     }
 }
@@ -118,7 +123,7 @@ pub(super) struct PendingInspection<'a, C: WorkControl + ?Sized> {
     meter: Meter<'a, C>,
 }
 impl<'a, C: WorkControl + ?Sized> PendingInspection<'a, C> {
-    pub(super) fn bind(
+    pub(super) const fn bind(
         payload: &'a [String],
         reference: &'a [String],
         mode: MatchMode,

@@ -252,7 +252,7 @@ const COMMAND_SPECS: &[CatalogEntry] = &[
 ];
 
 /// Return the static recipe-runner command catalog.
-pub(crate) fn recipe_command_catalog() -> &'static [CatalogEntry] {
+pub const fn recipe_command_catalog() -> &'static [CatalogEntry] {
     COMMAND_SPECS
 }
 

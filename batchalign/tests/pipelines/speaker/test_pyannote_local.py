@@ -47,7 +47,12 @@ def test_pinned_artifact_refuses_moving_or_escaping_inputs(value: object) -> Non
 def test_the_speaker_load_builds_only_pinned_artifacts(
     monkeypatch, tmp_path: Path, tampered: str | None
 ) -> None:
-    """The runtime must consume the same immutable graph named by the cache."""
+    """Guards: Pinned pipeline, segmentation and embedding files are admitted by digest and the loaded handle retains their observed graph.
+    Kind: contract
+    Not a type: Downloaded file content and the rewritten native configuration are external bytes that can disagree.
+    State: Real fixture files and the production verifier observe bytes while download and pipeline construction are stubbed.
+    Concurrency: Monkeypatch and private temporary files isolate each case.
+    """
 
     graph = load_local_pyannote_model_graph()
     config_path = tmp_path / "config.yaml"
@@ -125,6 +130,11 @@ def test_the_speaker_load_builds_only_pinned_artifacts(
     handle = load_local_pyannote_pipeline()
 
     assert handle.pipeline == {"pipeline": loaded[0]}
+    assert handle.loaded_graph.model_dump() == {
+        "pipeline_config_sha256": graph.pipeline.sha256,
+        "segmentation_sha256": graph.segmentation.sha256,
+        "embedding_sha256": graph.embedding.sha256,
+    }
     assert downloads == [
         (
             graph.pipeline.repo_id,

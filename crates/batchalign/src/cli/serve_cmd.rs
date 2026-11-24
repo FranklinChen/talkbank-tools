@@ -207,15 +207,7 @@ pub async fn start(
 
         // Start new session so it survives CLI exit
         #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-        }
+        crate::detached::start_in_new_session(&mut cmd);
 
         // On Windows, CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS ensures
         // the server survives after the spawning CLI exits, analogous to
@@ -287,6 +279,7 @@ const STOPPED_RECORDS: u32 = 3;
 /// The longest `serve stop` can take: each recorded process in turn may use
 /// its whole stop budget. The floor for a harness that kills the command on
 /// a timeout (`tests/live_deadline`, `CliRunBudget::ServeStop`).
+#[must_use]
 pub fn stop_budget() -> std::time::Duration {
     daemon::stop_budget_per_process() * STOPPED_RECORDS
 }

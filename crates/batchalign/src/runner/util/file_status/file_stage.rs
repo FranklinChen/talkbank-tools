@@ -13,7 +13,7 @@ use crate::api::FileProgressStage;
 /// lower-level FA/transcribe pipeline progress labels that feed the same file
 /// status channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FileStage {
+pub enum FileStage {
     /// Generic processing for worker-owned media commands.
     Processing,
     /// Initial file read/setup work.

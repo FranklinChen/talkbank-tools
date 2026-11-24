@@ -49,6 +49,7 @@ pub struct PreparedFaPayloadV2 {
 impl PreparedFaPayloadV2 {
     /// Build the prepared payload from the existing production-domain infer
     /// item.
+    #[must_use]
     pub fn from_infer_item(infer_item: &FaInferItem) -> Self {
         Self {
             words: infer_item.words.clone(),
@@ -106,7 +107,7 @@ impl FaCandidateBackend {
             FaBackendV2::Qwen3 => Self::Qwen,
         }
     }
-    fn wire(&self) -> FaBackendV2 {
+    const fn wire(&self) -> FaBackendV2 {
         match self {
             Self::Whisper { .. } => FaBackendV2::Whisper,
             Self::Wave2vec => FaBackendV2::Wave2vec,
@@ -175,6 +176,7 @@ impl PreparedFaCandidateV2 {
     }
 
     /// Cross into the generic worker envelope at its transport boundary.
+    #[must_use]
     pub fn into_request(self) -> ExecuteRequestV2 {
         let backend = self.backend.wire();
         let attention_capture = match self.backend {
@@ -316,7 +318,7 @@ pub async fn build_forced_alignment_request_v2(
 /// A field read off the engine's row in `FA_ENGINES`, which is where an
 /// unrouted engine now fails to compile: the roster match this used to be was
 /// one of fifteen places a new engine had to be named.
-pub(crate) fn fa_backend_for_engine(engine: FaEngineName) -> FaBackendV2 {
+pub(crate) const fn fa_backend_for_engine(engine: FaEngineName) -> FaBackendV2 {
     engine.worker_backend()
 }
 
@@ -325,7 +327,10 @@ pub(crate) fn fa_backend_for_engine(engine: FaEngineName) -> FaBackendV2 {
 /// Only the input-shaping choice reaches this boundary. Gap healing is a
 /// downstream output policy and cannot select a different model request.
 /// Legacy `--pauses` still selects character-spaced Whisper input.
-pub(crate) fn text_mode_for(backend: FaBackendV2, whisper_text: WhisperTextMode) -> FaTextModeV2 {
+pub(crate) const fn text_mode_for(
+    backend: FaBackendV2,
+    whisper_text: WhisperTextMode,
+) -> FaTextModeV2 {
     match (backend, whisper_text) {
         // Only the onset-only decoder benefits: the wave2vec models align
         // against their own label set and never see this text.

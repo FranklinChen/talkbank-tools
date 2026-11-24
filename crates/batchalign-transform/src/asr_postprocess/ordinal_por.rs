@@ -88,7 +88,7 @@ const THOUSAND_STEM: &str = "milésim";
 
 /// Indicator ordinals are a Portuguese convention; every entry point is
 /// gated on the ISO 639-3 code.
-fn is_portuguese(lang: &str) -> bool {
+const fn is_portuguese(lang: &str) -> bool {
     lang.eq_ignore_ascii_case("por")
 }
 
@@ -102,7 +102,7 @@ enum OrdinalGender {
 }
 
 impl OrdinalGender {
-    fn from_indicator(ch: char) -> Option<Self> {
+    const fn from_indicator(ch: char) -> Option<Self> {
         match ch {
             MASCULINE_INDICATOR => Some(Self::Masculine),
             FEMININE_INDICATOR => Some(Self::Feminine),
@@ -111,7 +111,7 @@ impl OrdinalGender {
     }
 
     /// The final vowel every ordinal component takes in this gender.
-    fn vowel(self) -> char {
+    const fn vowel(self) -> char {
         match self {
             Self::Masculine => 'o',
             Self::Feminine => 'a',
@@ -128,7 +128,7 @@ enum GrammaticalNumber {
 
 impl GrammaticalNumber {
     /// Suffix every ordinal component takes in this number.
-    fn suffix(self) -> &'static str {
+    const fn suffix(self) -> &'static str {
         match self {
             Self::Singular => "",
             Self::Plural => "s",

@@ -54,7 +54,7 @@ use super::{WorkerProbeRefusal, probe_command_worker};
 /// needs to know which model the host could not serve.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot run 'align' for language '{lang}': {cause}")]
-pub(crate) struct FaWorkerRefusal {
+pub struct FaWorkerRefusal {
     /// The file's declared primary language.
     lang: LanguageCode3,
     /// What the probe of the worker keyed by that language refused on.
@@ -77,7 +77,7 @@ impl FaWorkerRefusal {
 /// The only way to a [`FaCacheNamespace`] inside the FA pipeline is
 /// [`Self::admit`], so no file can be aligned under a namespace that was not
 /// read off the worker keyed by its own language.
-pub(crate) struct FaWorkerAdmission {
+pub struct FaWorkerAdmission {
     /// The pool the probe and the file's requests both reach.
     pool: Arc<WorkerPool>,
     /// The job's typed options; the worker key is derived from them.
@@ -116,7 +116,7 @@ struct ProbeMemo<K, V> {
 }
 
 impl<K: Ord + Clone, V: Clone> ProbeMemo<K, V> {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             cells: Mutex::new(BTreeMap::new()),
         }
@@ -154,7 +154,7 @@ impl<K: Ord + Clone, V: Clone> ProbeMemo<K, V> {
 
 impl FaWorkerAdmission {
     /// The gate for one job. Nothing is probed until a file asks.
-    pub(crate) fn new(
+    pub(crate) const fn new(
         pool: Arc<WorkerPool>,
         options: CommandOptions,
         gpu: Arc<GpuModelPlan>,

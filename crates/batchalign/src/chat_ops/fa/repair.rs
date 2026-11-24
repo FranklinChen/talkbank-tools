@@ -155,9 +155,9 @@ struct BulletEntry {
     line_idx: usize,
     /// Speaker code.
     speaker: String,
-    /// Current bullet start_ms.
+    /// Current bullet `start_ms`.
     start_ms: u64,
-    /// Current bullet end_ms.
+    /// Current bullet `end_ms`.
     end_ms: u64,
     /// What repair may do to this bullet (`ReadOnly` under
     /// `--main-bullets keep` for a bullet the input gave).
@@ -741,9 +741,10 @@ fn remove_outside_lis(
     };
     let mut inside: Vec<usize> = Vec::new();
     for &entry_idx in segment {
-        match within(entries[entry_idx].start_ms) {
-            true => inside.push(entry_idx),
-            false => removals.push(entries[entry_idx].line_idx),
+        if within(entries[entry_idx].start_ms) {
+            inside.push(entry_idx)
+        } else {
+            removals.push(entries[entry_idx].line_idx)
         }
     }
     if inside.len() <= 1 {

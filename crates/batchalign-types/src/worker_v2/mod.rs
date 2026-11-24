@@ -46,7 +46,7 @@
 //! ## Current Status of Task Migration
 //!
 //! - **Fully migrated to V2:** FA (forced-alignment), ASR (automatic speech recognition),
-//!   Speaker ID, OpenSmile, AVQI, Morphosyntax, Utseg, Translation, Coref.
+//!   Speaker ID, `OpenSmile`, AVQI, Morphosyntax, Utseg, Translation, Coref.
 //!
 //! - **Still using V1 (frozen):** Direct Python model inference via `dispatch_batch_infer`
 //!   (JSON-lines interface in [`crate::worker`]). Used for backward compatibility and
@@ -58,10 +58,10 @@
 //!
 //! Prepared artifacts (audio, text) carry explicit ownership semantics in their references:
 //!
-//! - **PreparedAudioRefV2**: Filesystem path + metadata (sample rate, channels, frame count,
+//! - **`PreparedAudioRefV2`**: Filesystem path + metadata (sample rate, channels, frame count,
 //!   byte range). Rust allocates the artifact; Python reads via `mmap` or file I/O.
 //!
-//! - **PreparedTextRefV2**: Filesystem path + encoding hint. Rust prepares and owns the file;
+//! - **`PreparedTextRefV2`**: Filesystem path + encoding hint. Rust prepares and owns the file;
 //!   Python reads and deserializes.
 //!
 //! - **Lifecycle:** Rust creates artifacts in the worker's temp directory before sending the request.

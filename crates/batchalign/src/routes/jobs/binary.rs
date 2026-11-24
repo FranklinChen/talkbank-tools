@@ -28,7 +28,7 @@ use tokio::io::AsyncReadExt;
         (status = 404, description = "No successful binary result", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn get_binary_result(
+pub async fn get_binary_result(
     State(state): State<Arc<AppState>>,
     Path((job_id, filename)): Path<(String, String)>,
 ) -> Result<Response, ServerError> {

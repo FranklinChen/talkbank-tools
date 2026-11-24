@@ -17,7 +17,7 @@ use crate::parse::parse_lenient;
 mod response_admission;
 mod retokenization_annotations;
 
-pub(crate) fn parse_chat(text: &str) -> ChatFile {
+pub fn parse_chat(text: &str) -> ChatFile {
     let parser = TreeSitterParser::new().expect("parser init");
     parser.parse_chat_file(text).expect_built()
 }
@@ -36,7 +36,7 @@ fn one_utterance(main_tier: &str) -> String {
 
 /// One-utterance fixture with an explicit `@Languages` list, for the
 /// code-switching cases where a second declared language is the point.
-pub(crate) fn one_utterance_in(languages: &str, main_tier: &str) -> String {
+pub fn one_utterance_in(languages: &str, main_tier: &str) -> String {
     format!(
         "@UTF8\n\
          @Begin\n\
@@ -48,7 +48,7 @@ pub(crate) fn one_utterance_in(languages: &str, main_tier: &str) -> String {
     )
 }
 
-pub(crate) fn first_utterance(chat: &ChatFile) -> &Utterance {
+pub fn first_utterance(chat: &ChatFile) -> &Utterance {
     for line in &chat.lines {
         if let talkbank_model::model::Line::Utterance(u) = line {
             return u;
@@ -67,49 +67,28 @@ fn classify_filler_only() {
     validate_morphosyntax(&mut chat);
 }
 
+/// Guards: An utterance with no Mor-alignable words is labelled by the one word kind it holds (filler, fragment, nonword, untranscribed, omission), and by the mixed label when it holds several, so the not-applicable evidence names what was actually there.
+/// Kind: policy
+/// Not a type: `WordKind` is a closed enum matched exhaustively from chatter's `WordCategory`, so no category can fall into the linguistic count; which reason each kind maps to, and that several kinds are reported as mixed, is a labelling choice only classification of real parsed utterances shows.
+/// State: None. Main tiers parsed in memory by chatter's parser; no model or worker.
+/// Concurrency: None. Each row parses its own transcript and classifies it before the next; no row shares a value with another.
 #[test]
-fn classify_multiple_fillers() {
-    let chat = parse_chat(&one_utterance("&-hmm &-hmm ."));
-    assert_eq!(
-        classify_not_applicable(first_utterance(&chat)),
-        NotApplicableReason::FillerOnly,
-    );
-}
-
-#[test]
-fn classify_fragment_only() {
-    let chat = parse_chat(&one_utterance("&+le ."));
-    assert_eq!(
-        classify_not_applicable(first_utterance(&chat)),
-        NotApplicableReason::FragmentOnly,
-    );
-}
-
-#[test]
-fn classify_nonword_only() {
-    let chat = parse_chat(&one_utterance("&~ach ."));
-    assert_eq!(
-        classify_not_applicable(first_utterance(&chat)),
-        NotApplicableReason::NonwordOnly,
-    );
-}
-
-#[test]
-fn classify_untranscribed_only() {
-    let chat = parse_chat(&one_utterance("xxx ."));
-    assert_eq!(
-        classify_not_applicable(first_utterance(&chat)),
-        NotApplicableReason::UntranscribedOnly,
-    );
-}
-
-#[test]
-fn classify_mixed_nonlinguistic() {
-    let chat = parse_chat(&one_utterance("&-hmm &+le ."));
-    assert_eq!(
-        classify_not_applicable(first_utterance(&chat)),
-        NotApplicableReason::MixedNonLinguistic,
-    );
+fn classify_names_the_one_kind_present() {
+    for (main_tier, expected) in [
+        ("&-hmm &-hmm .", NotApplicableReason::FillerOnly),
+        ("&+le .", NotApplicableReason::FragmentOnly),
+        ("&~ach .", NotApplicableReason::NonwordOnly),
+        ("xxx .", NotApplicableReason::UntranscribedOnly),
+        ("0is .", NotApplicableReason::OmissionOnly),
+        ("&-hmm &+le .", NotApplicableReason::MixedNonLinguistic),
+    ] {
+        let chat = parse_chat(&one_utterance(main_tier));
+        assert_eq!(
+            classify_not_applicable(first_utterance(&chat)),
+            expected,
+            "{main_tier}"
+        );
+    }
 }
 
 #[test]

@@ -107,7 +107,7 @@ enum Kept {
 
 impl KeptBullet {
     /// Start, in milliseconds.
-    pub(super) fn start_ms(self) -> u64 {
+    pub(super) const fn start_ms(self) -> u64 {
         match self.0 {
             Kept::Extent { start_ms, .. } => start_ms,
             Kept::Empty { at_ms } => at_ms,
@@ -115,7 +115,7 @@ impl KeptBullet {
     }
 
     /// End, in milliseconds.
-    pub(super) fn end_ms(self) -> u64 {
+    pub(super) const fn end_ms(self) -> u64 {
         match self.0 {
             Kept::Extent { end_ms, .. } => end_ms,
             Kept::Empty { at_ms } => at_ms,
@@ -124,7 +124,7 @@ impl KeptBullet {
 
     /// The span words are clamped into. Empty for an `Empty` bullet, so every
     /// timed word falls outside it.
-    fn span(self) -> TimeSpan {
+    const fn span(self) -> TimeSpan {
         TimeSpan::new(self.start_ms(), self.end_ms())
     }
 
@@ -138,7 +138,7 @@ impl KeptBullet {
     }
 
     /// Whether the live bullet is exactly this one.
-    fn is_live(self, live: Option<&Bullet>) -> bool {
+    const fn is_live(self, live: Option<&Bullet>) -> bool {
         match live {
             Some(bullet) => {
                 bullet.timing.start_ms == self.start_ms() && bullet.timing.end_ms == self.end_ms()
@@ -730,10 +730,13 @@ impl MainBulletAuthority {
                     None => kept_absent += 1,
                     Some(live) => return Err(KeptBulletError::gained(utterance_idx, live)),
                 },
-                GivenSlot::Kept(kept) => match kept.is_live(live) {
-                    true => kept_count += 1,
-                    false => return Err(KeptBulletError::drifted(utterance_idx, kept, live)),
-                },
+                GivenSlot::Kept(kept) => {
+                    if kept.is_live(live) {
+                        kept_count += 1
+                    } else {
+                        return Err(KeptBulletError::drifted(utterance_idx, kept, live));
+                    }
+                }
                 GivenSlot::OffRecord(given) => match (given, live) {
                     (None, None) => {}
                     (Some(kept), live) if kept.is_live(live) => kept_count += 1,
@@ -746,38 +749,39 @@ impl MainBulletAuthority {
                 },
             }
         }
-        match working_utterances == given.by_utterance.len() {
-            true => Ok(KeptBulletsHeld(HeldBullets::AllHeld {
+        if working_utterances == given.by_utterance.len() {
+            Ok(KeptBulletsHeld(HeldBullets::AllHeld {
                 kept: kept_count,
                 kept_absent,
-            })),
-            false => Err(KeptBulletError::UtteranceMissing {
+            }))
+        } else {
+            Err(KeptBulletError::UtteranceMissing {
                 input_utterances: given.by_utterance.len(),
                 working_utterances,
-            }),
+            })
         }
     }
 }
 
 /// Source-bound retry candidates; only original main-bullet admission builds it.
-pub(crate) struct SuppliedRetrySources(Vec<SuppliedRetrySource>);
+pub struct SuppliedRetrySources(Vec<SuppliedRetrySource>);
 
 /// Complete original words paired with one positive, recording-contained,
 /// supplied window. Only the original main-bullet authority constructs it.
-pub(crate) struct SuppliedRetrySource {
+pub struct SuppliedRetrySource {
     index: UtteranceIdx,
     words: super::split::NonEmptyWords,
     window: super::coordinates::FaWindow,
 }
 
 impl SuppliedRetrySource {
-    pub(crate) fn index(&self) -> UtteranceIdx {
+    pub(crate) const fn index(&self) -> UtteranceIdx {
         self.index
     }
     pub(crate) fn words(&self) -> &[super::FaWord] {
         self.words.as_slice()
     }
-    pub(crate) fn window(&self) -> super::coordinates::FaWindow {
+    pub(crate) const fn window(&self) -> super::coordinates::FaWindow {
         self.window
     }
     pub(crate) fn request(&self) -> super::GroupUnit<'_> {
@@ -798,7 +802,7 @@ impl SuppliedRetrySources {
 pub(super) struct OwnedImposedBullets(MainBulletAuthority);
 
 impl OwnedImposedBullets {
-    pub(super) fn proof(&self) -> ImposedBullets<'_> {
+    pub(super) const fn proof(&self) -> ImposedBullets<'_> {
         ImposedBullets { authority: &self.0 }
     }
     pub(super) fn restore_and_verify(
@@ -927,10 +931,13 @@ impl ImposedBullets<'_> {
             Some(GivenSlot::KeptAbsent) => Err(KeptBulletError::gained(utterance_idx, live)),
             // No bullet until `restore_off_record`, after every phase that asks.
             Some(GivenSlot::OffRecord(_)) => Err(KeptBulletError::off_record(utterance_idx, live)),
-            Some(GivenSlot::Kept(kept)) => match kept.is_live(Some(live)) {
-                true => Ok(BulletMutability::ReadOnly(kept)),
-                false => Err(KeptBulletError::drifted(utterance_idx, kept, Some(live))),
-            },
+            Some(GivenSlot::Kept(kept)) => {
+                if kept.is_live(Some(live)) {
+                    Ok(BulletMutability::ReadOnly(kept))
+                } else {
+                    Err(KeptBulletError::drifted(utterance_idx, kept, Some(live)))
+                }
+            }
         }
     }
 }
@@ -964,7 +971,8 @@ enum HeldBullets {
 
 impl KeptBulletsHeld {
     /// How many given bullets were verified unchanged (0 under the default).
-    pub fn kept(self) -> usize {
+    #[must_use]
+    pub const fn kept(self) -> usize {
         match self.0 {
             HeldBullets::NoneKept => 0,
             HeldBullets::AllHeld { kept, .. } => kept,
@@ -973,7 +981,8 @@ impl KeptBulletsHeld {
 
     /// How many kept absences were verified still without a bullet (0 unless
     /// `exact`).
-    pub fn kept_absent(self) -> usize {
+    #[must_use]
+    pub const fn kept_absent(self) -> usize {
         match self.0 {
             HeldBullets::NoneKept => 0,
             HeldBullets::AllHeld { kept_absent, .. } => kept_absent,
@@ -994,7 +1003,8 @@ pub struct FaProjection {
 
 impl FaProjection {
     /// Pair a projection policy with the authority bound at the parse.
-    pub fn new(policy: FaProjectionPolicy, main_bullets: MainBulletAuthority) -> Self {
+    #[must_use]
+    pub const fn new(policy: FaProjectionPolicy, main_bullets: MainBulletAuthority) -> Self {
         Self {
             policy,
             main_bullets,
@@ -1003,7 +1013,7 @@ impl FaProjection {
 
     /// The bound bullets, for a pre-grouping pass that must label what it
     /// does to a kept bullet (narrow-bullet rescue).
-    pub(crate) fn main_bullets(&self) -> &MainBulletAuthority {
+    pub(crate) const fn main_bullets(&self) -> &MainBulletAuthority {
         &self.main_bullets
     }
 

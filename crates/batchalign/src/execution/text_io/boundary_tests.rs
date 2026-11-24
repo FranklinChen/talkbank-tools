@@ -2,17 +2,20 @@
 
 use std::sync::Arc;
 
-use super::{CoreferenceText, PreparedTextJob};
-use crate::api::{NumWorkers, ReleasedCommand};
+use super::{
+    CorefSubmission, CoreferenceText, OnceReply, PreparedTextJob, SegmentationText, UtsegSubmission,
+};
+use crate::api::{LanguageCode3, NumWorkers, ReleasedCommand};
 use crate::execution::MorphotagRuntimeOptions;
-use crate::options::{CommandOptions, CommonOptions, CorefOptions};
+use crate::execution::worker_gateway::{CorefGateway, UtsegGateway};
+use crate::options::{CommandOptions, CommonOptions, CorefOptions, UtsegOptions};
 use crate::runner::DispatchHostContext;
 use crate::runner::util::test_sink::RecordingSink;
 use crate::store::test_support::{
     PathsFixture, paths_inputs, queued_morphotag_job_fixture, with_pending,
 };
 use crate::store::{ContentInput, InputKind, RunnerJobSnapshot};
-use crate::text_batch::TextBatchFileResult;
+use crate::text_batch::{TextBatchFileResult, TextBatchFileResults};
 
 const CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n*PAR:\thello .\n@End\n";
 
@@ -20,6 +23,7 @@ const CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Partici
 enum SourceCase {
     Incremental(PriorObservation),
     Coreference,
+    Segmentation,
 }
 
 enum PriorObservation {
@@ -70,6 +74,14 @@ impl Sources {
                 std::fs::write(root.path().join("b.cha"), CHAT).unwrap();
                 vec![first, root.input("b.cha", InputKind::Chat)]
             }
+            SourceCase::Segmentation => {
+                job.dispatch.command = ReleasedCommand::Utseg;
+                job.dispatch.options = CommandOptions::Utseg(UtsegOptions {
+                    common: CommonOptions::default(),
+                    utseg_fallback: crate::params::UtsegFallbackPolicy::AllowStanza,
+                });
+                vec![first]
+            }
         };
         job.filesystem.inputs = paths_inputs(inputs);
         job.filesystem.staging_dir = batchalign_types::paths::ServerPath::new(root.path());
@@ -78,6 +90,20 @@ impl Sources {
             job: with_pending(job),
             sink: Arc::new(RecordingSink::default()),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl UtsegGateway for OnceReply<TextBatchFileResults> {
+    async fn utseg_file(&self, _submission: UtsegSubmission<'_>) -> TextBatchFileResults {
+        self.take()
+    }
+}
+
+#[async_trait::async_trait]
+impl CorefGateway for OnceReply<TextBatchFileResults> {
+    async fn coref_batch(&self, _submission: CorefSubmission<'_>) -> TextBatchFileResults {
+        self.take()
     }
 }
 
@@ -103,7 +129,7 @@ async fn prior_observations_survive_preparation() {
         let host = DispatchHostContext::for_recorded_effects(Arc::clone(&sources.sink));
         let mut files =
             PreparedTextJob::<MorphotagRuntimeOptions>::for_test(sources.job, host, NumWorkers(1));
-        let read = files.next_file().await;
+        let read = files.next_file_for_test().await;
         match expected {
             Ok(before) => {
                 let file = read.expect("read admitted input");
@@ -127,7 +153,7 @@ async fn prior_observations_survive_preparation() {
                 );
             }
         }
-        assert!(files.next_file().await.is_none());
+        assert!(files.next_file_for_test().await.is_none());
         assert!(sources.sink.completed_files().is_empty());
         assert!(!sources.root.path().join("output/a.cha").exists());
     }
@@ -140,83 +166,56 @@ async fn prior_observations_survive_preparation() {
 /// Concurrency: Every row owns its directory and recorder. All correspondence admission completes before the first output effect, with no shared paths or external processes.
 #[tokio::test]
 async fn result_correspondence_precedes_publication() {
-    enum Response {
-        ReorderedBatch,
-        MissingBatch,
-        RepeatedBatch,
-        ForeignBatch,
-        MissingSingle,
-        RepeatedSingle,
-        ForeignSingle,
+    enum Submission {
+        Batch(&'static [&'static str]),
+        Single(&'static [&'static str]),
     }
-    for response in [
-        Response::ReorderedBatch,
-        Response::MissingBatch,
-        Response::RepeatedBatch,
-        Response::ForeignBatch,
-        Response::MissingSingle,
-        Response::RepeatedSingle,
-        Response::ForeignSingle,
+    for submission in [
+        Submission::Batch(&["b.cha", "a.cha"]),
+        Submission::Batch(&["a.cha"]),
+        Submission::Batch(&["a.cha", "a.cha"]),
+        Submission::Batch(&["a.cha", "other.cha"]),
+        Submission::Single(&[]),
+        Submission::Single(&["a.cha", "a.cha"]),
+        Submission::Single(&["other.cha"]),
     ] {
-        let sources = Sources::observe(SourceCase::Coreference);
+        let (case, command, names) = match submission {
+            Submission::Batch(names) => (SourceCase::Coreference, ReleasedCommand::Coref, names),
+            Submission::Single(names) => (SourceCase::Segmentation, ReleasedCommand::Utseg, names),
+        };
+        let sources = Sources::observe(case);
         let host = DispatchHostContext::for_recorded_effects(Arc::clone(&sources.sink));
-        let mut files =
-            PreparedTextJob::<CoreferenceText>::for_test(sources.job, host, NumWorkers(1));
-        let output = |name: &str| {
+        let output = |&name: &&str| {
             TextBatchFileResult::ok(
                 name,
-                crate::pipeline::post_validate::PostValidated::for_test(
-                    CHAT,
-                    ReleasedCommand::Coref,
-                ),
+                crate::pipeline::post_validate::PostValidated::for_test(CHAT, command),
             )
         };
-        let success = matches!(response, Response::ReorderedBatch);
-        match response {
-            Response::ReorderedBatch => {
-                files
+        let gateway = OnceReply::new(names.iter().map(output).collect::<TextBatchFileResults>());
+        let success = names == ["b.cha", "a.cha"];
+        match submission {
+            Submission::Batch(_) => {
+                PreparedTextJob::<CoreferenceText>::for_test(sources.job, host, NumWorkers(1))
                     .read_batch()
-                    .await
-                    .complete(vec![output("b.cha"), output("a.cha")])
-                    .await
-            }
-            Response::MissingBatch => {
-                files
-                    .read_batch()
-                    .await
-                    .complete(vec![output("a.cha")])
-                    .await
-            }
-            Response::RepeatedBatch => {
-                files
-                    .read_batch()
-                    .await
-                    .complete(vec![output("a.cha"), output("a.cha")])
-                    .await
-            }
-            Response::ForeignBatch => {
-                files
-                    .read_batch()
-                    .await
-                    .complete(vec![output("a.cha"), output("other.cha")])
-                    .await
-            }
-            Response::MissingSingle => files.next_file().await.unwrap().complete(vec![]).await,
-            Response::RepeatedSingle => {
-                files
-                    .next_file()
                     .await
                     .unwrap()
-                    .complete(vec![output("a.cha"), output("a.cha")])
-                    .await
+                    .submit(&gateway)
+                    .await;
             }
-            Response::ForeignSingle => {
-                files
-                    .next_file()
+            Submission::Single(_) => {
+                let route = crate::utseg_route::UtsegRoute::resolve(
+                    &LanguageCode3::eng(),
+                    crate::params::UtsegFallbackPolicy::AllowStanza,
+                )
+                .unwrap()
+                .boundary_model()
+                .unwrap();
+                PreparedTextJob::<SegmentationText>::for_test(sources.job, host, NumWorkers(1))
+                    .next_file_for_test()
                     .await
                     .unwrap()
-                    .complete(vec![output("other.cha")])
-                    .await
+                    .submit(&gateway, &route)
+                    .await;
             }
         }
         if success {
@@ -241,4 +240,37 @@ async fn result_correspondence_precedes_publication() {
             assert!(!sources.root.path().join("output/b.cha").exists());
         }
     }
+}
+
+/// Guards: A text file task that panics still ends with its file failed as a system error naming the panic, so the file never stays in its last stage with the job unable to finish it.
+/// Kind: boundary
+/// Not a type: The text runner spawns each file's work onto a tokio task, and a panic inside that work is a runtime event no signature can exclude; only joining a task that really panicked shows the file is failed.
+/// State: A private directory holds one segmentation CHAT source, and the shared recording sink observes the terminal file error. No worker, registry or output write is involved, because the panicking task never reaches them.
+/// Concurrency: One task on the test's own runtime; the sink and source root belong to this test alone.
+#[tokio::test]
+async fn a_panicking_text_file_task_fails_its_file() {
+    let sources = Sources::observe(SourceCase::Segmentation);
+    let host = DispatchHostContext::for_recorded_effects(Arc::clone(&sources.sink));
+    let files = PreparedTextJob::<SegmentationText>::for_test(sources.job, host, NumWorkers(1));
+    files
+        .run_files(|_file| async { panic!("synthetic text task panic") })
+        .await;
+
+    let errors = sources.sink.errors();
+    assert_eq!(
+        errors.len(),
+        1,
+        "the panicked file must be failed: {errors:?}"
+    );
+    assert_eq!(errors[0].filename, "a.cha");
+    assert_eq!(
+        errors[0].category,
+        crate::scheduling::FailureCategory::System
+    );
+    assert!(
+        errors[0].error.contains("panicked")
+            && errors[0].error.contains("synthetic text task panic"),
+        "the failure names the panic: {}",
+        errors[0].error
+    );
 }

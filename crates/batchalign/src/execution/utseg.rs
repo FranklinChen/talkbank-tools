@@ -2,33 +2,20 @@
 
 use super::text_io::{PreparedTextJob, SegmentationText};
 use super::worker_gateway::UtsegGateway;
-use crate::runner::util::{FileRunTracker, FileStage};
-use crate::scheduling::WorkUnitKind;
 use crate::utseg_route::ServableUtsegRoute;
 use std::sync::Arc;
 
-pub(crate) async fn dispatch_utseg_job(
+pub async fn dispatch_utseg_job(
     files: PreparedTextJob<SegmentationText>,
     gateway: Arc<dyn UtsegGateway>,
     route: &ServableUtsegRoute,
 ) -> Result<(), crate::error::ServerError> {
     let route = route.clone();
     files
-        .run_files(move |file, _mode| {
+        .run_files(move |file| {
             let gateway = Arc::clone(&gateway);
             let route = route.clone();
-            async move {
-                FileRunTracker::new(file.host().sink().as_ref(), file.input().filename.as_ref())
-                    .begin_first_attempt(WorkUnitKind::BatchInfer, FileStage::Segmenting)
-                    .await;
-                let results = crate::runner::util::observing_file_waits(
-                    file.host().sink(),
-                    [file.input().filename.to_string()],
-                    gateway.utseg_file(file.input(), &route, file.cancellation()),
-                )
-                .await;
-                file.complete(results).await;
-            }
+            async move { file.submit(gateway.as_ref(), &route).await }
         })
         .await;
     Ok(())
@@ -48,10 +35,11 @@ mod tests {
         CorrelationId, DisplayPath, JobId, LanguageCode3, LanguageSpec, NumSpeakers,
         ReleasedCommand,
     };
+    use crate::execution::text_io::UtsegSubmission;
     use crate::options::{CommandOptions, CommonOptions, UtsegOptions};
     use crate::runner::DispatchHostContext;
     use crate::store::RunnerJobSnapshot;
-    use crate::text_batch::{TextBatchFileInput, TextBatchFileResult, TextBatchFileResults};
+    use crate::text_batch::{TextBatchFileResult, TextBatchFileResults};
     use crate::utseg_route::UtsegRoute;
 
     struct FakeUtsegGateway {
@@ -73,12 +61,8 @@ mod tests {
 
     #[async_trait]
     impl UtsegGateway for FakeUtsegGateway {
-        async fn utseg_file(
-            &self,
-            file: &TextBatchFileInput,
-            route: &ServableUtsegRoute,
-            _cancellation: crate::infer_retry::Cancellation<'_>,
-        ) -> TextBatchFileResults {
+        async fn utseg_file(&self, submission: UtsegSubmission<'_>) -> TextBatchFileResults {
+            let (file, route, _) = submission.into_parts();
             self.events
                 .lock()
                 .unwrap()

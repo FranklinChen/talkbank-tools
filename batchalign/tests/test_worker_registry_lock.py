@@ -3,6 +3,7 @@ and writes the file with the Rust writer's mode."""
 
 from __future__ import annotations
 
+import os
 import stat
 import sys
 from typing import TYPE_CHECKING
@@ -11,7 +12,6 @@ import pytest
 
 from batchalign.worker._registry import (
     WorkerRegistryEntry,
-    _lock_path,
     _registry_lock,
     list_workers,
     register_worker,
@@ -27,29 +27,28 @@ def _entry(pid: int, port: int) -> WorkerRegistryEntry:
     return WorkerRegistryEntry(
         pid=pid,
         host="127.0.0.1",
-        port=port,  # type: ignore[arg-type]
+        port=port,
         profile="gpu",
-        lang="eng",  # type: ignore[arg-type]
+        lang="eng",
         build_identity=None,
     )
 
 
-def test_the_lock_file_is_the_one_the_rust_writer_takes(tmp_path: Path) -> None:
-    """``workers.json.lock`` beside the registry, as `file_lock::lock_file_for`
-    names it, never the registry file each write replaces."""
-    registry = tmp_path / "workers.json"
-    assert _lock_path(registry) == tmp_path / "workers.json.lock"
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_registry_writes_are_owner_only(tmp_path: Path) -> None:
-    """Every write leaves the registry ``0600``, the mode the Rust writer gives
-    it, whichever writer wrote last."""
+    """Guards: Register, unregister and stale cleanup mutate only the named
+        rows and publish owner-only registry bytes.
+    Kind: contract
+    Not a type: Actual POSIX modes and file contents can differ from the
+        producer's intended state after atomic replacement.
+    State: A private filesystem registry exercises create, replace and removal.
+    Concurrency: The fixture owns its directory and no ambient registry.
+    """
     registry = tmp_path / "state" / "workers.json"
     register_worker(_entry(1, 9001), registry_path=registry)
     assert stat.S_IMODE(registry.stat().st_mode) == 0o600
     register_worker(_entry(2, 9002), registry_path=registry)
-    assert unregister_worker(host="127.0.0.1", port=9001, registry_path=registry)  # type: ignore[arg-type]
+    assert unregister_worker(host="127.0.0.1", port=9001, registry_path=registry)
     assert stat.S_IMODE(registry.stat().st_mode) == 0o600
     assert [e.pid for e in list_workers(registry_path=registry)] == [2]
     assert remove_stale_entry(pid=2, registry_path=registry)
@@ -58,34 +57,47 @@ def test_registry_writes_are_owner_only(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="flock")
 def test_a_held_registry_lock_excludes_other_holders(tmp_path: Path) -> None:
-    """While one writer holds the lock, a second open of the lock file cannot
-    take it, which is how the Rust writer (another process) sees it."""
+    """Guards: The live lock excludes a second holder on the lock path used by
+        the Rust writer and releases that path on exit.
+    Kind: contract
+    Not a type: The path spelling crosses languages, and the kernel decides
+        whether a separately opened file can obtain the lock.
+    State: Two handles on an actual POSIX lock path exercise kernel locking.
+    Concurrency: A nonblocking attempt observes exclusion under the held guard
+        and succeeds after release. No shared directory or process is needed.
+    """
     import fcntl
 
     registry = tmp_path / "workers.json"
-    with _registry_lock(registry):
-        with open(_lock_path(registry), "a+") as other:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    with open(_lock_path(registry), "a+") as other:
-        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # This is the independent spelling from Rust file_lock::lock_file_for.
+    lock = tmp_path / "workers.json.lock"
+    with _registry_lock(registry), lock.open("a+") as observer:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(observer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with lock.open("a+") as observer:
+        fcntl.flock(observer.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def test_windows_unlock_releases_rather_than_locks(monkeypatch, tmp_path: Path) -> None:
-    """On Windows the unlock is ``LK_UNLCK`` at byte 0, the bytes the lock
-    took; it was ``LK_NBLCK``, a second lock, so the lock was never released.
+def test_windows_unlock_releases_rather_than_locks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Guards: The Windows adapter locks and unlocks one byte at byte zero.
+    Kind: contract
+    Not a type: The platform call consumes native operation values and the
+        actual descriptor position. Buffering can move the cursor between calls.
+    State: One local file and an msvcrt double capture mode, length and offset.
+    Concurrency: The mock is scoped to this test and the descriptor is private.
     """
     import types
 
     from batchalign.worker import _registry
 
-    calls: list[tuple[int, int]] = []
-    fake_msvcrt = types.SimpleNamespace(
-        LK_LOCK=1,
-        LK_NBLCK=2,
-        LK_UNLCK=0,
-        locking=lambda fd, mode, nbytes: calls.append((mode, nbytes)),
-    )
+    calls: list[tuple[int, int, int]] = []
+
+    def locking(fd: int, mode: int, nbytes: int) -> None:
+        calls.append((mode, nbytes, os.lseek(fd, 0, os.SEEK_CUR)))
+
+    fake_msvcrt = types.SimpleNamespace(LK_LOCK=1, LK_UNLCK=0, locking=locking)
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
     monkeypatch.setattr(_registry, "_IS_WINDOWS", True)
     with open(tmp_path / "workers.json.lock", "a+", encoding="utf-8") as f:
@@ -93,22 +105,30 @@ def test_windows_unlock_releases_rather_than_locks(monkeypatch, tmp_path: Path) 
         _registry._lock_file(f)
         f.write("moved the position")
         _registry._unlock_file(f)
-    assert calls == [(fake_msvcrt.LK_LOCK, 1), (fake_msvcrt.LK_UNLCK, 1)]
+    assert calls == [(fake_msvcrt.LK_LOCK, 1, 0), (fake_msvcrt.LK_UNLCK, 1, 0)]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX directory fsync")
-def test_a_registry_write_fsyncs_its_directory(monkeypatch, tmp_path: Path) -> None:
-    """The replace is made durable by an fsync of the registry's directory, as
-    the Rust writer does."""
-    import os
-
-    synced_directories: list[bool] = []
+def test_a_registry_write_fsyncs_its_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Guards: Publishing a registry update syncs the actual containing directory.
+    Kind: contract
+    Not a type: An admitted path cannot prove that its descriptor reached the
+        fsync adapter or that the descriptor refers to the intended directory.
+    State: A local registry and delegated fsync capture the actual directory inode.
+    Concurrency: The test owns the directory and scopes its adapter replacement.
+    """
+    synced_directories: list[tuple[int, int]] = []
     real_fsync = os.fsync
 
     def recording_fsync(fd: int) -> None:
-        synced_directories.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced_directories.append((info.st_dev, info.st_ino))
         real_fsync(fd)
 
     monkeypatch.setattr(os, "fsync", recording_fsync)
     register_worker(_entry(1, 9001), registry_path=tmp_path / "workers.json")
-    assert True in synced_directories
+    directory = tmp_path.stat()
+    assert (directory.st_dev, directory.st_ino) in synced_directories

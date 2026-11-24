@@ -56,7 +56,7 @@
               "const": "mms_cpu"
             },
             "torch_version": {
-              "description": "PyTorch that performed the virtual projection.",
+              "description": "`PyTorch` that performed the virtual projection.",
               "type": "string"
             },
             "torchaudio_revision": {
@@ -80,7 +80,7 @@
               "const": "whisper"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -108,7 +108,7 @@
               "const": "qwen"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -135,12 +135,12 @@
           "const": "whisper"
         },
         {
-          "description": "MMS Wave2Vec forced alignment.",
+          "description": "MMS `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wave2vec"
         },
         {
-          "description": "Cantonese Wave2Vec forced alignment.",
+          "description": "Cantonese `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wav2vec_canto"
         },

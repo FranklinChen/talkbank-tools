@@ -586,9 +586,10 @@ enum TranscribedOverlap {
 
 impl TranscribedOverlap {
     fn of(utterance: &Utterance, end_ms: u64) -> Self {
-        match overlaps_previous_utterance(utterance) {
-            true => Self::PrecedesMarked(RaiseReach::of(utterance, end_ms)),
-            false => Self::Unmarked,
+        if overlaps_previous_utterance(utterance) {
+            Self::PrecedesMarked(RaiseReach::of(utterance, end_ms))
+        } else {
+            Self::Unmarked
         }
     }
 }
@@ -620,13 +621,13 @@ mod reach {
 
         /// A reach given directly, for tests of the chain search.
         #[cfg(test)]
-        pub(super) fn reaching(end_ms: u64) -> Self {
+        pub(super) const fn reaching(end_ms: u64) -> Self {
             Self(end_ms)
         }
 
         /// Whether raising the start to `new_start` leaves the utterance any
         /// extent and, when a word is timed, a timed word ending after it.
-        pub(super) fn survives_raise_to(self, new_start: u64) -> bool {
+        pub(super) const fn survives_raise_to(self, new_start: u64) -> bool {
             new_start < self.0
         }
 
@@ -646,7 +647,7 @@ mod reach {
     impl KeepThreshold {
         /// Whether an utterance with this threshold keeps its timing judged
         /// against `start`.
-        pub(super) fn keeps_against_start(self, start: u64) -> bool {
+        pub(super) const fn keeps_against_start(self, start: u64) -> bool {
             start <= self.0
         }
     }
@@ -669,7 +670,7 @@ enum StripCause {
 
 impl StripCause {
     /// The `cause=` value in the decision reason.
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::NoOverlapMarker => "no_overlap_marker",
             Self::NothingAfterPrecedingStart => "nothing_after_preceding_start",

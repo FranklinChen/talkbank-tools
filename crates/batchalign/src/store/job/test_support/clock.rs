@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 /// Private fields prevent pairing an unrelated manual clock with a store.
-pub(crate) struct ManualClockStore {
+pub struct ManualClockStore {
     store: Arc<crate::store::JobStore>,
     clock: Arc<crate::clock::ManualClock>,
 }

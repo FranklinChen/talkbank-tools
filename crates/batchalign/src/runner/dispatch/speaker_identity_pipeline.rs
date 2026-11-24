@@ -173,7 +173,7 @@ impl AudioFileTask for SpeakerIdentityTask {
 }
 
 /// Dispatch `speaker-identify` over every pending file.
-pub(crate) async fn dispatch_speaker_identity(
+pub async fn dispatch_speaker_identity(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     pool: Arc<WorkerPool>,
@@ -362,6 +362,11 @@ mod admission_tests {
         @Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n\
         @Media:\tsample, audio\n*PAR:\thello . \u{15}0_1000\u{15}\n@End\n";
 
+    /// Guards: Valid speaker input keeps named recording information and timed utterances in one admitted owner.
+    /// Kind: transcript
+    /// Not a type: CHAT content can parse but still lose fields during named complete admission.
+    /// State: One valid named source goes through the actual speaker input adapter.
+    /// Concurrency: The transcript remains immutable throughout observation.
     #[test]
     fn complete_named_source_is_the_task_input() {
         let admitted = admit_speaker_transcript(SOURCE, std::path::Path::new("sample.cha"))
@@ -378,39 +383,27 @@ mod admission_tests {
         ));
     }
 
-    #[test]
-    fn parseability_does_not_admit_missing_required_headers() {
-        let source = SOURCE.replace("@Languages:\teng\n", "");
-        assert!(batchalign_transform::parse::parse_strict(&crate::chat_parser(), &source).is_ok());
-        let error = admit_speaker_transcript(&source, std::path::Path::new("sample.cha"))
-            .expect_err("parseable does not mean valid");
-        assert!(matches!(error, ServerError::ChatAdmission(_)));
-        assert_eq!(classify_server_error(&error), FailureCategory::Validation);
-    }
-
-    /// Align may admit a source whose `%wor` is corrupt because it
-    /// regenerates that tier; speaker identification regenerates nothing, so
-    /// the same corruption refuses the file. The corruption is an unreadable
-    /// bullet, invalid under every validity policy. (A reversed bullet was
-    /// used until the pinned Chatter made `%wor` intervals lenient, as CHECK
-    /// is, which turned this test red for a reason unrelated to its claim.)
-    #[test]
-    fn retained_dependent_tier_corruption_has_no_regeneration_exemption() {
-        let source = SOURCE.replace("@End\n", "%wor:\thello \u{15}invalid\u{15} .\n@End\n");
-        let error = admit_speaker_transcript(&source, std::path::Path::new("sample.cha"))
-            .expect_err("speaker evidence does not regenerate word timing");
-        assert!(matches!(error, ServerError::ChatAdmission(_)));
-        assert_eq!(classify_server_error(&error), FailureCategory::Validation);
-    }
-
+    /// Guards: Complete speaker admission rejects missing headers, corrupt
+    /// retained tiers, mismatched filenames and inverted main timing.
+    /// Kind: transcript
+    /// Not a type: The raw transcript and the filename supply independent bytes
+    /// until the named complete CHAT boundary accepts them.
+    /// State: One source recipe makes four distinct invalid inputs in memory.
+    /// Concurrency: Each input owns its mutated bytes.
     #[test]
     fn filename_and_main_interval_are_part_of_complete_admission() {
         for (source, path) in [
             (SOURCE.to_owned(), "other.cha"),
             (SOURCE.replace("0_1000", "1000_0"), "sample.cha"),
+            (SOURCE.replace("@Languages:\teng\n", ""), "sample.cha"),
+            (
+                SOURCE.replace("@End\n", "%wor:\thello \u{15}invalid\u{15} .\n@End\n"),
+                "sample.cha",
+            ),
         ] {
             let error = admit_speaker_transcript(&source, std::path::Path::new(path))
                 .expect_err("named structure must be valid before resolving media");
+            assert!(matches!(error, ServerError::ChatAdmission(_)));
             assert_eq!(classify_server_error(&error), FailureCategory::Validation);
         }
     }

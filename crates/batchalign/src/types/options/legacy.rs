@@ -73,7 +73,7 @@ fn meaningful_retired_value(document: &str) -> Option<serde_json::Value> {
 /// Apply the retired-key rule to one stored job whose options were just read
 /// as `options` from `document`: warn when the document asked a command that
 /// no longer has `merge_abbrev` for something dropping the key changes.
-pub(crate) fn report_retired_merge_abbrev(
+pub fn report_retired_merge_abbrev(
     job_id: &str,
     status: &str,
     document: &str,

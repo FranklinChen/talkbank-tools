@@ -37,7 +37,7 @@ use std::path::Path;
 
 /// Whether a write may replace a file already at the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Existing {
+pub enum Existing {
     /// Replace whatever is there.
     Replace,
     /// Refuse (`AlreadyExists`) rather than replace an existing file.
@@ -47,7 +47,7 @@ pub(crate) enum Existing {
 /// Who a written file is for, which decides its mode and whether an alias at
 /// the target is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Audience {
+pub enum Audience {
     /// Per-user runtime state or debug content: owner read/write only
     /// (`0600`), regardless of the umask. The path is this program's own and
     /// is never an alias, so it is written exactly where named.
@@ -76,7 +76,7 @@ impl Audience {
 
 /// Write `bytes` to `path` atomically, creating missing parent directories,
 /// with the mode and alias handling `audience` calls for.
-pub(crate) fn write_atomically(
+pub fn write_atomically(
     path: &Path,
     bytes: &[u8],
     existing: Existing,
@@ -143,7 +143,7 @@ pub(crate) fn write_atomically(
 /// run's output path is its input, and an explicit `-o` destination is where
 /// the user asked for the result. Media exports, which must never replace,
 /// publish through their own `persist_noclobber` path.
-pub(crate) fn write_text_artifact(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_text_artifact(path: &Path, text: &str) -> std::io::Result<()> {
     write_atomically(
         path,
         text.as_bytes(),

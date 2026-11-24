@@ -40,7 +40,7 @@ type BenchmarkFileFuture = Pin<Box<dyn Future<Output = FileTaskOutcome> + Send>>
 ///
 /// Benchmark reuses the transcribe and compare stacks, so the runtime bundle is
 /// the same worker/cache context plus the file-level concurrency cap.
-pub(crate) struct BenchmarkDispatchRuntime {
+pub struct BenchmarkDispatchRuntime {
     /// Worker pool used for the benchmark's ASR requests.
     pub pool: Arc<WorkerPool>,
     /// Shared utterance cache used by the compare-side morphosyntax phase.
@@ -68,7 +68,7 @@ struct BenchmarkFileContext<'a> {
 }
 
 /// Dispatch benchmark through the Rust-owned benchmark pipeline.
-pub(crate) async fn dispatch_benchmark_infer(
+pub async fn dispatch_benchmark_infer(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     runtime: BenchmarkDispatchRuntime,

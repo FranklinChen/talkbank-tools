@@ -19,7 +19,6 @@ from batchalign.worker._model_loading.asr import (
 )
 from batchalign.worker._model_loading.bootstrap import (
     EnsureTaskResponse,
-    enable_test_echo,
     ensure_task_loaded,
     parse_engine_overrides,
     start_worker,
@@ -30,7 +29,6 @@ from batchalign.worker._model_loading.utterance import load_utterance_model
 
 __all__ = [
     "EnsureTaskResponse",
-    "enable_test_echo",
     "ensure_task_loaded",
     "load_asr_engine",
     "load_fa_engine",

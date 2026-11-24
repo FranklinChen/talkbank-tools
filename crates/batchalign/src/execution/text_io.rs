@@ -3,9 +3,37 @@
 #[cfg(test)]
 mod boundary_tests;
 mod preparation;
-pub(crate) use preparation::{
-    CoreferenceText, PreparedTextFile, PreparedTextJob, SegmentationText, TranslationText,
+pub use preparation::{
+    CorefSubmission, CoreferenceText, MorphotagSource, MorphotagSubmission, PreparedTextFile,
+    PreparedTextJob, SegmentationText, TranslateSubmission, TranslationText, UtsegSubmission,
 };
+
+#[cfg(test)]
+struct OnceReply<T>(std::sync::Mutex<Option<T>>);
+
+#[cfg(test)]
+impl<T> OnceReply<T> {
+    fn new(reply: T) -> Self {
+        Self(std::sync::Mutex::new(Some(reply)))
+    }
+
+    fn take(&self) -> T {
+        self.0.lock().unwrap().take().expect("one fixture reply")
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl super::worker_gateway::MorphotagGateway
+    for OnceReply<crate::morphosyntax::report::MorphosyntaxOutput>
+{
+    async fn morphotag_single(
+        &self,
+        _submission: MorphotagSubmission<'_>,
+    ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, crate::error::ServerError> {
+        Ok(self.take())
+    }
+}
 
 #[cfg(test)]
 mod reporting_tests {
@@ -14,7 +42,6 @@ mod reporting_tests {
     use crate::morphosyntax::report::{MorphosyntaxOutput, SecondaryReport};
     use crate::pipeline::post_validate::PostValidated;
     use crate::runner::DispatchHostContext;
-    use crate::text_batch::TextBatchFileResult;
     use std::sync::Arc;
 
     enum SecondaryCase {
@@ -100,10 +127,10 @@ mod reporting_tests {
                 host,
                 crate::api::NumWorkers(1),
             )
-            .next_file()
+            .next_file_for_test()
             .await
             .expect("read prepared source")
-            .complete(vec![TextBatchFileResult::ok("job-file.cha", output)])
+            .submit(&OnceReply::new(output), None)
             .await;
             assert_eq!(
                 tokio::fs::read_to_string(temp.path().join("output/job-file.cha"))

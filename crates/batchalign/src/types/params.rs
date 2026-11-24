@@ -11,9 +11,9 @@ use crate::chat_ops::CacheTaskName;
 use crate::chat_ops::fa::coordinates::Recording;
 use crate::chat_ops::fa::{AudioIdentity, WordGapHealing};
 use crate::chat_ops::morphosyntax_ops::{MultilingualPolicy, MwtDict, TokenizationMode};
+use crate::ensure_wav::MeasuredAudio;
 use crate::error::{RecordingDurationError, ServerError};
 use crate::infer_retry::Cancellation;
-use crate::media::probe::AudioDuration;
 use crate::types::engines::FaEngineName;
 use serde::{Deserialize, Serialize};
 
@@ -50,7 +50,8 @@ pub enum WorTierPolicy {
 
 impl WorTierPolicy {
     /// Returns `true` when the `%wor` tier should be generated.
-    pub fn should_write(&self) -> bool {
+    #[must_use]
+    pub const fn should_write(&self) -> bool {
         matches!(self, Self::Include)
     }
 }
@@ -87,7 +88,8 @@ pub enum MergeAbbrevPolicy {
 
 impl MergeAbbrevPolicy {
     /// Returns `true` when abbreviation merging should run.
-    pub fn should_merge(&self) -> bool {
+    #[must_use]
+    pub const fn should_merge(&self) -> bool {
         matches!(self, Self::Merge)
     }
 }
@@ -110,7 +112,7 @@ impl From<MergeAbbrevPolicy> for bool {
 }
 
 /// Operator opt-in to the legacy Stanza constituency-parser fallback
-/// for utterance segmentation when no language-specific TalkBank BERT
+/// for utterance segmentation when no language-specific `TalkBank` BERT
 /// utseg model is configured for the requested language.
 ///
 /// The default is [`Refuse`], which mirrors the
@@ -142,7 +144,8 @@ pub enum UtsegFallbackPolicy {
 
 impl UtsegFallbackPolicy {
     /// Returns `true` when the Stanza fallback should be permitted.
-    pub fn is_allowed(&self) -> bool {
+    #[must_use]
+    pub const fn is_allowed(&self) -> bool {
         matches!(self, Self::AllowStanza)
     }
 }
@@ -226,10 +229,10 @@ impl UtrCachePolicies {
         }
     }
 
-    pub(crate) fn response(self) -> CachePolicy {
+    pub(crate) const fn response(self) -> CachePolicy {
         self.response
     }
-    pub(crate) fn rev_evidence(self) -> CachePolicy {
+    pub(crate) const fn rev_evidence(self) -> CachePolicy {
         self.rev_evidence
     }
 }
@@ -299,6 +302,7 @@ impl CacheOverrides {
     }
 
     /// Resolve the effective cache policy for a specific task.
+    #[must_use]
     pub fn policy_for(&self, task: CacheTaskName) -> CachePolicy {
         match self {
             Self::None => CachePolicy::UseCache,
@@ -391,7 +395,8 @@ pub enum L2MorphotagPolicy {
 
 impl L2MorphotagPolicy {
     /// Whether secondary-language Stanza inference should run.
-    pub fn should_analyze(self) -> bool {
+    #[must_use]
+    pub const fn should_analyze(self) -> bool {
         matches!(self, Self::Analyze)
     }
 }
@@ -407,7 +412,8 @@ pub enum PosHintPolicy {
 
 impl PosHintPolicy {
     /// Whether the post-Stanza hint pass should run.
-    pub fn should_apply(self) -> bool {
+    #[must_use]
+    pub const fn should_apply(self) -> bool {
         matches!(self, Self::Honor)
     }
 }
@@ -428,53 +434,39 @@ impl From<bool> for L2MorphotagPolicy {
     }
 }
 
-/// Audio file context for forced alignment and transcription.
-///
-/// Groups the audio-related parameters that are always passed together
-/// to FA processing functions.
+/// A prepared recording and its cache identity. The path is obtained from
+/// the same observation as its duration or refusal.
+#[derive(Clone, Copy)]
 pub struct AudioContext<'a> {
-    /// Path to the audio file on disk.
-    pub audio_path: &'a Path,
-    /// Content-based identity for cache keying (hash of audio content).
+    media: &'a MeasuredAudio,
+    /// Content-based identity for cache keying.
     pub audio_identity: &'a AudioIdentity,
-    /// How long the audio runs, when the pipeline already probed it.
-    pub audio_duration: Option<AudioDuration>,
 }
 
-impl AudioContext<'_> {
-    /// The recording this context describes, probing when the pipeline did not
-    /// already carry its duration.
-    ///
-    /// # Why this exists rather than each caller unwrapping the `Option`
-    ///
-    /// The duration being optional (a bare `total_audio_ms`) made "we do not
-    /// know how long the audio is" a legal state, and each consumer invented
-    /// its own answer for it: FA grouping skipped untimed utterances, the
-    /// final window declined to extend, and the timing conversion simply went
-    /// unbounded, which is how word timings came to be written 28.2 seconds
-    /// past the end of a recording. None of those is a better answer than the
-    /// others, because there is no good behaviour for an unknown duration.
-    ///
-    /// Forced alignment always has an audio file and the engine must read the
-    /// same bytes, so the duration is always obtainable. This makes the
-    /// question cheap to answer in one place instead of unanswerable in
-    /// several. Being the single owner is the point: three call sites deriving
-    /// this independently is the duplication that produced the divergent
-    /// fallbacks.
-    ///
-    /// Both arms hold an [`AudioDuration`], so the bound is a measurement and
-    /// never empty (see `media::probe`).
-    pub async fn recording(&self) -> Result<Recording, ServerError> {
-        let duration = match self.audio_duration {
-            Some(known) => known,
-            None => crate::media::probe::MediaProbe::new(self.audio_path)
-                .duration()
-                .await
-                .map_err(|why| {
-                    ServerError::RecordingDuration(RecordingDurationError::Probe(why))
-                })?,
-        };
-        Ok(Recording::of_audio(duration))
+impl<'a> AudioContext<'a> {
+    /// Bind the cache identity to the prepared recording used by alignment.
+    #[must_use]
+    pub const fn new(media: &'a MeasuredAudio, audio_identity: &'a AudioIdentity) -> Self {
+        Self {
+            media,
+            audio_identity,
+        }
+    }
+
+    /// The prepared input read by alignment's media consumers.
+    #[must_use]
+    pub fn audio_path(&self) -> &'a Path {
+        self.media.path()
+    }
+
+    /// Use the retained measurement or report the original probe failure.
+    pub fn recording(&self) -> Result<Recording, ServerError> {
+        self.media
+            .duration()
+            .map(Recording::of_audio)
+            .map_err(|why| {
+                ServerError::RecordingDuration(RecordingDurationError(std::sync::Arc::clone(why)))
+            })
     }
 }
 
@@ -515,11 +507,13 @@ impl FaParams {
     ///
     /// Derived rather than stored: the engine is already here, so the pairing
     /// cannot disagree with it.
+    #[must_use]
     pub fn word_end_policy(&self) -> crate::chat_ops::fa::WordEndPolicy {
         crate::chat_ops::fa::WordEndPolicy::for_engine(self.engine, self.gap_healing)
     }
 
     /// Complete downstream projection policy for this run.
+    #[must_use]
     pub fn projection_policy(&self) -> crate::chat_ops::fa::FaProjectionPolicy {
         crate::chat_ops::fa::FaProjectionPolicy::new(
             self.word_end_policy(),
@@ -534,7 +528,8 @@ impl FaParams {
     /// beside it. It was a field until 2026-08-14, which meant the value could
     /// be set from one engine and read beside another, and made the test that
     /// checked them equal a test of nothing.
-    pub fn aggregation_target(&self) -> crate::types::engines::FaAggregationTarget {
+    #[must_use]
+    pub const fn aggregation_target(&self) -> crate::types::engines::FaAggregationTarget {
         self.engine.aggregation_target()
     }
 }
@@ -641,6 +636,11 @@ mod tests {
     /// recording (up to 30 s on a four-hour lecture) lay "outside the
     /// recording": its ASR tokens were discarded before UTR and its FA timings
     /// refused as past the end of the audio.
+    /// Guards: A native MP3 admits a window ending at the actual packet-derived recording length.
+    /// Kind: contract
+    /// Not a type: Actual unpadded MPEG frames outlast the bitrate-based duration reported by the native demuxer.
+    /// State: A known-length generated MP3 and the real ffprobe adapter supply the prepared recording.
+    /// Concurrency: A private directory isolates the recording and preparation finishes before window admission.
     #[tokio::test]
     async fn a_window_at_the_true_end_of_an_underdeclared_mp3_is_admitted() {
         use crate::chat_ops::fa::coordinates::FaWindow;
@@ -652,14 +652,12 @@ mod tests {
         write_unpadded_cbr_mp3(&source);
         let identity = crate::chat_ops::fa::AudioIdentity::from_metadata("lecture.mp3", 0, 0);
 
-        let recording = super::AudioContext {
-            audio_path: &source,
-            audio_identity: &identity,
-            audio_duration: None,
-        }
-        .recording()
-        .await
-        .expect("the fixture is a recording");
+        let measured = crate::ensure_wav::prepare_measured_audio(&source)
+            .await
+            .expect("native source prepares");
+        let recording = super::AudioContext::new(&measured, &identity)
+            .recording()
+            .expect("the fixture is a recording");
 
         // The final ten seconds, ending where the frames end. The estimate
         // stops 689 ms earlier.

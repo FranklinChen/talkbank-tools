@@ -89,6 +89,7 @@ impl AsrElementTimingV2 {
     }
 
     /// The admitted interval, when the element is timed.
+    #[must_use]
     pub const fn interval(self) -> Option<AdmittedInterval> {
         match self {
             Self::Timed { interval } => Some(interval),
@@ -187,7 +188,7 @@ pub struct InvalidProviderSpeakerLabel {
 ///
 /// Two states, because there are two facts, and the wire used to have a
 /// spelling for only one of them. `speaker` was a bare string, so an engine
-/// that separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to
+/// that separates no speakers at all (Aliyun, `FunASR`, Whisper, Qwen) had to
 /// write SOMETHING, and what it wrote was `"0"`: a label indistinguishable
 /// from a provider's real first speaker. Downstream that became
 /// `SpeakerIndex(0)` and a `PAR0` tier, so "nobody was diarized" and "the
@@ -317,7 +318,8 @@ closed_wire_enum! {
 
 impl MorphosyntaxPipelineV2 {
     /// The name as stamp-safe text. Each arm is checked at compile time.
-    pub fn stamp_name(self) -> crate::domain::StampSafeText {
+    #[must_use]
+    pub const fn stamp_name(self) -> crate::domain::StampSafeText {
         use crate::domain::StampSafeText;
         match self {
             Self::Standard => const { StampSafeText::from_static(Self::Standard.wire_name()) },
@@ -424,11 +426,13 @@ impl PaddingValue {
     }
 
     /// `value` as padding, if it is.
+    #[must_use]
     pub fn admit(value: &str) -> Option<Self> {
         Self::is_padding(value).then(|| Self(value.to_owned()))
     }
 
     /// The padding value, verbatim.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -499,6 +503,7 @@ pub struct RemovedFeatureValue {
 /// feature left with no value is dropped, and FEATS left with no feature is
 /// `None`. A pair without `=` is not a feature and passes through for the
 /// server's admission to skip.
+#[must_use]
 pub fn repair_feats(feats: &str) -> RepairedFeatures {
     let mut pairs: Vec<String> = Vec::new();
     let mut removed = Vec::new();
@@ -665,11 +670,13 @@ impl UdLemmaRepairV2 {
     }
 
     /// Surface form of the word, which is also the lemma applied.
+    #[must_use]
     pub fn word(&self) -> &str {
         &self.word
     }
 
     /// The lemma the model produced.
+    #[must_use]
     pub fn from_lemma(&self) -> &str {
         &self.from_lemma
     }
@@ -763,6 +770,7 @@ pub enum UdRepairV2 {
 
 impl UdRepairV2 {
     /// Which field this repair rewrote.
+    #[must_use]
     pub const fn kind(&self) -> UdRepairKindV2 {
         match self {
             Self::Relation(_) => UdRepairKindV2::Relation,
@@ -775,6 +783,7 @@ impl UdRepairV2 {
     /// Why the field was rewritten: the variant's own reason, by its wire
     /// name (`pad_relation`, `pad_feature_value`, `feature_name_alias`,
     /// `punctuation_lemma`, ...). What an operator-facing tally groups by.
+    #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::Relation(repair) => repair.kind.wire_name(),
@@ -789,6 +798,12 @@ impl UdRepairV2 {
     /// exhaustive match is what makes a kind with no example a compile error
     /// rather than a fixture that forgot it.
     #[doc(hidden)]
+    // Reason: the two literals below go through their validating
+    // constructors (whose own tests cover the predicates) rather than around
+    // them, so a refusal here would be a broken predicate, not a bad input;
+    // the types allow no struct literal to skip admission.
+    #[allow(clippy::unreachable)]
+    #[must_use]
     pub fn example(kind: UdRepairKindV2) -> Self {
         match kind {
             UdRepairKindV2::Relation => Self::Relation(UdRelationRepairV2 {
@@ -919,6 +934,7 @@ impl HttpStatusCodeV2 {
     /// A status known at compile time, for policy tables: an out-of-range
     /// literal fails the build, so a table cannot name a status that the
     /// wire would refuse.
+    #[must_use]
     pub const fn known(code: u16) -> Self {
         assert!(
             code >= 100 && code <= 599,
@@ -1068,6 +1084,17 @@ impl SpeakerProviderJobIdV2 {
     }
 }
 
+/// Content evidence from the local speaker model loader's verified graph.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SpeakerLoadedModelGraphV2 {
+    /// Exact bytes of the loaded pipeline configuration before local path rewriting.
+    pipeline_config_sha256: crate::evidence::Sha256Digest,
+    /// Exact segmentation artifact admitted by the loader.
+    segmentation_sha256: crate::evidence::Sha256Digest,
+    /// Exact embedding artifact admitted by the loader.
+    embedding_sha256: crate::evidence::Sha256Digest,
+}
+
 /// Raw evidence returned by one speaker-inference backend.
 ///
 /// The variants make backend provenance structural. In particular, a
@@ -1090,6 +1117,9 @@ pub enum SpeakerInferenceEvidenceV2 {
     Pyannote {
         /// Ordered speaker segments.
         segments: Vec<SpeakerSegmentV2>,
+        /// Graph evidence reported by the local loader. Older replies may omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loaded_graph: Option<SpeakerLoadedModelGraphV2>,
     },
 }
 
@@ -1464,7 +1494,7 @@ impl ExecuteResponseV2 {
     /// payload. Takes the code and message rather than an [`ExecuteOutcomeV2`]
     /// so `failure(Success)` has no signature to travel through.
     #[must_use]
-    pub fn failure(
+    pub const fn failure(
         request_id: WorkerRequestIdV2,
         code: ProtocolErrorCodeV2,
         message: String,
@@ -1479,13 +1509,13 @@ impl ExecuteResponseV2 {
 
     /// Correlation id for the request this response answers.
     #[must_use]
-    pub fn request_id(&self) -> &WorkerRequestIdV2 {
+    pub const fn request_id(&self) -> &WorkerRequestIdV2 {
         &self.request_id
     }
 
     /// How long the worker spent answering, as it measured it.
     #[must_use]
-    pub fn elapsed(&self) -> NonNegativeSeconds {
+    pub const fn elapsed(&self) -> NonNegativeSeconds {
         self.elapsed
     }
 

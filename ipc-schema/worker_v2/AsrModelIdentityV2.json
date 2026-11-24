@@ -45,7 +45,7 @@
       ]
     },
     {
-      "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+      "description": "`FunASR` Paraformer, with its voice-activity and punctuation models.",
       "type": "object",
       "properties": {
         "asr": {
@@ -73,11 +73,11 @@
       ]
     },
     {
-      "description": "FunASR SenseVoice, with its voice-activity model.",
+      "description": "`FunASR` `SenseVoice`, with its voice-activity model.",
       "type": "object",
       "properties": {
         "asr": {
-          "description": "The SenseVoice checkpoint that ran.",
+          "description": "The `SenseVoice` checkpoint that ran.",
           "$ref": "#/$defs/LoadedModelV2"
         },
         "engine": {
@@ -247,7 +247,7 @@
           ]
         },
         {
-          "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+          "description": "The runtime exposes no revision at all. True of every `ModelScope` loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
           "type": "object",
           "properties": {
             "kind": {

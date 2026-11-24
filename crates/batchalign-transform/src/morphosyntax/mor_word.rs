@@ -21,7 +21,7 @@ pub(super) enum MorPos {
 
 impl MorPos {
     /// The name written before `|`.
-    fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::Upos(upos) => upos.to_chat_pos_name(),
             Self::JapaneseComma => "cm",
@@ -62,6 +62,7 @@ impl TagMarker {
     /// (`build_chat::tag_marker_separator`, `retokenize::parse_helpers`,
     /// `asr_postprocess::MOR_PUNCT`, `compare::engine`); this is the primitive
     /// those sites can be brought onto.
+    #[must_use]
     pub fn of_text(text: &str) -> Option<Self> {
         match text {
             Self::VOCATIVE => Some(Self::Vocative),
@@ -75,6 +76,7 @@ impl TagMarker {
     /// than the model's lemma, because the text is ours and the lemma is the
     /// model's. The only way to mint a [`Lexical`] from a model token, so the
     /// generic path cannot be handed a marker.
+    #[must_use]
     pub fn classify(ud: &UdWord) -> Classified<'_> {
         match Self::of_text(&ud.text) {
             Some(marker) => Classified::Marker(marker),
@@ -83,6 +85,7 @@ impl TagMarker {
     }
 
     /// The marker as written in CHAT.
+    #[must_use]
     pub const fn chat_text(self) -> &'static str {
         match self {
             Self::Vocative => Self::VOCATIVE,
@@ -101,6 +104,7 @@ impl TagMarker {
     /// for `„` (Chatter's `is_tag_marker_separator` names it). This function
     /// keeps the current spelling so that O5a changes exactly one function,
     /// and nothing else, when it is decided.
+    #[must_use]
     pub fn mor(self, ctx: &MappingContext) -> MorWord {
         let category = match lang2(&ctx.lang) {
             "ja" => MorPos::JapaneseComma,
@@ -125,12 +129,13 @@ impl<'a> Lexical<'a> {
     /// comes from the table's own allowlist (Italian compound imperatives and
     /// mis-splits), never from the model, so it is lexical by provenance.
     /// Scoped to this module tree: a model token takes the classifier.
-    pub(super) fn curated(word: &'a UdWord) -> Self {
+    pub(super) const fn curated(word: &'a UdWord) -> Self {
         Self(word)
     }
 
     /// The word.
-    pub fn word(self) -> &'a UdWord {
+    #[must_use]
+    pub const fn word(self) -> &'a UdWord {
         self.0
     }
 }
@@ -243,6 +248,7 @@ fn map_actual_punct(ud: &UdWord) -> MorWord {
 /// A lemma that does begin with `0` is therefore cleaned like any other, with
 /// no character dropped. [`tests::clean_lemma_keeps_a_leading_zero_intact`]
 /// pins that, so the deletion is a stated behaviour rather than a silent one.
+#[must_use]
 pub fn clean_lemma(lemma: &str, text: &str) -> String {
     let mut target = lemma.to_string();
 
@@ -344,6 +350,7 @@ fn compute_features(
 
 /// Return `true` if the token text represents a known clitic for the given
 /// language.
+#[must_use]
 pub fn is_clitic(text: &str, ctx: &MappingContext) -> bool {
     match lang2(&ctx.lang) {
         "en" => text == "n't" || text == "'s" || text == "'ve" || text == "'ll",

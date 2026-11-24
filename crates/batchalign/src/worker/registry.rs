@@ -79,6 +79,7 @@ impl RegistryEntry {
     }
 
     /// Parse the profile string into a [`WorkerProfile`].
+    #[must_use]
     pub fn worker_profile(&self) -> Option<WorkerProfile> {
         WorkerProfile::try_from_name(&self.profile)
     }
@@ -138,6 +139,7 @@ pub struct ForeignBuildDaemon {
 impl ForeignBuildDaemon {
     /// The refusal as `/health` reports it: the daemon's worker key as its
     /// registry entry names it, its pid, and a typed reason.
+    #[must_use]
     pub fn to_refused_registry_worker(&self) -> crate::api::RefusedRegistryWorker {
         crate::api::RefusedRegistryWorker {
             worker_key: format!("profile:{}:{}", self.profile, self.lang),
@@ -181,6 +183,7 @@ impl std::fmt::Display for ReportedBuild {
 /// Default registry file path: `workers.json` in the runtime state
 /// directory (`~/.batchalign3` unless `BATCHALIGN_STATE_DIR` or
 /// `BATCHALIGN_HOME` says otherwise), resolved by the one layout resolver.
+#[must_use]
 pub fn default_registry_path() -> PathBuf {
     crate::config::RuntimeLayout::from_env()
         .state_dir()

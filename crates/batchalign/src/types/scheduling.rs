@@ -190,6 +190,7 @@ impl FailureCategory {
     ];
 
     /// Stable wire spelling, suitable for bounded structured provenance.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Validation => "validation",
@@ -332,6 +333,7 @@ pub struct RetryPolicy {
 
 impl RetryPolicy {
     /// Conservative default suitable for transient worker/runtime failures.
+    #[must_use]
     pub const fn conservative() -> Self {
         Self {
             max_attempts: 3,
@@ -342,6 +344,7 @@ impl RetryPolicy {
     }
 
     /// Compute the backoff delay for a 1-based retry number.
+    #[must_use]
     pub fn backoff_for_retry(&self, retry_number: u32) -> DurationMs {
         if retry_number <= 1 {
             return DurationMs(self.initial_backoff_ms.0.min(self.max_backoff_ms.0));
@@ -380,6 +383,7 @@ pub enum Retryability {
 impl FailureCategory {
     /// Whether another attempt could succeed after a failure of this
     /// category.
+    #[must_use]
     pub const fn retryability(self) -> Retryability {
         match self {
             Self::WorkerCrash
@@ -428,6 +432,7 @@ pub enum StopReason {
 impl RetryPolicy {
     /// The decision after attempt `attempt_number` (1-based) failed with
     /// `category`.
+    #[must_use]
     pub fn after_failure(&self, attempt_number: u32, category: FailureCategory) -> NextAttempt {
         match category.retryability() {
             Retryability::Final => NextAttempt::Stop(StopReason::Final),
@@ -568,17 +573,20 @@ impl LeaseRecord {
     }
 
     /// The node that holds the lease.
-    pub fn leased_by_node(&self) -> &NodeId {
+    #[must_use]
+    pub const fn leased_by_node(&self) -> &NodeId {
         &self.leased_by_node
     }
 
     /// When the lease was taken or last renewed.
-    pub fn heartbeat_at(&self) -> MachineTime {
+    #[must_use]
+    pub const fn heartbeat_at(&self) -> MachineTime {
         self.heartbeat_at
     }
 
     /// When the lease lapses unless renewed; always after the heartbeat.
-    pub fn expires_at(&self) -> MachineTime {
+    #[must_use]
+    pub const fn expires_at(&self) -> MachineTime {
         self.expires_at
     }
 

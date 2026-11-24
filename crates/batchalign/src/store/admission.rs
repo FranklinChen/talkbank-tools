@@ -6,18 +6,18 @@ use super::{
 use std::sync::Arc;
 
 /// The actual store and its exclusive registry claim are one non-cloneable owner.
-pub(crate) struct AdmittedRun {
+pub struct AdmittedRun {
     store: Arc<JobStore>,
     claim: RunnerClaim,
 }
 
 /// Completion-only authority when cancellation preceded execution admission.
-pub(crate) struct StoppedAdmission {
+pub struct StoppedAdmission {
     store: Arc<JobStore>,
     stopped: StoppedRun,
 }
 
-pub(crate) enum RunnerAdmission {
+pub enum RunnerAdmission {
     Started(AdmittedRun),
     Stopped(StoppedAdmission),
     RunnerStillLive,
@@ -48,13 +48,13 @@ impl JobStore {
 }
 
 impl AdmittedRun {
-    pub(crate) fn snapshot(&self) -> &Arc<RunnerJobSnapshot> {
+    pub(crate) const fn snapshot(&self) -> &Arc<RunnerJobSnapshot> {
         self.claim.snapshot()
     }
-    pub(crate) fn store(&self) -> &Arc<JobStore> {
+    pub(crate) const fn store(&self) -> &Arc<JobStore> {
         &self.store
     }
-    pub(super) fn binding(&self) -> &super::RunBinding {
+    pub(super) const fn binding(&self) -> &super::RunBinding {
         self.claim.binding()
     }
 

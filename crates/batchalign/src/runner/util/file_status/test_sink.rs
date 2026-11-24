@@ -17,7 +17,7 @@ use super::FileStage;
 use super::event_sink::RunnerEventSink;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordedProgress {
+pub struct RecordedProgress {
     pub(crate) filename: String,
     pub(crate) stage: FileStage,
     pub(crate) current: Option<i64>,
@@ -26,14 +26,14 @@ pub(crate) struct RecordedProgress {
 
 /// One durable attempt the sink was asked to open.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordedAttempt {
+pub struct RecordedAttempt {
     pub(crate) filename: String,
     pub(crate) work_unit_kind: WorkUnitKind,
 }
 
 /// How one file's completion was recorded.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RecordedCompletion {
+pub enum RecordedCompletion {
     /// Finished without diagnostics.
     Done { filename: String },
     /// Written with diagnostics.
@@ -53,7 +53,7 @@ impl RecordedCompletion {
 
 /// One terminal file error the sink was asked to record.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecordedError {
+pub struct RecordedError {
     pub(crate) filename: String,
     pub(crate) error: String,
     pub(crate) category: FailureCategory,
@@ -62,7 +62,7 @@ pub(crate) struct RecordedError {
 /// Records what the runner reported. Like the store's sink it stands for
 /// one run of one job, so no method names the job.
 #[derive(Default)]
-pub(crate) struct RecordingSink {
+pub struct RecordingSink {
     progress: Mutex<Vec<RecordedProgress>>,
     worker_waits: Mutex<Vec<(String, crate::store::WorkerWaitChange)>>,
     attempts: Mutex<Vec<RecordedAttempt>>,

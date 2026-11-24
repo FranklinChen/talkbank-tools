@@ -14,7 +14,7 @@ from batchalign.inference.speaker import (
     SpeakerResponse,
     SpeakerSegment,
 )
-from batchalign.tests._loaded_hosts import diarization
+from batchalign.tests._loaded_hosts import TEST_LOCAL_SPEAKER_GRAPH, diarization
 from batchalign.worker._speaker_v2 import execute_speaker_request_v2
 from batchalign.worker._types_v2 import (
     ExecuteErrorV2,
@@ -42,7 +42,9 @@ def _pyannote_response(segments: list[SpeakerSegment] | None = None) -> SpeakerR
     """Build evidence which can only satisfy a local pyannote request."""
 
     return SpeakerResponse(
-        evidence=LocalPyannoteSpeakerEvidence(segments=segments or [])
+        evidence=LocalPyannoteSpeakerEvidence(
+            loaded_graph=TEST_LOCAL_SPEAKER_GRAPH, segments=segments or []
+        )
     )
 
 
@@ -117,7 +119,12 @@ def _assert_error_response(
 
 
 def test_execute_speaker_request_v2_returns_typed_segments(tmp_path: Path) -> None:
-    """Speaker V2 execution should return the typed segment payload."""
+    """Guards: Local speaker segments and their loaded model graph survive the real Python and Rust execute boundary.
+    Kind: wire
+    Not a type: The native extension can silently discard additive evidence from a typed Python host.
+    State: Real PCM and the native extension use a typed synthetic model host.
+    Concurrency: Private PCM file and in-process fake host.
+    """
 
     response = execute_speaker_request_v2(
         _make_request(tmp_path),
@@ -137,6 +144,7 @@ def test_execute_speaker_request_v2_returns_typed_segments(tmp_path: Path) -> No
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, SpeakerResultV2)
     assert isinstance(response.result.evidence, LocalPyannoteSpeakerEvidenceV2)
+    assert response.result.evidence.loaded_graph == TEST_LOCAL_SPEAKER_GRAPH
     assert response.result.evidence.segments[0].speaker == "SPEAKER_2_16000_4"
     assert response.result.evidence.segments[0].start_ms == 10
 

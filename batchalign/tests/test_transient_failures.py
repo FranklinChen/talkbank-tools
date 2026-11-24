@@ -249,12 +249,20 @@ def test_a_utseg_pipeline_download_failing_inside_the_request_is_a_download(
 def test_a_worker_reports_the_runtime_it_started_with_not_what_loading_changed(
     tmp_path: Path,
 ) -> None:
-    """A model loader that changes `sys.path` (importing FunASR's dependencies
-    puts setuptools' vendored packages there) must not change the identity
-    the worker reports in its ready line. The identity used to be observed at
-    the ready line, after loading, so a worker that loaded FunASR reported a
-    different distribution inventory from one that had not, and the server
-    refused it (2026-11-05). It is now observed at process start."""
+    """Guards: The stdio ready envelope publishes the runtime observed before loading.
+      A loader that introduced vendored distributions used to make the server
+      reject a worker from the same environment.
+    Kind: wire
+    Not a type: The launcher carries an immutable startup observation, but a
+      serializer can still choose a fresh package inventory after a loader
+      changes real interpreter state.
+    State: A real startup subprocess exposes import discovery and ready-line
+      ordering. A scripted loader inserts private dist-info metadata without
+      loading a model. A clean subprocess supplies the pre-load observation.
+    Concurrency: Both child processes run serially. Only the first child
+      changes its import path, and the added metadata lives in this test's
+      temporary directory.
+    """
     vendored = tmp_path / "vendored"
     (vendored / "Vendored_Dist-1.0.dist-info").mkdir(parents=True)
     (vendored / "Vendored_Dist-1.0.dist-info" / "METADATA").write_text(

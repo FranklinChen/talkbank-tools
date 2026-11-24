@@ -68,7 +68,8 @@ pub enum CaMarkerPolicy {
 
 impl CaMarkerPolicy {
     /// Whether CA marker processing is active.
-    pub fn is_enabled(self) -> bool {
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
 }
@@ -90,7 +91,7 @@ pub enum UtrMatchMode {
 
 impl UtrMatchMode {
     /// Convert to the `dp_align::MatchMode` used by the alignment engine.
-    pub(crate) fn to_dp_match_mode(self) -> MatchMode {
+    pub(crate) const fn to_dp_match_mode(self) -> MatchMode {
         match self {
             UtrMatchMode::Exact => MatchMode::CaseInsensitive,
             UtrMatchMode::Fuzzy { threshold } => MatchMode::Fuzzy {
@@ -110,7 +111,8 @@ impl UtrFuzzyThreshold {
     pub const DEFAULT: Self = Self(0.85);
 
     /// Validated floating-point value consumed by the DP aligner.
-    pub fn value(self) -> f64 {
+    #[must_use]
+    pub const fn value(self) -> f64 {
         self.0
     }
 }
@@ -175,7 +177,8 @@ impl UtrOverlapDensityThreshold {
     pub const MAX: Self = Self(1.0);
 
     /// Validated fraction consumed by the two-pass policy.
-    pub fn value(self) -> f64 {
+    #[must_use]
+    pub const fn value(self) -> f64 {
         self.0
     }
 }
@@ -231,7 +234,7 @@ pub enum UtrOverlapDensityThresholdParseError {
 /// Tunable parameters for the two-pass overlap-aware UTR strategy.
 ///
 /// All fields have documented defaults that were tuned empirically on
-/// SBCSAE (English), Jefferson NB (dense CA), and TaiwanHakka (Hakka).
+/// SBCSAE (English), Jefferson NB (dense CA), and `TaiwanHakka` (Hakka).
 /// Users can override individual parameters via CLI flags.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TwoPassConfig {
@@ -256,7 +259,7 @@ pub struct TwoPassConfig {
 
 impl Default for TwoPassConfig {
     /// Default configuration tuned empirically on SBCSAE (English CA),
-    /// Jefferson NB (dense CA), TaiwanHakka (Hakka), and APROCSA (English
+    /// Jefferson NB (dense CA), `TaiwanHakka` (Hakka), and APROCSA (English
     /// aphasia). Fuzzy matching at 0.85 is the default because it provides
     /// the best coverage/precision tradeoff across all tested corpora.
     fn default() -> Self {
@@ -307,6 +310,7 @@ impl Default for TwoPassOverlapUtr {
 
 impl TwoPassOverlapUtr {
     /// Create a `TwoPassOverlapUtr` with default config and no grouping context.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             grouping_context: None,
@@ -315,6 +319,7 @@ impl TwoPassOverlapUtr {
     }
 
     /// Create a `TwoPassOverlapUtr` with grouping context for FA stability.
+    #[must_use]
     pub fn with_grouping_context(
         recording: Recording,
         aggregation_target: crate::types::engines::FaAggregationTarget,
@@ -329,7 +334,8 @@ impl TwoPassOverlapUtr {
     }
 
     /// Set custom configuration.
-    pub fn with_config(mut self, config: TwoPassConfig) -> Self {
+    #[must_use]
+    pub const fn with_config(mut self, config: TwoPassConfig) -> Self {
         self.config = config;
         self
     }
@@ -625,7 +631,7 @@ fn run_two_pass_inner<C: WorkControl + ?Sized>(
 /// bottom CA overlap when CA markers are enabled. An utterance not in the
 /// recording never is, so it neither counts toward the overlap density nor
 /// is searched for.
-fn is_recoverable_overlap(info: &UtrUtteranceInfo, config: &TwoPassConfig) -> bool {
+const fn is_recoverable_overlap(info: &UtrUtteranceInfo, config: &TwoPassConfig) -> bool {
     match info.presence {
         crate::chat_ops::fa::RecordingPresence::NotInRecording(_) => false,
         crate::chat_ops::fa::RecordingPresence::InRecording => {

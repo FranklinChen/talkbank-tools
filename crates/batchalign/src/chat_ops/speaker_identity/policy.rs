@@ -185,7 +185,7 @@ impl BestScoringLabels {
 
     /// The score they tied at.
     #[must_use]
-    pub fn score(&self) -> SimilarityScore {
+    pub const fn score(&self) -> SimilarityScore {
         self.score
     }
 }

@@ -83,7 +83,7 @@ pub(crate) enum TranscribeUtsegExecution {
 }
 
 impl TranscribeUtsegExecution {
-    pub(crate) fn production(enabled: bool) -> Self {
+    pub(crate) const fn production(enabled: bool) -> Self {
         if enabled {
             Self::PreAndPostChat {
                 pre_chat: UtsegDecisionPolicy::WorkerDeclared,
@@ -94,7 +94,7 @@ impl TranscribeUtsegExecution {
         }
     }
 
-    pub(crate) fn pre_chat_policy(self) -> Option<UtsegDecisionPolicy> {
+    pub(crate) const fn pre_chat_policy(self) -> Option<UtsegDecisionPolicy> {
         match self {
             Self::Disabled => None,
             Self::PreChatOnly { pre_chat } | Self::PreAndPostChat { pre_chat, .. } => {
@@ -103,7 +103,7 @@ impl TranscribeUtsegExecution {
         }
     }
 
-    pub(crate) fn post_chat_policy(self) -> Option<UtsegDecisionPolicy> {
+    pub(crate) const fn post_chat_policy(self) -> Option<UtsegDecisionPolicy> {
         match self {
             Self::Disabled | Self::PreChatOnly { .. } => None,
             Self::PreAndPostChat { post_chat, .. } => Some(post_chat),
@@ -336,17 +336,13 @@ pub(crate) async fn infer_utseg_predictions_with_policy(
 // Cross-file batch utseg processing
 // ---------------------------------------------------------------------------
 
-/// Process multiple CHAT files, pooling payloads from all files into a single
-/// `batch_infer` call for maximum throughput.
-///
-/// Returns `(filename, Ok(output_text) | Err(error_msg))` for each file.
-pub(crate) async fn process_utseg_batch(
-    files: &[TextBatchFileInput],
-    route: &ServableUtsegRoute,
+/// Process the exact CHAT file and route admitted for this submission.
+pub(crate) async fn process_utseg_file(
+    submission: crate::execution::text_io::UtsegSubmission<'_>,
     pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    run_utseg_batch_impl(files, route, pool, cancellation).await
+    let (file, route, cancellation) = submission.into_parts();
+    run_utseg_batch_impl(std::slice::from_ref(&file), route, pool, cancellation).await
 }
 
 /// The single-file text-pipeline hooks for utterance segmentation.
@@ -484,16 +480,8 @@ pub(crate) fn apply_utseg_document(
             "Utterance segmentation invalidated dependent tiers: {}. Regenerate analysis if required.",
             descriptions.join("; "),
         );
-        let insert_pos = crate::provenance::insert_pos_after_constant_headers(chat_file);
-        chat_file.lines.insert(
-            insert_pos,
-            talkbank_model::model::Line::header(
-                talkbank_model::Location::Unlocated,
-                talkbank_model::model::Header::Comment {
-                    content: talkbank_model::model::CommentContent::try_from_text(text)?,
-                },
-            ),
-        );
+        let content = talkbank_model::model::CommentContent::try_from_text(text)?;
+        crate::provenance::CommentSlot::in_preamble(chat_file).insert(content);
     }
     Ok(layout)
 }
@@ -542,7 +530,7 @@ pub(crate) enum AdmittedUtsegPrediction {
 
 impl AdmittedUtsegPrediction {
     /// Borrow the segmentation known to be parallel to the dispatched words.
-    pub(crate) fn segmentation(&self) -> &UtteranceSegmentation {
+    pub(crate) const fn segmentation(&self) -> &UtteranceSegmentation {
         match self {
             Self::BoundaryModelWorkerDeclared {
                 segmentation,
@@ -792,7 +780,7 @@ async fn infer_admitted_batch_with_policy(
         "Dispatching utseg execute_v2 batch"
     );
 
-    let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
+    let response = dispatch_execute_v2_with_retry(pool, lang, request, cancellation).await?;
     let result = parse_utseg_result_v2(&response)
         .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     if result.items.len() != items.len() {
@@ -843,23 +831,25 @@ mod tests {
             .expect("valid fixture commit")
     }
 
+    /// Guards: Disabled and pre-CHAT-only transcribe segmentation exposes only the configured model pass.
+    /// Kind: policy
+    /// Not a type: Production configuration and its pass projection still choose whether inference is reachable.
+    /// State: Two real execution selections cover disabled and pre-CHAT-only policy.
+    /// Concurrency: Pure configuration and capability observation.
     #[test]
-    fn disabled_transcribe_utseg_has_no_reachable_model_pass() {
-        let execution = TranscribeUtsegExecution::production(false);
-        assert_eq!(execution.pre_chat_policy(), None);
-        assert_eq!(execution.post_chat_policy(), None);
-    }
-
-    #[test]
-    fn pre_chat_only_execution_cannot_reach_the_post_chat_policy() {
-        let execution = TranscribeUtsegExecution::PreChatOnly {
-            pre_chat: UtsegDecisionPolicy::WorkerDeclared,
-        };
-        assert_eq!(
-            execution.pre_chat_policy(),
-            Some(UtsegDecisionPolicy::WorkerDeclared)
-        );
-        assert_eq!(execution.post_chat_policy(), None);
+    fn transcribe_utseg_admits_only_configured_model_passes() {
+        for (execution, expected) in [
+            (TranscribeUtsegExecution::production(false), None),
+            (
+                TranscribeUtsegExecution::PreChatOnly {
+                    pre_chat: UtsegDecisionPolicy::WorkerDeclared,
+                },
+                Some(UtsegDecisionPolicy::WorkerDeclared),
+            ),
+        ] {
+            assert_eq!(execution.pre_chat_policy(), expected);
+            assert_eq!(execution.post_chat_policy(), None);
+        }
     }
 
     fn two_word_request() -> UtsegBatchItem {
@@ -921,6 +911,11 @@ mod tests {
         }
     }
 
+    /// Guards: A boundary prediction with parallel evidence and assignments admits both with its exact model key.
+    /// Kind: wire
+    /// Not a type: The worker can return valid vector lengths alongside content or provenance that is lost in projection.
+    /// State: One two-word request and a matching external-shaped result use the actual boundary constructor.
+    /// Concurrency: Only private request and response values are observed.
     #[test]
     fn admits_boundary_prediction_only_when_all_parallel_vectors_align() {
         let admitted = admit_worker_item(&two_word_request(), &boundary_result(2))
@@ -938,6 +933,11 @@ mod tests {
         assert_eq!(evidence.model_id, "talkbank/utterance-boundary");
     }
 
+    /// Guards: A result with fewer boundary evidence states than input words is refused.
+    /// Kind: wire
+    /// Not a type: Worker evidence counts can differ from the validated request without violating the wire shape.
+    /// State: One two-word request and a one-word boundary evidence response.
+    /// Concurrency: Pure response admission without a model.
     #[test]
     fn refuses_boundary_evidence_that_is_not_parallel_to_request_words() {
         let error = admit_worker_item(&two_word_request(), &boundary_result(1))
@@ -950,6 +950,11 @@ mod tests {
 
     /// A constituency item with no tree, or with a tree that does not read,
     /// is the item's failure: it used to segment into one utterance.
+    /// Guards: Missing and unreadable worker constituency trees both refuse segmentation.
+    /// Kind: wire
+    /// Not a type: The worker may send no parse or text that does not decode into one despite valid JSON.
+    /// State: Two explicit constituency result payloads are passed to the actual parser boundary.
+    /// Concurrency: Pure bounded response decoding.
     #[test]
     fn refuses_a_constituency_parse_with_no_tree_or_an_unreadable_tree() {
         for trees in [vec![], vec!["not a tree".to_string()]] {
@@ -962,6 +967,11 @@ mod tests {
         }
     }
 
+    /// Guards: Boundary evidence and applied assignments that describe different decisions are refused.
+    /// Kind: wire
+    /// Not a type: The worker can send same-length evidence and assignments that disagree semantically.
+    /// State: One otherwise valid external-shaped result is changed to carry inconsistent assignments.
+    /// Concurrency: Pure response admission without a model.
     #[test]
     fn refuses_assignments_that_disagree_with_applied_boundary_evidence() {
         let mut result = boundary_result(2);
@@ -973,6 +983,11 @@ mod tests {
         assert!(error.contains("assignments disagree"));
     }
 
+    /// Guards: Segmentation refuses applied actions that disagree with the worker's declared policy.
+    /// Kind: wire
+    /// Not a type: Valid action enums can describe inconsistent decisions at the correct vector length.
+    /// State: A two-word fixture returns contradictory applied action evidence.
+    /// Concurrency: Pure admission over independent request and reply.
     #[test]
     fn refuses_applied_actions_that_disagree_with_declared_policy() {
         let mut result = boundary_result(2);
@@ -990,36 +1005,13 @@ mod tests {
         assert!(error.contains("applied action disagrees"));
     }
 
-    #[test]
-    fn typed_candidate_policy_rederives_assignments_from_raw_evidence() {
-        let mut result = boundary_result(2);
-        let evidence = boundary_parts(&mut result).1;
-        evidence.word_evidence[0] = UtsegWordBoundaryEvidenceV2::Classified {
-            raw_action: UtsegBoundaryActionV2::PeriodBoundary,
-            applied_action: UtsegBoundaryActionV2::Ordinary,
-            boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(900_000)
-                .expect("probability"),
-        };
-        evidence.word_evidence[1] = UtsegWordBoundaryEvidenceV2::Classified {
-            raw_action: UtsegBoundaryActionV2::CapitalizedOnset,
-            applied_action: UtsegBoundaryActionV2::CapitalizedOnset,
-            boundary_probability_micros: BoundaryProbabilityMicrosV2::try_from(800_000)
-                .expect("probability"),
-        };
-        *boundary_parts(&mut result).0 = vec![0, 0];
-        let request = two_word_request();
-        let admitted = admit_worker_item(&request, &result)
-            .expect("baseline evidence")
-            .apply_decision_policy(UtsegDecisionPolicy::ReapplyBoundaryModel(
-                UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
-            ))
-            .expect("candidate replay");
-
-        assert_eq!(admitted.segmentation().assignments(), &[0, 1]);
-    }
-
     /// The check must accept exactly what the local policy itself produces, or
     /// the replay could not read back evidence this build wrote.
+    /// Guards: Locally reapplied boundary evidence yields revised assignments and an admissible replay receipt.
+    /// Kind: wire
+    /// Not a type: Actual adjacent raw actions can change the split and reconstructed evidence must agree with the receipt.
+    /// State: A two-word worker result supplies probabilities and raw actions for replay and reattachment.
+    /// Concurrency: All decisions are made in memory.
     #[test]
     fn a_receipt_the_local_policy_produced_is_accepted() {
         let mut result = boundary_result(2);
@@ -1044,6 +1036,7 @@ mod tests {
                 UtsegAdjacencyPolicyRevisionV2::SuppressEarlierAdjacentBoundariesV1,
             ))
             .expect("candidate replay");
+        assert_eq!(reapplied.segmentation().assignments(), &[0, 1]);
         let AdmittedUtsegPrediction::BoundaryModelLocallyReapplied {
             segmentation,
             evidence,
@@ -1070,6 +1063,11 @@ mod tests {
     /// RED FIRST (review item 4): a receipt is a claim, not a label, and it can
     /// arrive from an artifact where nothing checked it. One that does not
     /// explain the evidence it travels with must never become a prediction.
+    /// Guards: Segmentation refuses a replay receipt whose policy does not explain its evidence.
+    /// Kind: wire
+    /// Not a type: The stored receipt can name a valid policy that differs from the actual evidence it accompanies.
+    /// State: One admitted two-word prediction and a deliberately contradictory receipt.
+    /// Concurrency: Pure validation with no model or static defaults.
     #[test]
     fn a_receipt_that_does_not_explain_its_evidence_is_refused() {
         let admitted =
@@ -1090,6 +1088,11 @@ mod tests {
         assert!(error.contains("adjacency policy"), "{error}");
     }
 
+    /// Guards: Local boundary replay refuses constituency output without raw action evidence.
+    /// Kind: policy
+    /// Not a type: An admitted constituency result does not necessarily supply the action sequence needed for replay.
+    /// State: One synthetic constituency result and the actual local policy transition.
+    /// Concurrency: Only local typed inputs participate.
     #[test]
     fn candidate_policy_refuses_constituency_output_without_raw_actions() {
         let prediction = AdmittedUtsegPrediction::Constituency {
@@ -1104,6 +1107,11 @@ mod tests {
         );
     }
 
+    /// Guards: Segmentation reports invalidated morphology and syntax while preserving free-text tiers.
+    /// Kind: transcript
+    /// Not a type: An admitted source may carry both structure-dependent analysis and annotations still valid after splitting.
+    /// State: One embedded source with morphology, syntax and free-text annotations.
+    /// Concurrency: One local model owns transformation and output.
     #[test]
     fn invalidated_analysis_is_recorded_in_typed_output_without_losing_free_text() {
         let source = include_str!("../../../test-fixtures/eng_hello_world_with_mor_gra_act.cha");

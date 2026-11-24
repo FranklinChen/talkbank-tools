@@ -6,7 +6,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 
 /// Return one frame per label using open-begin, fixed-end alignment.
 #[pyfunction]
-pub(crate) fn whisper_lexical_frame_indices(
+pub fn whisper_lexical_frame_indices(
     py: Python<'_>,
     costs: PyReadonlyArray2<'_, f32>,
 ) -> PyResult<Vec<usize>> {

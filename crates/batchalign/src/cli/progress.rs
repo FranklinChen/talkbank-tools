@@ -55,7 +55,7 @@ pub trait ProgressDisplay: Send + Sync {
     fn update_health(&self, _health: &HealthResponse) {}
     /// Surface a cancellation receipt for the end-of-run banner.
     /// Default no-op for non-TUI sinks (which already print the
-    /// receipt to stderr inline as part of their finish() output).
+    /// receipt to stderr inline as part of their `finish()` output).
     fn send_cancelled_receipt(&self, _receipt: crate::cli::tui::app::CancelledReceipt) {}
 }
 
@@ -75,6 +75,7 @@ pub struct BatchProgress {
 
 impl BatchProgress {
     /// Create a new batch progress display.
+    #[must_use]
     pub fn new(total: u64, command: &str) -> Self {
         let mp = indicatif::MultiProgress::new();
 

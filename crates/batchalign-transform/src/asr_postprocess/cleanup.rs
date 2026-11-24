@@ -22,10 +22,10 @@ use std::sync::LazyLock;
 // Disfluency wordlists
 // ---------------------------------------------------------------------------
 
-/// A word replacement entry: original → main_line_form.
+/// A word replacement entry: original → `main_line_form`.
 ///
 /// For filled pauses: original="um", main_line="&-um".
-/// For replacements: original="'cause", main_line="(be)cause".
+/// For replacements: original="'cause", `main_line="(be)cause`".
 #[derive(Debug, Clone)]
 struct Replacement {
     /// What appears on the main line in CHAT (e.g. "&-um", "(be)cause").
@@ -34,7 +34,7 @@ struct Replacement {
 
 /// Filled pauses for English. From BA2's `support/filled_pauses.eng`.
 ///
-/// Format: (original, main_line).
+/// Format: (original, `main_line`).
 /// In CHAT, filled pauses appear as `&-{text}` on the main line.
 const FILLED_PAUSES_ENG: &[(&str, &str)] = &[("um", "&-um"), ("ur", "&-ur"), ("uh", "&-uh")];
 
@@ -100,7 +100,7 @@ static REPLACEMENT_MAP: LazyLock<HashMap<&'static str, HashMap<&'static str, Rep
 /// embedded `„` glued to word content reaches this predicate, where
 /// stripping it from a boundary is correct (ASR producers don't emit
 /// tag markers structurally).
-fn is_boundary_quote(c: char) -> bool {
+const fn is_boundary_quote(c: char) -> bool {
     use talkbank_model::chars::{
         LEFT_DOUBLE_QUOTE, LEFT_GUILLEMET, LEFT_SINGLE_QUOTE, RIGHT_DOUBLE_QUOTE, RIGHT_GUILLEMET,
         RIGHT_SINGLE_QUOTE, TAG_MARKER,
@@ -123,7 +123,7 @@ fn is_boundary_quote(c: char) -> bool {
 /// ASR engines occasionally emit tokens like `"My` (leading quote stuck
 /// to the word) when transcribing quoted speech. Such tokens are
 /// structurally illegal as CHAT words: tree-sitter rejects the `"`,
-/// surfacing as E330 ("Expected source_file root, got 'ERROR'") at the
+/// surfacing as E330 ("Expected `source_file` root, got 'ERROR'") at the
 /// `transcript_from_asr_utterances` validation gate.
 ///
 /// This pass runs in `prepare_words_pre_expansion` (Stage 2c, after
@@ -199,17 +199,20 @@ impl DroppedAsrToken {
     }
 
     /// The token, verbatim.
+    #[must_use]
     pub fn text(&self) -> &str {
         self.text.as_str()
     }
 
     /// Its start in milliseconds, when timed.
-    pub fn start_ms(&self) -> Option<i64> {
+    #[must_use]
+    pub const fn start_ms(&self) -> Option<i64> {
         self.start_ms
     }
 
     /// Its end in milliseconds, when timed.
-    pub fn end_ms(&self) -> Option<i64> {
+    #[must_use]
+    pub const fn end_ms(&self) -> Option<i64> {
         self.end_ms
     }
 
@@ -224,6 +227,7 @@ impl DroppedAsrToken {
     /// as its code point (`U+0015`). The rest of a dropped token is by
     /// definition punctuation or symbols CHAT does not admit as a word, and a
     /// comment tier admits them as text.
+    #[must_use]
     pub fn comment_text(&self) -> String {
         let quoted = quoted_for_comment(self.text.as_str(), CommentQuoting::Token);
         let when = match (self.start_ms, self.end_ms) {
@@ -239,7 +243,7 @@ impl DroppedAsrToken {
 /// How a recognizer text is quoted inside a `%com` or `@Comment` this
 /// pipeline writes about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommentQuoting {
+pub enum CommentQuoting {
     /// One token, in single quotes; every whitespace character is written as
     /// its code point, since a token holds none.
     Token,
@@ -252,7 +256,7 @@ pub(crate) enum CommentQuoting {
 /// it: a control character, the CHAT bullet delimiter (U+0015) and, per the
 /// quoting, whitespace are written as their code points (`U+0015`). The one
 /// rule, shared by the dropped-token and the window-seam records.
-pub(crate) fn quoted_for_comment(text: &str, quoting: CommentQuoting) -> String {
+pub fn quoted_for_comment(text: &str, quoting: CommentQuoting) -> String {
     let (open, close) = match quoting {
         CommentQuoting::Token => ('\'', '\''),
         CommentQuoting::Phrase => ('"', '"'),
@@ -475,16 +479,16 @@ use std::collections::HashSet;
 /// Surface-form allowlist of English title/abbreviation tokens whose
 /// trailing period(s) should be stripped. Sourced from the locked
 /// probe cases:
-/// * TITLE_PERIOD: `Dr.`, `Mr.`, `Mrs.`, `Prof.`
-/// * PLACE_PERIOD: `St.`, `Mt.`, `Ave.`
-/// * TIME_PERIOD: `a.m.`, `p.m.`
-/// * INITIALISM_PERIOD: `U.S.`, `J.F.K.`
-/// * DEGREE_PERIOD: `Ph.D.`, `M.D.`
-/// * TECHNICAL_ABBREV: `etc.`, `e.g.`, `i.e.`
+/// * `TITLE_PERIOD`: `Dr.`, `Mr.`, `Mrs.`, `Prof.`
+/// * `PLACE_PERIOD`: `St.`, `Mt.`, `Ave.`
+/// * `TIME_PERIOD`: `a.m.`, `p.m.`
+/// * `INITIALISM_PERIOD`: `U.S.`, `J.F.K.`
+/// * `DEGREE_PERIOD`: `Ph.D.`, `M.D.`
+/// * `TECHNICAL_ABBREV`: `etc.`, `e.g.`, `i.e.`
 ///
 /// The closed-set approach is deliberate. A regex or suffix-based
 /// rule would over-fire on decimals (`3.14`) and utterance-final
-/// periods, both flagged as POST_STRICTLY_WORSE in the DECIMAL
+/// periods, both flagged as `POST_STRICTLY_WORSE` in the DECIMAL
 /// and SENTENCE probes. Closed surfaces keep the rule safe.
 ///
 /// Matching is **case-insensitive** on the whole surface so ASR
@@ -571,7 +575,7 @@ pub fn apply_english_transcribe_rules_post_retokenize(utterances: &mut [Utteranc
 /// `I'll` / `I'm` / `I've` / `I'd`. Idempotent.
 ///
 /// Probe-verdict locks: `_decision_cases/english.py::_PRONOUN_I_CASES`
-/// (POST_NEUTRAL) and `_I_CONTRACTION_CASES` (POST_NEUTRAL).
+/// (`POST_NEUTRAL`) and `_I_CONTRACTION_CASES` (`POST_NEUTRAL`).
 fn apply_i_capitalization_to_words(words: &mut [AsrWord]) {
     for word in words.iter_mut() {
         // A deliberate copy of chatter's former table, which now lives in
@@ -593,10 +597,10 @@ fn apply_i_capitalization_to_words(words: &mut [AsrWord]) {
 ///
 /// Probe-verdict locks: `_TITLE_CASES`, `_PLACE_CASES`,
 /// `_TIME_CASES`, `_INITIALISM_CASES`, `_DEGREE_CASES`,
-/// `_TECHNICAL_CASES` (all POST_NEUTRAL). The closed-set guard
-/// ensures DECIMAL_CONTROL cases (`3.14`) and SENTENCE_PERIOD
+/// `_TECHNICAL_CASES` (all `POST_NEUTRAL`). The closed-set guard
+/// ensures `DECIMAL_CONTROL` cases (`3.14`) and `SENTENCE_PERIOD`
 /// cases (utterance-final `.`) never fire; those are locked
-/// POST_STRICTLY_WORSE in the probe matrix.
+/// `POST_STRICTLY_WORSE` in the probe matrix.
 fn apply_title_period_strip_to_words(words: &mut [AsrWord]) {
     for word in words.iter_mut() {
         let lower = word.text.to_lowercase();
@@ -612,7 +616,7 @@ fn apply_title_period_strip_to_words(words: &mut [AsrWord]) {
 /// (`&+...`), nonwords (`&~...`), and tokens that start with
 /// non-letter characters.
 ///
-/// Probe-verdict lock: `_UTTERANCE_INITIAL_CASES` (POST_NEUTRAL).
+/// Probe-verdict lock: `_UTTERANCE_INITIAL_CASES` (`POST_NEUTRAL`).
 ///
 /// The "first real word" walk mirrors what a CHAT reader would do
 /// when capitalizing a sentence: skip any leading filler / markers
@@ -654,7 +658,7 @@ fn apply_utterance_initial_capitalization(utterances: &mut [Utterance]) {
 /// first owner. One decision for the pre-CHAT pass over ASR words and the
 /// post-CHAT split's new children, so the two cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InitialCapSlot {
+pub enum InitialCapSlot {
     /// Not a capitalizable content word (marker, filler, fragment,
     /// punctuation): the slot belongs to a later word.
     NotOwner,
@@ -669,7 +673,7 @@ pub(crate) enum InitialCapSlot {
 
 /// Decide the slot for one surface as the pre-CHAT pass spells it (`&-um`,
 /// `www@k`, `xxx`).
-pub(crate) fn initial_cap_slot(text: &str) -> InitialCapSlot {
+pub fn initial_cap_slot(text: &str) -> InitialCapSlot {
     if !owns_utterance_initial_cap(text) {
         InitialCapSlot::NotOwner
     } else if is_letter_form(text) {

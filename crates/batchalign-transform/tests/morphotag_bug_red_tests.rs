@@ -191,7 +191,7 @@ fn bug_009_level_pitch_separator_no_space_must_not_leak_into_stanza_payload() ->
 /// the same contract for the longer nobfield.cha line 12 pattern,
 /// where `→` follows a multi-word utterance with no space and no
 /// terminator (followed by an audio time bullet):
-///     *PAT: I think you could use new clothes→ 0_2633
+///     *PAT: I think you could use new clothes→ `0_2633`
 /// The `→` and the bullet must NOT appear as Stanza-payload words.
 #[test]
 fn bug_009_level_pitch_separator_in_long_utterance_with_bullet_must_not_leak() -> TestResult {
@@ -382,7 +382,7 @@ fn bug_dona_at_s_mwt_terminator_gra_alignment_must_hold() -> TestResult {
 /// ```
 ///
 /// Hypothesis under test (level-2 narrowing): `build_gra_and_validate`
-/// completes with consistent (mors_len + 1, gras_len + 1) under
+/// completes with consistent (`mors_len` + 1, `gras_len` + 1) under
 /// `AppendTrailingPunct`, but the terminator chunk reaches the
 /// `MorTier` via a different path that doesn't append a matching
 /// `%gra` entry. The post-Stanza injection layer or the tier-

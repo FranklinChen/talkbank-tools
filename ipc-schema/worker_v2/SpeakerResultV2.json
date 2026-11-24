@@ -13,6 +13,11 @@
     "evidence"
   ],
   "$defs": {
+    "Sha256Digest": {
+      "description": "A validated lowercase SHA-256 digest.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "SpeakerInferenceEvidenceV2": {
       "description": "Raw evidence returned by one speaker-inference backend.\n\nThe variants make backend provenance structural. In particular, a\nlocal backend cannot construct a pyannoteAI result without also supplying\nthe completed provider job evidence, and cloud evidence cannot masquerade\nas a normalized-only local segment list.",
       "oneOf": [
@@ -55,6 +60,17 @@
               "type": "string",
               "const": "pyannote"
             },
+            "loaded_graph": {
+              "description": "Graph evidence reported by the local loader. Older replies may omit it.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SpeakerLoadedModelGraphV2"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "segments": {
               "description": "Ordered speaker segments.",
               "type": "array",
@@ -68,6 +84,29 @@
             "segments"
           ]
         }
+      ]
+    },
+    "SpeakerLoadedModelGraphV2": {
+      "description": "Content evidence from the local speaker model loader's verified graph.",
+      "type": "object",
+      "properties": {
+        "embedding_sha256": {
+          "description": "Exact embedding artifact admitted by the loader.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "pipeline_config_sha256": {
+          "description": "Exact bytes of the loaded pipeline configuration before local path rewriting.",
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "segmentation_sha256": {
+          "description": "Exact segmentation artifact admitted by the loader.",
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "pipeline_config_sha256",
+        "segmentation_sha256",
+        "embedding_sha256"
       ]
     },
     "SpeakerProviderJobIdV2": {

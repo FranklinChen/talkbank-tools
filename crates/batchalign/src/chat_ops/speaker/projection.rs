@@ -60,6 +60,7 @@ struct AssignmentWitness {
 /// Greatest accumulated overlap; lexical-label ties; nearest-segment gaps.
 /// Untimed tokens retain the existing backward/forward attachment policy.
 /// Extraction requires explicit best-effort admission, not an accuracy claim.
+#[must_use]
 pub fn project_speakers_onto_chunks(
     chunks: Vec<PreparedMonologueChunk>,
     segments: &[SpeakerSegment],

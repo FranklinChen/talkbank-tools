@@ -110,7 +110,7 @@ impl SpawnPermit {
     /// Failures to update the ledger are warned and dropped: this is a
     /// best-effort accounting hint, not a correctness gate. A worker
     /// that never gets its PID written into the lease falls back to
-    /// the older "owner_pid is daemon" behaviour, which is the
+    /// the older "`owner_pid` is daemon" behaviour, which is the
     /// pre-fix status quo: strictly no worse than today.
     pub fn set_worker_pid(&self, worker_pid: crate::worker::WorkerPid) {
         if let Err(error) = self.host_lease.set_worker_pid(worker_pid) {
@@ -188,26 +188,27 @@ mod tests {
     use crate::worker::WorkerProfile;
     use tempfile::tempdir;
 
-    /// A reserve no host can keep free refuses the spawn at once, naming the
-    /// sizes, rather than queueing it for ever.
+    /// Guards: An impossible reserve gives a named refusal rather than a wait.
+    /// Kind: policy
+    /// Not a type: The requested reserve and the declared host's capacity
+    /// are separately valid quantities whose relationship requires admission.
+    /// State: A synthetic host and a private ledger path exercise spawn admission.
+    /// Concurrency: The path and coordinator belong only to this test.
     #[tokio::test]
     async fn a_spawn_no_host_can_fit_is_refused_at_once() {
         let temp = tempdir().expect("tempdir");
-        let config = WorkerConfig {
-            profile: WorkerProfile::Stanza,
-            lang: WorkerLanguage::from(LanguageCode3::eng()),
-            runtime: crate::worker::handle::WorkerRuntimeConfig {
-                host: crate::worker::handle::WorkerRuntimeConfig::for_tests()
-                    .host
-                    .with_ledger(HostMemoryRuntimeConfig::from_sources(
-                        temp.path().join("host-memory.json"),
-                        MemoryMb(1_000_000_000),
-                        crate::config::WorkerStartupLimit::literal::<1>(),
-                    )),
-                ..crate::worker::handle::WorkerRuntimeConfig::for_tests()
-            },
-            ..WorkerConfig::for_tests()
-        };
+        let mut config = WorkerConfig::for_tests_with_python("unused-interpreter".to_owned());
+        config.profile = WorkerProfile::Stanza;
+        config.lang = WorkerLanguage::from(LanguageCode3::eng());
+        config.runtime.host =
+            config
+                .runtime
+                .host
+                .with_ledger(HostMemoryRuntimeConfig::from_sources(
+                    temp.path().join("host-memory.json"),
+                    MemoryMb(1_000_000_000),
+                    crate::config::WorkerStartupLimit::literal::<1>(),
+                ));
         let result = acquire_spawn_permit(&config, &crate::host_memory::NoIdleWorkers).await;
         assert!(
             matches!(

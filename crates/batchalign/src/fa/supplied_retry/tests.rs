@@ -16,6 +16,11 @@ use crate::worker::pool::{GpuModelPlan, PoolConfig, WorkerPool};
 use talkbank_parser::TreeSitterParser;
 use talkbank_parser_tests::test_error::ParseProductTestExt;
 
+/// Guards: Cached primary timings grant only missing projected slots to the retry and retain measured evidence.
+/// Kind: transcript
+/// Not a type: Actual cached indexed timings can project differently across words and healing policies.
+/// State: Parsed CHAT and a private SQLite cache supply primary and retry evidence. The admitted window supplies bounds without opening media or a model.
+/// Concurrency: Each control owns its private cache directory and awaits processing before inspecting output.
 #[tokio::test]
 async fn cached_primary_retries_only_projected_gaps_and_retains_evidence() {
     use crate::api::NonNegativeSeconds;
@@ -50,23 +55,19 @@ async fn cached_primary_retries_only_projected_gaps_and_retains_evidence() {
         let directory = tempfile::tempdir().unwrap();
         let audio_path = directory.path().join("absent.wav");
         let identity = AudioIdentity::from_metadata("absent.wav", 0, 0);
-        let audio = AudioContext {
-            audio_path: &audio_path,
-            audio_identity: &identity,
-            audio_duration: None,
-        };
+        let measured = crate::ensure_wav::MeasuredAudio::unmeasurable_fixture(&audio_path);
+        let audio = AudioContext::new(&measured, &identity);
         let pool = WorkerPool::new(PoolConfig::for_tests());
         let cache = UtteranceCache::sqlite(Some(directory.path().join("cache")))
             .await
             .unwrap();
         let namespace = crate::engine_reports::FaCacheNamespace::for_test("test-fa");
         let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-        let services = super::super::FaServices {
-            pipeline: PipelineServices::new(&pool, &cache),
-            cache_namespace: &namespace,
-            gpu: &gpu,
-            attention_capture_dir: None,
-        };
+        let services = super::super::FaServices::for_tests(
+            PipelineServices::new(&pool, &cache),
+            &namespace,
+            &gpu,
+        );
         let params = FaParams {
             gap_healing: match control {
                 Control::MissingGap => WordGapHealing::PreserveMeasured,
@@ -300,17 +301,19 @@ fn complete_compound_filler_survives_projection_without_retry() {
     assert!(output.contains("\u{15}170_190\u{15}"));
 }
 
+/// Guards: An empty cache under `RequireCache` retains missing slots without preparing media or running inference.
+/// Kind: contract
+/// Not a type: The actual cache can lack the computed key and the optional retry must honor that result.
+/// State: An empty SQLite cache, absent media and a model-free echo-worker pool expose accidental backing effects.
+/// Concurrency: A private cache directory and a new pool isolate this invocation.
 #[tokio::test]
 async fn optional_required_cache_miss_cannot_prepare_decode_or_infer() {
     let directory = tempfile::tempdir().unwrap();
     // Deliberately absent: any decoder attempt would fail this boundary.
     let path = directory.path().join("absent.wav");
     let identity = AudioIdentity::from_metadata("absent.wav", 0, 0);
-    let audio = AudioContext {
-        audio_path: &path,
-        audio_identity: &identity,
-        audio_duration: None,
-    };
+    let measured = crate::ensure_wav::MeasuredAudio::unmeasurable_fixture(&path);
+    let audio = AudioContext::new(&measured, &identity);
     let chat = TreeSitterParser::new().unwrap().parse_chat_file(
         "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tSPK Speaker\n@ID:\teng|test|SPK|||||Speaker|||\n@Media:\tabsent, audio\n*SPK:\thello . \u{15}100_200\u{15}\n@End\n"
     ).expect_built();
@@ -327,12 +330,8 @@ async fn optional_required_cache_miss_cannot_prepare_decode_or_infer() {
         .unwrap();
     let namespace = crate::engine_reports::FaCacheNamespace::for_test("test-echo");
     let gpu = GpuModelPlan::alignment(FaEngineName::Wave2Vec, None);
-    let services = super::super::FaServices {
-        pipeline: PipelineServices::new(&pool, &cache),
-        cache_namespace: &namespace,
-        gpu: &gpu,
-        attention_capture_dir: None,
-    };
+    let services =
+        super::super::FaServices::for_tests(PipelineServices::new(&pool, &cache), &namespace, &gpu);
     let language = LanguageCode3::eng();
     let params = FaParams {
         gap_healing: WordGapHealing::PreserveMeasured,

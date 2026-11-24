@@ -27,7 +27,7 @@
 //! | Stanza  | any                                       | one request/process  |
 //! | IO      | any                                       | one request/process  |
 //!
-//! Forced CPU is one request per process because each PyTorch request on CPU
+//! Forced CPU is one request per process because each `PyTorch` request on CPU
 //! already uses every core through OpenMP; threads sharing a process only
 //! oversubscribe them. A pool size of one is one request per process because a
 //! shared process admitting one request at a time is exactly a single
@@ -63,7 +63,8 @@ pub enum WorkerServing {
 
 impl WorkerServing {
     /// The serving mode for workers of `profile` launched with `runtime`.
-    pub fn decide(profile: WorkerProfile, runtime: &WorkerRuntimeConfig) -> Self {
+    #[must_use]
+    pub const fn decide(profile: WorkerProfile, runtime: &WorkerRuntimeConfig) -> Self {
         let pool_size = NonZeroU32::new(runtime.gpu_thread_pool_size);
         match profile {
             WorkerProfile::Gpu => match (runtime.force_cpu, pool_size) {
@@ -80,7 +81,8 @@ impl WorkerServing {
     }
 
     /// Whether the pool dispatches through one shared process per key.
-    pub fn is_shared(self) -> bool {
+    #[must_use]
+    pub const fn is_shared(self) -> bool {
         match self {
             Self::SharedConcurrent { .. } => true,
             Self::OneRequestPerProcess => false,
@@ -120,11 +122,17 @@ mod tests {
         }
     }
 
-    /// Policy table (see the module docs): each row of the cross-product.
+    /// Guards: The documented cross-product selects shared GPU serving only
+    /// when the device policy allows GPU and offers more than one slot.
+    /// Kind: policy
+    /// Not a type: These independent valid runtime and profile inputs are
+    /// resolved by an intentional routing policy, including zero and one.
+    /// State: In-memory declared host configuration, with no process or model.
+    /// Concurrency: Each row owns all of its inputs.
     #[test]
     fn serving_follows_the_documented_cross_product() {
-        let shared = |n: u32| WorkerServing::SharedConcurrent {
-            in_flight: NonZeroU32::new(n).expect("nonzero"),
+        let shared = WorkerServing::SharedConcurrent {
+            in_flight: NonZeroU32::new(4).expect("positive test constant"),
         };
         let cases = [
             (
@@ -142,7 +150,7 @@ mod tests {
                 runtime(false, 0),
                 WorkerServing::OneRequestPerProcess,
             ),
-            (WorkerProfile::Gpu, runtime(false, 4), shared(4)),
+            (WorkerProfile::Gpu, runtime(false, 4), shared),
             // Stanza is one request per process whatever the runtime: the
             // decision no longer reads whether Python is free-threaded, so no
             // runtime can multiplex requests onto one guarded pipeline.

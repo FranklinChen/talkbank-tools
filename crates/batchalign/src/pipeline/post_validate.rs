@@ -115,7 +115,7 @@ impl OutputDocument {
 /// [`OutputProof::Gated`] carries a materialization cache, and a cache is not
 /// part of the document's identity. See the impls below.
 #[derive(Debug)]
-pub(crate) struct PostValidated {
+pub struct PostValidated {
     /// The command whose output this document is.
     ///
     /// Held here rather than inside [`OutputProof::Gated`] because it is true
@@ -155,7 +155,7 @@ enum OutputProof {
 /// diagnostics, and never handed to a stage that needs an admitted document,
 /// because those take a [`PostValidated`].
 #[derive(Debug)]
-pub(crate) struct DiagnosedOutput {
+pub struct DiagnosedOutput {
     /// The command whose output this document is.
     command: ReleasedCommand,
     /// Boxed so the sum it lives in stays an inexpensive ownership handle.
@@ -202,7 +202,7 @@ impl DiagnosedOutput {
     }
 
     /// The command whose output this is.
-    pub(crate) fn command(&self) -> ReleasedCommand {
+    pub(crate) const fn command(&self) -> ReleasedCommand {
         self.command
     }
 
@@ -250,7 +250,7 @@ impl DiagnosedOutput {
 /// judge its result afresh ([`PostValidated::produced`]); holding this value
 /// grants no admission.
 #[derive(Debug, Clone)]
-pub(crate) struct LocalizedDiagnosis {
+pub struct LocalizedDiagnosis {
     diagnosed: DiagnosedOutput,
     held_out: HeldOutUtterances,
 }
@@ -261,12 +261,12 @@ pub(crate) struct LocalizedDiagnosis {
 /// asks [`Self::contains`] rather than searching a bare list whose order
 /// nothing enforced.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HeldOutUtterances(Vec<usize>);
+pub struct HeldOutUtterances(Vec<usize>);
 
 /// Where applying a stage's results left the file's utterances, so a
 /// judgement of the result can find the utterances the stage was not given.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AppliedLayout {
+pub enum AppliedLayout {
     /// Every utterance is where it was: the stage edits utterances in place.
     InPlace,
     /// The stage split utterances; where each input utterance went, as the
@@ -282,7 +282,7 @@ pub(crate) enum AppliedLayout {
 /// index spaces, and only [`HeldOutUtterances::in_place`] and
 /// [`HeldOutUtterances::after`] cross from one to the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HeldOutInOutput(Vec<usize>);
+pub struct HeldOutInOutput(Vec<usize>);
 
 impl HeldOutInOutput {
     /// Whether the output utterance at this ordinal is held out.
@@ -328,7 +328,7 @@ impl HeldOutUtterances {
     }
 
     /// How many utterances are held out, at least one.
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.0.len()
     }
 
@@ -417,7 +417,7 @@ impl DiagnosedOutput {
 
 impl LocalizedDiagnosis {
     /// The held-out utterances.
-    pub(crate) fn held_out(&self) -> &HeldOutUtterances {
+    pub(crate) const fn held_out(&self) -> &HeldOutUtterances {
         &self.held_out
     }
 
@@ -468,7 +468,7 @@ impl LocalizedDiagnosis {
 /// diagnosed document with its findings. The writer takes this sum, so it
 /// needs no runtime check to tell the two apart.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ProducedOutput {
+pub enum ProducedOutput {
     /// The output passed its judgement.
     Admitted(PostValidated),
     /// The output did not pass; it is written with its findings.
@@ -492,7 +492,7 @@ impl ProducedOutput {
     }
 
     /// The command whose output this is.
-    pub(crate) fn command(&self) -> ReleasedCommand {
+    pub(crate) const fn command(&self) -> ReleasedCommand {
         match self {
             Self::Admitted(admitted) => admitted.command(),
             Self::Diagnosed(diagnosed) => diagnosed.command(),
@@ -519,7 +519,7 @@ impl ProducedOutput {
 /// What a CHAT writer may persist: the bytes of a judged proof, and the
 /// command whose output they are. Implemented only by the two proof types, so
 /// a writer cannot be handed a bare string.
-pub(crate) trait WritableChat {
+pub trait WritableChat {
     /// The bytes to write.
     fn chat_text(&self) -> &str;
     /// The command whose output they are.
@@ -546,24 +546,24 @@ impl WritableChat for ProducedOutput {
 
 /// An optional later stage of a generating producer: the wire enum is the
 /// one owner of the closed set.
-pub(crate) use crate::api::OptionalStage;
+pub use crate::api::OptionalStage;
 
 /// Requested work a written output does not carry, and why. A fact about the
 /// run, carried beside the document by the producer that knows it and
 /// reported whatever the document's standing: a file with any shortfall is
 /// reported diagnosed, never clean. The wire record is the one owner.
-pub(crate) type Shortfall = crate::api::OutputShortfallRecord;
+pub type Shortfall = crate::api::OutputShortfallRecord;
 
 /// Part of the input a producer left out of its work on purpose, by a
 /// recorded ruling. Reported beside the written output on a separate channel
 /// from [`Shortfall`]: it is information, and never makes a file diagnosed,
 /// so [`OutputReport::of`] does not take it. The wire record is the one
 /// owner.
-pub(crate) type Exclusion = crate::api::OutputExclusionRecord;
+pub type Exclusion = crate::api::OutputExclusionRecord;
 
 /// How a written output is reported: clean, or with diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OutputReport {
+pub enum OutputReport {
     /// Admitted, and nothing requested is missing.
     Clean,
     /// Written with these diagnostics: the judgement's findings, the
@@ -596,7 +596,7 @@ impl OutputReport {
 /// sidecar file. A draft cannot reach the store; only [`Self::record`]
 /// produces the record it keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiagnosticsDraft {
+pub struct DiagnosticsDraft {
     /// What the judgement found, with its bar; absent when the document was
     /// admitted and only shortfalls diagnose it. Never absent together with
     /// an empty `shortfalls`: [`OutputReport::of`] is the only constructor,
@@ -720,7 +720,7 @@ struct Findings {
 
 /// One finding, typed: its CHAT error code when it has one, its validity
 /// level and its message. The wire record is the one owner of the shape.
-pub(crate) type Finding = crate::api::OutputFindingRecord;
+pub type Finding = crate::api::OutputFindingRecord;
 
 /// A gate's coarse finding (a command's completion or preservation check),
 /// which names no code.
@@ -735,7 +735,7 @@ fn gate_finding(error: ValidationError) -> Finding {
 
 /// The wire level of a validity level. Exhaustive, so a new level must say
 /// how it is reported.
-fn finding_level(level: ValidityLevel) -> crate::api::FindingLevel {
+const fn finding_level(level: ValidityLevel) -> crate::api::FindingLevel {
     match level {
         ValidityLevel::Parseable => crate::api::FindingLevel::Parseable,
         ValidityLevel::StructurallyComplete => crate::api::FindingLevel::StructurallyComplete,
@@ -779,7 +779,7 @@ impl Findings {
 /// What a judgement found in one output: the bar it was held to and every
 /// finding, never empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutputFindings {
+pub struct OutputFindings {
     bar: JudgementBar,
     findings: Findings,
 }
@@ -812,7 +812,7 @@ impl OutputFindings {
     }
 
     /// The bar the output was judged against.
-    pub(crate) fn bar(&self) -> JudgementBar {
+    pub(crate) const fn bar(&self) -> JudgementBar {
         self.bar
     }
 
@@ -822,12 +822,12 @@ impl OutputFindings {
     }
 
     /// The first finding: there always is one.
-    pub(crate) fn first(&self) -> &Finding {
+    pub(crate) const fn first(&self) -> &Finding {
         &self.findings.first
     }
 
     /// How many findings there are, at least one.
-    pub(crate) fn count(&self) -> usize {
+    pub(crate) const fn count(&self) -> usize {
         1 + self.findings.rest.len()
     }
 
@@ -872,7 +872,7 @@ impl Judgement {
     /// which claim failed and has no business carrying the census it was
     /// measured against, and deriving it here means a new judgement must state
     /// how it renders.
-    fn bar(&self) -> JudgementBar {
+    const fn bar(&self) -> JudgementBar {
         match self {
             Self::Admitted | Self::Aligned(_) | Self::Declined => JudgementBar::Construction,
             Self::Preserved(_) => JudgementBar::Preservation,
@@ -881,7 +881,7 @@ impl Judgement {
 }
 
 /// The bar an output was judged against: the wire type is the one owner.
-pub(crate) use crate::api::JudgementBar;
+pub use crate::api::JudgementBar;
 
 /// What a document's utterances WERE, before a command touched them.
 ///
@@ -900,7 +900,7 @@ pub(crate) use crate::api::JudgementBar;
 /// census determines which preservation losses can be detected. Its private
 /// fields prevent a caller from hiding those losses behind an empty census.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UtteranceCensus {
+pub struct UtteranceCensus {
     /// One entry per main tier, in document order.
     utterances: Vec<CensusEntry>,
 }
@@ -1098,7 +1098,7 @@ impl PartialEq for OutputProof {
 /// broke rather than a count. Rendered into the per-file error a job reports.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{command} post-validation failed ({}): {}", .findings.bar(), .findings.render())]
-pub(crate) struct PostValidationFailure {
+pub struct PostValidationFailure {
     /// The command whose own output failed its gate.
     pub(crate) command: ReleasedCommand,
     /// The bar the output was judged against (complete construction, or
@@ -1496,7 +1496,7 @@ impl PostValidated {
     /// The writer reads the command from HERE rather than being told it
     /// separately, so there is no second place for the name to be written down
     /// and no way for the two to disagree.
-    pub(crate) fn command(&self) -> ReleasedCommand {
+    pub(crate) const fn command(&self) -> ReleasedCommand {
         self.command
     }
 
@@ -1647,6 +1647,11 @@ mod tests {
         file
     }
 
+    /// Guards: The output proof stays within its native handle size budget.
+    /// Kind: measurement
+    /// Not a type: Rust types do not guarantee byte layout remains below the documented budget.
+    /// State: Native size inspection of the handle and boxed payload.
+    /// Concurrency: No runtime effects or shared state.
     #[test]
     fn output_proof_is_a_compact_ownership_handle() {
         let proof = std::mem::size_of::<PostValidated>();
@@ -1667,21 +1672,20 @@ mod tests {
         .expect("the source control must be completely valid")
     }
 
-    /// Complete construction and command completion authorize output bytes.
-    #[test]
-    fn gate_admits_output_that_still_validates() {
-        let file = parse(VALID);
-        let proof = PostValidated::gate(&file, ReleasedCommand::Utseg)
-            .expect("a clean file must pass its own output gate");
-        assert!(proof.as_str().contains("*CHI:"));
-    }
-
     /// RED FIRST: an output that lost a terminator must be REFUSED, not
     /// warned about. This is the whole point of the type; before this change
     /// the same input produced a `warn!` and a written file.
+    /// Guards: The strict output gate admits valid CHAT and refuses the same model after removing a terminator.
+    /// Kind: transcript
+    /// Not a type: An AST can express a required missing mark introduced after source admission.
+    /// State: One parsed model is checked before and after a local edit.
+    /// Concurrency: The edit happens after initial gate inspection.
     #[test]
     fn gate_refuses_output_that_dropped_a_terminator() {
         let mut file = parse(VALID);
+        let admitted = PostValidated::gate(&file, ReleasedCommand::Utseg)
+            .expect("the original document satisfies the strict gate");
+        assert!(admitted.as_str().contains("*CHI:"));
         for line in &mut file.lines {
             if let Line::Utterance(utt) = line {
                 utt.main.content.terminator = None;
@@ -1697,29 +1701,15 @@ mod tests {
         );
     }
 
-    /// No-work status cannot exempt invalid source from complete admission.
-    #[test]
-    fn invalid_source_cannot_acquire_pass_through_permission() {
-        let text = "@UTF8\n@Begin\n*PAR:\thello .\n@End\n";
-        let file = parse(text);
-        assert!(
-            PostValidated::gate(&file, ReleasedCommand::Utseg).is_err(),
-            "precondition: this document does not satisfy L1"
-        );
-        assert!(
-            crate::pipeline::text_infer::admit_retained_text(
-                &crate::chat_parser(),
-                text,
-                TranscriptName::Anonymous,
-            )
-            .is_err()
-        );
-    }
-
     /// RED FIRST: a pass-through must carry the input's OWN bytes. It used to
     /// re-serialize the parsed model, so a document the docs call unchanged
     /// shipped through a serializer no gate had judged. The trailing spaces
     /// here are the cheapest observable difference a round trip removes.
+    /// Guards: Complete pass-through preserves exact whitespace while malformed source fails admission.
+    /// Kind: transcript
+    /// Not a type: Actual source may have unusual formatting or be rejected before its model can be written.
+    /// State: One admitted formatted source and one malformed source exercise the actual edge.
+    /// Concurrency: The parser observes immutable local bytes.
     #[test]
     fn pass_through_carries_the_original_bytes_not_a_reserialization() {
         let text = VALID.replace("*CHI:", "@Comment:\tkept   \n*CHI:");
@@ -1729,6 +1719,17 @@ mod tests {
             text.as_str(),
             "a pass-through must be byte-identical to its input"
         );
+        let invalid = "@UTF8\n@Begin\n*PAR:\thello .\n@End\n";
+        let refusal = crate::pipeline::text_infer::admit_retained_text(
+            &crate::chat_parser(),
+            invalid,
+            TranscriptName::Anonymous,
+        )
+        .expect_err("an invalid source cannot authorize unchanged output");
+        assert!(matches!(
+            refusal,
+            crate::error::ServerError::ChatAdmission(_)
+        ));
     }
 
     /// RED FIRST (2026-09-07): a declining command's proof must not carry the
@@ -1740,19 +1741,19 @@ mod tests {
     /// `pass_through` half of the assertion is the control: it is the same
     /// document down the other route, and it keeps the tiers, which is exactly
     /// why the two routes are different constructors.
+    /// Guards: A decline strips prior decision tiers while ordinary pass-through keeps them.
+    /// Kind: transcript
+    /// Not a type: A valid source may contain generated decisions and the output policy determines which survive.
+    /// State: One admitted source proof feeds both real output operations.
+    /// Concurrency: Both operations use independently owned evidence of the same source.
     #[test]
     fn declining_a_document_strips_the_decision_tiers_a_previous_run_wrote() {
         let text = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
 @ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\thello world .\n\
 %xalign:\tmonotonicity:end_clamped\n@End\n";
+        let admitted = source(text);
         let declined = PostValidated::declined_stripping_decision_tiers(
-            crate::pipeline::text_infer::admit_retained_text(
-                &crate::chat_parser(),
-                text,
-                TranscriptName::Anonymous,
-            )
-            .expect("the retained source is valid")
-            .into_valid_file(),
+            admitted.clone().into_valid_file(),
             ReleasedCommand::Morphotag,
         )
         .expect("removing decision tiers preserves validity");
@@ -1767,7 +1768,7 @@ mod tests {
             declined.as_str()
         );
         assert!(
-            PostValidated::pass_through(source(text), ReleasedCommand::Morphotag)
+            PostValidated::pass_through(admitted, ReleasedCommand::Morphotag)
                 .as_str()
                 .contains("%xalign:"),
             "control: a pass-through applies nothing, so it keeps them"
@@ -1775,90 +1776,69 @@ mod tests {
     }
 
     /// An inherited defect is still invalid output, not a preservation waiver.
+    /// Guards: Preservation refuses inherited invalidity and lost terminator, utterance or correspondence evidence.
+    /// Kind: transcript
+    /// Not a type: A transformed model can retain a source defect or lose structure after its census was established.
+    /// State: Actual parsed pairs cover both terminator cases, count and participant mismatch.
+    /// Concurrency: One fixture owns all source and output models.
     #[test]
     fn preservation_cannot_exempt_invalid_output_from_complete_admission() {
-        let input = parse(NO_TERMINATOR);
-        assert!(
-            PostValidated::gate(&input, ReleasedCommand::Compare).is_err(),
-            "precondition: a level gate refuses this document"
-        );
-        let failure = PostValidated::preserving(
-            UtteranceCensus::of(&input),
-            input.clone(),
+        let complete = parse(VALID);
+        let no_terminator = parse(NO_TERMINATOR);
+        let inherited = PostValidated::preserving(
+            UtteranceCensus::of(&no_terminator),
+            no_terminator.clone(),
             ReleasedCommand::Compare,
         )
-        .expect_err("preserving an invalid input does not authorize invalid output");
-        assert!(failure.findings.errors().next().is_some());
-    }
+        .expect_err("preservation cannot certify inherited invalidity");
+        assert!(inherited.findings.errors().next().is_some());
 
-    /// RED FIRST (2026-09-07 review, item 1): the same output IS refused when
-    /// its input had the terminator, so the check fires on a real loss.
-    ///
-    /// Read with the test above, these two differ only in the input, which is
-    /// what makes either of them evidence: a check that ignored the input would
-    /// fail one of them whichever way it leaned.
-    #[test]
-    fn preserving_refuses_an_output_that_lost_a_terminator_its_input_had() {
-        let failure = PostValidated::preserving(
-            UtteranceCensus::of(&parse(VALID)),
-            parse(NO_TERMINATOR),
+        let lost_terminator = PostValidated::preserving(
+            UtteranceCensus::of(&complete),
+            no_terminator,
             ReleasedCommand::Compare,
         )
-        .expect_err("an output that lost a terminator its input had must be refused");
-        assert_eq!(failure.findings.bar(), JudgementBar::Preservation);
-        let rendered = failure.to_string();
-        assert!(
-            rendered.contains("lost its terminator"),
-            "the refusal must name what broke, got: {rendered}"
-        );
-        assert!(
-            !rendered.contains("must still satisfy"),
-            "a preserved refusal must not report a bar the input was never held to: {rendered}"
-        );
-    }
+        .expect_err("the input's terminator was lost");
+        assert_eq!(lost_terminator.findings.bar(), JudgementBar::Preservation);
+        let message = lost_terminator.to_string();
+        assert!(message.contains("lost its terminator"), "{message}");
+        assert!(!message.contains("must still satisfy"), "{message}");
 
-    /// An utterance the command DROPPED is a loss too, and the count is what
-    /// notices it.
-    #[test]
-    fn preserving_refuses_an_output_that_dropped_an_utterance() {
-        let two = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tCHI Target_Child\n\
-@ID:\teng|test|CHI|3;|male|||Target_Child|||\n*CHI:\thello world .\n*CHI:\tbye now .\n@End\n";
-        let failure = PostValidated::preserving(
-            UtteranceCensus::of(&parse(two)),
-            parse(VALID),
+        let two = VALID.replace("@End", "*CHI:\tbye now .\n@End");
+        let dropped = PostValidated::preserving(
+            UtteranceCensus::of(&parse(&two)),
+            complete.clone(),
             ReleasedCommand::Compare,
         )
-        .expect_err("an output with fewer utterances than its input must be refused");
+        .expect_err("the result cannot lose an utterance");
         assert!(
-            failure
+            dropped
                 .to_string()
                 .contains("kept 1 of the input's 2 utterances"),
-            "the refusal must say what went missing, got: {failure}"
+            "{dropped}"
         );
-    }
 
-    /// The correspondence between the two documents is positional, so it is
-    /// CHECKED rather than assumed: an output whose utterances no longer line
-    /// up with the input is refused instead of having two unrelated utterances
-    /// silently compared.
-    #[test]
-    fn preserving_refuses_an_output_whose_utterances_no_longer_line_up() {
         let other_speaker = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tMOT Mother\n\
 @ID:\teng|test|MOT|||||Mother|||\n*MOT:\thello world .\n@End\n";
-        let failure = PostValidated::preserving(
-            UtteranceCensus::of(&parse(VALID)),
+        let unbound = PostValidated::preserving(
+            UtteranceCensus::of(&complete),
             parse(other_speaker),
             ReleasedCommand::Compare,
         )
-        .expect_err("an output that no longer lines up with its input must be refused");
+        .expect_err("an output utterance no longer lines up");
         assert!(
-            failure.to_string().contains("no longer lines up"),
-            "the refusal must say the correspondence broke, got: {failure}"
+            unbound.to_string().contains("no longer lines up"),
+            "{unbound}"
         );
     }
 
     /// Checked construction must reject an invalid manually assembled word.
     /// This is constructor-boundary evidence, not CHAT corpus coverage.
+    /// Guards: Whitespace fails typed word construction and retains its exact output finding.
+    /// Kind: transcript
+    /// Not a type: Actual text can contain illegal whitespace and reporting can lose the original evidence.
+    /// State: Malformed word and checked output cases exercise model and output admission.
+    /// Concurrency: Only local text and diagnostics are observed.
     #[test]
     fn whitespace_cannot_be_smuggled_through_a_typed_word() {
         use talkbank_model::model::{TierContentItems, UtteranceContent, Word};
@@ -1932,9 +1912,27 @@ mod tests {
     /// RED FIRST (2026-10-06): output our own producer generated is written
     /// with its diagnostics, not refused. Before this, one ASR token made the
     /// whole transcript vanish behind a file error.
+    /// Guards: Clean production is admitted while flawed production keeps its findings and a strict consumer refuses them.
+    /// Kind: transcript
+    /// Not a type: A produced model can still carry invalid word content and the consumption policy selects the verdict.
+    /// State: Clean and flawed generated models plus the strict gate over the same flawed input.
+    /// Concurrency: The fixture owns all proofs and diagnoses.
     #[test]
     fn a_producer_keeps_its_generated_output_with_every_finding() {
+        let admitted = PostValidated::produced(parse(VALID), ReleasedCommand::Transcribe);
+        assert!(matches!(admitted, ProducedOutput::Admitted(_)));
+        assert_eq!(OutputReport::of(&admitted, &[]), OutputReport::Clean);
+
         let file = generated_with_invalid_word();
+        let failure = PostValidated::gate(&file, ReleasedCommand::Morphotag)
+            .expect_err("a strict gate refuses the same document");
+        assert!(
+            failure
+                .findings
+                .errors()
+                .any(|error| error.code.as_deref() == Some("E220")),
+            "{failure}"
+        );
         let produced = PostValidated::produced(file, ReleasedCommand::Transcribe);
         let OutputReport::Diagnosed(report) = OutputReport::of(&produced, &[]) else {
             panic!("an invalid generated word must diagnose the output");
@@ -1953,39 +1951,14 @@ mod tests {
         );
     }
 
-    /// The SAME document is still refused by the strict gate a command that
-    /// transforms submitted CHAT uses: validation is exactly as strict, only
-    /// a generating producer's handling of the verdict differs.
-    #[test]
-    fn the_strict_gate_still_refuses_what_a_producer_keeps() {
-        let failure =
-            PostValidated::gate_owned(generated_with_invalid_word(), ReleasedCommand::Morphotag)
-                .expect_err("a strict gate refuses the same document");
-        assert!(
-            failure
-                .findings
-                .errors()
-                .any(|error| error.code.as_deref() == Some("E220")),
-            "the refusal names the same finding, got: {failure}"
-        );
-    }
-
-    /// A clean generated document is admitted by the producer transition; a
-    /// diagnosed one is a different type, so it cannot be handed to a stage
-    /// that requires admission.
-    #[test]
-    fn the_producer_transition_is_a_sum_of_admitted_and_diagnosed() {
-        let admitted = PostValidated::produced(parse(VALID), ReleasedCommand::Transcribe);
-        assert!(matches!(admitted, ProducedOutput::Admitted(_)));
-        assert_eq!(OutputReport::of(&admitted, &[]), OutputReport::Clean);
-        let diagnosed =
-            PostValidated::produced(generated_with_invalid_word(), ReleasedCommand::Transcribe);
-        assert!(matches!(diagnosed, ProducedOutput::Diagnosed(_)));
-    }
-
     /// Shortfalls are reported whatever the document's standing: an admitted
     /// document with a shortfall is never reported clean, and a diagnosed one
     /// reports its findings and its shortfalls together.
+    /// Guards: Optional-stage shortfalls are reported whether final CHAT is clean or diagnosed.
+    /// Kind: policy
+    /// Not a type: Real stage decisions can fail independently of complete transcript validation.
+    /// State: Two output proofs and explicit stage refusal and skip records.
+    /// Concurrency: Pure report projection over local values.
     #[test]
     fn shortfalls_are_reported_whatever_the_standing() {
         let refused = Shortfall::StageNotApplied {
@@ -2035,6 +2008,11 @@ mod tests {
     /// A recorded diagnosis is bounded: the count, a count per code and the
     /// first findings stay on the record; a longer list is written once, in
     /// full, to the sidecar, and a short one writes nothing.
+    /// Guards: Only overlong finding lists write their full contents to a sidecar.
+    /// Kind: contract
+    /// Not a type: Actual diagnosis can exceed the inline cap and persistent JSON must keep the entire list.
+    /// State: A private directory and real persistent reports witness short and long cases.
+    /// Concurrency: Every target belongs to the test directory.
     #[tokio::test]
     async fn recording_bounds_the_findings_and_writes_a_long_list_once() {
         let finding = |code: Option<&str>, n: usize| Finding {
@@ -2130,6 +2108,11 @@ mod tests {
     /// A sidecar that cannot be written is recorded as unwritten, with the
     /// bounded record intact; it never turns the written output into an
     /// error.
+    /// Guards: A sidecar write failure retains its path, error and bounded inline findings.
+    /// Kind: contract
+    /// Not a type: The OS may refuse publication after successful diagnosis and recovery must report the actual error.
+    /// State: An overlong findings list and a real refused path exercise the writer.
+    /// Concurrency: A private directory isolates the failure.
     #[tokio::test]
     async fn an_unwritable_sidecar_is_recorded_not_raised() {
         let dir = tempfile::tempdir().expect("tempdir");

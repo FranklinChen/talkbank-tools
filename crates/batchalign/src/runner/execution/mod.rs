@@ -32,7 +32,7 @@ use tracing::{error, info};
 /// return type an explicitly-typed boxed future breaks the recursion: the inner
 /// call `job_task(...)` has a concrete `Pin<Box<dyn Future + Send>>` type that
 /// the compiler can verify is `Send + 'static`.
-pub(crate) fn job_task(
+pub fn job_task(
     job_id: JobId,
     host: ServerExecutionHost,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
@@ -75,7 +75,7 @@ async fn run_server_job_attempt(
 }
 
 /// Run one inline job. Its deferred type has no inhabitants.
-pub(crate) async fn run_direct_job(
+pub async fn run_direct_job(
     job_id: &JobId,
     host: &DirectExecutionHost,
 ) -> Result<(), crate::error::ServerError> {

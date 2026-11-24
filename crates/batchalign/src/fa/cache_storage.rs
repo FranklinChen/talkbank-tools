@@ -4,10 +4,7 @@
 //! its established semantic address and derive a disjoint timing-layer address.
 
 use super::{AdmittedCachedFaTimings, FaServices};
-use crate::cache::{
-    UtteranceCache,
-    tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE},
-};
+use crate::cache::tasks::{FORCED_ALIGNMENT, FORCED_ALIGNMENT_RAW_EVIDENCE};
 use crate::chat_ops::fa::WordTiming;
 use std::collections::HashMap;
 use tracing::warn;
@@ -35,6 +32,11 @@ pub(super) async fn read_values(
     HashMap<String, serde_json::Value>,
     HashMap<String, serde_json::Value>,
 ) {
+    // An unidentified recording reads nothing: its keys could match an
+    // earlier version of the file.
+    let Some(cache) = services.recording_cache.keyed() else {
+        return (HashMap::new(), HashMap::new());
+    };
     if keys.is_empty() {
         return (HashMap::new(), HashMap::new());
     }
@@ -47,12 +49,8 @@ pub(super) async fn read_values(
         .map(|address| address.physical.clone())
         .collect();
     let (derived, raw) = tokio::join!(
-        services.pipeline.cache.get_batch(
-            &derived_keys,
-            FORCED_ALIGNMENT,
-            services.cache_namespace
-        ),
-        services.pipeline.cache.get_batch(
+        cache.get_batch(&derived_keys, FORCED_ALIGNMENT, services.cache_namespace),
+        cache.get_batch(
             keys,
             FORCED_ALIGNMENT_RAW_EVIDENCE,
             services.cache_namespace
@@ -75,9 +73,7 @@ pub(super) async fn read_values(
     let mut legacy = if legacy_keys.is_empty() {
         HashMap::new()
     } else {
-        match services
-            .pipeline
-            .cache
+        match cache
             .get_batch(&legacy_keys, FORCED_ALIGNMENT, services.cache_namespace)
             .await
         {
@@ -110,11 +106,16 @@ pub(super) async fn read_values(
 /// Consuming replayable evidence supplies its admitted semantic key and engine
 /// namespace. A caller cannot independently choose either cache identity.
 /// Cache writes remain best-effort; failures do not invalidate this run's timings.
+/// An unidentified recording's evidence is not written: no later run could
+/// tell its key from an earlier version of the file.
 pub(super) async fn store_unit_evidence(
-    cache: &UtteranceCache,
+    recording_cache: super::RecordingCache<'_>,
     timings: &[Option<WordTiming>],
     raw_evidence: super::raw_evidence::ReplayableFaRawEvidence,
 ) {
+    let Some(cache) = recording_cache.keyed() else {
+        return;
+    };
     let key = raw_evidence.cache_key().as_str().to_owned();
     let namespace = raw_evidence.request_engine_version().clone();
     let derived_key = DerivedFaStorageKey::of(&key);

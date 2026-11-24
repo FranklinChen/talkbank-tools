@@ -42,7 +42,7 @@ pub(crate) enum FileCompletion {
 
 impl FileCompletion {
     /// The result to record, whichever way the file finished with one.
-    pub(crate) fn result(&self) -> Option<&CompletedFileOutput> {
+    pub(crate) const fn result(&self) -> Option<&CompletedFileOutput> {
         match self {
             Self::WithoutResult => None,
             Self::Clean(result) | Self::Diagnosed { result, .. } => Some(result),

@@ -725,7 +725,7 @@ mod tests {
         (pool, key, reservation)
     }
 
-    /// Guards: A legitimately held startup slot keeps a saturated checkout waiting across report intervals, and pool shutdown returns PoolShuttingDown.
+    /// Guards: A legitimately held startup slot keeps a saturated checkout waiting across report intervals, and pool shutdown returns `PoolShuttingDown`.
     /// Kind: policy
     /// Not a type: The slot prevents fabricated saturation counts. Waiting indefinitely through congestion and selecting shutdown over further retry remain async scheduling policies observed through the actual checkout future.
     /// State: An isolated pool on the declared test host retains a real reservation. Its shared semaphore and cancellation token drive checkout; no worker process, socket, model or memory ledger is needed.

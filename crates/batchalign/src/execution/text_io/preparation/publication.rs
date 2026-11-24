@@ -1,7 +1,7 @@
 //! Gateway correspondence is admitted once before any publication effect.
 
-use super::{PreparedTextFile, ReadTextBatch, ReadTextFile};
-use crate::runner::util::{FileRunTracker, FileStage, set_file_progress};
+use super::PreparedTextFile;
+use crate::runner::util::{FileRunTracker, FileStage, TerminalRecorded, set_file_progress};
 use crate::scheduling::FailureCategory;
 use crate::text_batch::{TextBatchFileResult, TextBatchFileResults};
 
@@ -14,37 +14,66 @@ struct BoundTextResult {
     >,
 }
 
-impl ReadTextFile {
-    /// Raw gateway responses are admitted once against this file's owner.
-    /// A missing, duplicate or foreign response fails the originating file.
-    pub(crate) async fn complete(self, results: TextBatchFileResults) {
-        let owner = self.owner;
-        drop(self.input);
-        drop(self.before);
-        let [result] = match <[TextBatchFileResult; 1]>::try_from(results) {
-            Ok(result) => result,
-            Err(results) => {
-                owner
-                    .fail(&format!(
-                        "Expected one text result for {}, received {}",
-                        owner.filename(),
-                        results.len()
-                    ))
-                    .await;
-                return;
-            }
-        };
-        if result.filename != *owner.filename() {
-            owner
+/// Raw gateway responses are admitted once against this file's owner.
+/// A missing, duplicate or foreign response fails the originating file.
+pub(super) async fn publish_one(
+    owner: PreparedTextFile,
+    results: TextBatchFileResults,
+) -> TerminalRecorded {
+    let [result] = match <[TextBatchFileResult; 1]>::try_from(results) {
+        Ok(result) => result,
+        Err(results) => {
+            return owner
                 .fail(&format!(
-                    "Unexpected text result {} for {}",
-                    result.filename,
-                    owner.filename()
+                    "Expected one text result for {}, received {}",
+                    owner.filename(),
+                    results.len()
                 ))
                 .await;
-            return;
         }
-        publish(BoundTextResult {
+    };
+    if result.filename != *owner.filename() {
+        return owner
+            .fail(&format!(
+                "Unexpected text result {} for {}",
+                result.filename,
+                owner.filename()
+            ))
+            .await;
+    }
+    publish(BoundTextResult {
+        owner,
+        stamp: result.stamp,
+        outcome: result.result,
+    })
+    .await
+}
+
+pub(super) async fn publish_batch(
+    mut owners: Vec<PreparedTextFile>,
+    mut results: TextBatchFileResults,
+) {
+    // Gateway responses may arrive in another order. Validate the whole
+    // correspondence before publication, retaining every owner on refusal.
+    owners.sort_by(|left, right| left.filename().cmp(right.filename()));
+    results.sort_by(|left, right| left.filename.cmp(&right.filename));
+    if owners.len() != results.len()
+        || owners
+            .iter()
+            .zip(&results)
+            .any(|(owner, result)| *owner.filename() != result.filename)
+    {
+        // A batch reports no per-file outcome: recording is the whole effect,
+        // so each file's proof is dropped here.
+        for owner in owners {
+            let _recorded = owner
+                .fail("Text results do not match the prepared source batch")
+                .await;
+        }
+        return;
+    }
+    for (owner, result) in owners.into_iter().zip(results) {
+        let _recorded = publish(BoundTextResult {
             owner,
             stamp: result.stamp,
             outcome: result.result,
@@ -53,40 +82,23 @@ impl ReadTextFile {
     }
 }
 
-impl ReadTextBatch {
-    pub(crate) async fn complete(mut self, mut results: TextBatchFileResults) {
-        drop(self.inputs);
-        // Gateway responses may arrive in another order. Validate the whole
-        // correspondence before publication, retaining every owner on refusal.
-        self.owners
-            .sort_by(|left, right| left.filename().cmp(right.filename()));
-        results.sort_by(|left, right| left.filename.cmp(&right.filename));
-        if self.owners.len() != results.len()
-            || self
-                .owners
-                .iter()
-                .zip(&results)
-                .any(|(owner, result)| *owner.filename() != result.filename)
-        {
-            for owner in self.owners {
-                owner
-                    .fail("Text results do not match the prepared source batch")
-                    .await;
-            }
-            return;
-        }
-        for (owner, result) in self.owners.into_iter().zip(results) {
-            publish(BoundTextResult {
-                owner,
-                stamp: result.stamp,
-                outcome: result.result,
-            })
-            .await;
-        }
-    }
+/// Outcomes produced for the single source locally already have correspondence.
+pub(super) async fn publish_unstamped(
+    owner: PreparedTextFile,
+    outcome: Result<
+        crate::morphosyntax::report::MorphosyntaxOutput,
+        crate::text_batch::TextWorkflowFileError,
+    >,
+) -> TerminalRecorded {
+    publish(BoundTextResult {
+        owner,
+        stamp: crate::api::FileStampOutcome::Unrecorded,
+        outcome,
+    })
+    .await
 }
 
-async fn publish(bound: BoundTextResult) {
+async fn publish(bound: BoundTextResult) -> TerminalRecorded {
     let BoundTextResult {
         owner,
         stamp,
@@ -110,13 +122,12 @@ async fn publish(bound: BoundTextResult) {
                 // nobody can find, classified as every such fault is.
                 Err(error) => {
                     let error = crate::error::ServerError::from(error);
-                    lifecycle
+                    return lifecycle
                         .fail(
                             &error.to_string(),
                             crate::runner::util::classify_server_error(&error),
                         )
                         .await;
-                    return;
                 }
             };
             let finished = crate::pipeline::post_validate::ProducedOutput::Admitted(finished);
@@ -132,10 +143,9 @@ async fn publish(bound: BoundTextResult) {
             let target = match outputs.primary_target() {
                 Ok(target) => target,
                 Err(error) => {
-                    lifecycle
+                    return lifecycle
                         .fail(&error.to_string(), FailureCategory::System)
                         .await;
-                    return;
                 }
             };
             let artifact = outputs.primary();
@@ -145,10 +155,9 @@ async fn publish(bound: BoundTextResult) {
                 )
                 .await
             {
-                lifecycle
+                return lifecycle
                     .fail(&error.to_string(), FailureCategory::System)
                     .await;
-                return;
             }
             use crate::pipeline::post_validate::OutputReport;
             let diagnostics = match OutputReport::of(&finished, &shortfalls) {
@@ -168,10 +177,8 @@ async fn publish(bound: BoundTextResult) {
                     },
                     diagnostics,
                 )
-                .await;
+                .await
         }
-        Err(error) => {
-            lifecycle.fail(&error.to_string(), error.category()).await;
-        }
+        Err(error) => lifecycle.fail(&error.to_string(), error.category()).await,
     }
 }

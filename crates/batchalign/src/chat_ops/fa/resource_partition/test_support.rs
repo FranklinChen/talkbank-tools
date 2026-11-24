@@ -6,7 +6,7 @@ use crate::api::ReportedEngineName;
 use crate::types::worker_v2::{FaConstraintUnitV2, FaPreparationRefusalV2};
 use std::{convert::Infallible, num::NonZeroU64};
 
-pub(crate) enum DeclaredModel {
+pub enum DeclaredModel {
     AudioSamples {
         maximum: NonZeroU64,
     },
@@ -27,7 +27,7 @@ pub(crate) enum DeclaredModel {
 }
 
 /// The host-memory constraint every declared host refusal carries.
-pub(crate) fn declared_host_memory() -> FaResourceConstraintV2 {
+pub fn declared_host_memory() -> FaResourceConstraintV2 {
     FaResourceConstraintV2::HostMemory {
         engine: ReportedEngineName::try_from("declared-model").unwrap(),
         required_mb: 14_100,
@@ -36,7 +36,7 @@ pub(crate) fn declared_host_memory() -> FaResourceConstraintV2 {
     }
 }
 
-pub(crate) struct DeclaredPreparation {
+pub struct DeclaredPreparation {
     window: FaWindow,
     ids: Vec<String>,
 }
@@ -135,7 +135,7 @@ impl DeclaredPreparation {
 
 /// Two disjoint answer ranges may legally borrow the same complete context.
 /// Admit both through the real context constructor and probe boundary.
-pub(crate) async fn shared_context_partition<P: ResourceProbe>(
+pub async fn shared_context_partition<P: ResourceProbe>(
     request: GroupUnit<'_>,
     probe: &mut P,
 ) -> Result<PreparedResourceSplit<P::Prepared>, ResourcePlanError<P::Error>> {

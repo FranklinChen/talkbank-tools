@@ -10,7 +10,7 @@ mod word_features;
 
 use std::num::NonZeroUsize;
 
-pub(crate) use word_features::FeatName;
+pub use word_features::FeatName;
 pub use word_features::{
     CuratedFeats, FeatSource, FeatValue, UnrepairedPaddingFeature, WordFeatures,
 };
@@ -57,7 +57,8 @@ pub enum UniversalPos {
 
 impl UniversalPos {
     /// The lowercase CHAT POS category name for this UPOS.
-    pub fn to_chat_pos_name(self) -> &'static str {
+    #[must_use]
+    pub const fn to_chat_pos_name(self) -> &'static str {
         match self {
             Self::Adj => "adj",
             Self::Adp => "adp",
@@ -79,6 +80,7 @@ impl UniversalPos {
     }
 
     /// Parse a POS category name into a `UniversalPos`.
+    #[must_use]
     pub fn from_pos_name(name: &str) -> Option<Self> {
         let eq = |s: &str| name.eq_ignore_ascii_case(s);
         if eq("adj") {
@@ -172,6 +174,7 @@ pub enum DepRel {
 
 impl DepRel {
     /// Parse a UD relation string into a typed variant.
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s {
             "root" => Self::Root,
@@ -199,7 +202,8 @@ impl DepRel {
     }
 
     /// Serialize back to the UD relation string.
-    pub fn as_str(&self) -> &str {
+    #[must_use]
+    pub const fn as_str(&self) -> &str {
         match self {
             Self::Root => "root",
             Self::NSubj => "nsubj",
@@ -249,6 +253,7 @@ pub enum VerbForm {
 
 impl VerbForm {
     /// Parse a UD `VerbForm` value into a typed variant.
+    #[must_use]
     pub fn parse(s: &str) -> Self {
         match s {
             "Fin" => Self::Fin,
@@ -263,7 +268,8 @@ impl VerbForm {
     }
 
     /// Serialize this typed value back to its UD string.
-    pub fn as_str(&self) -> &str {
+    #[must_use]
+    pub const fn as_str(&self) -> &str {
         match self {
             Self::Fin => "Fin",
             Self::Part => "Part",
@@ -280,6 +286,7 @@ impl VerbForm {
 /// The value of `key` in a UD MISC field (`Key=Value|Key=Value`). Splits on
 /// the first `=` only, so a value may itself contain `=`. FEATS is not read
 /// this way: it is a typed [`WordFeatures`] on the word.
+#[must_use]
 pub fn ud_pair_value<'a>(field: Option<&'a str>, key: &str) -> Option<&'a str> {
     field?.split('|').find_map(|pair| {
         pair.split_once('=')
@@ -311,7 +318,8 @@ pub struct UdWordId(NonZeroUsize);
 
 impl UdWordId {
     /// The raw id, for diagnostics and for building a [`UdId`].
-    pub fn get(self) -> usize {
+    #[must_use]
+    pub const fn get(self) -> usize {
         self.0.get()
     }
 
@@ -332,7 +340,7 @@ impl UdWordId {
 
     /// The id `by` places further on: where this word lands when `by` words
     /// are inserted before it.
-    pub(crate) fn after(self, by: usize) -> Self {
+    pub(crate) const fn after(self, by: usize) -> Self {
         Self(self.0.saturating_add(by))
     }
 }
@@ -358,7 +366,7 @@ pub enum UdHead {
 
 impl UdHead {
     /// The CoNLL-U `HEAD` column: `0` is the root.
-    fn from_conllu(head: usize) -> Self {
+    const fn from_conllu(head: usize) -> Self {
         match NonZeroUsize::new(head) {
             None => Self::Root,
             Some(id) => Self::Word(UdWordId(id)),
@@ -366,7 +374,8 @@ impl UdHead {
     }
 
     /// The word this head names; `None` for the root.
-    pub fn word(self) -> Option<UdWordId> {
+    #[must_use]
+    pub const fn word(self) -> Option<UdWordId> {
         match self {
             Self::Root => None,
             Self::Word(id) => Some(id),
@@ -374,6 +383,7 @@ impl UdHead {
     }
 
     /// Whether this head names `id`.
+    #[must_use]
     pub fn is(self, id: UdWordId) -> bool {
         self == Self::Word(id)
     }
@@ -566,16 +576,19 @@ pub struct UdWord {
 
 impl UdWord {
     /// Typed view over this word's dependency relation.
+    #[must_use]
     pub fn dep_rel(&self) -> DepRel {
         DepRel::parse(&self.deprel)
     }
 
     /// This word's features.
-    pub fn features(&self) -> &WordFeatures {
+    #[must_use]
+    pub const fn features(&self) -> &WordFeatures {
         &self.feats
     }
 
     /// Whether this word carries a finite-verb marker (`VerbForm=Fin`).
+    #[must_use]
     pub fn has_finite_verb_form(&self) -> bool {
         self.feats.value(FeatName::VerbForm) == Some("Fin")
     }
@@ -670,6 +683,7 @@ impl UdSentence {
     }
 
     /// Whether the single-token id `id` is a component of a multi-word token.
+    #[must_use]
     pub fn is_mwt_component(&self, id: usize) -> bool {
         self.mwt_component_ranges().any(|r| r.contains(&id))
     }
@@ -685,6 +699,7 @@ pub struct UdResponse {
 
 /// Sanitize a string for use in a `%mor` field by replacing structural
 /// separators with underscores and stripping whitespace.
+#[must_use]
 pub fn sanitize_mor_text(s: &str) -> String {
     let mut result = s.replace(['|', '#', '-', '&', '$', '~'], "_");
     result.retain(|c| !c.is_whitespace());

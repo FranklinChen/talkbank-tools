@@ -22,6 +22,8 @@ from typing import Any
 from huggingface_hub import get_token, hf_hub_download
 from omegaconf import OmegaConf
 
+from batchalign.inference._speaker_model_evidence import SpeakerLoadedModelGraph
+
 _MODEL_MANIFEST_RESOURCE = "local_pyannote_model.json"
 _COMMIT_REVISION = re.compile(r"[0-9a-f]{40}")
 _HUB_REPOSITORY_ID = re.compile(
@@ -39,6 +41,7 @@ class LoadedPyannotePipeline:
 
     pipeline: object
     files: tempfile.TemporaryDirectory[str]
+    loaded_graph: SpeakerLoadedModelGraph
 
 
 @dataclass(frozen=True)
@@ -217,6 +220,7 @@ class _VerifiedArtifact:
     """Private snapshot admitted by the packaged artifact's complete digest."""
 
     path: Path
+    sha256: str
 
     @classmethod
     def admit(
@@ -235,30 +239,29 @@ class _VerifiedArtifact:
             while block := incoming.read(1024 * 1024):
                 digest.update(block)
                 outgoing.write(block)
-        if digest.hexdigest() != artifact.sha256:
+        observed = digest.hexdigest()
+        if observed != artifact.sha256:
             raise ValueError(
                 f"model artifact integrity mismatch: {artifact.repo_id}/{artifact.filename}"
             )
-        return cls(target)
+        return cls(target, observed)
+
+
+@dataclass(frozen=True)
+class _PreparedPipelineConfig:
+    config: dict[str, Any]
+    graph: SpeakerLoadedModelGraph
 
 
 def _pinned_pipeline_config(
     graph: LocalPyannoteModelGraph, *, token: str | None, directory: Path
-) -> dict[str, Any]:
+) -> _PreparedPipelineConfig:
     """Materialize a config whose transitive model references cannot move."""
 
-    pipeline_config_path = _VerifiedArtifact.admit(
-        graph.pipeline, directory, token=token
-    ).path
-    embedding_path = _VerifiedArtifact.admit(
-        graph.embedding, directory, token=token
-    ).path
-    segmentation_path = _VerifiedArtifact.admit(
-        graph.segmentation, directory, token=token
-    ).path
-    loaded = OmegaConf.to_container(
-        OmegaConf.load(Path(pipeline_config_path)), resolve=True
-    )
+    pipeline_config = _VerifiedArtifact.admit(graph.pipeline, directory, token=token)
+    embedding = _VerifiedArtifact.admit(graph.embedding, directory, token=token)
+    segmentation = _VerifiedArtifact.admit(graph.segmentation, directory, token=token)
+    loaded = OmegaConf.to_container(OmegaConf.load(pipeline_config.path), resolve=True)
     if not isinstance(loaded, dict):
         raise ValueError("pinned local Pyannote config is not a mapping")
     pipeline = loaded.get("pipeline")
@@ -269,10 +272,17 @@ def _pinned_pipeline_config(
         raise ValueError("pinned local Pyannote config has no parameter mapping")
 
     params["segmentation"] = {
-        "checkpoint": str(segmentation_path),
+        "checkpoint": str(segmentation.path),
     }
-    params["embedding"] = str(embedding_path)
-    return loaded
+    params["embedding"] = str(embedding.path)
+    return _PreparedPipelineConfig(
+        loaded,
+        SpeakerLoadedModelGraph(
+            pipeline_config_sha256=pipeline_config.sha256,
+            segmentation_sha256=segmentation.sha256,
+            embedding_sha256=embedding.sha256,
+        ),
+    )
 
 
 def load_local_pyannote_pipeline() -> LoadedPyannotePipeline:
@@ -296,13 +306,13 @@ def load_local_pyannote_pipeline() -> LoadedPyannotePipeline:
             HfRepo(graph.pipeline.repo_id),
             what=f"{graph.pipeline.repo_id} for speaker diarization",
         ):
-            pipeline = _load_pipeline(
-                _pinned_pipeline_config(graph, token=token, directory=Path(files.name)),
-                token=token,
+            prepared = _pinned_pipeline_config(
+                graph, token=token, directory=Path(files.name)
             )
+            pipeline = _load_pipeline(prepared.config, token=token)
         if pipeline is None:
             raise RuntimeError("pinned local Pyannote model graph could not be loaded")
     except BaseException:
         files.cleanup()
         raise
-    return LoadedPyannotePipeline(pipeline, files)
+    return LoadedPyannotePipeline(pipeline, files, prepared.graph)

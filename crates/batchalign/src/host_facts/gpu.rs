@@ -57,7 +57,7 @@ pub enum GpuPresence {
         /// driver-vs-CUDA-version mismatches; not used by `recommend()`.
         driver_version: String,
     },
-    /// A device we have not characterized, e.g., AMD ROCm, Intel Arc,
+    /// A device we have not characterized, e.g., AMD `ROCm`, Intel Arc,
     /// future Apple GPU stacks. `functional_for_batchalign` defaults to
     /// false until we explicitly add support.
     Other {
@@ -91,7 +91,8 @@ impl GpuPresence {
     /// on this host. Encapsulates the "present + functional" check so
     /// the recommendation function reads one method instead of pattern-
     /// matching every variant.
-    pub fn is_functional_for_batchalign(&self) -> bool {
+    #[must_use]
+    pub const fn is_functional_for_batchalign(&self) -> bool {
         match self {
             GpuPresence::None => false,
             GpuPresence::AppleMps {
@@ -375,6 +376,11 @@ mod tests {
         }
     }
 
+    /// Guards: Apple Silicon detection returns MPS excluded with no warnings without ever invoking the nvidia-smi probe.
+    /// Kind: boundary
+    /// Not a type: The OS/arch short-circuit is encoded in `detect_gpu_presence`'s branch, but that the probe is never touched is external effect ordering no type can prove; `NeverProbe` would panic if called.
+    /// State: None. The `NeverProbe` double records the short-circuit over synthetic OS/arch values.
+    /// Concurrency: None. One synchronous detection call with a panic-on-use probe.
     #[test]
     fn apple_silicon_short_circuits_to_mps_excluded() {
         let (presence, warnings) =
@@ -392,6 +398,11 @@ mod tests {
         );
     }
 
+    /// Guards: An absent nvidia-smi probe yields no GPU plus exactly the not-found warning.
+    /// Kind: boundary
+    /// Not a type: The `NotFound` outcome is a closed variant, but its mapping to `GpuPresence::None` and one specific warning is the detector's recovery policy, not a state a type carries.
+    /// State: None. A `FixedProbe` double supplies the external outcome in memory.
+    /// Concurrency: None. One synchronous detection call.
     #[test]
     fn linux_without_nvidia_smi_falls_to_none_with_warning() {
         let (presence, warnings) = detect_gpu_presence(
@@ -403,6 +414,11 @@ mod tests {
         assert_eq!(warnings, vec![DetectionWarning::NvidiaSmiNotFound]);
     }
 
+    /// Guards: A failing nvidia-smi falls back to no GPU while preserving its exit code and stderr in the warning.
+    /// Kind: wire
+    /// Not a type: Failed carries external exit code and truncated stderr that the type cannot validate; this pins that both bytes reach the operator-facing warning intact.
+    /// State: None. A `FixedProbe` double carries the failure outcome in memory.
+    /// Concurrency: None. One synchronous detection call.
     #[test]
     fn linux_with_failing_nvidia_smi_falls_to_none_with_warning() {
         let (presence, warnings) = detect_gpu_presence(
@@ -424,6 +440,11 @@ mod tests {
         }
     }
 
+    /// Guards: Parseable nvidia-smi CSV aggregates device count and VRAM and keeps the driver version.
+    /// Kind: wire
+    /// Not a type: `CudaCsvRow` is built from external CSV bytes by `parse_nvidia_smi_csv`; the aggregation and field placement are an external format contract a type cannot check.
+    /// State: None. A `FixedProbe` double carries the CSV text; no nvidia-smi process runs.
+    /// Concurrency: None. One synchronous detection call.
     #[test]
     fn linux_with_parseable_nvidia_smi_returns_cuda() {
         let stdout = "24576, 535.183.01\n24576, 535.183.01\n".to_owned();
@@ -443,6 +464,11 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    /// Guards: Unparseable nvidia-smi output falls back to no GPU with an unparseable warning carrying the failure detail.
+    /// Kind: boundary
+    /// Not a type: The `CudaCsvParseError` detail is text derived from external bytes; the type cannot prove detection surfaces it in `NvidiaSmiUnparseable` rather than swallowing it.
+    /// State: None. A `FixedProbe` double carries malformed CSV text in memory.
+    /// Concurrency: None. One synchronous detection call.
     #[test]
     fn linux_with_unparseable_nvidia_smi_falls_to_none_with_warning() {
         let stdout = "this is not csv\n".to_owned();
@@ -459,12 +485,22 @@ mod tests {
         ));
     }
 
+    /// Guards: Whitespace-only nvidia-smi output is rejected as `NoRows` rather than producing a zero-device GPU.
+    /// Kind: boundary
+    /// Not a type: `CudaCsvParseError` closes the failure variants, but which external byte pattern selects which variant is a parser decision a type cannot prove.
+    /// State: None. One synthetic CSV string exercises the pure parser.
+    /// Concurrency: None. One synchronous parse call.
     #[test]
     fn parse_nvidia_smi_csv_handles_empty_output() {
         let result = parse_nvidia_smi_csv("\n\n");
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CudaCsvParseError::NoRows)));
     }
 
+    /// Guards: A trailing newline still parses one complete CUDA row from otherwise valid CSV bytes.
+    /// Kind: wire
+    /// Not a type: The CSV row shape and trailing-whitespace tolerance are an external nvidia-smi format contract; `CudaCsvRow` cannot validate the bytes it is built from.
+    /// State: None. One synthetic CSV string exercises the pure parser.
+    /// Concurrency: None. One synchronous parse call.
     #[test]
     fn parse_nvidia_smi_csv_handles_trailing_newline() {
         let row = parse_nvidia_smi_csv("8192, 555.42.06\n").expect("valid CSV");
@@ -473,15 +509,24 @@ mod tests {
         assert_eq!(row.driver_version, "555.42.06");
     }
 
+    /// Guards: Each malformed CSV shape is rejected with its specific typed error, not merely with any error.
+    /// Kind: boundary
+    /// Not a type: The error variants are closed, but the mapping from concrete malformed bytes (no driver field, empty driver, non-integer memory) to the right variant is parser behavior no type can derive.
+    /// State: None. Three synthetic CSV strings cover the reachable rejection paths; `MissingMemoryColumn` is unreachable because splitn always yields a first field.
+    /// Concurrency: None. Each parse is serial and owns its input.
     #[test]
-    fn parse_nvidia_smi_csv_rejects_missing_driver_column() {
-        let result = parse_nvidia_smi_csv("8192\n");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_nvidia_smi_csv_rejects_non_integer_memory() {
-        let result = parse_nvidia_smi_csv("not_a_number, 555.42\n");
-        assert!(result.is_err());
+    fn parse_nvidia_smi_csv_rejects_malformed_rows_with_exact_variants() {
+        assert!(matches!(
+            parse_nvidia_smi_csv("8192\n"),
+            Err(CudaCsvParseError::MissingDriverColumn { line: 1 })
+        ));
+        assert!(matches!(
+            parse_nvidia_smi_csv("8192, \n"),
+            Err(CudaCsvParseError::EmptyDriver { line: 1 })
+        ));
+        assert!(matches!(
+            parse_nvidia_smi_csv("not_a_number, 555.42\n"),
+            Err(CudaCsvParseError::MemoryNotInteger { line: 1, .. })
+        ));
     }
 }

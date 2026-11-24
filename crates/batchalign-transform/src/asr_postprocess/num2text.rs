@@ -75,6 +75,7 @@ pub fn language_percent_word(lang: &str) -> Option<&'static str> {
 /// # Arguments
 /// * `word` - The word to potentially expand.
 /// * `lang` - ISO 639-3 language code.
+#[must_use]
 pub fn expand_number(word: &str, lang: &str) -> String {
     // Portuguese indicator ordinals carry grammatical gender and number in
     // the token itself, which no cardinal table can express, so they are

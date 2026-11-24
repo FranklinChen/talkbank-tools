@@ -43,7 +43,7 @@ const SCHEMA_VERSION: u8 = 5;
 /// Location in transcribe at which utterance segmentation ran.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum UtsegEvidencePhase {
+pub enum UtsegEvidencePhase {
     /// Segmentation over timed ASR chunks before CHAT construction.
     PreChat,
     /// Segmentation over main-tier words after CHAT construction.
@@ -51,7 +51,7 @@ pub(crate) enum UtsegEvidencePhase {
 }
 
 impl UtsegEvidencePhase {
-    fn filename_component(self) -> &'static str {
+    const fn filename_component(self) -> &'static str {
         match self {
             Self::PreChat => "pre_chat",
             Self::PostChat => "post_chat",
@@ -71,7 +71,7 @@ impl fmt::Display for UtsegEvidencePhase {
 /// read back by [`AdmittedUtsegEvidence::admit`], so the shape on disk has one
 /// definition and the replay cannot drift from the writer.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct UtsegEvidenceTrace {
+pub struct UtsegEvidenceTrace {
     /// 5 since the local decision receipt lost its exact-retrace suppression
     /// revision; 4 since a boundary model's revision became required; 3
     /// removed the top-level `engine_version`, which inside transcribe
@@ -96,7 +96,7 @@ struct UtsegEvidenceItem {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 enum UtsegEvidencePrediction {
-    /// TalkBank boundary model with raw and applied per-word evidence.
+    /// `TalkBank` boundary model with raw and applied per-word evidence.
     BoundaryModel {
         assignments: Vec<usize>,
         evidence: UtsegBoundaryModelEvidenceV2,
@@ -114,7 +114,7 @@ enum UtsegEvidencePrediction {
 #[error(
     "cannot construct utseg evidence trace from {request_count} requests and {prediction_count} predictions"
 )]
-pub(crate) struct UtsegEvidenceShapeError {
+pub struct UtsegEvidenceShapeError {
     request_count: usize,
     prediction_count: usize,
 }
@@ -191,14 +191,14 @@ impl UtsegEvidenceTrace {
 /// ([`admit_prediction`]). A replay can therefore reapply what it holds without
 /// re-checking anything, and cannot reapply an artifact that was never checked,
 /// because there is no other way to obtain this type.
-pub(crate) struct AdmittedUtsegEvidence {
+pub struct AdmittedUtsegEvidence {
     language: String,
     items: Vec<AdmittedUtsegEvidenceItem>,
 }
 
 /// One admitted item: the request that was dispatched and the prediction the
 /// run applied to it.
-pub(crate) struct AdmittedUtsegEvidenceItem {
+pub struct AdmittedUtsegEvidenceItem {
     /// The transcript position the producer recorded this request under.
     pub(crate) item_ordinal: usize,
     /// The words and text exactly as they were dispatched.
@@ -212,7 +212,7 @@ pub(crate) struct AdmittedUtsegEvidenceItem {
 /// Every variant names what failed, so a refusal tells an operator which
 /// artifact to regenerate rather than only that the replay stopped.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum UtsegEvidenceAdmissionError {
+pub enum UtsegEvidenceAdmissionError {
     /// The bytes are not the JSON this artifact is written as.
     #[error("retained utseg evidence is not readable as this artifact: {0}")]
     Malformed(#[from] serde_json::Error),
@@ -339,7 +339,7 @@ impl AdmittedUtsegEvidence {
 /// borrowed from the prediction and rendered once into provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum UtsegEngineIdentity<'a> {
-    /// A TalkBank boundary model, by model id and the exact revision it was
+    /// A `TalkBank` boundary model, by model id and the exact revision it was
     /// loaded at. Both halves always exist: the model is loaded from a pinned
     /// snapshot, so there is no boundary model without a revision to name.
     BoundaryModel {
@@ -415,7 +415,7 @@ impl UtsegEngineIdentity<'_> {
 /// actually segmented the file rather than the pipeline's engine version
 /// (which inside transcribe belongs to the ASR engine).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UtsegEngineIdentities<'a>(BTreeSet<UtsegEngineIdentity<'a>>);
+pub struct UtsegEngineIdentities<'a>(BTreeSet<UtsegEngineIdentity<'a>>);
 
 impl<'a> UtsegEngineIdentities<'a> {
     /// `None` when there were no predictions, because nothing was segmented.
@@ -441,7 +441,7 @@ impl UtsegEngineIdentities<'_> {
 
 /// Typestate-like evidence destination: absence and enabled persistence are
 /// explicit variants instead of an optional path threaded through writes.
-pub(crate) enum UtsegEvidenceSink {
+pub enum UtsegEvidenceSink {
     /// The run did not request durable debug evidence.
     Disabled,
     /// Every requested trace must be durably written or fail the run.
@@ -449,13 +449,13 @@ pub(crate) enum UtsegEvidenceSink {
 }
 
 /// Validated destination for an enabled evidence run.
-pub(crate) struct EnabledUtsegEvidenceSink {
+pub struct EnabledUtsegEvidenceSink {
     dir: PathBuf,
 }
 
 /// Observable outcome of a write request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UtsegEvidenceWriteOutcome {
+pub enum UtsegEvidenceWriteOutcome {
     /// Evidence collection was not requested.
     Disabled,
     /// Complete evidence was durably written to this path.
@@ -464,7 +464,7 @@ pub(crate) enum UtsegEvidenceWriteOutcome {
 
 /// Failures that prevent an enabled evidence request from being durable.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum UtsegEvidenceWriteError {
+pub enum UtsegEvidenceWriteError {
     /// Destination directory could not be created.
     #[error("failed to create utseg evidence directory {}: {source}", path.display())]
     CreateDirectory {
@@ -622,6 +622,11 @@ mod tests {
         .expect("the fixture's assignments are the ones its evidence states")
     }
 
+    /// Guards: Segmentation trace retains request words, assignments, source and exact producer revision.
+    /// Kind: wire
+    /// Not a type: External worker decisions and actual request text are independent fields that must stay associated.
+    /// State: Two-word evidence enters the versioned trace serializer.
+    /// Concurrency: Only local model and wire data.
     #[test]
     fn trace_keeps_request_assignments_source_and_model_provenance_together() {
         let trace = UtsegEvidenceTrace::from_predictions(
@@ -647,6 +652,11 @@ mod tests {
         );
     }
 
+    /// Guards: Unmatched request and prediction populations refuse trace output with exact counts.
+    /// Kind: wire
+    /// Not a type: A valid request can lack a matching external prediction when the effect returns incomplete results.
+    /// State: One request and an empty population exercise the actual trace boundary.
+    /// Concurrency: The boundary runs without writing a file.
     #[test]
     fn trace_refuses_to_zip_different_request_and_prediction_counts() {
         let error = UtsegEvidenceTrace::from_predictions(
@@ -661,6 +671,11 @@ mod tests {
         assert!(error.to_string().contains("0 predictions"));
     }
 
+    /// Guards: An enabled segmentation sink atomically writes the exact versioned artifact.
+    /// Kind: contract
+    /// Not a type: The real filesystem decides whether publication succeeds and written bytes must match the trace.
+    /// State: A private directory and real enabled trace writer.
+    /// Concurrency: Publication completes before the target is opened.
     #[test]
     fn enabled_sink_writes_a_versioned_artifact_atomically() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -697,33 +712,23 @@ mod tests {
             .map(|joined| joined.as_str().to_owned())
     }
 
+    /// Guards: Engine identities deduplicate sources, preserve revisions and omit unobserved or absent results.
+    /// Kind: policy
+    /// Not a type: Response populations can repeat a producer, mix sources or name no engine at all.
+    /// State: Admitted synthetic prediction variants exercise exact accumulation and ordering.
+    /// Concurrency: No worker, cache or filesystem effect.
     #[test]
-    fn engine_identities_name_the_boundary_model_and_its_revision() {
+    fn engine_identities_list_each_distinct_source_and_are_absent_for_no_predictions() {
         assert_eq!(
             joined(&[prediction(), prediction()]),
             Some(format!("talkbank/utterance-boundary@{TEST_COMMIT}"))
         );
-    }
 
-    /// RED FIRST (review item 2): no placeholder names. A worker that returned
-    /// assignments without naming their source contributes nothing, so a file
-    /// segmented only by such a worker has no `engine=` to write and gets no
-    /// stamp. That used to be written as an invented `unobserved-worker`.
-    ///
-    /// The companion case, a boundary model recorded by its id alone, is no
-    /// longer testable and that is the point: the revision is part of the
-    /// model's identity, so `<id>` with no revision has no representation to
-    /// construct. The compiler refuses the fixture this test used to build.
-    #[test]
-    fn a_source_that_names_nothing_contributes_no_engine_name() {
         let unobserved = AdmittedUtsegPrediction::UnobservedAssignments {
             segmentation: UtteranceSegmentation::unstated(vec![0, 0]),
         };
         assert_eq!(joined(&[unobserved]), None);
-    }
 
-    #[test]
-    fn engine_identities_list_each_distinct_source_and_are_absent_for_no_predictions() {
         let constituency = AdmittedUtsegPrediction::Constituency {
             segmentation: UtteranceSegmentation::unstated(vec![0, 0]),
         };

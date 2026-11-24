@@ -38,6 +38,7 @@ impl Default for TraceStore {
 
 impl TraceStore {
     /// Create a new trace store with default capacity (50 jobs) and TTL (1 hour).
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cache: Cache::builder()

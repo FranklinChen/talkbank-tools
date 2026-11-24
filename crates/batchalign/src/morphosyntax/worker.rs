@@ -11,7 +11,7 @@ use crate::execution::morphotag::progress::BackendProgressPort;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry_and_progress};
 use crate::runner::util::batch_progress::BatchChunkIndex;
 use crate::stanza_registry::{Admitted, Morphosyntax};
-use crate::types::worker_v2::MorphosyntaxItemResultV2;
+use crate::types::worker_v2::{ExecuteRequestV2, MorphosyntaxItemResultV2, MorphosyntaxResultV2};
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::execute_result_v2::ModelLocality;
 use crate::worker::pool::WorkerPool;
@@ -113,7 +113,7 @@ fn language_groups_for_items<T: AsRef<MorphosyntaxBatchItem>>(
 /// to separate workers.  This is transparent to callers, the returned
 /// responses are always parallel to the input `items` slice, each admitted
 /// with the model that produced it.
-pub(crate) async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
+pub async fn infer_batch<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     pool: &WorkerPool,
     items: &[T],
     lang: &Admitted<Morphosyntax>,
@@ -343,7 +343,7 @@ impl ChunkProgressBridge {
         }
     }
 
-    fn sender(
+    const fn sender(
         &self,
     ) -> Option<&tokio::sync::mpsc::Sender<crate::types::worker_v2::ProgressEventV2>> {
         self.inner_tx.as_ref()
@@ -373,25 +373,8 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
     let payload_items: Vec<MorphosyntaxBatchItem> =
         items.iter().map(|item| item.as_ref().clone()).collect();
 
-    let artifacts = PreparedArtifactRuntimeV2::new("morphosyntax_v2").map_err(|error| {
-        ServerError::Validation(format!(
-            "failed to create morphosyntax V2 artifact runtime: {error}"
-        ))
-    })?;
-    let request_ids = PreparedTextRequestIdsV2::for_task("morphosyntax");
-    let request = build_morphosyntax_request_v2(
-        artifacts.store(),
-        &request_ids,
-        lang,
-        &payload_items,
-        mwt,
-        retokenize,
-    )
-    .map_err(|error| {
-        ServerError::Validation(format!(
-            "failed to build morphosyntax V2 worker request: {error}"
-        ))
-    })?;
+    let (request, artifacts) =
+        PreparedMorphosyntaxRequest::prepare(lang, &payload_items, mwt, retokenize)?.into_parts();
 
     info!(
         num_items = items.len(),
@@ -399,23 +382,92 @@ async fn infer_batch_single<T: AsRef<MorphosyntaxBatchItem> + Sync>(
         "Dispatching morphosyntax execute_v2 batch"
     );
 
-    let response = dispatch_execute_v2_with_retry_and_progress(
-        pool,
-        lang,
-        &request,
-        progress_tx,
-        cancellation,
-    )
-    .await?;
-    let result = parse_morphosyntax_result_v2(response)
+    let response =
+        dispatch_execute_v2_with_retry_and_progress(pool, lang, request, progress_tx, cancellation)
+            .await;
+    // The attachment the request points into is no longer read.
+    drop(artifacts);
+    let result = parse_morphosyntax_result_v2(response?)
         .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
-    if result.items.len() != items.len() {
+    admit_morphosyntax_result(result, &payload_items)
+}
+
+/// A morphosyntax `execute_v2` request with the attachment directory its
+/// payload is written into, so the file exists until the worker has read it.
+///
+/// The one place a morphotag request is encoded, shared by the job path and
+/// `doctor`'s smoke check, so the check cannot drift from what a job sends.
+pub struct PreparedMorphosyntaxRequest {
+    request: ExecuteRequestV2,
+    artifacts: PreparedArtifactRuntimeV2,
+}
+
+impl PreparedMorphosyntaxRequest {
+    /// Encode `items` in `lang` as one request.
+    ///
+    /// # Errors
+    ///
+    /// The attachment directory cannot be created or the payload written.
+    pub(crate) fn prepare(
+        lang: &LanguageCode3,
+        items: &[MorphosyntaxBatchItem],
+        mwt: &MwtDict,
+        retokenize: bool,
+    ) -> Result<Self, ServerError> {
+        let artifacts = PreparedArtifactRuntimeV2::new("morphosyntax_v2").map_err(|error| {
+            ServerError::Validation(format!(
+                "failed to create morphosyntax V2 artifact runtime: {error}"
+            ))
+        })?;
+        let request = build_morphosyntax_request_v2(
+            artifacts.store(),
+            &PreparedTextRequestIdsV2::for_task("morphosyntax"),
+            lang,
+            items,
+            mwt,
+            retokenize,
+        )
+        .map_err(|error| {
+            ServerError::Validation(format!(
+                "failed to build morphosyntax V2 worker request: {error}"
+            ))
+        })?;
+        Ok(Self { request, artifacts })
+    }
+
+    /// The request, while its attachment exists.
+    pub(crate) const fn request(&self) -> &ExecuteRequestV2 {
+        &self.request
+    }
+
+    /// The request to send by value, and the attachment owner the caller
+    /// keeps until the reply has arrived.
+    fn into_parts(self) -> (ExecuteRequestV2, PreparedArtifactRuntimeV2) {
+        (self.request, self.artifacts)
+    }
+}
+
+/// Admit one worker's morphosyntax result for the items it was sent: one
+/// response per item, in order.
+///
+/// Shared by the job path and `doctor`'s smoke check, so the check reads a
+/// reply exactly as a morphotag job does and cannot pass on one the job
+/// would decline.
+///
+/// # Errors
+///
+/// The worker answered a different number of items than it was sent.
+pub fn admit_morphosyntax_result(
+    result: MorphosyntaxResultV2,
+    payload_items: &[MorphosyntaxBatchItem],
+) -> Result<Vec<AdmittedMorphosyntaxResponse>, ServerError> {
+    if result.items.len() != payload_items.len() {
         return Err(ServerError::OutputAdmission {
             command: crate::api::ReleasedCommand::Morphotag,
             details: crate::error::OutputAdmissionRefusal::unestablished(format!(
                 "morphosyntax V2 returned {} items for {} requests",
                 result.items.len(),
-                items.len(),
+                payload_items.len(),
             )),
         });
     }
@@ -531,46 +583,41 @@ mod tests {
         )
     }
 
+    /// Guards: Morphology chunk count follows the admitted worker count and the population threshold.
+    /// Kind: policy
+    /// Not a type: A valid population and worker cap still require the chosen threshold and rounding policy.
+    /// State: A table covers empty, below threshold, scaling, caps and the defensive zero value.
+    /// Concurrency: Pure calculation with no worker processes.
     #[test]
-    fn compute_chunk_count_below_minimum_returns_one() {
-        assert_eq!(compute_chunk_count(0, 4), 1);
-        assert_eq!(compute_chunk_count(1, 4), 1);
-        assert_eq!(compute_chunk_count(29, 4), 1);
+    fn morphology_chunk_count_scales_with_population_and_worker_capacity() {
+        for (items, workers, expected) in [
+            (0, 4, 1),
+            (1, 4, 1),
+            (29, 4, 1),
+            (30, 4, 1),
+            (60, 4, 2),
+            (90, 4, 3),
+            (120, 4, 4),
+            (2_000, 4, 4),
+            (500, 2, 2),
+            (500, 8, 8),
+            (2_000, 1, 1),
+            (60, 1, 1),
+            (100, 0, 1),
+        ] {
+            assert_eq!(
+                compute_chunk_count(items, workers),
+                expected,
+                "{items} items, {workers} workers"
+            );
+        }
     }
 
-    #[test]
-    fn compute_chunk_count_at_minimum_returns_one() {
-        // 30 / 30 = 1
-        assert_eq!(compute_chunk_count(30, 4), 1);
-    }
-
-    #[test]
-    fn compute_chunk_count_scales_with_items() {
-        assert_eq!(compute_chunk_count(60, 4), 2);
-        assert_eq!(compute_chunk_count(90, 4), 3);
-        assert_eq!(compute_chunk_count(120, 4), 4);
-    }
-
-    #[test]
-    fn compute_chunk_count_clamped_by_max_workers() {
-        // 2000 / 30 = 66, but max_workers = 4
-        assert_eq!(compute_chunk_count(2000, 4), 4);
-        assert_eq!(compute_chunk_count(500, 2), 2);
-        assert_eq!(compute_chunk_count(500, 8), 8);
-    }
-
-    #[test]
-    fn compute_chunk_count_single_worker_always_one() {
-        assert_eq!(compute_chunk_count(2000, 1), 1);
-        assert_eq!(compute_chunk_count(60, 1), 1);
-    }
-
-    #[test]
-    fn compute_chunk_count_zero_workers_returns_one() {
-        // Defensive: max_workers=0 should not panic
-        assert_eq!(compute_chunk_count(100, 0), 1);
-    }
-
+    /// Guards: Morphology groups preserve first language appearance and original source indices.
+    /// Kind: policy
+    /// Not a type: Typed items can arrive in interleaved language order and require exact grouping.
+    /// State: Three literal payloads name two effective languages.
+    /// Concurrency: Pure grouping over one owned item list.
     #[test]
     fn language_groups_for_items_uses_per_item_language_and_preserves_indices() {
         let items = vec![batch_item("eng"), batch_item("spa"), batch_item("eng")];
@@ -591,6 +638,11 @@ mod tests {
             .expect("the double admits English")
     }
 
+    /// Guards: A dispatch plan's admitted effective languages retain exact group membership and original payload association.
+    /// Kind: contract
+    /// Not a type: A mixed-language population can still be grouped or ordered incorrectly after the typed route has bound it.
+    /// State: The actual dispatch planner borrows a three-item fixture, a lightweight pool and admitted registry double.
+    /// Concurrency: No worker or remote registry executes.
     #[test]
     fn dispatch_plan_binds_supported_groups_to_their_exact_payloads() {
         let items = vec![batch_item("eng"), batch_item("cym"), batch_item("eng")];
@@ -613,6 +665,11 @@ mod tests {
     /// by whatever the pool holds: this pool has no registry at all, which
     /// used to refuse every group with "no registry" although the file had
     /// been admitted.
+    /// Guards: An unsupported effective language refuses the mixed plan before any group dispatch.
+    /// Kind: policy
+    /// Not a type: An admitted primary language can coexist with a request for a catalog entry that does not exist.
+    /// State: Two payloads, an inert pool and a deliberately limited admitted registry.
+    /// Concurrency: Pure plan construction before any dispatch.
     #[test]
     fn unsupported_effective_language_cannot_receive_a_dispatch_plan() {
         let items = vec![batch_item("eng"), batch_item("que")];

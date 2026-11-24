@@ -22,7 +22,7 @@ use super::EnsureTaskResponse;
 
 /// Why a worker's output stream stopped being read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StreamClosed {
+pub enum StreamClosed {
     /// The worker closed its output (EOF): the process exited or the daemon
     /// dropped the connection.
     Eof,
@@ -40,7 +40,7 @@ pub(crate) enum StreamClosed {
 
 /// Why the pool stops a shared worker, which decides what its waiters hear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Retirement {
+pub enum Retirement {
     /// The pool is shutting down: nothing will serve the request
     /// ([`WorkerError::PoolShuttingDown`], not retried).
     PoolShutdown,
@@ -52,7 +52,7 @@ pub(crate) enum Retirement {
 
 impl Retirement {
     /// The error a request refused or stranded by this stop receives.
-    pub(crate) fn to_worker_error(self) -> WorkerError {
+    pub(crate) const fn to_worker_error(self) -> WorkerError {
         match self {
             Self::PoolShutdown => WorkerError::PoolShuttingDown,
             Self::WorkerRetired => WorkerError::WorkerRetired,
@@ -79,7 +79,7 @@ impl StreamClosed {
 
 /// Why a waiter got no response of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplyFailure {
+pub enum ReplyFailure {
     /// The worker reported a failure in an `op=error` line.
     Reported(ReportedFailure),
     /// The worker sent a line the protocol refuses: an envelope that does not
@@ -117,17 +117,17 @@ impl ReplyFailure {
 /// What a waiting V2 dispatch is answered with: the worker's own response
 /// (success, or a failure the worker reported inside an `execute_v2` line),
 /// or the error the sequential path returns for the same line.
-pub(crate) type DispatchReply = Result<ExecuteResponseV2, WorkerError>;
+pub type DispatchReply = Result<ExecuteResponseV2, WorkerError>;
 
 /// A pending invocation owns its resources until the terminal effect consumes it.
 /// The reader's policy contracts use the same graph with an observation-only double.
-pub(crate) trait DispatchOwner: Send + 'static {
+pub trait DispatchOwner: Send + 'static {
     fn request_id(&self) -> &WorkerRequestIdV2;
     fn finish(self, reply: DispatchReply) -> DispatchReply;
 }
 
 /// Shared routing retains execution ownership independently of caller interest.
-pub(crate) struct PendingDispatches<O: DispatchOwner = super::channel::ScheduledInvocation>(
+pub struct PendingDispatches<O: DispatchOwner = super::channel::ScheduledInvocation>(
     Arc<Mutex<PendingState<O>>>,
 );
 
@@ -154,7 +154,7 @@ enum PendingState<O> {
 }
 
 /// Caller interest in the reply carries no authority over submitted work.
-pub(crate) struct DispatchReceipt {
+pub struct DispatchReceipt {
     reply: oneshot::Receiver<DispatchReply>,
 }
 
@@ -283,7 +283,7 @@ impl PendingDispatches<super::channel::ScheduledInvocation> {
 #[cfg(test)]
 pub(super) mod observations {
     use super::*;
-    pub(crate) struct ObservedDispatch(WorkerRequestIdV2);
+    pub struct ObservedDispatch(WorkerRequestIdV2);
     impl ObservedDispatch {
         pub(crate) fn named(id: impl Into<WorkerRequestIdV2>) -> Self {
             Self(id.into())
@@ -307,7 +307,7 @@ pub(super) mod observations {
 
 /// A sequential op's decoded reply, as the reader hands it to the slot.
 #[derive(Debug)]
-pub(crate) enum ControlReply {
+pub enum ControlReply {
     Capabilities(crate::worker::WorkerCapabilities),
     EnsureTask(EnsureTaskResponse),
     Shutdown,
@@ -316,14 +316,14 @@ pub(crate) enum ControlReply {
 /// Which sequential op a reply line's `op` names, for a line that does not
 /// decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlOpName {
+pub enum ControlOpName {
     Capabilities,
     EnsureTask,
 }
 
 impl ControlOpName {
     /// The op's name on the wire.
-    pub(crate) fn wire_name(self) -> &'static str {
+    pub(crate) const fn wire_name(self) -> &'static str {
         match self {
             Self::Capabilities => "capabilities",
             Self::EnsureTask => "ensure_task",
@@ -333,7 +333,7 @@ impl ControlOpName {
 
 /// One line the reader offers the control slot.
 #[derive(Debug)]
-pub(crate) enum ControlLine {
+pub enum ControlLine {
     /// A decoded reply.
     Reply(ControlReply),
     /// A reply line of this op that does not decode.
@@ -347,10 +347,10 @@ pub(crate) enum ControlLine {
 }
 
 /// What a waiting op receives: its own reply, or why none came.
-pub(crate) type ControlAnswer<T> = Result<T, ReplyFailure>;
+pub type ControlAnswer<T> = Result<T, ReplyFailure>;
 
 /// An armed op: the id its request must carry, and where its answer arrives.
-pub(crate) struct ArmedControl<T> {
+pub struct ArmedControl<T> {
     pub(crate) request_id: ControlRequestId,
     pub(crate) answer: oneshot::Receiver<ControlAnswer<T>>,
 }
@@ -358,7 +358,7 @@ pub(crate) struct ArmedControl<T> {
 /// An armed `ensure_task`: like [`ArmedControl`], plus the progress the
 /// worker reports while it loads, which keeps the load's stall window open
 /// (`SharedChannel::ensure_task`).
-pub(crate) struct ArmedLoad {
+pub struct ArmedLoad {
     pub(crate) request_id: ControlRequestId,
     pub(crate) answer: oneshot::Receiver<ControlAnswer<EnsureTaskResponse>>,
     pub(crate) progress: mpsc::UnboundedReceiver<LoadProgressV2>,
@@ -385,7 +385,7 @@ enum ControlWaiter {
 }
 
 impl ControlWaiter {
-    fn request_id(&self) -> &ControlRequestId {
+    const fn request_id(&self) -> &ControlRequestId {
         match self {
             Self::Capabilities { request_id, .. } | Self::EnsureTask { request_id, .. } => {
                 request_id
@@ -393,7 +393,7 @@ impl ControlWaiter {
         }
     }
 
-    fn op(&self) -> ControlOpName {
+    const fn op(&self) -> ControlOpName {
         match self {
             Self::Capabilities { .. } => ControlOpName::Capabilities,
             Self::EnsureTask { .. } => ControlOpName::EnsureTask,
@@ -448,7 +448,7 @@ impl ControlWaiter {
     }
 }
 
-/// The single slot a sequential op (capabilities, ensure_task, shutdown)
+/// The single slot a sequential op (capabilities, `ensure_task`, shutdown)
 /// waits in. The ops are serialized by the worker's control gate, so at most
 /// one live waiter exists; shutdown, which does not take the gate, supersedes
 /// any waiter with [`StreamClosed::Stopped`].
@@ -457,7 +457,7 @@ impl ControlWaiter {
 /// [`ControlWaiter::offer`]), so an op that timed out cannot have its late
 /// reply, or its late failure, taken as the answer to the next op.
 #[derive(Clone, Default)]
-pub(crate) struct ControlSlot(Arc<Mutex<ControlState>>);
+pub struct ControlSlot(Arc<Mutex<ControlState>>);
 
 #[derive(Default)]
 enum ControlState {
@@ -755,7 +755,7 @@ mod tests {
 
     /// Guards: Retiring one worker refuses its later ops retryably, unlike a pool shutdown.
     /// Kind: policy
-    /// Not a type: the WorkerRetired reason selects retryable refusal for later load attempts, independently of the different PoolShutdown policy.
+    /// Not a type: the `WorkerRetired` reason selects retryable refusal for later load attempts, independently of the different `PoolShutdown` policy.
     /// State: local route owners, byte values and reply channels isolate the routing policy.
     /// Concurrency: all maps, channels and request identities belong to this test runtime.
     #[test]

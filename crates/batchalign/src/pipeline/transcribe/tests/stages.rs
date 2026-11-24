@@ -353,7 +353,7 @@ fn snapshot_and_plain_preparation_agree() {
     assert_eq!(plain, traced, "one preparation step, two entry points");
 }
 
-/// When the request is detection, stage_build_chat must resolve to the
+/// When the request is detection, `stage_build_chat` must resolve to the
 /// ASR-detected language for CHAT headers (regression test for job
 /// 696870c7-02b where `@Languages: auto` leaked into output).
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! Rust-owned request validation and op dispatch for the Python worker stdio loop.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "1. Worker Protocol Dispatch" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "1. Worker Protocol Dispatch" for:
 //! - Python implementation: `batchalign/worker/_protocol.py` + `batchalign/worker/_handlers.py`
 //! - Shared schema: `ipc-schema/worker_v2/`
 //! - Full Rust/Python responsibility split.
@@ -51,7 +51,7 @@ fn refusal_payload<'py>(
 /// anything else raises `ValueError` rather than reaching the wire.
 #[pyfunction]
 #[pyo3(signature = (message, kind, request_id=None))]
-pub(crate) fn error_envelope(
+pub fn error_envelope(
     py: Python<'_>,
     message: &str,
     kind: &str,
@@ -71,7 +71,7 @@ pub(crate) fn error_envelope(
 /// they stop serving for exactly the kinds after which the Rust readers
 /// retire the worker (`WorkerErrorKind::worker_after`).
 #[pyfunction]
-pub(crate) fn error_kind_ends_worker(kind: &str) -> PyResult<bool> {
+pub fn error_kind_ends_worker(kind: &str) -> PyResult<bool> {
     use batchalign_types::worker_v2::WorkerAfterError;
     let Some(kind) = WorkerErrorKind::from_wire(kind) else {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -161,7 +161,7 @@ enum ExecutableOperation {
 }
 
 impl ExecutableOperation {
-    fn wire_name(self) -> &'static str {
+    const fn wire_name(self) -> &'static str {
         match self {
             Self::Health => "health",
             Self::Capabilities => "capabilities",
@@ -176,7 +176,7 @@ impl ExecutableOperation {
 /// A request whose operation can execute on a worker thread.
 /// No Python constructor exists; admission owns its immutable operation.
 #[pyclass(frozen, module = "batchalign_core")]
-pub(crate) struct PendingProtocolRequest {
+pub struct PendingProtocolRequest {
     operation: ExecutableOperation,
     message: Py<PyDict>,
 }
@@ -197,7 +197,7 @@ enum ImmediateReply {
 
 /// A reader-thread reply. Its action and payload cannot disagree.
 #[pyclass(frozen, module = "batchalign_core")]
-pub(crate) struct ImmediateProtocolReply {
+pub struct ImmediateProtocolReply {
     reply: ImmediateReply,
 }
 
@@ -212,7 +212,7 @@ impl ImmediateProtocolReply {
     }
 
     #[getter]
-    fn should_shutdown(&self) -> bool {
+    const fn should_shutdown(&self) -> bool {
         matches!(self.reply, ImmediateReply::Shutdown)
     }
 }
@@ -229,10 +229,7 @@ fn rejected_message(py: Python<'_>, message: &str) -> PyResult<Py<PyAny>> {
 
 /// Classify control messages before the reader can block or enqueue work.
 #[pyfunction]
-pub(crate) fn prepare_protocol_message(
-    py: Python<'_>,
-    message: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
+pub fn prepare_protocol_message(py: Python<'_>, message: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let Ok(message) = message.cast::<PyDict>() else {
         return rejected_message(py, "request must be a JSON object");
     };
@@ -294,7 +291,7 @@ pub(crate) fn prepare_protocol_message(
     reason = "thin PyO3 IPC dispatch boundary: threads the worker's Python \
               callback and request-model handles through to per-task handlers"
 )]
-pub(crate) fn dispatch_protocol_message(
+pub fn dispatch_protocol_message(
     py: Python<'_>,
     request: &PendingProtocolRequest,
     health_fn: &Bound<'_, PyAny>,

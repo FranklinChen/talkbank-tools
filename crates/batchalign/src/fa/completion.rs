@@ -79,7 +79,7 @@ impl BulletExtent {
             }
         }
     }
-    fn of(bullet: &talkbank_model::model::Bullet) -> Self {
+    const fn of(bullet: &talkbank_model::model::Bullet) -> Self {
         Self::Parsed {
             start_ms: bullet.timing.start_ms,
             end_ms: bullet.timing.end_ms,
@@ -189,7 +189,7 @@ impl<T> Recorded<T> {
     }
 
     /// How many items there are, at least one.
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         1 + self.rest_named.len() + self.unnamed.len()
     }
 }
@@ -221,7 +221,7 @@ struct RecordedBuilder<'d, T> {
 }
 
 impl<'d, T: AtUtterance> RecordedBuilder<'d, T> {
-    fn new(document: &'d talkbank_model::ChatFile) -> Self {
+    const fn new(document: &'d talkbank_model::ChatFile) -> Self {
         Self {
             document,
             named: Vec::new(),
@@ -256,7 +256,7 @@ impl<'d, T: AtUtterance> RecordedBuilder<'d, T> {
 /// Every utterance with untimed required words, in transcript order, never
 /// empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UntimedAccount {
+pub struct UntimedAccount {
     /// Required lexical words in the whole file: every word of an utterance
     /// in the recording. A word of an excluded utterance is not required.
     required_words: usize,
@@ -265,7 +265,7 @@ pub(crate) struct UntimedAccount {
 
 /// One utterance with untimed required words. `untimed` is never empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UntimedUtterance {
+pub struct UntimedUtterance {
     utterance: UtteranceIdx,
     /// Required lexical words in this utterance.
     words: usize,
@@ -276,7 +276,7 @@ pub(crate) struct UntimedUtterance {
 
 /// Why an utterance's words have no timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UntimedCause {
+pub enum UntimedCause {
     /// Grouping refused the utterance's audio window, so no alignment
     /// request was made for it.
     WindowRefused(RefusedWindowTrace),
@@ -315,7 +315,7 @@ pub(crate) enum UntimedCause {
 /// What the requests covering one utterance yielded, counted from the run's
 /// group evidence ([`crate::types::results::FaGroupEvidence`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct RequestCoverage {
+pub struct RequestCoverage {
     /// Requests that returned timing evidence: a worker's answer, the cache,
     /// a replayed response, or reused `%wor`.
     answered: u64,
@@ -333,7 +333,7 @@ pub(crate) struct RequestCoverage {
 
 impl RequestCoverage {
     /// Add one group's requests, counted once, to an utterance it covers.
-    fn add(&mut self, group: Self) {
+    const fn add(&mut self, group: Self) {
         self.answered += group.answered;
         self.unaligned += group.unaligned;
         self.refused += group.refused;
@@ -366,7 +366,7 @@ impl RequestCoverage {
         }
     }
 
-    fn count_request(&mut self, source: crate::types::traces::FaEvidenceSourceTrace) {
+    const fn count_request(&mut self, source: crate::types::traces::FaEvidenceSourceTrace) {
         use crate::types::traces::FaEvidenceSourceTrace;
         match source {
             FaEvidenceSourceTrace::WorReuse
@@ -384,7 +384,7 @@ impl RequestCoverage {
 /// [`RequiredFaTiming::admit`], after it checked that the output gave none
 /// of them timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExclusionAccount(Recorded<ExcludedUtterance>);
+pub struct ExclusionAccount(Recorded<ExcludedUtterance>);
 
 /// One utterance left out of alignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -552,13 +552,13 @@ impl std::fmt::Display for UntimedAccount {
 
 impl PartialFaResult {
     /// What is untimed, and why.
-    pub(super) fn account(&self) -> &UntimedAccount {
+    pub(super) const fn account(&self) -> &UntimedAccount {
         &self.account
     }
 
     /// The utterances left out on purpose, checked untimed by the same
     /// admission that measured the result.
-    pub(super) fn exclusions(&self) -> Option<&ExclusionAccount> {
+    pub(super) const fn exclusions(&self) -> Option<&ExclusionAccount> {
         self.exclusions.as_ref()
     }
 
@@ -597,7 +597,7 @@ fn word_coverage(utterance: &Utterance) -> Vec<WordTimingCoverage> {
 impl CompleteFaResult {
     /// The utterances left out on purpose, checked untimed by the same
     /// admission that measured the result.
-    pub(super) fn exclusions(&self) -> Option<&ExclusionAccount> {
+    pub(super) const fn exclusions(&self) -> Option<&ExclusionAccount> {
         self.exclusions.as_ref()
     }
 
@@ -625,7 +625,7 @@ fn lexical_shape(utterance: &Utterance) -> Vec<Vec<String>> {
 /// Retained in output admission so later cosmetic transforms cannot change
 /// that projection while carrying the old complete/partial account to disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DurableFaTimingCensus(Arc<[UtteranceProjection]>);
+pub struct DurableFaTimingCensus(Arc<[UtteranceProjection]>);
 
 #[derive(Debug, PartialEq, Eq)]
 struct UtteranceProjection {

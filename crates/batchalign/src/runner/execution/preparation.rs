@@ -16,7 +16,7 @@ use crate::runner::context::{
 use crate::runner::preflight::ObservedPreflight;
 use crate::runner::util::compute_job_workers;
 
-/// Cancellation belongs to RunScope, so execution itself cannot report it.
+/// Cancellation belongs to `RunScope`, so execution itself cannot report it.
 #[derive(Debug)]
 pub(super) enum ExecutionEnd<Deferred> {
     Dispatched,
@@ -25,7 +25,7 @@ pub(super) enum ExecutionEnd<Deferred> {
     Refused(crate::runner::context::JobRefusal),
 }
 
-/// Created only alongside the owning RunScope, from the same claimed snapshot.
+/// Created only alongside the owning `RunScope`, from the same claimed snapshot.
 pub(super) struct ExecutionPreparation<'host, H: ExecutionHost> {
     host: &'host H,
     store: Arc<JobStore>,
@@ -65,7 +65,7 @@ impl<'host, H: ExecutionHost> ExecutionPreparation<'host, H> {
         }
     }
 
-    /// The consuming path from the claim's inputs to dispatch, under RunScope.
+    /// The consuming path from the claim's inputs to dispatch, under `RunScope`.
     pub(super) async fn execute(
         self,
     ) -> Result<ExecutionEnd<H::Deferred>, crate::error::ServerError> {

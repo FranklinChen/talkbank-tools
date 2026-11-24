@@ -37,6 +37,7 @@ const MIN_UTTERANCES_FOR_SECONDARY: usize = 3;
 ///
 /// Returns the ISO 639-3 code of the majority language, or `None` if no
 /// utterances are long enough for reliable detection.
+#[must_use]
 pub fn detect_primary_language(utterance_texts: &[&str]) -> Option<String> {
     let mut lang_counts: Vec<(String, usize)> = Vec::new();
 
@@ -63,6 +64,7 @@ pub fn detect_primary_language(utterance_texts: &[&str]) -> Option<String> {
 ///
 /// Returns `Some(iso639_3_code)` when detection is confident enough,
 /// `None` otherwise (caller should assume primary language).
+#[must_use]
 pub fn detect_utterance_language(text: &str) -> Option<String> {
     let clean = text.trim();
     let alpha_count = clean.chars().filter(|c| c.is_alphabetic()).count();
@@ -102,6 +104,7 @@ pub struct UtteranceLanguages {
 
 impl UtteranceLanguages {
     /// Detect each utterance once and admit the languages the header declares.
+    #[must_use]
     pub fn detect(utterance_texts: &[&str], primary_lang: &str) -> Self {
         let detected: Vec<Option<String>> = utterance_texts
             .iter()
@@ -135,16 +138,19 @@ impl UtteranceLanguages {
     }
 
     /// The `@Languages` list: primary first, then admitted secondaries.
+    #[must_use]
     pub fn declared(&self) -> &[String] {
         &self.declared
     }
 
     /// The per-utterance tags, one per input text, in order.
+    #[must_use]
     pub fn tags(&self) -> &[Option<String>] {
         &self.tags
     }
 
     /// Hand over the header list and the tags together.
+    #[must_use]
     pub fn into_parts(self) -> (Vec<String>, Vec<Option<String>>) {
         (self.declared, self.tags)
     }

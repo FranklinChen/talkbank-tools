@@ -8,10 +8,10 @@
 //! # Architecture
 //!
 //! This module is the shared implementation used by both:
-//! - The PyO3 bridge (`batchalign-core`), called from `align_tokens` pyfunction
+//! - The `PyO3` bridge (`batchalign-core`), called from `align_tokens` pyfunction
 //! - The standalone Rust server (`batchalign-server`), called directly
 //!
-//! The PyO3 crate provides only a thin wrapper that converts `Vec<PatchedToken>`
+//! The `PyO3` crate provides only a thin wrapper that converts `Vec<PatchedToken>`
 //! to Stanza's string, MWT-hint, or explicit-component representations.
 //!
 //! # MWT Hint Convention
@@ -61,11 +61,13 @@ impl FrenchElision {
     }
 
     /// The single authoritative word.
+    #[must_use]
     pub fn surface(&self) -> &str {
         &self.surface
     }
 
     /// Exactly the native components that spell that word.
+    #[must_use]
     pub fn components(&self) -> &[String] {
         &self.components
     }
@@ -89,6 +91,7 @@ pub enum PatchedToken {
 
 impl PatchedToken {
     /// Extract the text content regardless of variant.
+    #[must_use]
     pub fn text(&self) -> &str {
         match self {
             PatchedToken::Plain(s) | PatchedToken::Hint(s, _) => s,
@@ -236,6 +239,7 @@ pub struct AlignedTokens {
 
 impl AlignedTokens {
     /// Checked tokens, one per authoritative word in input order.
+    #[must_use]
     pub fn tokens(&self) -> &[PatchedToken] {
         &self.tokens
     }

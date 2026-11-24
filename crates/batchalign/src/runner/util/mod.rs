@@ -1,35 +1,38 @@
 //! Utility functions, constants, and auto-tuning for the runner module.
 
 mod auto_tune;
-pub(crate) mod batch_progress;
+pub mod batch_progress;
 mod error_classification;
 mod file_status;
 
 /// Shared recording event sink for tests in other modules.
 #[cfg(test)]
-pub(crate) use file_status::test_sink;
+pub use file_status::test_sink;
 mod media;
 
 // Re-export everything at the same paths callers already use.
 pub(super) use auto_tune::compute_job_workers;
 
-pub(crate) use error_classification::classify_server_error;
-pub(crate) use error_classification::classify_worker_error;
+pub use error_classification::classify_server_error;
+pub use error_classification::classify_worker_error;
 pub(super) use error_classification::user_facing_error;
 
+// Reason: re-exports an item that is visible in this crate only; Clippy's
+// suggested `pub` does not compile (E0365).
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) use file_status::{
     AfterFailure, FileAttempts, FileRunTracker, FileStage, FileTaskOutcome, ProgressSender,
     ProgressUpdate, RunnerEventSink, StoreRunnerEventSink, TerminalRecorded, set_file_progress,
 };
-pub(crate) use file_status::{
-    drain_supervised_file_tasks, observing_file_waits, record_file_cancelled_before_dispatch,
-    spawn_observed_progress_forwarder, spawn_supervised_file_task,
+pub use file_status::{
+    SupervisedFileTasks, drain_supervised_file_tasks, observing_file_waits,
+    record_file_cancelled_before_dispatch, spawn_observed_progress_forwarder,
+    spawn_supervised_file_task,
 };
 
 #[cfg(test)]
 pub(super) use media::apply_result_filename;
-pub(super) use media::compute_audio_identity;
-pub(crate) use media::probe_audio_duration;
+pub use media::probe_audio_duration;
 
 #[cfg(test)]
 mod tests {
@@ -42,18 +45,25 @@ mod tests {
     use crate::scheduling::FailureCategory;
     use crate::worker::error::WorkerError;
 
+    /// Guards: A dotted path spelling and a staging symlink resolve to the same cache identity as the recording itself, so neither triggers another ASR run.
+    /// Kind: boundary
+    /// Not a type: Path canonicalization and symlink resolution are filesystem behavior.
+    /// State: Private temporary directory holding one small file and, on Unix, one symlink.
+    /// Concurrency: Private temporary directory; no shared state.
     #[tokio::test]
     async fn audio_identity_resolves_media_aliases() {
         let directory = tempfile::tempdir().expect("temporary media directory");
         let media = directory.path().join("audio.wav");
         std::fs::write(&media, b"media identity fixture").expect("write media");
-        let direct = compute_audio_identity(media.to_str().expect("UTF-8 path"))
+        let direct = crate::chat_ops::fa::AudioIdentity::read(&media)
             .await
             .expect("media identity");
         let dotted = directory.path().join(".").join("audio.wav");
         assert_eq!(
-            Some(direct.clone()),
-            compute_audio_identity(dotted.to_str().expect("UTF-8 alias")).await,
+            direct,
+            crate::chat_ops::fa::AudioIdentity::read(&dotted)
+                .await
+                .expect("alias identity"),
             "path spelling must not trigger another ASR run"
         );
         #[cfg(unix)]
@@ -61,8 +71,10 @@ mod tests {
             let alias = directory.path().join("staged.wav");
             std::os::unix::fs::symlink(&media, &alias).expect("media symlink");
             assert_eq!(
-                Some(direct),
-                compute_audio_identity(alias.to_str().expect("UTF-8 alias")).await,
+                direct,
+                crate::chat_ops::fa::AudioIdentity::read(&alias)
+                    .await
+                    .expect("symlink identity"),
                 "staging symlinks must share the original media identity"
             );
         }
@@ -91,7 +103,7 @@ mod tests {
 
     /// Guards: File, CPU, operator, GPU and tier ceilings are resolved from the declared host even when the running machine has other resources.
     /// Kind: policy
-    /// Not a type: HostSnapshot binds the facts together, while the chosen numerical allocation among valid policy alternatives requires checking the resulting worker counts.
+    /// Not a type: `HostSnapshot` binds the facts together, while the chosen numerical allocation among valid policy alternatives requires checking the resulting worker counts.
     /// State: None. Each row resolves the standard declared laptop with explicit policy overrides. No ledger lease or host observation is taken.
     /// Concurrency: None. Snapshots and configuration values are owned by each row.
     #[test]
@@ -377,8 +389,8 @@ mod tests {
         assert!(msg.contains("test.cha"), "should include filename: {msg}");
     }
 
-    /// Verifies media_roots fallback: audio not alongside cha or in source_dir,
-    /// but present in a configured media_root.
+    /// Verifies `media_roots` fallback: audio not alongside cha or in `source_dir`,
+    /// but present in a configured `media_root`.
     #[tokio::test]
     async fn resolve_audio_media_roots_fallback() {
         let media_root = tempfile::tempdir().unwrap();

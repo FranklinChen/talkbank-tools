@@ -12,7 +12,7 @@ from batchalign.inference.qwen_forced_alignment import (
 )
 from batchalign.tests._snapshots import fake_resolve_transformers
 from batchalign.worker._model_loading.forced_alignment import load_fa_engine
-from batchalign.worker._types import InferTask, WorkerBootstrapRuntime
+from batchalign.worker._types import WorkerBootstrapRuntime
 from batchalign.worker._types_v2 import (
     FaBackendV2,
     FaPreparationBindingV2,
@@ -42,7 +42,6 @@ def loaded_qwen(
 
     host = load_fa_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.FA,
             lang="eng",
             num_speakers=1,
             engine_overrides={"fa": "qwen3_fa"},

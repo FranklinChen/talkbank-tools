@@ -19,7 +19,7 @@ use super::domain::{DisplayPath, LanguageCode3, LanguageSpec, NumSpeakers, Relea
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "server", derive(utoipa::ToSchema))]
 pub struct FilePayload {
-    /// Original filename (e.g. "01DM_18.cha").
+    /// Original filename (e.g. "`01DM_18.cha`").
     pub filename: DisplayPath,
     /// Full CHAT file text.
     pub content: String,
@@ -49,10 +49,10 @@ pub struct JobSubmission {
     /// CHAT files to process.
     #[serde(default)]
     pub files: Vec<FilePayload>,
-    /// Media filenames for the server to resolve from media_roots (transcribe only).
+    /// Media filenames for the server to resolve from `media_roots` (transcribe only).
     #[serde(default)]
     pub media_files: Vec<String>,
-    /// Key into server's media_mappings config (e.g. "childes-data").
+    /// Key into server's `media_mappings` config (e.g. "childes-data").
     #[serde(default)]
     pub media_mapping: batchalign_types::paths::MediaMappingKey,
     /// Subdirectory under the mapped root (e.g. "Eng-NA/MacWhinney/0young-ASR").
@@ -66,16 +66,16 @@ pub struct JobSubmission {
     pub options: CommandOptions,
 
     // Paths mode: local daemon sends filesystem paths instead of content.
-    /// When true, server reads/writes files directly via source_paths/output_paths.
+    /// When true, server reads/writes files directly via `source_paths/output_paths`.
     #[serde(default)]
     pub paths_mode: bool,
-    /// Absolute paths to read input files from (paths_mode only).
+    /// Absolute paths to read input files from (`paths_mode` only).
     #[serde(default)]
     pub source_paths: Vec<batchalign_types::paths::ClientPath>,
-    /// Absolute paths to write output files to (paths_mode only).
+    /// Absolute paths to write output files to (`paths_mode` only).
     #[serde(default)]
     pub output_paths: Vec<batchalign_types::paths::ClientPath>,
-    /// Human-readable filenames for display (paths_mode only, optional).
+    /// Human-readable filenames for display (`paths_mode` only, optional).
     #[serde(default)]
     pub display_names: Vec<String>,
 
@@ -87,8 +87,8 @@ pub struct JobSubmission {
     pub debug_traces: bool,
 
     /// Absolute paths to "before" files for incremental processing
-    /// (paths_mode only). When non-empty, the diff engine compares each
-    /// before file against its corresponding source_path and only
+    /// (`paths_mode` only). When non-empty, the diff engine compares each
+    /// before file against its corresponding `source_path` and only
     /// reprocesses changed utterances.
     ///
     /// Must be the same length as `source_paths` when non-empty. A null entry
@@ -97,7 +97,7 @@ pub struct JobSubmission {
     pub before_paths: Vec<Option<batchalign_types::paths::ClientPath>>,
 }
 
-pub(crate) fn default_num_speakers() -> NumSpeakers {
+pub(crate) const fn default_num_speakers() -> NumSpeakers {
     NumSpeakers(1)
 }
 
@@ -153,12 +153,14 @@ enum StanzaAdmission<'a> {
 
 impl<'a> ValidatedSubmission<'a> {
     /// The submission that was validated.
-    pub fn submission(&self) -> &'a JobSubmission {
+    #[must_use]
+    pub const fn submission(&self) -> &'a JobSubmission {
         self.submission
     }
 
     /// How the job's inputs reach the server, as validation admitted them.
-    pub fn staging(&self) -> &Staging<'a> {
+    #[must_use]
+    pub const fn staging(&self) -> &Staging<'a> {
         &self.staging
     }
 }
@@ -246,7 +248,8 @@ pub struct StagedName<'a>(&'a std::path::Path);
 
 impl<'a> StagedName<'a> {
     /// The name as a path relative to the staging directory.
-    pub fn relative_path(&self) -> &'a std::path::Path {
+    #[must_use]
+    pub const fn relative_path(&self) -> &'a std::path::Path {
         self.0
     }
 
@@ -308,7 +311,7 @@ fn admit_staged_files(files: &[FilePayload]) -> Result<Vec<StagedFile<'_>>, Vali
 }
 
 impl JobSubmission {
-    /// Validate submission constraints (paths_mode, command consistency),
+    /// Validate submission constraints (`paths_mode`, command consistency),
     /// returning the proof later checks require.
     pub fn validate(&self) -> Result<ValidatedSubmission<'_>, ValidationError> {
         // Validate options command tag matches the command field.
@@ -380,44 +383,42 @@ impl JobSubmission {
         // Refuse a language transcribe cannot segment, here at submission.
         self.validate_utseg_route(&language)?;
 
-        let staging = match self.paths_mode {
-            true => Staging::Paths(self.admit_paths_sources()?),
-            false => {
-                if !self.source_paths.is_empty()
-                    || !self.output_paths.is_empty()
-                    || !self.before_paths.is_empty()
-                    || !self.display_names.is_empty()
-                {
-                    return Err(ValidationError(
-                        "source_paths, output_paths, before_paths and display_names are for \
-                         paths_mode; this submission sends file content"
-                            .into(),
-                    ));
-                }
-                if self.files.is_empty() && self.media_files.is_empty() {
-                    return Err(ValidationError(
-                        "Must provide at least one file or media_file.".into(),
-                    ));
-                }
-                // Every content-mode file is tracked by its name: a media name
-                // that repeats another name would share one status.
-                let mut names = std::collections::HashSet::with_capacity(
-                    self.files.len() + self.media_files.len(),
-                );
-                for name in self
-                    .files
-                    .iter()
-                    .map(|file| file.filename.as_ref())
-                    .chain(self.media_files.iter().map(String::as_str))
-                {
-                    if !names.insert(name) {
-                        return Err(ValidationError(format!(
-                            "two submitted files are both named {name}; each needs its own name"
-                        )));
-                    }
-                }
-                Staging::Content(admit_staged_files(&self.files)?)
+        let staging = if self.paths_mode {
+            Staging::Paths(self.admit_paths_sources()?)
+        } else {
+            if !self.source_paths.is_empty()
+                || !self.output_paths.is_empty()
+                || !self.before_paths.is_empty()
+                || !self.display_names.is_empty()
+            {
+                return Err(ValidationError(
+                    "source_paths, output_paths, before_paths and display_names are for \
+                     paths_mode; this submission sends file content"
+                        .into(),
+                ));
             }
+            if self.files.is_empty() && self.media_files.is_empty() {
+                return Err(ValidationError(
+                    "Must provide at least one file or media_file.".into(),
+                ));
+            }
+            // Every content-mode file is tracked by its name: a media name
+            // that repeats another name would share one status.
+            let mut names =
+                std::collections::HashSet::with_capacity(self.files.len() + self.media_files.len());
+            for name in self
+                .files
+                .iter()
+                .map(|file| file.filename.as_ref())
+                .chain(self.media_files.iter().map(String::as_str))
+            {
+                if !names.insert(name) {
+                    return Err(ValidationError(format!(
+                        "two submitted files are both named {name}; each needs its own name"
+                    )));
+                }
+            }
+            Staging::Content(admit_staged_files(&self.files)?)
         };
         let stanza = self.admit_stanza_requirement(&language)?;
         Ok(ValidatedSubmission {
@@ -447,7 +448,7 @@ impl JobSubmission {
     ///
     /// `whisperx` and `whisper_oai` parse, appear in `--help`, and round-trip
     /// through the wire format, and nothing in this workspace implements
-    /// either WhisperX or the OpenAI Whisper API. Backend selection used to
+    /// either `WhisperX` or the `OpenAI` Whisper API. Backend selection used to
     /// end in a catch-all arm that ran stock local Whisper for both, so such a
     /// job SUCCEEDED while running an engine nobody asked for and writing that
     /// other engine's name into provenance.
@@ -507,7 +508,7 @@ impl JobSubmission {
     /// placeholder is sneaking through (the 2026-05-03 morphotag incident).
     ///
     /// Conversely, every other processing command (transcribe,
-    /// transcribe_s, benchmark, utseg, opensmile, avqi, diarize,
+    /// `transcribe_s`, benchmark, utseg, opensmile, avqi, diarize,
     /// speaker-identify) takes a concrete `--lang` (or `--lang auto` for
     /// ASR-detect). Those must never carry `PerFile`; if they do, something
     /// downstream of the CLI built a malformed `JobSubmission`.
@@ -1017,7 +1018,7 @@ impl DeclaredLanguages {
     /// Read from the declaration rather than resolved a second time, so the
     /// language a file is processed under is necessarily the one that was
     /// validated.
-    pub(crate) fn primary(&self) -> &LanguageCode3 {
+    pub(crate) const fn primary(&self) -> &LanguageCode3 {
         &self.primary
     }
 }
@@ -1072,13 +1073,13 @@ pub(crate) struct AdmittedFaParams {
 
 impl AdmittedFaParams {
     /// The run parameters, whose engine is the one that was admitted.
-    pub(crate) fn params(&self) -> &FaParams {
+    pub(crate) const fn params(&self) -> &FaParams {
         &self.params
     }
 
     /// The primary declared language, read off the declaration that was
     /// CHECKED rather than resolved a second time from the header.
-    pub(crate) fn primary_language(&self) -> &LanguageCode3 {
+    pub(crate) const fn primary_language(&self) -> &LanguageCode3 {
         self.declared.primary()
     }
 }
@@ -1800,7 +1801,7 @@ mod tests {
     ///
     /// What it used to do was obey. The count reached the diarizer, which
     /// returned a single track, which is why diarized runs produced one `PAR0`
-    /// and the two ml_golden "surfaces multiple speakers" tests failed with the
+    /// and the two `ml_golden` "surfaces multiple speakers" tests failed with the
     /// very count they submitted.
     #[test]
     fn diarization_with_a_count_of_one_is_refused_at_submission() {
@@ -1958,7 +1959,7 @@ mod tests {
     /// ``whisper_hub``, not ``whisper``. This test remains as a *validation*
     /// guard rail (API-supported), not a quality claim.
     ///
-    /// Malayalam has no TalkBank boundary model either, so the submission
+    /// Malayalam has no `TalkBank` boundary model either, so the submission
     /// authorizes the Stanza segmentation fallback: the ASR engine is what this
     /// test is about, and without the opt-in the route, not the engine, refuses.
     #[test]

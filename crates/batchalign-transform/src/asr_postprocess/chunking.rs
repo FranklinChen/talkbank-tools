@@ -14,6 +14,7 @@ use batchalign_types::segmentation::{BoundaryTerminator, UtteranceSegmentation};
 /// Cantonese normalization used to run here, as stage 4b, per word. Han-script
 /// normalization now runs once per monologue in [`super::prepare_words_pre_expansion`], before the
 /// multi-word split.
+#[must_use]
 pub fn finalize_words_to_chunks(
     words: Vec<AsrWord>,
     speaker: SpeakerIndex,
@@ -26,6 +27,7 @@ pub fn finalize_words_to_chunks(
 ///
 /// Populates `after_long_turn_split` when `snapshot` is `Some`. `None` is the
 /// zero-overhead default.
+#[must_use]
 pub fn finalize_words_to_chunks_with_snapshot(
     words: Vec<AsrWord>,
     speaker: SpeakerIndex,
@@ -73,7 +75,8 @@ pub struct SegmentedChunk {
 
 impl SegmentedChunk {
     /// A chunk no boundary model cut: it ends as its words do.
-    pub fn uncut(chunk: PreparedMonologueChunk) -> Self {
+    #[must_use]
+    pub const fn uncut(chunk: PreparedMonologueChunk) -> Self {
         Self {
             chunk,
             predicted_end: None,
@@ -81,16 +84,19 @@ impl SegmentedChunk {
     }
 
     /// The chunk's speaker and words.
-    pub fn chunk(&self) -> &PreparedMonologueChunk {
+    #[must_use]
+    pub const fn chunk(&self) -> &PreparedMonologueChunk {
         &self.chunk
     }
 
     /// The terminator the model predicted at the cut that made this piece.
-    pub fn predicted_end(&self) -> Option<BoundaryTerminator> {
+    #[must_use]
+    pub const fn predicted_end(&self) -> Option<BoundaryTerminator> {
         self.predicted_end
     }
 
     /// The speaker, the words and the predicted end, for retokenization.
+    #[must_use]
     pub fn into_parts(self) -> (PreparedMonologueChunk, Option<BoundaryTerminator>) {
         (self.chunk, self.predicted_end)
     }
@@ -143,6 +149,7 @@ pub struct RetraceAnalyzedChunk {
 
 impl RetraceAnalyzedChunk {
     /// Analyze the chunk's exact repetitions under `lang`'s minimum n-gram.
+    #[must_use]
     pub fn analyze(chunk: PreparedMonologueChunk, lang: &str) -> Self {
         let words: Vec<&str> = chunk.words.iter().map(|word| word.text.as_str()).collect();
         let analysis = analyze_exact_retraces(&words, lang);

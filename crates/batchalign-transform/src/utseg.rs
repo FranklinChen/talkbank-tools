@@ -146,7 +146,8 @@ pub enum UtsegNotApplicableReason {
 
 impl UtsegNotApplicableReason {
     /// Stable label for tracing and structured decision evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::SingleWord => "single_word",
             Self::Empty => "empty",
@@ -170,6 +171,7 @@ impl UtsegOutcome {
     /// Convert into a [`DecisionRecord`](crate::decisions::DecisionRecord)
     /// for tracing and structured evidence. Aligned outcomes return `None`:
     /// happy-path utterances should not flood the reporting surface.
+    #[must_use]
     pub fn to_decision_record(&self, line_idx: usize) -> Option<crate::decisions::DecisionRecord> {
         use crate::decisions::{DecisionRecord, DecisionStrategy, UtsegStrategy};
         match &self.kind {
@@ -210,17 +212,18 @@ impl UtsegOutcome {
 pub struct UtsegPayloadCollection {
     /// Utterances that will be sent to the utseg worker.
     pub batch_items: Vec<(usize, UtsegBatchItem)>,
-    /// Utterances that were classified as NotApplicable and not dispatched,
+    /// Utterances that were classified as `NotApplicable` and not dispatched,
     /// each carrying a structured reason.
     pub not_applicable: Vec<UtsegOutcome>,
 }
 
-/// Collect utseg payloads from all multi-word utterances in a ChatFile.
+/// Collect utseg payloads from all multi-word utterances in a `ChatFile`.
 ///
 /// Single-word and empty utterances are classified as
 /// [`UtsegNotApplicableReason::SingleWord`] / `Empty` and returned as
 /// [`UtsegOutcome::NotApplicable`] entries, no worker call, no silent
 /// skip.
+#[must_use]
 pub fn collect_utseg_payloads(chat_file: &ChatFile) -> UtsegPayloadCollection {
     let mut batch_items = Vec::new();
     let mut not_applicable = Vec::new();
@@ -296,6 +299,7 @@ pub fn collect_utseg_payloads(chat_file: &ChatFile) -> UtsegPayloadCollection {
 /// Returns the classified outcome kind. [`UtsegOutcomeKind::MisalignmentBug`]
 /// is emitted when the worker's `assignments` vector has a different
 /// length than the dispatched `words`, always a worker-contract bug.
+#[must_use]
 pub fn validate_utseg_response(
     batch_item: &UtsegBatchItem,
     response: &UtsegResponse,
@@ -335,18 +339,22 @@ pub struct UtsegTierInvalidation {
 
 impl UtsegTierInvalidation {
     /// Original utterance ordinal, before any split.
+    #[must_use]
     pub const fn utterance_ordinal(&self) -> usize {
         self.utterance_ordinal
     }
     /// Position of the original dependent tier.
+    #[must_use]
     pub const fn tier_index(&self) -> usize {
         self.tier_index
     }
     /// Label derived from the original typed tier.
+    #[must_use]
     pub fn tier_kind(&self) -> &str {
         &self.tier_kind
     }
     /// Why the shared partition owner refused reuse.
+    #[must_use]
     pub const fn reason(&self) -> talkbank_transform::utterance_split::TierInvalidationReason {
         self.reason
     }
@@ -381,6 +389,7 @@ impl SegmentationLayout {
     /// The output position of input utterance `input` when it is still one
     /// utterance; `None` when it was split or the file had no such
     /// utterance.
+    #[must_use]
     pub fn whole_output_ordinal(&self, input: usize) -> Option<usize> {
         match self.placements.get(input) {
             Some(&(first, 1)) => Some(first),
@@ -389,7 +398,8 @@ impl SegmentationLayout {
     }
 
     /// How many utterances the input file had.
-    pub fn input_utterances(&self) -> usize {
+    #[must_use]
+    pub const fn input_utterances(&self) -> usize {
         self.placements.len()
     }
 }
@@ -1170,7 +1180,7 @@ mod tests {
     ///
     /// Rev.AI returns "dishes , or she didn't order them" and Stanza puts
     /// the boundary after "dishes". The comma is correctly modeled as
-    /// `UtteranceContent::Separator(Separator::Comma)` by build_chat.rs.
+    /// `UtteranceContent::Separator(Separator::Comma)` by `build_chat.rs`.
     /// But after the split, it lands as the first content item of the second
     /// utterance, which is invalid CHAT. Leading separators must be stripped.
     ///
@@ -1312,7 +1322,7 @@ mod tests {
     }
 
     /// %wor partitioning: when a parent has %wor with timing for every
-    /// main-tier word, splitting must distribute the WorItems to the
+    /// main-tier word, splitting must distribute the `WorItems` to the
     /// children matching their words. F1.5: BA2-equivalent per-word
     /// timing preservation across split.
     #[test]
@@ -1651,7 +1661,7 @@ mod tests {
     /// segmentation predicted at its cut. This preserves quote-introducer
     /// linkage (`+"/.` parent → next-utterance `+"` quoted speech),
     /// interruption markers, and any other non-default terminator. See
-    /// spec/errors/E341_auto.md for the `+"/.` ↔ `+"` validation pairing.
+    /// `spec/errors/E341_auto.md` for the `+"/.` ↔ `+"` validation pairing.
     /// Until 2026-11-03 this test pinned a `Period` on every non-last child
     /// whatever the model predicted, the defect.
     #[test]
@@ -1817,18 +1827,18 @@ mod tests {
     }
 
     /// Replaced-word handling: a `ReplacedWord(wanna [: want to])` is one
-    /// main-tier slot but contributes N replacement words to TierDomain::Mor
+    /// main-tier slot but contributes N replacement words to `TierDomain::Mor`
     /// (the BERT classifier sees N words). `split_utterance` builds its
-    /// word→content mapping with TierDomain::Mor too, so the assignment
+    /// word→content mapping with `TierDomain::Mor` too, so the assignment
     /// vector lengths match. The first-assignment-wins logic in
-    /// `split_utterance` correctly attributes each ReplacedWord to ONE
+    /// `split_utterance` correctly attributes each `ReplacedWord` to ONE
     /// child group regardless of where the boundary lands relative to
     /// the replacement words.
     ///
     /// Coverage gap discovered 2026-04-27 while writing replacements
     /// docs (`book/src/batchalign/architecture/replacements-handling.md`); analogous
     /// to the FA bug shape from 2026-04-08. The current code is correct
-    /// by construction (extract + split both use TierDomain::Mor); these
+    /// by construction (extract + split both use `TierDomain::Mor`); these
     /// tests pin that invariant against future drift.
     #[test]
     fn utseg_split_handles_replaced_word_boundary_before() {

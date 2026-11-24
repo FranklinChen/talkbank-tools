@@ -42,6 +42,7 @@ impl MediaExtensions {
     ];
 
     /// Whether this filename names a media file batchalign can consume.
+    #[must_use]
     pub fn matches(filename: &str) -> bool {
         Path::new(filename)
             .extension()
@@ -49,6 +50,7 @@ impl MediaExtensions {
     }
 
     /// Whether this bare extension, with or without a leading dot, is known.
+    #[must_use]
     pub fn is_known(extension: &str) -> bool {
         let bare = extension.trim_start_matches('.').to_lowercase();
         Self::ALL.contains(&bare.as_str())
@@ -83,6 +85,7 @@ impl MediaExtensions {
     /// answered yes to `foo.wav` for a file named `Foo.WAV` while a
     /// case-sensitive one says no. See [`MediaLookup`]. It is blocking, like
     /// the listing it does; an async caller runs it on a blocking thread.
+    #[must_use]
     pub fn find_under(root: &Path, subdir: &Path, stem: &str) -> MediaLookup {
         let walk = match DirWalk::of(root, subdir) {
             Ok(walk) => walk,
@@ -92,19 +95,73 @@ impl MediaExtensions {
             Ok(listing) => listing,
             Err(lookup) => return lookup,
         };
-        // An exact name under ANY extension beats a near miss under an earlier
-        // one, which is the answer a case-sensitive host gives.
-        if let Some(name) = Self::candidates(stem).find(|name| listing.contains(OsStr::new(name))) {
-            return walk.lookup(OsStr::new(&name), OsStr::new(&name));
+        // An exact recording under any extension beats an earlier near miss.
+        // Keep the generated names for the fallback so it never builds them twice.
+        // An entry that cannot be inspected (a symlink loop, a target in an
+        // unsearchable directory) is not a recording and not proof of
+        // absence: it is kept, the search goes on, and it is the answer only
+        // if no regular recording of this stem is found at all.
+        let mut unreadable: Option<MediaLookup> = None;
+        let mut candidates = Vec::new();
+        for name in Self::candidates(stem) {
+            if listing.contains(OsStr::new(&name)) {
+                match walk.recording(OsStr::new(&name)) {
+                    Ok(Some(recording)) => {
+                        return chosen_over(walk.lookup(OsStr::new(&name), recording), unreadable);
+                    }
+                    Ok(None) => {}
+                    Err(missed) => {
+                        unreadable.get_or_insert(missed);
+                    }
+                }
+            }
+            candidates.push(name);
         }
-        let folded = listing.folded();
-        Self::candidates(stem)
-            .find_map(|name| {
-                let on_disk = folded.get(&fold(OsStr::new(&name)))?;
-                Some(walk.lookup(OsStr::new(&name), on_disk))
-            })
-            .unwrap_or(MediaLookup::Absent)
+
+        // An exactly spelled entry was already checked above. Scan for other
+        // spellings using the same directory listing, and consider only names
+        // whose folded spelling matches one of the actual candidates.
+        let wanted: HashMap<_, _> = candidates
+            .iter()
+            .enumerate()
+            .map(|(rank, name)| (fold(OsStr::new(name)), (rank, OsStr::new(name))))
+            .collect();
+        let mut best = None;
+        for actual in &listing.names {
+            let Some(&(rank, name)) = wanted.get(&fold(actual)) else {
+                continue;
+            };
+            if actual == name || best.as_ref().is_some_and(|(earlier, _)| *earlier <= rank) {
+                continue;
+            }
+            match walk.recording(actual) {
+                Ok(Some(recording)) => best = Some((rank, walk.lookup(name, recording))),
+                Ok(None) => {}
+                Err(missed) => {
+                    unreadable.get_or_insert(missed);
+                }
+            }
+        }
+        match (best, unreadable) {
+            (Some((_, result)), skipped) => chosen_over(result, skipped),
+            (None, Some(unreadable)) => unreadable,
+            (None, None) => MediaLookup::Absent,
+        }
     }
+}
+
+/// The lookup's answer when a recording was admitted, saying so in the log
+/// if an earlier candidate of the same stem could not be inspected and was
+/// passed over.
+fn chosen_over(chosen: MediaLookup, skipped: Option<MediaLookup>) -> MediaLookup {
+    if let Some(skipped) = skipped {
+        tracing::warn!(
+            ?skipped,
+            ?chosen,
+            "a media candidate could not be inspected; using another recording of the same name"
+        );
+    }
+    chosen
 }
 
 /// A directory reached from a root by exact names: where the caller asked to
@@ -152,17 +209,35 @@ impl DirWalk {
         self.wanted == self.on_disk
     }
 
-    /// The answer for a file wanted as `name` and present as `on_disk`.
-    fn lookup(&self, name: &OsStr, on_disk: &OsStr) -> MediaLookup {
-        if self.is_exact() && name == on_disk {
-            MediaLookup::Found(self.on_disk.join(on_disk))
+    /// Admit only an entry that names a regular file. Metadata follows a
+    /// symlink to a recording and refuses a stale or non-file target.
+    fn recording<'a>(&self, name: &'a OsStr) -> Result<Option<RecordingEntry<'a>>, MediaLookup> {
+        let path = self.on_disk.join(name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Ok(Some(RecordingEntry { name, path })),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(Missed::unreadable(&path, &error)),
+        }
+    }
+
+    /// Only an admitted recording can become an exact hit or a near-miss witness.
+    fn lookup(&self, wanted: &OsStr, recording: RecordingEntry<'_>) -> MediaLookup {
+        if self.is_exact() && wanted == recording.name {
+            MediaLookup::Found(recording.path)
         } else {
             MediaLookup::Missed(Missed::SpelledDifferently {
-                wanted: self.wanted.join(name),
-                on_disk: self.on_disk.join(on_disk),
+                wanted: self.wanted.join(wanted),
+                on_disk: recording.path,
             })
         }
     }
+}
+
+/// The spelling and path identified by one regular-file observation.
+struct RecordingEntry<'a> {
+    name: &'a OsStr,
+    path: PathBuf,
 }
 
 /// A directory's entry names, listed once and compared exactly.
@@ -251,9 +326,9 @@ pub enum Missed {
         /// The path as it is spelled on disk.
         on_disk: PathBuf,
     },
-    /// The directory exists but could not be listed, so absence is unknown.
+    /// A directory or file could not be inspected, so absence is unknown.
     Unreadable {
-        /// The directory that could not be listed.
+        /// The path that could not be inspected.
         dir: PathBuf,
         /// The operating system's reason.
         error: String,
@@ -282,7 +357,7 @@ impl std::fmt::Display for Missed {
                 wanted.display()
             ),
             Self::Unreadable { dir, error } => {
-                write!(f, "could not list '{}': {error}", dir.display())
+                write!(f, "could not inspect '{}': {error}", dir.display())
             }
         }
     }
@@ -298,46 +373,45 @@ mod tests {
         std::fs::write(path, b"data").expect("create test file");
     }
 
+    /// Guards: Only real recordings participate in extension precedence, and
+    /// an exact file outranks an earlier differently spelled recording.
+    /// Kind: contract
+    /// Not a type: The filesystem assigns the kind and exact spelling to
+    /// each directory entry before it can become a candidate.
+    /// State: One root with a lookalike directory, an exact file, and a second
+    /// stem that has an earlier differently spelled file.
+    /// Concurrency: This test alone creates or removes its scratch entries.
     #[test]
     fn an_exact_name_is_found() {
         let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("session.wav")).expect("lookalike directory");
         touch(&dir.path().join("session.mp3"));
-        assert_eq!(
-            MediaExtensions::find_under(dir.path(), Path::new(""), "session"),
-            MediaLookup::Found(dir.path().join("session.mp3"))
-        );
-    }
+        touch(&dir.path().join("Talk.WAV"));
+        touch(&dir.path().join("talk.mp3"));
+        for (stem, file) in [("session", "session.mp3"), ("talk", "talk.mp3")] {
+            assert_eq!(
+                MediaExtensions::find_under(dir.path(), Path::new(""), stem),
+                MediaLookup::Found(dir.path().join(file))
+            );
+        }
 
-    /// The case that motivated the type: on macOS the filesystem itself would
-    /// say `session.wav` exists, and the answer must not depend on that.
-    #[test]
-    fn a_name_spelled_with_other_case_is_a_near_miss_not_the_media() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        touch(&dir.path().join("Session.WAV"));
+        std::fs::remove_file(dir.path().join("talk.mp3")).expect("remove exact file");
         assert_eq!(
-            MediaExtensions::find_under(dir.path(), Path::new(""), "session"),
+            MediaExtensions::find_under(dir.path(), Path::new(""), "talk"),
             MediaLookup::Missed(Missed::SpelledDifferently {
-                wanted: dir.path().join("session.wav"),
-                on_disk: dir.path().join("Session.WAV"),
+                wanted: dir.path().join("talk.wav"),
+                on_disk: dir.path().join("Talk.WAV"),
             })
-        );
-    }
-
-    /// An exact name under a later extension beats a near miss under an
-    /// earlier one: the case-sensitive answer, which every host must give.
-    #[test]
-    fn an_exact_later_extension_wins_over_an_earlier_near_miss() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        touch(&dir.path().join("session.WAV"));
-        touch(&dir.path().join("session.mp3"));
-        assert_eq!(
-            MediaExtensions::find_under(dir.path(), Path::new(""), "session"),
-            MediaLookup::Found(dir.path().join("session.mp3"))
         );
     }
 
     /// macOS stores a decomposed accent as written yet finds it under the
     /// composed spelling; the answer here must not depend on that either.
+    /// Guards: A different Unicode form is an exact-spelling near miss even on filesystems that normalize names.
+    /// Kind: contract
+    /// Not a type: The filesystem chooses how to expose composed and decomposed entry names to directory enumeration.
+    /// State: A real temporary recording with an intentionally decomposed stem.
+    /// Concurrency: Only the test writes or searches its root.
     #[test]
     fn a_name_in_another_unicode_form_is_a_near_miss_not_the_media() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -352,6 +426,11 @@ mod tests {
         );
     }
 
+    /// Guards: A differently spelled subdirectory yields a near miss while its exact spelling resolves.
+    /// Kind: contract
+    /// Not a type: An actual path component may be listed under different case from the submitted relative name.
+    /// State: One nested recording observed through two spellings of its parent.
+    /// Concurrency: The test owns the directory tree and queries it read-only.
     #[test]
     fn a_directory_spelled_with_other_case_is_a_near_miss() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -369,6 +448,11 @@ mod tests {
         );
     }
 
+    /// Guards: Missing relative directories and climbing subdirs cannot yield a recording.
+    /// Kind: contract
+    /// Not a type: A supplied subdir may be absent or contain a parent traversal component.
+    /// State: A temporary root and recording, searched using missing and climbing paths.
+    /// Concurrency: No mutable state is shared between the lookups.
     #[test]
     fn a_missing_directory_or_a_climbing_subdir_is_absent() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -380,6 +464,33 @@ mod tests {
         assert_eq!(
             MediaExtensions::find_under(root.path(), Path::new("../a"), "session"),
             MediaLookup::Absent
+        );
+    }
+
+    /// Guards: An entry that cannot be inspected never hides a regular recording of the same stem; it is the answer only when no recording was admitted.
+    /// Kind: contract
+    /// Not a type: Whether the operating system can follow an entry (a symlink loop here) is known only by asking it for the entry's metadata.
+    /// State: One root holding a self-referencing `session.wav` symlink and, in the first lookup, a regular `session.mp3` that the second lookup no longer has.
+    /// Concurrency: The test owns its root; it removes the recording only after the first lookup returned.
+    #[cfg(unix)]
+    #[test]
+    fn an_uninspectable_candidate_does_not_hide_a_recording() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let looped = root.path().join("session.wav");
+        std::os::unix::fs::symlink(&looped, &looped).expect("self-referencing symlink");
+        touch(&root.path().join("session.mp3"));
+        assert_eq!(
+            MediaExtensions::find_under(root.path(), Path::new(""), "session"),
+            MediaLookup::Found(root.path().join("session.mp3"))
+        );
+
+        std::fs::remove_file(root.path().join("session.mp3")).expect("remove the recording");
+        assert!(
+            matches!(
+                MediaExtensions::find_under(root.path(), Path::new(""), "session"),
+                MediaLookup::Missed(Missed::Unreadable { .. })
+            ),
+            "with no recording left, the uninspectable entry is the answer"
         );
     }
 }

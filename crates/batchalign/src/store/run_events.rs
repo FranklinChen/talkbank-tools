@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// task of a cancelled or restarted run, still finishing a step when it was
 /// stopped, cannot write onto the files of the run that replaced it.
 #[derive(Clone)]
-pub(crate) struct StoreRunnerEventSink {
+pub struct StoreRunnerEventSink {
     store: Arc<JobStore>,
     run: crate::store::RunBinding,
 }

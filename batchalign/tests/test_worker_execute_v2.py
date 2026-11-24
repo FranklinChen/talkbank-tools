@@ -30,6 +30,7 @@ from batchalign.tests._asr_model_pins import (
     request_models,
 )
 from batchalign.tests._loaded_hosts import (
+    TEST_LOCAL_SPEAKER_GRAPH,
     diarization,
     loads,
     local_asr,
@@ -401,7 +402,12 @@ def test_routes_provider_media_asr_execute_v2_request() -> None:
 
 
 def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
-    """The live V2 router should hand speaker requests to the speaker host."""
+    """Guards: The live router drives the selected local speaker host and preserves the returned model graph.
+    Kind: wire
+    Not a type: Dispatch or the native bridge can project the typed host result incorrectly.
+    State: Private PCM, a typed load registry and the actual native extension exercise the router.
+    Concurrency: Private PCM and a per-test load registry.
+    """
 
     audio_path = tmp_path / "speaker-audio.pcm"
     _write_pcm_f32le(audio_path, np.asarray([0.2, 0.1, 0.0, -0.1], dtype=np.float32))
@@ -433,13 +439,14 @@ def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
                 diarization(
                     lambda audio, sample_rate_hz, num_speakers: SpeakerResponse(
                         evidence=LocalPyannoteSpeakerEvidence(
+                            loaded_graph=TEST_LOCAL_SPEAKER_GRAPH,
                             segments=[
                                 SpeakerSegment(
                                     start_ms=0,
                                     end_ms=1200,
                                     speaker=f"SPEAKER_{num_speakers}_{sample_rate_hz}_{audio.shape[0]}",
                                 )
-                            ]
+                            ],
                         )
                     )
                 ),
@@ -450,6 +457,7 @@ def test_routes_speaker_execute_v2_request(tmp_path: Path) -> None:
     assert isinstance(response.outcome, ExecuteSuccessV2)
     assert isinstance(response.result, SpeakerResultV2)
     assert response.result.evidence.kind == "pyannote"
+    assert response.result.evidence.loaded_graph == TEST_LOCAL_SPEAKER_GRAPH
     assert response.result.evidence.segments[0].speaker == "SPEAKER_3_16000_4"
     assert response.result.evidence.segments[0].end_ms == 1200
 

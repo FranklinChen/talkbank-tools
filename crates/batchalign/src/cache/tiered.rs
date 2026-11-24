@@ -28,7 +28,7 @@ const DEFAULT_TTI: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Tiered cache: moka in-memory hot layer wrapping a persistent cold backend.
 ///
-/// - **Read path:** check moka → on hit, verify task+engine_version → on miss
+/// - **Read path:** check moka → on hit, verify `task+engine_version` → on miss
 ///   or mismatch, fall through to cold → promote cold hits to moka.
 /// - **Write path:** write to cold first (authoritative), then insert into moka.
 /// - **Delete path:** remove from moka first, then cold.
@@ -42,6 +42,7 @@ impl TieredCacheBackend {
     /// Create a new tiered cache wrapping the given cold backend.
     ///
     /// - `max_capacity`: maximum hot-cache entries (default 10,000 → ~5-20 MB).
+    #[must_use]
     pub fn new(cold: Box<dyn CacheBackend>, max_capacity: Option<u64>) -> Self {
         let hot = Cache::builder()
             .max_capacity(max_capacity.unwrap_or(DEFAULT_MAX_CAPACITY))
@@ -266,6 +267,11 @@ mod tests {
         (tiered, verifier, dir)
     }
 
+    /// Guards: Tiered put serves the new JSON both hot and from durable storage.
+    /// Kind: contract
+    /// Not a type: Correct publication to memory and SQLite are distinct observable effects of a put.
+    /// State: Private tiered cache and its SQLite backing store exercise both read routes.
+    /// Concurrency: Private temporary directory and awaited calls.
     #[tokio::test]
     async fn test_put_and_get_hot_path() {
         let (tiered, verifier, _dir) = test_tiered_with_cold().await;
@@ -291,6 +297,11 @@ mod tests {
         assert_eq!(cold_result, Some(data));
     }
 
+    /// Guards: A cold lookup promotes the exact value for subsequent hot reads.
+    /// Kind: contract
+    /// Not a type: Promotion depends on real memory and SQLite side effects after the lookup.
+    /// State: Private tiered fixture seeds SQLite and observes its in-memory entry.
+    /// Concurrency: Private temporary directory and serial awaited operations.
     #[tokio::test]
     async fn test_get_cold_promotes_to_hot() {
         let (tiered, verifier, _dir) = test_tiered_with_cold().await;
@@ -314,6 +325,11 @@ mod tests {
         assert_eq!(result2, Some(data));
     }
 
+    /// Guards: Mixed batch retrieval returns each payload and promotes the cold member.
+    /// Kind: contract
+    /// Not a type: Associating SQL rows with their hot peers and promoting misses are runtime effects.
+    /// State: Private tiered fixture seeds one hot member and one cold member.
+    /// Concurrency: Private temporary directory and awaited operations.
     #[tokio::test]
     async fn test_get_batch_mixed_hot_cold() {
         let (tiered, verifier, _dir) = test_tiered_with_cold().await;
@@ -341,6 +357,11 @@ mod tests {
         assert!(tiered.hot.get("k2").await.is_some());
     }
 
+    /// Guards: A stale hot engine version does not shadow the cold entry requested by version.
+    /// Kind: contract
+    /// Not a type: Actual mutable tiers can have inconsistent values for the same key and task.
+    /// State: Private tiered cache stores two engine versions and observes promotion of the requested value.
+    /// Concurrency: Private directory and writes ordered before the lookup.
     #[tokio::test]
     async fn test_version_mismatch_falls_through() {
         let (tiered, verifier, _dir) = test_tiered_with_cold().await;
@@ -378,6 +399,11 @@ mod tests {
         assert_eq!(hot_entry.engine_version, "v2");
     }
 
+    /// Guards: Tiered batch deletion evicts hot entries and leaves unrelated data readable.
+    /// Kind: contract
+    /// Not a type: A committed delete must reach both mutable stores with the right predicate.
+    /// State: Private tiered cache retains a second key as an independent control.
+    /// Concurrency: Private directory and ordered awaited operations.
     #[tokio::test]
     async fn test_delete_batch_evicts_hot() {
         let (tiered, _dir) = test_tiered().await;
@@ -407,6 +433,11 @@ mod tests {
         assert_eq!(result, Some(serde_json::json!({"i": 2})));
     }
 
+    /// Guards: Tiered empty batch lookup and delete return zero successfully.
+    /// Kind: contract
+    /// Not a type: Routing an empty key list across both adapters is runtime integration behavior.
+    /// State: Private tiered fixture drives both methods with empty key slices.
+    /// Concurrency: Private directory and serial awaited operations.
     #[tokio::test]
     async fn test_empty_batch_operations() {
         let (tiered, _dir) = test_tiered().await;
@@ -420,6 +451,11 @@ mod tests {
         assert_eq!(deleted, 0);
     }
 
+    /// Guards: Tiered batch write warms every key and makes the whole set readable.
+    /// Kind: contract
+    /// Not a type: Each key must receive a memory publication after the SQLite batch succeeds.
+    /// State: Private tiered fixture exposes hot state and the supported batch read.
+    /// Concurrency: Private directory and serial awaited operations.
     #[tokio::test]
     async fn test_put_batch_populates_hot() {
         let (tiered, _dir) = test_tiered().await;
@@ -445,6 +481,11 @@ mod tests {
         assert_eq!(results.len(), 5);
     }
 
+    /// Guards: Tiered stats reflect the on-disk totals and task grouping.
+    /// Kind: contract
+    /// Not a type: The delegation and returned size depend on real cold storage state.
+    /// State: Private tiered fixture writes rows in multiple tasks before requesting stats.
+    /// Concurrency: Private directory and awaited writes.
     #[tokio::test]
     async fn test_stats_delegates_to_cold() {
         let (tiered, _dir) = test_tiered().await;

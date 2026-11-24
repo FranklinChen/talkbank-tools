@@ -1,71 +1,207 @@
-"""The worker serves requests the way its launcher says, never its own way.
-
-Whether a worker process serves requests concurrently is decided once, by the
-Rust pool that launches it and routes requests to it
-(``batchalign::worker::serving::WorkerServing``), and passed as ``--serving``.
-Until 2026-09-30 the worker decided for itself from a CUDA probe while the pool
-assumed every GPU-profile worker was concurrent; on a CPU-only host the pool
-multiplexed every request for a key into one process that served them one at
-a time. These tests pin the worker half of the contract at its real boundary,
-the process command line: the flag is required, and the serving loop the
-worker enters is the one the flag names.
-"""
+"""Python launch admission and model-free serving over actual stdio."""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
+from enum import Enum
 
 import pytest
 
-from batchalign.worker._main import parse_worker_args
-from batchalign.worker._types import WorkerServing
-
-# The pool size the worker is launched with and must report back.
-THREADS = 3
-
-
-def test_a_launch_without_a_serving_mode_is_refused() -> None:
-    """No silent default: a launcher that does not say how to serve is a bug."""
-    with pytest.raises(SystemExit):
-        parse_worker_args(["--profile", "gpu", "--lang", "eng"])
+from batchalign.worker._types import (
+    InferTask,
+    ModelTarget,
+    ProfileTarget,
+    TaskTarget,
+    UntargetedEcho,
+    WorkerProfile,
+    WorkerServing,
+)
 
 
-@pytest.mark.parametrize("serving", list(WorkerServing))
-def test_the_worker_enters_the_serving_loop_its_launcher_names(
-    serving: WorkerServing,
-) -> None:
-    """A real echo worker reports, at startup, the mode it was told to use.
+class Device(Enum):
+    DEFAULT = ()
+    CPU = ("--force-cpu",)
 
-    The GPU profile is the case that mattered: without CUDA the worker used to
-    choose sequential serving whatever its launcher assumed.
-    """
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "batchalign.worker",
+
+@dataclass(frozen=True, slots=True)
+class EchoLaunch:
+    """The exact profile, device and serving choice the child receives."""
+
+    target: ModelTarget | UntargetedEcho
+    serving: WorkerServing
+    device: Device
+
+    def arguments(self) -> list[str]:
+        if isinstance(self.target, ProfileTarget):
+            target = ["--profile", self.target.profile.value]
+        elif isinstance(self.target, TaskTarget):
+            target = ["--task", self.target.task.value]
+        else:
+            target = []
+        return [
             "--test-echo",
-            "--profile",
-            "gpu",
+            *target,
+            "--lang",
+            "eng",
             "--serving",
-            serving.value,
-            "--gpu-thread-pool-size",
-            str(THREADS),
-            "--verbose",
-            "1",
+            self.serving.value,
             "--supervisor-pid",
             str(os.getpid()),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+            "--gpu-thread-pool-size",
+            "3",
+            "--verbose",
+            "1",
+            *self.device.value,
+        ]
+
+
+# Run the real module with an import fence in a fresh process. Loading the
+# fence into pytest would miss imports that its plugins already cached.
+_ECHO_PROGRAM = """
+import importlib.abc
+import runpy
+import sys
+
+class NoModelImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'torch', 'transformers', 'stanza'}:
+            raise RuntimeError('echo startup imported ' + fullname)
+
+sys.meta_path.insert(0, NoModelImports())
+runpy.run_module('batchalign.worker', run_name='__main__')
+"""
+
+
+@pytest.mark.parametrize(
+    ("arguments", "diagnostic", "supply_supervisor"),
+    [
+        (["--test-echo"], "the following arguments are required: --serving", True),
+        (
+            [
+                "--test-echo",
+                "--profile",
+                "gpu",
+                "--task",
+                "morphosyntax",
+                "--serving",
+                "sequential",
+            ],
+            "--task: not allowed with argument --profile",
+            True,
+        ),
+        (
+            ["--serving", "sequential"],
+            "--task or --profile is required",
+            True,
+        ),
+        (
+            ["--test-echo", "--serving", "sequential"],
+            "--supervisor-pid is required for --transport stdio",
+            False,
+        ),
+        (
+            ["--test-echo", "--serving", "sequential", "--supervisor-pid", "0"],
+            "--supervisor-pid must be a positive PID",
+            False,
+        ),
+        (
+            [
+                "--test-echo",
+                "--serving",
+                "sequential",
+                "--supervisor-pid",
+                "2147483648",
+            ],
+            "--supervisor-pid must be a positive PID",
+            False,
+        ),
+        (
+            [
+                "--test-echo",
+                "--serving",
+                "sequential",
+                "--transport",
+                "tcp",
+                "--port",
+                "65536",
+            ],
+            "--port must be between 0 and 65535",
+            False,
+        ),
+    ],
+)
+def test_invalid_worker_argv_is_refused_before_ready(
+    arguments: list[str],
+    diagnostic: str,
+    supply_supervisor: bool,
+) -> None:
+    """Guards: Invalid argv receives a launch diagnostic without a ready line.
+    Kind: wire
+    Not a type: An independent process can deliver malformed argument bytes
+        before Python has an admitted target, supervisor or bind request.
+    State: A fresh subprocess receives the raw argv over its real launch edge.
+        Cases supplying a valid supervisor use this test process.
+    Concurrency: Each case owns its child and pipes, with a bounded deadline.
+    """
+    supervisor = ["--supervisor-pid", str(os.getpid())] if supply_supervisor else []
+    result = subprocess.run(
+        [sys.executable, "-c", _ECHO_PROGRAM, *supervisor, *arguments],
+        capture_output=True,
         text=True,
+        timeout=15,
+        check=False,
     )
-    # Closing stdin ends either loop once it has started; `communicate` then
-    # returns everything the worker wrote.
-    stdout, stderr = proc.communicate(input="", timeout=60)
-    assert proc.returncode == 0, stderr
-    assert '"ready": true' in stdout, stdout
-    assert f"serving={serving.value} threads={THREADS}" in stderr, stderr
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert not result.stdout
+    assert diagnostic in result.stderr
+
+
+@pytest.mark.parametrize(
+    "launch",
+    [
+        *(
+            EchoLaunch(ProfileTarget(profile), WorkerServing.SEQUENTIAL, Device.CPU)
+            for profile in WorkerProfile
+        ),
+        *(
+            EchoLaunch(ProfileTarget(WorkerProfile.GPU), serving, Device.DEFAULT)
+            for serving in WorkerServing
+        ),
+        EchoLaunch(UntargetedEcho(), WorkerServing.SEQUENTIAL, Device.DEFAULT),
+        EchoLaunch(TaskTarget(InferTask.FA), WorkerServing.CONCURRENT, Device.CPU),
+    ],
+)
+def test_model_free_echo_worker_serves_the_launch_it_received(
+    launch: EchoLaunch,
+) -> None:
+    """Guards: Python enters the requested serving loop, emits ready and health,
+        and shuts down without importing model stacks.
+    Kind: contract
+    Not a type: The independently implemented Python process can import an
+        unexpected model or enter the wrong loop despite admitted argv.
+    State: A fresh interpreter exercises the actual import and stdio boundaries.
+        It receives only echo work and the import fence refuses model libraries.
+    Concurrency: Each case owns its subprocess and pipes. The parent's actual
+        PID is the supervisor, and the subprocess deadline bounds a refusal.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _ECHO_PROGRAM, *launch.arguments()],
+        input='{"op":"health"}\n{"op":"shutdown"}\n',
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "echo startup imported" not in result.stderr
+    assert f"serving={launch.serving.value} threads=3" in result.stderr
+    ready, health, shutdown = (json.loads(line) for line in result.stdout.splitlines())
+    assert ready["ready"] is True
+    assert health["op"] == "health"
+    assert health["response"]["status"] == "ok"
+    assert health["response"]["command"] == launch.target.label
+    assert shutdown == {"op": "shutdown"}

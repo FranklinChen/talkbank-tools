@@ -6,17 +6,15 @@ use super::types::{AsrResponse, AsrWorkerMode, NonRevAsrBackend, SingleAsrLangua
 use super::{
     SpeakerEvidenceInference, SpeakerEvidenceModelRevision, SpeakerEvidenceRequest,
     SpeakerEvidenceResolution, SpeakerEvidenceResolutionError, SpeakerEvidenceSource,
-    SpeakerEvidenceTrace, SpeakerProjectionRevision, VerifiedSpeakerEvidenceRun,
-    resolve_speaker_evidence,
+    SpeakerEvidenceTrace, SpeakerInferenceReply, SpeakerProjectionRevision,
+    VerifiedSpeakerEvidenceRun, resolve_speaker_evidence,
 };
 use crate::api::{LanguageCode3, NumSpeakers, WorkerLanguage};
 use crate::cache::UtteranceCache;
 use crate::chat_ops::CacheKey;
 use crate::error::{MissingRequiredEvidence, MissingSpeakerEvidence, ServerError};
 use crate::params::CachePolicy;
-use crate::types::worker_v2::{
-    DecodeBudgetSeconds, SpeakerBackendV2, SpeakerInferenceEvidenceV2, SpeakerSegmentV2,
-};
+use crate::types::worker_v2::{DecodeBudgetSeconds, SpeakerBackendV2, SpeakerSegmentV2};
 use crate::worker::artifacts_v2::PreparedArtifactRuntimeV2;
 use crate::worker::asr_request_v2::{
     AsrBuildInputV2, PreparedAsrRequestIdsV2, build_asr_request_v2,
@@ -27,14 +25,14 @@ use crate::worker::speaker_request_v2::{
     PreparedSpeakerRequestIdsV2, SpeakerAudioBuildSourceV2, SpeakerBuildInputV2,
     build_speaker_request_v2,
 };
-use crate::worker::speaker_result_v2::{SpeakerResultParseError, parse_speaker_result_v2};
+use crate::worker::speaker_result_v2::SpeakerResultParseError;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Parameters for ASR worker inference.
-pub(crate) struct AsrInferParams<'a> {
+pub struct AsrInferParams<'a> {
     /// Which runtime boundary owns raw ASR inference.
     pub backend: NonRevAsrBackend,
     /// Audio file to transcribe.
@@ -70,7 +68,7 @@ pub(crate) struct AsrInferParams<'a> {
 }
 
 /// Call the Python worker for ASR inference on a single audio file.
-pub(crate) async fn infer_asr(
+pub async fn infer_asr(
     pool: &WorkerPool,
     params: &AsrInferParams<'_>,
 ) -> Result<AsrResponse, ServerError> {
@@ -142,7 +140,7 @@ async fn infer_whisper_rs_asr(
 /// '{"asr":"whisper_rs","whisper_rs_model":"/path/model.bin"}'`.
 const WHISPER_RS_MODEL_EXTRA: &str = "whisper_rs_model";
 
-/// Model-resolution precedence for the whisper_rs engine: the per-job
+/// Model-resolution precedence for the `whisper_rs` engine: the per-job
 /// engine-override extra, then the machine-wide env var, then the
 /// auto-fetched default (inside `resolve()`).
 fn whisper_rs_config_from(
@@ -234,7 +232,7 @@ async fn infer_speaker(
     pool: &WorkerPool,
     route: &GpuRoute,
     run: VerifiedSpeakerEvidenceRun,
-) -> Result<SpeakerInferenceEvidenceV2, ServerError> {
+) -> Result<SpeakerInferenceReply, ServerError> {
     let (source_bytes, backend, expected_speakers) = run.into_worker_input();
     let artifacts = PreparedArtifactRuntimeV2::new("speaker_v2").map_err(|error| {
         ServerError::Validation(format!(
@@ -262,14 +260,12 @@ async fn infer_speaker(
         .await
         .map_err(ServerError::Worker)?;
 
-    parse_speaker_result_v2(&response)
-        .map(|result| result.evidence.clone())
-        .map_err(|error| {
-            speaker_parse_failure_to_server_error(
-                error,
-                crate::worker::execute_result_v2::ModelLocality::of_speaker(backend),
-            )
-        })
+    SpeakerInferenceReply::admit(response).map_err(|error| {
+        speaker_parse_failure_to_server_error(
+            error,
+            crate::worker::execute_result_v2::ModelLocality::of_speaker(backend),
+        )
+    })
 }
 
 /// Route a speaker V2 parse failure to its category, instead of collapsing
@@ -300,13 +296,13 @@ fn speaker_parse_failure_to_server_error(
 }
 
 /// Production implementation of the typed speaker-evidence service boundary.
-pub(crate) struct SpeakerWorkerInference<'a> {
+pub struct SpeakerWorkerInference<'a> {
     pool: &'a WorkerPool,
     route: GpuRoute,
 }
 
 impl<'a> SpeakerWorkerInference<'a> {
-    pub(crate) fn new(pool: &'a WorkerPool, route: GpuRoute) -> Self {
+    pub(crate) const fn new(pool: &'a WorkerPool, route: GpuRoute) -> Self {
         Self { pool, route }
     }
 }
@@ -316,7 +312,7 @@ impl SpeakerEvidenceInference for SpeakerWorkerInference<'_> {
     async fn infer(
         &self,
         run: VerifiedSpeakerEvidenceRun,
-    ) -> Result<SpeakerInferenceEvidenceV2, ServerError> {
+    ) -> Result<SpeakerInferenceReply, ServerError> {
         infer_speaker(self.pool, &self.route, run).await
     }
 }
@@ -327,7 +323,7 @@ impl SpeakerEvidenceInference for SpeakerWorkerInference<'_> {
 /// backend auto-detection, while `transcribe` always supplies a known count.
 /// Keeping that distinction typed prevents the cache from conflating an
 /// auto-detected result with a request for an arbitrary sentinel count.
-pub(crate) struct SpeakerEvidenceRunParams<'a> {
+pub struct SpeakerEvidenceRunParams<'a> {
     pub audio_path: &'a Path,
     pub backend: SpeakerBackendV2,
     pub expected_speakers: Option<NumSpeakers>,
@@ -340,17 +336,16 @@ pub(crate) struct SpeakerEvidenceRunParams<'a> {
 /// Consumers cannot obtain segments without going through the shared
 /// cache-or-infer state machine, and cannot log a cache key from a different
 /// request by accident.
-pub(crate) struct ResolvedSpeakerEvidence {
-    request: SpeakerEvidenceRequest,
+pub struct ResolvedSpeakerEvidence {
     resolution: SpeakerEvidenceResolution,
 }
 
 impl ResolvedSpeakerEvidence {
-    pub(crate) fn cache_key(&self) -> &CacheKey {
-        self.request.cache_key()
+    pub(crate) const fn cache_key(&self) -> &CacheKey {
+        self.resolution.cache_key()
     }
 
-    pub(crate) fn source(&self) -> SpeakerEvidenceSource {
+    pub(crate) const fn source(&self) -> SpeakerEvidenceSource {
         self.resolution.source()
     }
 
@@ -358,7 +353,7 @@ impl ResolvedSpeakerEvidence {
         self.resolution.segments()
     }
 
-    pub(crate) fn trace(&self) -> SpeakerEvidenceTrace {
+    pub(crate) const fn trace(&self) -> SpeakerEvidenceTrace<'_> {
         self.resolution.trace(SpeakerProjectionRevision::SegmentsV1)
     }
 
@@ -369,7 +364,7 @@ impl ResolvedSpeakerEvidence {
 
 /// Resolve speaker evidence through one production operation shared by
 /// integrated transcription and standalone diarization.
-pub(crate) async fn resolve_speaker_evidence_for_audio(
+pub async fn resolve_speaker_evidence_for_audio(
     pool: &WorkerPool,
     cache: &UtteranceCache,
     gpu: &GpuModelPlan,
@@ -390,10 +385,7 @@ pub(crate) async fn resolve_speaker_evidence_for_audio(
     let resolution = resolve_speaker_evidence(&request, cache, params.cache_policy, &inference)
         .await
         .map_err(speaker_resolution_error_to_server_error)?;
-    Ok(ResolvedSpeakerEvidence {
-        request,
-        resolution,
-    })
+    Ok(ResolvedSpeakerEvidence { resolution })
 }
 
 fn speaker_resolution_error_to_server_error(error: SpeakerEvidenceResolutionError) -> ServerError {
@@ -533,6 +525,11 @@ mod tests {
     /// cache), and it must surface as the 500-class `WhisperEngine`
     /// variant, never as `Validation`: infra failures may not be
     /// reported to clients as bad input.
+    /// Guards: An explicitly supplied native Whisper model path takes precedence.
+    /// Kind: policy
+    /// Not a type: Operator override precedence is a semantic rule over runtime path inputs.
+    /// State: Pure extras and model config parsing with no downloaded model or path access.
+    /// Concurrency: none
     #[test]
     fn whisper_rs_model_extra_takes_precedence() {
         let mut extras = std::collections::BTreeMap::new();
@@ -547,6 +544,11 @@ mod tests {
         );
     }
 
+    /// Guards: The speaker cache precondition reaches the server with its typed missing key.
+    /// Kind: policy
+    /// Not a type: The scheduler adapter can choose the wrong refusal category or rebind its key.
+    /// State: Pure typed missing-evidence fixture exercises server error mapping.
+    /// Concurrency: none
     #[test]
     fn required_speaker_evidence_maps_to_typed_precondition_refusal() {
         let key = CacheKey::from_content("speaker evidence identity");
@@ -563,6 +565,11 @@ mod tests {
         assert_eq!(missing.cache_key(), &key);
     }
 
+    /// Guards: Automatic language reaches native Whisper and infrastructure failures retain infrastructure classification.
+    /// Kind: policy
+    /// Not a type: The language-routing and error classification rules are semantic choices across dispatch.
+    /// State: Pure dispatch inputs and synthetic native failure categories exercise their mappings.
+    /// Concurrency: none
     #[tokio::test]
     async fn whisper_rs_dispatch_accepts_auto_and_types_infra_failures() {
         let extras = std::collections::BTreeMap::new();

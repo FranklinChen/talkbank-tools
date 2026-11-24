@@ -121,7 +121,7 @@ fn classify_same_words(
 /// 2. Compute fingerprints (space-joined cleaned words) per utterance.
 /// 3. Run Hirschberg DP alignment on the fingerprint sequences.
 /// 4. Post-process alignment to detect substitution pairs
-///    (adjacent ExtraPayload + ExtraReference from the DP aligner).
+///    (adjacent `ExtraPayload` + `ExtraReference` from the DP aligner).
 /// 5. Classify each result into an [`UtteranceDelta`].
 pub fn diff_chat(before: &ChatFile, after: &ChatFile) -> Vec<UtteranceDelta> {
     let before_utts = extract::extract_words(before, PositionalDomain::Mor);

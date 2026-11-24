@@ -59,7 +59,7 @@ enum RankPopulation {
 }
 
 impl RankPopulation {
-    fn observe(&mut self, payload: usize, reference: usize) {
+    const fn observe(&mut self, payload: usize, reference: usize) {
         *self = match self {
             Self::Empty => Self::Unique { payload, reference },
             Self::Unique { .. } | Self::Competing => Self::Competing,
@@ -100,7 +100,7 @@ impl<'input> LiteralCandidates<'input> {
         })
     }
 
-    pub(super) fn raw_edges(&self) -> usize {
+    pub(super) const fn raw_edges(&self) -> usize {
         self.raw_edges
     }
 

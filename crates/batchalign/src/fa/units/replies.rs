@@ -116,7 +116,7 @@ impl<'p, 'g> ReplySlot<'p, 'g> {
 }
 
 impl<'unit> ReplyTicket<'unit> {
-    pub(in crate::fa) fn unit(&self) -> &'unit DispatchUnit<'unit> {
+    pub(in crate::fa) const fn unit(&self) -> &'unit DispatchUnit<'unit> {
         self.unit
     }
 

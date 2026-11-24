@@ -16,7 +16,7 @@ use crate::worker::WorkerBootstrapMode;
 /// Kernel-facing worker-lane hint derived from one command's performance
 /// profile and the current runtime caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExecutionLaneHint {
+pub enum ExecutionLaneHint {
     /// GPU-bound lane with a hard worker cap.
     Gpu {
         /// Maximum concurrent GPU-backed workers.
@@ -65,7 +65,7 @@ impl ExecutionLaneHint {
 
 /// Resource-aware kernel plan for one released command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommandKernelPlan {
+pub struct CommandKernelPlan {
     /// Released command the plan was derived for.
     pub command: ReleasedCommand,
     /// High-level scheduling shape requested by the command.

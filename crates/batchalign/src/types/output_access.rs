@@ -42,7 +42,7 @@ pub enum LocalOutputAccess {
     ContentMode,
     /// A legacy/empty record contains no output-location evidence.
     NotRecorded,
-    /// Every entry is the parent of a recorded output path, never source_dir.
+    /// Every entry is the parent of a recorded output path, never `source_dir`.
     Recorded {
         /// Nonempty destinations admitted together from the stored mapping.
         #[cfg_attr(feature = "server", schema(value_type = Vec<String>, min_items = 1))]

@@ -257,6 +257,7 @@ pub struct ErrorEntry {
 
 impl AppState {
     /// Create initial state for a new job.
+    #[must_use]
     pub fn new(total_files: u64, command: &str) -> Self {
         Self {
             progress: JobProgressState {
@@ -425,7 +426,7 @@ impl AppState {
     }
 
     /// Scroll up within the focused group.
-    pub fn scroll_up(&mut self) {
+    pub const fn scroll_up(&mut self) {
         self.directories.scroll_offset = self.directories.scroll_offset.saturating_sub(1);
     }
 
@@ -440,7 +441,7 @@ impl AppState {
     }
 
     /// Cycle to the next directory group.
-    pub fn cycle_group(&mut self) {
+    pub const fn cycle_group(&mut self) {
         if !self.directories.groups.is_empty() {
             self.directories.focused_group =
                 (self.directories.focused_group + 1) % self.directories.groups.len();
@@ -449,27 +450,29 @@ impl AppState {
     }
 
     /// Toggle the error panel expansion.
-    pub fn toggle_errors(&mut self) {
+    pub const fn toggle_errors(&mut self) {
         self.errors.expanded = !self.errors.expanded;
     }
 
     /// Toggle the worker/memory metrics rows.
-    pub fn toggle_metrics(&mut self) {
+    pub const fn toggle_metrics(&mut self) {
         self.show_metrics = !self.show_metrics;
     }
 
     /// Return whether the job is locally marked as finished.
-    pub fn is_finished(&self) -> bool {
+    #[must_use]
+    pub const fn is_finished(&self) -> bool {
         self.progress.finished
     }
 
     /// Return whether the cancel-confirm prompt is currently visible.
-    pub fn cancel_confirm_active(&self) -> bool {
+    #[must_use]
+    pub const fn cancel_confirm_active(&self) -> bool {
         self.interaction.cancel_confirm
     }
 
     /// Show the cancel-confirm prompt when the job is still active.
-    pub fn request_cancel_confirmation(&mut self) {
+    pub const fn request_cancel_confirmation(&mut self) {
         if !self.is_finished() {
             self.interaction.cancel_confirm = true;
         }
@@ -484,6 +487,7 @@ impl AppState {
     /// returns whichever the directory iteration encounters first. Forensic
     /// readers can cross-reference against the per-file `attempts` table
     /// for the full picture.
+    #[must_use]
     pub fn first_active_filename(&self) -> Option<String> {
         for group in &self.directories.groups {
             for file in &group.files {
@@ -496,12 +500,12 @@ impl AppState {
     }
 
     /// Clear the cancel-confirm prompt.
-    pub fn clear_cancel_confirmation(&mut self) {
+    pub const fn clear_cancel_confirmation(&mut self) {
         self.interaction.cancel_confirm = false;
     }
 
     /// Advance the spinner animation one frame.
-    pub fn tick_spinner(&mut self) {
+    pub const fn tick_spinner(&mut self) {
         self.directories.spinner_tick = self.directories.spinner_tick.wrapping_add(1);
     }
 }

@@ -392,6 +392,7 @@ pub(crate) async fn process_compare_constructed_main(
 /// Derive the directory-level template gold path for a main file path.
 ///
 /// Convention: `DIR/FILE.cha` -> `DIR/template.gold.cha`.
+#[must_use]
 pub fn template_gold_path_for(main_path: &str) -> String {
     let p = Path::new(main_path);
     let parent = p.parent().unwrap_or_else(|| Path::new(""));
@@ -402,6 +403,7 @@ pub fn template_gold_path_for(main_path: &str) -> String {
 }
 
 /// Returns `true` if the filename is a gold reference file (ends with `.gold.cha`).
+#[must_use]
 pub fn is_gold_file(filename: &str) -> bool {
     filename.ends_with(".gold.cha")
 }
@@ -445,6 +447,11 @@ mod tests {
         lines.join("\n")
     }
 
+    /// Guards: Comparison derives the template companion using the main file's directory.
+    /// Kind: policy
+    /// Not a type: Real filenames can have different parents or none and must choose the right directory.
+    /// State: Nested and bare candidate paths test the derivation.
+    /// Concurrency: No filesystem observation or writes.
     #[test]
     fn template_gold_path_derivation() {
         assert_eq!(template_gold_path_for("test.cha"), "template.gold.cha");
@@ -458,6 +465,11 @@ mod tests {
         );
     }
 
+    /// Guards: Gold detection admits the configured companion suffix.
+    /// Kind: policy
+    /// Not a type: A filename may contain the gold token in another extension or path component.
+    /// State: Four literal candidate paths test the spelling policy.
+    /// Concurrency: No filesystem observation or writes.
     #[test]
     fn gold_file_detection() {
         assert!(is_gold_file("test.gold.cha"));
@@ -466,6 +478,11 @@ mod tests {
         assert!(!is_gold_file("test.gold.txt"));
     }
 
+    /// Guards: Released comparison writes the projected gold text with its actual agreement and disagreement comments.
+    /// Kind: transcript
+    /// Not a type: Valid input documents can disagree and the materializer chooses their observable projection.
+    /// State: Two admitted CHAT sources and their serialized comparison artifact.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn released_compare_surface_should_match_ba2_projected_gold_chat() {
         let main = make_chat(&[("PAR", "hello big world .")]);
@@ -492,6 +509,11 @@ mod tests {
         );
     }
 
+    /// Guards: The main materializer retains the actual main anchor and projected annotations.
+    /// Kind: transcript
+    /// Not a type: Valid main and gold CHAT can have different utterance lines and anchor metadata.
+    /// State: Two synthetic sources exercise the main-owned projection.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn main_materializer_keeps_main_anchor() {
         let main = make_chat(&[("PAR", "hello big world .")]);
@@ -518,6 +540,11 @@ mod tests {
         );
     }
 
+    /// Guards: Exact-match gold materialization retains word timing and removes obsolete structural tiers.
+    /// Kind: transcript
+    /// Not a type: An aligned gold document can include multiple retained and regenerated annotation layers.
+    /// State: One valid gold fixture supplies morphology, syntax and word timing.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn gold_materializer_projects_structural_tiers_for_exact_match() {
         let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n%gra:\t1|2|COM 2|0|ROOT 3|2|PUNCT\n%wor:\thello \u{15}0_100\u{15} world \u{15}100_200\u{15} .\n@End\n";
@@ -539,6 +566,11 @@ mod tests {
 
     /// Preservation detects new losses, while complete admission also refuses
     /// inherited invalidity. Neither case can authorize malformed output.
+    /// Guards: Complete comparison refuses retained invalidity in the main output.
+    /// Kind: transcript
+    /// Not a type: A parseable original utterance can lack a terminator and fail the actual output gate.
+    /// State: A malformed main source, valid companion and real materialization.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn comparison_requires_validity_even_when_input_already_lacked_a_terminator() {
         let parser = TreeSitterParser::new().expect("parser");
@@ -572,6 +604,11 @@ mod tests {
     }
 
     /// Invalid reference source cannot acquire comparison admission.
+    /// Guards: Malformed gold cannot authorize comparison output.
+    /// Kind: transcript
+    /// Not a type: A companion can build a recovered model without qualifying for complete source admission.
+    /// State: Malformed gold fixture enters the real comparison boundary.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn invalid_gold_cannot_authorize_a_successful_comparison_output() {
         let gold = make_chat(&[("PAR", "hello world today")]);
@@ -580,6 +617,11 @@ mod tests {
         assert!(matches!(refusal, ServerError::ChatAdmission(_)));
     }
 
+    /// Guards: Released comparison keeps the main file's declared recording.
+    /// Kind: transcript
+    /// Not a type: Two admitted sources can refer to different recordings and output must retain the main declaration.
+    /// State: Synthetic media headers and the comparison artifact witness the selected metadata.
+    /// Concurrency: One local comparison owns all inputs.
     #[test]
     fn released_compare_output_copies_media_header_from_main() {
         let main = "@UTF8\n@Begin\n@Languages:\teng\n@Participants:\tPAR Participant\n@ID:\teng|test|PAR|||||Participant|||\n@Media:\tsample, audio, unlinked\n*PAR:\thello world .\n%mor:\tintj|hello noun|world .\n@End\n";

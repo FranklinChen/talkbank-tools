@@ -196,7 +196,7 @@ pub(super) fn count_double_bullet_lines(chat_text: &str) -> usize {
         .count()
 }
 
-/// The (start_ms, end_ms) of the `n`th `%wor` word in `utterance`'s `%wor`
+/// The (`start_ms`, `end_ms`) of the `n`th `%wor` word in `utterance`'s `%wor`
 /// tier, or `None` when that slot has no timing (or the tier/index doesn't
 /// exist).
 pub(super) fn wor_word_timing(
@@ -288,7 +288,7 @@ pub(super) fn bound_projection(
 /// Assert that EVERY bullet `input` carried is exactly the bullet `output`
 /// has, utterance for utterance, and that no utterance was added or lost.
 /// Crate-visible so the incremental path's own tests use the same check.
-pub(crate) fn assert_given_bullets_held(
+pub fn assert_given_bullets_held(
     input: &talkbank_model::model::ChatFile,
     output: &talkbank_model::model::ChatFile,
 ) {

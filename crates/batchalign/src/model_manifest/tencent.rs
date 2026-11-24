@@ -48,7 +48,7 @@ use crate::types::worker_v2::ProviderParameterV2;
 /// (`FailedOperation.UserHasNoAmount`). That is why a billing refusal names
 /// the tier ([`TencentEngine::tier`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TencentTier {
+pub enum TencentTier {
     /// 通用引擎, the general engines.
     General,
     /// 大模型1.0版引擎, Large Model 1.0 (formerly "大模型版", Large Model).
@@ -332,7 +332,7 @@ fn known_engines() -> String {
 }
 
 /// The ini key the account's engine is read from, in the `[asr]` section.
-pub(crate) const TENCENT_ENGINE_INI_KEY: &str = "engine.tencent.model";
+pub const TENCENT_ENGINE_INI_KEY: &str = "engine.tencent.model";
 
 /// Which Tencent engine this server's account has chosen.
 ///
@@ -369,7 +369,7 @@ impl TencentEngineSetting {
             .read_tencent_engine()
     }
 
-    /// The account PolyU's tests run as: Large Model 2.0.
+    /// The account `PolyU`'s tests run as: Large Model 2.0.
     #[cfg(test)]
     pub(crate) const LARGE_MODEL_2: Self = Self::Chosen(TencentEngine::ZhEn2_0);
 
@@ -403,7 +403,7 @@ impl TencentEngineSetting {
 
 /// Why a Tencent job has no engine to run on.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum TencentEngineUnavailable {
+pub enum TencentEngineUnavailable {
     /// The account names no engine.
     #[error(
         "this account has not chosen a Tencent engine. Tencent bills each engine separately, so \
@@ -457,7 +457,7 @@ mod tests {
         assert!(!TencentEngine::some_engine_recognizes(&lang("jpn")));
     }
 
-    /// The engine PolyU bought covers Cantonese, Mandarin and English, and is
+    /// The engine `PolyU` bought covers Cantonese, Mandarin and English, and is
     /// billed as Large Model 2.0.
     #[test]
     fn large_model_2_covers_cantonese_mandarin_and_english() {
@@ -488,7 +488,7 @@ mod tests {
         assert!(refusal.to_string().contains("16k_zh_en_2.0"), "{refusal}");
     }
 
-    /// The engine PolyU bought separates speakers; general Cantonese does not.
+    /// The engine `PolyU` bought separates speakers; general Cantonese does not.
     #[test]
     fn speaker_separation_follows_tencents_engine_list() {
         assert!(TencentEngine::ZhEn2_0.separates_speakers());

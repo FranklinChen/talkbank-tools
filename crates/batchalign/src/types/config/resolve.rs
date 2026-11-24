@@ -10,7 +10,8 @@ impl ServerConfig {
     /// `--allow-mps` are presence-only, so present means `Some(true)` and absent
     /// leaves the file's value (default `None`) for the host recommendation.
     /// The one place that boundary conversion is spelled.
-    pub fn with_device_flags(mut self, force_cpu: bool, allow_mps: bool) -> Self {
+    #[must_use]
+    pub const fn with_device_flags(mut self, force_cpu: bool, allow_mps: bool) -> Self {
         if force_cpu {
             self.force_cpu = Some(true);
         }
@@ -25,6 +26,7 @@ impl ServerConfig {
     /// with the per-profile startup overrides applied. Pure over the facts it
     /// is given, which come from one reading of the host
     /// ([`crate::host_facts::HostSnapshot`]).
+    #[must_use]
     pub fn memory_tier_for_total(&self, ram_total_mb: u64) -> crate::types::runtime::MemoryTier {
         let tier = self
             .declared_memory_tier()
@@ -44,7 +46,7 @@ impl ServerConfig {
     }
 
     /// `tier` with the operator's per-profile startup reservations applied.
-    fn with_startup_overrides(
+    const fn with_startup_overrides(
         &self,
         mut tier: crate::types::runtime::MemoryTier,
     ) -> crate::types::runtime::MemoryTier {
@@ -71,7 +73,8 @@ impl ServerConfig {
     /// (the memory tier's `headroom_mb`, 2/4/8 GB by host RAM)
     /// has been retired: it tried to encode workload sizing into a
     /// floor that should only express OS-protection headroom.
-    pub fn resolved_memory_gate_mb(&self) -> crate::api::MemoryMb {
+    #[must_use]
+    pub const fn resolved_memory_gate_mb(&self) -> crate::api::MemoryMb {
         match self.memory_gate_mb {
             Some(value) => value,
             None => batchalign_types::memory::MIN_FREE_MEMORY_MB,

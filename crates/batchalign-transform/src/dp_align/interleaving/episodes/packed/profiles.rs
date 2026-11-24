@@ -34,19 +34,19 @@ impl Profile {
             maximum: 0,
         }
     }
-    pub(super) fn first(&self) -> usize {
+    pub(super) const fn first(&self) -> usize {
         self.first
     }
-    pub(super) fn last(&self) -> usize {
+    pub(super) const fn last(&self) -> usize {
         self.first + self.bits.length()
     }
-    pub(super) fn base(&self) -> usize {
+    pub(super) const fn base(&self) -> usize {
         self.base
     }
     pub(super) fn bits(&self) -> &[u64] {
         self.bits.words()
     }
-    pub(super) fn total(&self) -> usize {
+    pub(super) const fn total(&self) -> usize {
         self.maximum
     }
     /// The score at reference position `k`, or `None` outside the row's
@@ -102,9 +102,10 @@ impl Profile {
                 .sum::<usize>();
         // At most the newly appended reference cell can violate the reference
         // gap allowance. It has no score increment when it must be removed.
-        let last = match last - self.total() > slack {
-            true => last - 1,
-            false => last,
+        let last = if last - self.total() > slack {
+            last - 1
+        } else {
+            last
         };
         let span = last - self.first;
         self.bits.resize(span);
@@ -207,7 +208,7 @@ impl Suffix {
             bits: reverse_bits(&profile.bits),
         })
     }
-    fn last(&self) -> usize {
+    const fn last(&self) -> usize {
         self.first + self.bits.length()
     }
 

@@ -58,6 +58,13 @@ impl AudioDuration {
         DurationMs(self.length.get())
     }
 
+    /// How long the audio runs, with its positivity, for a consumer whose own
+    /// type must carry that a recording is never empty.
+    #[must_use]
+    pub const fn positive_length(self) -> NonZeroU64 {
+        self.length
+    }
+
     /// How the length was established, for provenance in logs and errors.
     #[must_use]
     pub const fn basis(self) -> DurationBasis {
@@ -109,7 +116,7 @@ pub enum StatingContainer {
     IsoMedia,
     /// Ogg: the final page's granule position.
     Ogg,
-    /// Matroska and WebM: the segment's Duration element.
+    /// Matroska and `WebM`: the segment's Duration element.
     Matroska,
     /// ASF (WMA): the file properties' play duration.
     Asf,

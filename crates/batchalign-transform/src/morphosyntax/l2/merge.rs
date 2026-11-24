@@ -45,7 +45,8 @@ pub struct SecondaryUdContext<'a, 's> {
 
 impl<'a, 's> SecondaryUdContext<'a, 's> {
     /// The context of one aligned span word.
-    pub fn of(word: AlignedWord<'a, 's, SpanWordPosition>) -> Self {
+    #[must_use]
+    pub const fn of(word: AlignedWord<'a, 's, SpanWordPosition>) -> Self {
         Self { word }
     }
 
@@ -59,6 +60,7 @@ impl<'a, 's> SecondaryUdContext<'a, 's> {
     /// `time out`, which is a compound noun, and `out` keeps its ADP. A
     /// multi-word token is never a particle: its `%mor` item is the
     /// assembled clitic group.
+    #[must_use]
     pub fn is_phrasal_verb_particle(&self) -> bool {
         match self.word.ud() {
             AlignedUd::Word(word) => {
@@ -74,6 +76,7 @@ impl<'a, 's> SecondaryUdContext<'a, 's> {
     /// The category the secondary model gave this word: PART for a
     /// phrasal-verb particle, otherwise the tag of the word (for a
     /// multi-word token, of its representative).
+    #[must_use]
     pub fn model_pos(&self) -> ModelAssignedPos {
         if self.is_phrasal_verb_particle() {
             ModelAssignedPos {
@@ -113,7 +116,7 @@ pub enum PosSource {
 impl ModelAssignedPos {
     /// The secondary's tag of one UD word. A raw punctuation tag reads as
     /// PUNCT, as the `%mor` mapper reads it.
-    fn tag_of(word: &UdWord) -> Self {
+    const fn tag_of(word: &UdWord) -> Self {
         let pos = match word.upos {
             UdPunctable::Value(pos) => pos,
             UdPunctable::Punct(_) => UniversalPos::Punct,
@@ -125,12 +128,14 @@ impl ModelAssignedPos {
     }
 
     /// The category.
-    pub fn pos(self) -> UniversalPos {
+    #[must_use]
+    pub const fn pos(self) -> UniversalPos {
         self.pos
     }
 
     /// Where in the secondary analysis it came from.
-    pub fn source(self) -> PosSource {
+    #[must_use]
+    pub const fn source(self) -> PosSource {
         self.source
     }
 }
@@ -186,22 +191,26 @@ pub struct MergedL2Span {
 
 impl MergedL2Span {
     /// The span's `%mor` items.
+    #[must_use]
     pub fn mors(&self) -> &[Mor] {
         self.block.items()
     }
 
     /// The mapped grammar's diagnostic spelling, not mutable graph data.
+    #[must_use]
     pub fn grammar_summary(&self) -> &str {
         &self.grammar_summary
     }
 
     /// How the span root attaches to the host.
-    pub fn attachment(&self) -> &L2Attachment<ExternalRelation> {
+    #[must_use]
+    pub const fn attachment(&self) -> &L2Attachment<ExternalRelation> {
         &self.attachment
     }
 
     /// The host word the span starts at.
-    pub fn first_word(&self) -> MorItemIndex {
+    #[must_use]
+    pub const fn first_word(&self) -> MorItemIndex {
         self.first_word
     }
 
@@ -325,14 +334,11 @@ fn external_relation(
             let primary = source.deprel();
             let contradicts = primary.base() == "flat"
                 || !deprel_to_pos_constraint(primary).contains(&root.pos());
-            let relation = match contradicts {
-                true => infer_deprel_from_pos(
-                    root.pos(),
-                    source.head_upos(),
-                    source.has_case_dependent(),
-                )
-                .map_or(ExternalRelation::Primary, ExternalRelation::Corrected),
-                false => ExternalRelation::Primary,
+            let relation = if contradicts {
+                infer_deprel_from_pos(root.pos(), source.head_upos(), source.has_case_dependent())
+                    .map_or(ExternalRelation::Primary, ExternalRelation::Corrected)
+            } else {
+                ExternalRelation::Primary
             };
             L2Attachment::HostGovernor {
                 source_word,

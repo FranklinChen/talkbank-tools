@@ -1,7 +1,7 @@
 # Media Conversion
 
 **Status:** Current
-**Last updated:** 2026-11-16 05:30 EST
+**Last updated:** 2026-11-18 11:18 EST
 
 ## Overview
 
@@ -21,14 +21,33 @@ The preservation-oriented Rust export operation (`media::export`) is separate
 from `ensure_wav` and model-facing `Transcode`. A model's 16 kHz mono input is
 not an appropriate substitute for an exported recording.
 
-`AudioExportPlan` owns the source, destination and selected WAV/MP3 encoding.
-It refuses an existing destination, including a dangling symlink, before
-encoding. Encoding happens in an owned adjacent temporary file. Successful
-encoding and independent stream/duration inspection produce
-`VerifiedAudioExport`; only that capability can publish to the bound
-destination, with atomic no-clobber semantics. A competing writer appearing
-after admission cannot be overwritten. Cancellation kills the owned async
-media subprocess and drops its temporary artifact.
+`PrimaryAudioExport` admits a regular source and an absent primary target in
+its canonical directory. It can then choose a primary-only plan or consume
+its single opportunity to bind an independent staged copy. The resulting
+`AudioExportPlan` carries the bound destinations into encoding.
+
+Encoding happens in an owned adjacent temporary file. A single ffprobe header
+observation supplies the output codec, audio layout and data needed to choose
+the duration route. When the duration route requires a packet walk, the walk
+uses the same source and observes the packet data. Layout and duration
+verification together produce the only object that can publish the encoded
+bytes. Publication rechecks the directory and uses atomic no-clobber
+semantics. Cancellation kills the owned subprocess and drops the temporary
+artifact.
+
+```mermaid
+flowchart TD
+    paths["Source and primary path"] --> primary["Admit the primary export"]
+    primary --> fixed["Fix requested destinations once"]
+    fixed --> encoded["Encode into the primary directory"]
+    encoded --> header["Read one encoded audio header"]
+    header --> layout["Verify the actual codec and audio layout"]
+    layout --> lengthRoute{"Choose duration from the same header"}
+    lengthRoute -- stated --> verified["Verified export owns the bytes and paths"]
+    lengthRoute -- walk --> packets["Measure packets of the same source"]
+    packets --> verified
+    verified --> publish["Publish by role with no clobber"]
+```
 
 WAV export is PCM16 and retains sample rate and channel count. MP3 export uses
 the encoder's VBR quality setting 2 and retains MP3-compatible sample rates
@@ -241,7 +260,13 @@ Implements content-fingerprinted WAV conversion with file-locking and atomic wri
 6. **Re-check**: another task may have completed conversion while we waited.
 7. **Convert**: `ffmpeg -y -nostdin -v error -i source -acodec pcm_s16le -ar 16000 -ac 1 tmp.wav`.
    The locked slot becomes a produced slot only after its own temporary path
-   passes conversion admission (see Error Handling).
+   passes conversion admission (see Error Handling). The produced WAV's
+   length is then read from its header (`ProducedWav`) and travels with the
+   published path, so FA never probes a WAV this call converted. A cache hit
+   (`ConvertedMedia::Published`) is probed once when measured. A damaged
+   decode reads the header twice, once to admit the damage and once here;
+   the second read is header-only and the path is rare, so it is accepted
+   rather than carried as an optional field.
 8. **Atomic rename**: publish the produced slot while retaining its lock;
    release the lock only after the rename succeeds.
 
@@ -422,12 +447,35 @@ A walk demuxes the whole file without decoding it. Measured on a 2-hour,
 115 MB, 128 kbit/s MP3 on an NFS volume with its pages already cached: ffprobe
 alone takes 0.36 s; in-process, including reading ffprobe's JSON (about 11 MB
 for 2.5 hours), 2.6 s in a debug build. An uncached file adds one sequential
-read of the file. The duration pipeline measures each file once: `fa_pipeline` measures
-`audio_path` and hands the same `AudioDuration` to the UTR pass
-(`UtrPassContext::audio_duration`) and to FA (`AudioContext::audio_duration`);
-only a failed first probe is retried, by `AudioContext::recording`. There is
-no cross-job probe cache. Container preparation performs its own header-only
-probe before this duration measurement.
+read of the file.
+
+### Carrying the measurement into alignment
+
+Container admission keeps the header it read in `ObservedMediaHeader`. For
+native audio, duration measurement consumes that header and walks packets only
+when the format requires it. For converted audio, alignment measures the
+prepared WAV. If damage admission measured the new WAV before publishing it
+to the cache, the same measurement travels with the published path. If damage
+admission needs the source length, it uses the observed source header.
+
+```mermaid
+flowchart TD
+    source["Read and classify the source header"] --> route{"Prepared audio route"}
+    route -->|Native| native["Measure from the admitted header<br/>Walk packets if required"]
+    route -->|Convert| wav["Prepare or reuse cached PCM WAV"]
+    wav --> damage{"Did damage admission measure this WAV?"}
+    damage -->|Yes| carry["Carry the measurement across publication"]
+    damage -->|No| measure["Measure the prepared WAV"]
+    native --> owned["MeasuredAudio<br/>Prepared path and duration or typed refusal"]
+    carry --> owned
+    measure --> owned
+    owned --> consumers["AudioContext shares that result<br/>UTR and forced alignment"]
+```
+
+`AudioContext::recording` reads the carried result in memory. The initial UTR
+pass, fallback UTR and alignment retries share that result, including a probe
+refusal. Each job prepares its own media, and commands that only need a prepared
+path can leave duration measurement deferred.
 
 ### Consumers
 
@@ -500,6 +548,33 @@ or a spelling of the name in another Unicode form. A file that differs only in
 letter case or Unicode form is reported as a near miss, never used. The
 reasons, the messages and how to fix them are on
 [File Name Matching](file-name-matching.md).
+
+A lookup uses exact directory and filename spelling. A candidate becomes a
+recording only after the filesystem identifies a regular file. A directory
+with an audio extension cannot hide another valid candidate, and neither can
+an entry the filesystem cannot inspect (a symlink loop, or a target in an
+unsearchable directory): the search goes on, logs a warning when it uses
+another recording of the same name, and reports the entry as unreadable only
+if no recording was found. A symlink can name a recording when its target is
+a regular file. Differently spelled recordings remain evidence for
+diagnostics.
+
+Each transcript search retains completed directory misses. Route priority still
+governs which locations are tried. If another route resolves to the same
+root and relative subdirectory, it reuses the earlier observation within
+that search. A fresh search can observe newly staged files.
+
+```mermaid
+flowchart TD
+    route["Next media route"] --> query["Derive the root and relative subdirectory"]
+    query --> prior{"Does this search own an observation already?"}
+    prior -- yes --> advance["Advance without another filesystem lookup"]
+    prior -- no --> listing["Observe directory entries once"]
+    listing --> kind{"Admit a regular recording by exact spelling"}
+    kind -- exact --> found["Return the admitted recording path"]
+    kind -- miss --> receipt["Retain completed lookup and any near miss"]
+    receipt --> advance
+```
 
 ## MP4 Media on Network Volumes
 

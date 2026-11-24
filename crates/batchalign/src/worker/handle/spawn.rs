@@ -25,11 +25,8 @@ use crate::worker::{WorkerProfile, WorkerTarget};
 /// overrides, and process-group isolation (`setpgid` on Unix,
 /// `CREATE_NEW_PROCESS_GROUP` on Windows).
 ///
-/// When you add a new flag or env var here that the Python child reads at
-/// startup, mirror the underlying `WorkerConfig` field in
-/// `tests/common/test_worker_pool.rs::ConfigKey`. The shared test fixture
-/// keys workers by that struct; missing a field there would silently let
-/// it share workers across configs that should be distinct.
+/// Shared echo fixtures own a fixed launch for each slot. A change to the
+/// worker command is exercised by that same fixture on the next spawn.
 pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     let mut cmd = worker_command(&config.python_path);
     cmd.stdin(Stdio::piped())
@@ -58,8 +55,7 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     // is in the middle of a request: a stdio worker's results can reach no
     // one once the server holding its pipes is gone, however the server
     // ended (a graceful stop, a SIGKILL after a stop timed out, a crash).
-    cmd.arg("--supervisor-pid")
-        .arg(std::process::id().to_string());
+    cmd.args(crate::worker::python::supervised_stdio_args());
 
     if !config.engine_overrides.is_empty() {
         cmd.arg("--engine-overrides").arg(&config.engine_overrides);
@@ -102,13 +98,8 @@ pub(super) fn build_worker_command(config: &WorkerConfig) -> StdCommand {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setpgid(0, 0);
-                Ok(())
-            });
-        }
+        // Group 0: the child's own ID, so it leads a new process group.
+        cmd.process_group(0);
     }
 
     // On Windows, CREATE_NEW_PROCESS_GROUP places the worker in its own
@@ -242,15 +233,7 @@ pub async fn spawn_tcp_daemon(
     // On Unix, create a new session (setsid) so the worker is fully detached
     // from the server's process group and terminal.
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
+    crate::detached::start_in_new_session(&mut cmd);
 
     info!(
         profile = %config.bootstrap_label(),

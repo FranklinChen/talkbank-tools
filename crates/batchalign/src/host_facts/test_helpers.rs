@@ -29,6 +29,7 @@ use super::{CpuArch, GpuPresence, HostFacts, MpsExclusionReason, OperatingSystem
 /// false, reason: AppleSiliconKernelDeadlock }`, the policy
 /// decision that the recommendation, validator, and doctor all
 /// branch on.
+#[must_use]
 pub fn apple_silicon_64gb() -> HostFacts {
     HostFacts {
         os: OperatingSystem::MacOs,
@@ -59,6 +60,7 @@ pub fn apple_silicon_64gb() -> HostFacts {
 /// be refused startup just because the capability surface
 /// hypothetically includes GPU-class workloads the user has no
 /// intention of running.
+#[must_use]
 pub fn laptop_16gb() -> HostFacts {
     HostFacts {
         os: OperatingSystem::Linux,
@@ -82,6 +84,7 @@ pub fn laptop_16gb() -> HostFacts {
 /// resemble a single-A10G/L4 fleet host. Exists alongside the
 /// Apple Silicon fixture so tests can exercise both branches of
 /// the GPU-functional-vs-not split.
+#[must_use]
 pub fn linux_cuda_24gb() -> HostFacts {
     HostFacts {
         os: OperatingSystem::Linux,

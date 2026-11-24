@@ -78,12 +78,14 @@ positive_config!(JobTtlDays, i32 => u32, "job_ttl_days");
 
 impl JobTtlDays {
     /// How long a job is kept.
+    #[must_use]
     pub fn duration(self) -> std::time::Duration {
         std::time::Duration::from_secs(u64::from(self.get()) * 86_400)
     }
 
     /// The earliest submission still kept at `now`: anything submitted
     /// before it has expired.
+    #[must_use]
     pub fn cutoff(self, now: MachineTime) -> MachineTime {
         now.minus(self.duration())
     }

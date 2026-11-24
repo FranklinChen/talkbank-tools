@@ -1,7 +1,7 @@
 //! `batchalign3 models`: model training utilities.
 //!
 //! - `models prep`: Rust-native CHAT→text extraction for training data.
-//! - `models train`: forwards to Python for the PyTorch training loop.
+//! - `models train`: forwards to Python for the `PyTorch` training loop.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

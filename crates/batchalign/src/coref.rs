@@ -95,11 +95,11 @@ pub(crate) enum ResolvedCoref {
 ///
 /// Returns `(filename, Ok(output_text) | Err(error_msg))` for each file.
 pub(crate) async fn process_coref_batch(
-    files: &[TextBatchFileInput],
+    submission: crate::execution::text_io::CorefSubmission<'_>,
     pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    run_coref_batch_impl(files, pool, async move |pool, items| {
+    let (files, cancellation) = submission.into_parts();
+    run_coref_batch_impl(&files, pool, async move |pool, items| {
         infer_batch(
             pool,
             items,
@@ -397,7 +397,7 @@ async fn infer_batch(
             ServerError::Validation(format!("failed to build coref V2 worker request: {error}"))
         })?;
 
-    let response = dispatch_execute_v2_with_retry(pool, lang, &request, cancellation).await?;
+    let response = dispatch_execute_v2_with_retry(pool, lang, request, cancellation).await?;
     let result = parse_coref_result_v2(response)
         .map_err(|refusal| refusal.into_server_error(ModelLocality::Local))?;
     if result.items.len() != items.len() {
@@ -485,6 +485,11 @@ mod tests {
         }
     }
 
+    /// Guards: Coreference admits bound and legitimate sparse annotations and refuses foreign, repeated or short worker output.
+    /// Kind: wire
+    /// Not a type: The worker can encode a sentence index or word count that disagrees with the dispatched source.
+    /// State: Typed synthetic worker results and a parsed source supply the exact sentence bounds.
+    /// Concurrency: Fresh source bindings for every response.
     #[test]
     fn coref_completion_refuses_unbound_or_incomplete_annotations() {
         let cases = [
@@ -533,6 +538,11 @@ mod tests {
         );
     }
 
+    /// Guards: Mixed coreference retains per-file admission and a pass-through when the inference call fails.
+    /// Kind: contract
+    /// Not a type: Validated source families and an independent inference failure must compose without reclassifying adjacent files.
+    /// State: Four CHAT inputs and a returning inference double use the production pipeline and inert pool.
+    /// Concurrency: Each source and result is owned by this call.
     #[tokio::test]
     async fn coref_mixed_batch_keeps_admission_verdicts_when_inference_fails() {
         use crate::api::DisplayPath;
@@ -589,39 +599,34 @@ mod tests {
         }
     }
 
+    /// Guards: English, multilingual English and absent headers select coreference eligibility while Spanish alone does not.
+    /// Kind: policy
+    /// Not a type: Input header bytes vary independently of the English-only compatibility rule.
+    /// State: Four embedded CHAT sources enter the real parser with no worker.
+    /// Concurrency: A local parser owns all observations.
     #[test]
-    fn test_file_has_english_with_eng_languages() {
+    fn coreference_english_eligibility_includes_the_missing_header_fallback() {
         let parser = TreeSitterParser::new().unwrap();
-        let chat = include_str!("../../../test-fixtures/eng_hello_world.cha");
-        let (chat_file, _) = parse_lenient(&parser, chat);
-        assert!(file_has_english(&chat_file).expect("eng fallback code must construct"));
-    }
-
-    #[test]
-    fn test_file_has_english_with_spa_languages() {
-        let parser = TreeSitterParser::new().unwrap();
-        let chat = include_str!("../../../test-fixtures/spa_chi_hola_mundo.cha");
-        let (chat_file, _) = parse_lenient(&parser, chat);
-        assert!(!file_has_english(&chat_file).expect("eng fallback code must construct"));
-    }
-
-    #[test]
-    fn test_file_has_english_no_languages_header_uses_eng_fallback() {
-        // BA2 parity: coref's English-only fallback for missing @Languages is
-        // hardcoded `eng` (--lang was removed from the CLI). A file without
-        // an @Languages header is treated as English.
-        let parser = TreeSitterParser::new().unwrap();
-        let chat = include_str!("../../../test-fixtures/eng_hello_world_no_languages.cha");
-        let (chat_file, _) = parse_lenient(&parser, chat);
-        assert!(file_has_english(&chat_file).expect("eng fallback code must construct"));
-    }
-
-    #[test]
-    fn test_file_has_english_multilingual_with_eng() {
-        let parser = TreeSitterParser::new().unwrap();
-        // File declares both eng and spa, should be considered English
-        let chat = include_str!("../../../test-fixtures/eng_spa_bilingual_hello_world.cha");
-        let (chat_file, _) = parse_lenient(&parser, chat);
-        assert!(file_has_english(&chat_file).expect("eng fallback code must construct"));
+        for (chat, expected) in [
+            (
+                include_str!("../../../test-fixtures/eng_hello_world.cha"),
+                true,
+            ),
+            (
+                include_str!("../../../test-fixtures/spa_chi_hola_mundo.cha"),
+                false,
+            ),
+            (
+                include_str!("../../../test-fixtures/eng_hello_world_no_languages.cha"),
+                true,
+            ),
+            (
+                include_str!("../../../test-fixtures/eng_spa_bilingual_hello_world.cha"),
+                true,
+            ),
+        ] {
+            let (file, _) = parse_lenient(&parser, chat);
+            assert_eq!(file_has_english(&file).unwrap(), expected);
+        }
     }
 }

@@ -21,11 +21,13 @@ fn invalid_input(msg: &str) -> CliError {
 /// This file stores the default ASR engine and Rev.AI API key. Its existence
 /// is used as the gate for first-run setup: if missing, the CLI triggers
 /// interactive setup before processing commands (matching batchalign2 behavior).
+#[must_use]
 pub fn default_config_path() -> PathBuf {
     crate::runtime_paths::BatchalignHome::from_env().config_ini()
 }
 
 /// True if `~/.batchalign.ini` exists on disk.
+#[must_use]
 pub fn config_exists() -> bool {
     default_config_path().is_file()
 }
@@ -206,7 +208,7 @@ pub fn run(args: &SetupArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Resolve (downloading on first use) the whisper_rs default model, so
+/// Resolve (downloading on first use) the `whisper_rs` default model, so
 /// the ~3.1 GB fetch happens here under an explicit command instead of
 /// silently inside the first transcription job.
 fn prefetch_whisper_rs() -> Result<(), CliError> {

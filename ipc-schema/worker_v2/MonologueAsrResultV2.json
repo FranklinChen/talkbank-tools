@@ -170,7 +170,7 @@
           ]
         },
         {
-          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "description": "`FunASR` Paraformer, with its voice-activity and punctuation models.",
           "type": "object",
           "properties": {
             "asr": {
@@ -198,11 +198,11 @@
           ]
         },
         {
-          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "description": "`FunASR` `SenseVoice`, with its voice-activity model.",
           "type": "object",
           "properties": {
             "asr": {
-              "description": "The SenseVoice checkpoint that ran.",
+              "description": "The `SenseVoice` checkpoint that ran.",
               "$ref": "#/$defs/LoadedModelV2"
             },
             "engine": {
@@ -397,7 +397,7 @@
           ]
         },
         {
-          "description": "The runtime exposes no revision at all. True of every ModelScope loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
+          "description": "The runtime exposes no revision at all. True of every `ModelScope` loader\nand every cloud provider; provider-side drift is invisible, and this\nvariant is how the type says so rather than inventing a value.",
           "type": "object",
           "properties": {
             "kind": {
@@ -517,7 +517,7 @@
       "pattern": "^[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D](?:[^\\u007C\\u003B\\u005D\\u000A\\u000D]*[^\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\u007C\\u003B\\u005D\\u000A\\u000D])?$"
     },
     "SpeakerAttributionV2": {
-      "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, FunASR, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
+      "description": "Who a provider attributed one monologue to.\n\nTwo states, because there are two facts, and the wire used to have a\nspelling for only one of them. `speaker` was a bare string, so an engine\nthat separates no speakers at all (Aliyun, `FunASR`, Whisper, Qwen) had to\nwrite SOMETHING, and what it wrote was `\"0\"`: a label indistinguishable\nfrom a provider's real first speaker. Downstream that became\n`SpeakerIndex(0)` and a `PAR0` tier, so \"nobody was diarized\" and \"the\nprovider said speaker zero\" produced identical CHAT.\n\n`Undiarized` is now a state of its own, and an ABSENT label where\nseparation WAS requested is a refusal rather than a track number.",
       "oneOf": [
         {
           "description": "The provider named a speaker; this is its own label for them.",

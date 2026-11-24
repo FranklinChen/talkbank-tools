@@ -453,7 +453,7 @@ pub(super) async fn materialize_once(
             .iter()
             .map(|word| word.utterance_word_index.raw())
             .collect(),
-        audio_path: context.audio.audio_path.to_string_lossy().into_owned(),
+        audio_path: context.audio.audio_path().to_string_lossy().into_owned(),
         window: request.window(),
         whisper_text: context.params.whisper_text,
     };

@@ -74,7 +74,7 @@ pub(super) struct PendingTiming {
 struct TranscriptBoundary<'a>(&'a Bullet);
 
 impl<'a> TranscriptBoundary<'a> {
-    fn observe(bullet: &'a Bullet) -> Option<Self> {
+    const fn observe(bullet: &'a Bullet) -> Option<Self> {
         match bullet.source {
             BulletSource::Authoritative => Some(Self(bullet)),
             BulletSource::Utr => None,
@@ -146,9 +146,10 @@ impl MovedBoundary {
     /// pulled earlier alike; the previous code could only express the latter
     /// and reported `Ms(0)` for the former.
     fn distance(&self) -> Ms {
-        match self.original >= self.now {
-            true => self.original.since(self.now),
-            false => self.now.since(self.original),
+        if self.original >= self.now {
+            self.original.since(self.now)
+        } else {
+            self.now.since(self.original)
         }
     }
 }
@@ -167,7 +168,7 @@ impl PendingTiming {
     }
 
     /// A span lifted off the transcript, before any pass has touched it.
-    fn from_transcript(span: TimeSpan) -> Self {
+    const fn from_transcript(span: TimeSpan) -> Self {
         Self {
             span,
             request_window: None,
@@ -205,21 +206,23 @@ impl PendingTiming {
             span,
             request_window: self.request_window,
             model_score: self.model_score,
-            start_origin: match span.start_ms == was.start_ms {
-                true => self.start_origin,
-                false => why(MovedBoundary {
+            start_origin: if span.start_ms == was.start_ms {
+                self.start_origin
+            } else {
+                why(MovedBoundary {
                     was: self.start_origin,
                     original: FileMs::new(was.start_ms),
                     now: FileMs::new(span.start_ms),
-                }),
+                })
             },
-            end_origin: match span.end_ms == was.end_ms {
-                true => self.end_origin,
-                false => why(MovedBoundary {
+            end_origin: if span.end_ms == was.end_ms {
+                self.end_origin
+            } else {
+                why(MovedBoundary {
                     was: self.end_origin,
                     original: FileMs::new(was.end_ms),
                     now: FileMs::new(span.end_ms),
-                }),
+                })
             },
         }
     }
@@ -260,23 +263,24 @@ impl PendingTiming {
     /// upper bound. `remeasured` marks whichever did.
     fn clamped_to_bullet(self, start_ms: u64, end_ms: u64) -> Option<Self> {
         let span = TimeSpan::new(start_ms, end_ms);
-        match end_ms > start_ms {
-            false => None,
+        if end_ms <= start_ms {
+            None
+        } else {
             // When nothing was cut the span equals this one, so `remeasured`
             // wraps neither boundary and the origins pass through untouched.
-            true => Some(self.remeasured(span, |moved| Origin::ClampedTo {
+            Some(self.remeasured(span, |moved| Origin::ClampedTo {
                 bound: ClampBound::UtteranceBullet,
                 overshoot: moved.distance(),
                 original: moved.original,
                 was: Box::new(moved.was),
-            })),
+            }))
         }
     }
 
     /// A working span for a test fixture, standing for one the transcript
     /// carried. Test-only, for the same reason `WordTiming::fixture` is.
     #[cfg(test)]
-    pub(super) fn fixture(span: TimeSpan) -> Self {
+    pub(super) const fn fixture(span: TimeSpan) -> Self {
         Self::from_transcript(span)
     }
 
@@ -616,14 +620,15 @@ pub fn postprocess_utterance_timings_with_boundary_policy(
                         // as an ORIGIN rather than as a boxed closure: both arms
                         // ignored the previous origin, so the trait object
                         // bought nothing but two allocations per word.
-                        let origin = match capped_end < assumed {
-                            true => Origin::ClampedTo {
+                        let origin = if capped_end < assumed {
+                            Origin::ClampedTo {
                                 bound: ClampBound::NextOnset,
                                 was: Box::new(invented),
                                 original: FileMs::new(assumed),
                                 overshoot: Ms(assumed - capped_end),
-                            },
-                            false => invented,
+                            }
+                        } else {
+                            invented
                         };
                         if let Some(span) = word_timings[i].take() {
                             word_timings[i] = Some(span.with_end(capped_end, origin));

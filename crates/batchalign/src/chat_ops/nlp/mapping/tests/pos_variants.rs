@@ -1,4 +1,4 @@
-//! Per-POS mapping variants (adp, intj, cconj, sconj, propn, verb, pron, det, adj, noun) plus utility-helper coverage (clean_lemma strip, lang2, irr_suffix, multivalue UD features, French pron case).
+//! Per-POS mapping variants (adp, intj, cconj, sconj, propn, verb, pron, det, adj, noun) plus utility-helper coverage (`clean_lemma` strip, lang2, `irr_suffix`, multivalue UD features, French pron case).
 
 #![allow(unused_imports, dead_code)]
 

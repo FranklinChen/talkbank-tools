@@ -20,7 +20,7 @@ mod context;
 
 /// Immutable source words and the complete window proposed for them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResourceRequest {
+pub struct ResourceRequest {
     utterance: UtteranceIdx,
     words: NonEmptyWords,
     window: FaWindow,
@@ -55,7 +55,7 @@ impl ResourceRequest {
     pub(crate) fn words(&self) -> &[FaWord] {
         self.words.as_slice()
     }
-    pub(crate) fn window(&self) -> FaWindow {
+    pub(crate) const fn window(&self) -> FaWindow {
         self.window
     }
     pub(crate) fn from_anchored(split: &super::AnchoredSplit) -> Self {
@@ -228,13 +228,13 @@ impl ResourceContext {
 }
 
 /// A model/host refusal is separate from transport or preparation failure.
-pub(crate) enum ResourceProbeOutcome<P> {
+pub enum ResourceProbeOutcome<P> {
     Prepared(P),
     Limited(FaResourceConstraintV2),
 }
 
 /// Implementations retain their actual prepared artifacts in `Prepared`.
-pub(crate) trait ResourceProbe: Send {
+pub trait ResourceProbe: Send {
     type Prepared: Send;
     type Error: Send;
     fn prepare(
@@ -245,10 +245,10 @@ pub(crate) trait ResourceProbe: Send {
 
 /// A source-cut construction defect cannot masquerade as a model refusal.
 #[derive(Debug)]
-pub(crate) struct InvalidResourceCut;
+pub struct InvalidResourceCut;
 
 #[derive(Debug)]
-pub(crate) enum ResourcePlanError<E> {
+pub enum ResourcePlanError<E> {
     Probe(E),
     InvalidCut(InvalidResourceCut),
 }
@@ -269,7 +269,7 @@ fn exhausted<P>(limited: LimitedRequest, remaining: Remaining) -> Step<P> {
 /// The least demand of this file's pieces against what this host can ever
 /// offer, when the host admitted nothing of the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostTooSmall {
+pub struct HostTooSmall {
     pub(crate) engine: crate::api::ReportedEngineName,
     pub(crate) required_mb: u64,
     pub(crate) reserve_mb: u64,
@@ -347,7 +347,7 @@ impl HostTooSmall {
 /// The groups one [`prepare_group`] call planned, with what the host
 /// admitted of them. Only `prepare_group` makes one, so a file's verdict
 /// is built from the producer's own account.
-pub(crate) struct PlannedGroups {
+pub struct PlannedGroups {
     groups: Vec<FaGroup>,
     admission: HostAdmission,
 }
@@ -379,7 +379,7 @@ impl PlannedGroups {
 /// engine cannot align this file on this host, and writing an untimed copy
 /// reported as diagnosed would present a refusal as an alignment. Then the
 /// file fails, with the least demand any of its pieces had.
-pub(crate) struct FilePlan {
+pub struct FilePlan {
     groups: Vec<FaGroup>,
     admission: HostAdmission,
 }
@@ -483,7 +483,7 @@ struct LimitedRequest {
 }
 
 /// Request words may later borrow context; output ownership remains disjoint.
-pub(crate) struct PreparedPiece<P> {
+pub struct PreparedPiece<P> {
     pub(crate) source: AnchoredPiece,
     pub(crate) prepared: P,
 }
@@ -499,16 +499,16 @@ impl ResourceUnavailable {
     pub(crate) fn words(&self) -> &[FaWord] {
         self.words.as_slice()
     }
-    pub(crate) fn window(&self) -> FaWindow {
+    pub(crate) const fn window(&self) -> FaWindow {
         self.window
     }
-    pub(crate) fn first_word(&self) -> WordIdx {
+    pub(crate) const fn first_word(&self) -> WordIdx {
         self.words.first_word()
     }
-    pub(crate) fn last_word(&self) -> WordIdx {
+    pub(crate) const fn last_word(&self) -> WordIdx {
         self.words.last_word()
     }
-    pub(crate) fn constraint(&self) -> &FaResourceConstraintV2 {
+    pub(crate) const fn constraint(&self) -> &FaResourceConstraintV2 {
         &self.constraint
     }
 }
@@ -523,7 +523,7 @@ impl From<LimitedRequest> for ResourceUnavailable {
     }
 }
 
-pub(crate) enum PreparedResourcePart<P> {
+pub enum PreparedResourcePart<P> {
     Request(PreparedPiece<P>),
     Unavailable(ResourceUnavailable),
 }
@@ -555,16 +555,16 @@ pub struct ResourceSplit {
 }
 
 impl ResourceSplit {
-    pub(crate) fn utterance(&self) -> &UtteranceIdx {
+    pub(crate) const fn utterance(&self) -> &UtteranceIdx {
         &self.source.utterance
     }
-    pub(crate) fn window(&self) -> FaWindow {
+    pub(crate) const fn window(&self) -> FaWindow {
         self.envelope
     }
     pub(crate) fn words(&self) -> &[FaWord] {
         self.source.words()
     }
-    pub(crate) fn source(&self) -> &ResourceRequest {
+    pub(crate) const fn source(&self) -> &ResourceRequest {
         &self.source
     }
     pub(crate) fn pieces(&self) -> ResourceParts<'_> {
@@ -572,12 +572,12 @@ impl ResourceSplit {
     }
 }
 
-pub(crate) type ResourceParts<'a> =
+pub type ResourceParts<'a> =
     std::iter::Chain<std::slice::Iter<'a, ResourcePart>, std::iter::Once<&'a ResourcePart>>;
 
 /// Nonempty by construction: the first planning step owns a part before this
 /// accumulator exists. No word disappears when a request is unavailable.
-pub(crate) struct PreparedResourceSplit<P> {
+pub struct PreparedResourceSplit<P> {
     source: ResourceRequest,
     earlier: Vec<PreparedResourcePart<P>>,
     last: PreparedResourcePart<P>,
@@ -751,7 +751,7 @@ async fn plan_before<P: ResourceProbe>(
 }
 
 #[cfg(test)]
-pub(crate) async fn plan<P: ResourceProbe>(
+pub async fn plan<P: ResourceProbe>(
     request: ResourceRequest,
     anchors: AnchorLookup<'_>,
     probe: &mut P,
@@ -763,13 +763,13 @@ pub(crate) async fn plan<P: ResourceProbe>(
 /// The queue alone binds each original group to the following source edge.
 /// Whole feasible groups retain their geometry; only a constrained partition
 /// uses this opportunity to propose separately admitted trailing context.
-pub(crate) struct GroupPlanningInput {
+pub struct GroupPlanningInput {
     group: FaGroup,
     following: FileMs,
 }
 
 impl GroupPlanningInput {
-    pub(crate) fn group(&self) -> &FaGroup {
+    pub(crate) const fn group(&self) -> &FaGroup {
         &self.group
     }
     pub(crate) fn into_group(self) -> FaGroup {
@@ -777,7 +777,7 @@ impl GroupPlanningInput {
     }
 }
 
-pub(crate) fn planning_queue(groups: Vec<FaGroup>) -> impl Iterator<Item = GroupPlanningInput> {
+pub fn planning_queue(groups: Vec<FaGroup>) -> impl Iterator<Item = GroupPlanningInput> {
     let mut groups = groups.into_iter().peekable();
     std::iter::from_fn(move || {
         let group = groups.next()?;
@@ -794,7 +794,7 @@ pub(crate) fn planning_queue(groups: Vec<FaGroup>) -> impl Iterator<Item = Group
 
 /// Production and declared-model controls share the exact geometry producer.
 /// Every retained proof stays paired with the view the probe actually saw.
-pub(crate) async fn prepare_group<P: ResourceProbe>(
+pub async fn prepare_group<P: ResourceProbe>(
     input: GroupPlanningInput,
     anchors: &super::AnchorIndex,
     probe: &mut P,
@@ -868,6 +868,6 @@ pub(crate) async fn prepare_group<P: ResourceProbe>(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support;
+pub mod test_support;
 #[cfg(test)]
 mod tests;

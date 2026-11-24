@@ -355,6 +355,7 @@ pub struct MorphosyntaxResult {
 
 impl MorphosyntaxResult {
     /// Convert retokenization info into dashboard trace format.
+    #[must_use]
     pub fn into_retokenization_traces(self) -> Vec<RetokenizationTrace> {
         self.retokenizations
             .into_iter()

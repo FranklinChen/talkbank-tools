@@ -38,7 +38,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 #[cfg(unix)]
-fn synthetic_runtime_ready(pid: u32) -> String {
+pub fn synthetic_runtime_ready(pid: u32) -> String {
     json!({
         "ready": true,
         "pid": pid,
@@ -57,16 +57,18 @@ fn synthetic_runtime_ready(pid: u32) -> String {
 
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) only checks process existence/permission.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // Signal 0 probes for existence without delivering anything.
+    let pid = i32::try_from(pid).expect("a Unix PID fits pid_t");
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 #[cfg(unix)]
 fn terminate_pid(pid: u32) {
-    // SAFETY: sending SIGTERM to an exact PID is the intended cleanup path.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
+    let pid = i32::try_from(pid).expect("a Unix PID fits pid_t");
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    );
 }
 
 #[cfg(unix)]
@@ -95,7 +97,6 @@ fn registry_path_for(state_dir: &tempfile::TempDir) -> std::path::PathBuf {
 #[cfg(unix)]
 fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> WorkerConfig {
     WorkerConfig {
-        python_path,
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
@@ -103,7 +104,7 @@ fn test_echo_tcp_config(python_path: String, state_dir: &tempfile::TempDir) -> W
             batchalign::api::PositiveSeconds::literal::<30>(),
         ),
         runtime: WorkerRuntimeConfig::for_tests().with_state_dir(state_dir.path().to_path_buf()),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(python_path)
     }
 }
 
@@ -124,98 +125,24 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
     }
 }
 
-#[tokio::test]
-async fn spawn_test_echo_worker() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let pool = common::test_worker_pool::shared_test_worker_pool();
-    let lease = pool.checkout(&config).await.expect("checkout failed");
-    assert!(*lease.pid() > 0, "should have a valid pid");
-    assert_eq!(lease.profile_label(), "profile:stanza");
-    assert_eq!(lease.lang(), "eng");
-    assert_eq!(lease.transport(), "stdio");
-    let runtime = lease.runtime_identity();
-    assert!(!runtime.python_version().is_empty());
-    assert_eq!(runtime.python_executable_sha256().as_str().len(), 64);
-}
-
-#[tokio::test]
-async fn health_check_works() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
-        .await
-        .expect("checkout failed");
-    let health = lease.health_check().await.expect("health check failed");
-    assert_eq!(health.status, batchalign::worker::WorkerHealthStatus::Ok);
-    assert_eq!(health.command, "profile:stanza");
-    assert_eq!(health.lang, WorkerLanguage::from(LanguageCode3::eng()));
-    assert!(*health.pid > 0);
-}
-
-#[tokio::test]
-async fn spawn_test_echo_worker_task_bootstrap() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        task: Some(InferTask::Morphosyntax),
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
-        .await
-        .expect("checkout failed");
-    assert_eq!(lease.profile_label(), "infer:morphosyntax");
-
-    let health = lease.health_check().await.expect("health check failed");
-    assert_eq!(health.command, "infer:morphosyntax");
-}
-
-/// REAL BOUNDARY for language admission: a real (not echo) worker builds its
-/// capability table from the installed Stanza catalog and Rust's ISO table,
-/// reports it, and the server's registry admission reads that report. Kazakh,
-/// which a static list once refused, is admitted; Quechua, which no catalog
-/// serves, is not in it. Opt-in: it spawns a real Stanza worker (no model is
-/// loaded for a per-file worker, but the worker refreshes the catalog it
-/// reads when it starts).
+/// Guards: A real Stanza worker's installed catalog admits Kazakh and English
+/// morphology and lacks Quechua.
+/// Kind: contract
+/// Not a type: Package catalog contents and the Python report are external
+/// observations, even after typed language and requirement admission.
+/// State: One dedicated per-file Stanza worker reads the installed catalog.
+/// Its interpreter must supply Stanza. The probe performs no model inference.
+/// Concurrency: The test owns the process and takes the capability response
+/// before shutting down its pipe. No shared echo slot is available to it.
 #[tokio::test]
 #[ignore = "Real Stanza worker and catalog; opt-in via --ignored"]
 async fn a_real_workers_catalog_report_admits_kazakh() {
     use batchalign::stanza_registry::StanzaRequirement;
-    let _ = crate::prerequisite::worker_test_python();
+    crate::prerequisite::require_free_memory(4096);
     let python = crate::prerequisite::PythonWorker::require()
         .require_module("stanza")
         .interpreter();
     let config = WorkerConfig {
-        python_path: python,
         test_echo: false,
         profile: WorkerProfile::Stanza,
         task: Some(InferTask::Morphosyntax),
@@ -223,13 +150,17 @@ async fn a_real_workers_catalog_report_admits_kazakh() {
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<120>(),
         ),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(python)
     };
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
-        .await
-        .expect("checkout failed");
-    let caps = lease.capabilities().await.expect("capabilities failed");
+    let mut worker = WorkerHandle::spawn(
+        config,
+        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
+    )
+    .await
+    .expect("catalog worker starts");
+    let report = worker.capabilities().await;
+    worker.shutdown().await.expect("catalog worker shutdown");
+    let caps = report.expect("capabilities failed");
     let batchalign::stanza_registry::StanzaCatalogReport::Catalog { languages } =
         caps.stanza_catalog
     else {
@@ -258,22 +189,17 @@ async fn a_real_workers_catalog_report_admits_kazakh() {
     );
 }
 
+/// Guards: Python's live echo capability report advertises morphology and
+/// identifies only FA by engine, with GIL-enabled execution.
+/// Kind: contract
+/// Not a type: The external Python dispatcher chooses these values when
+/// serializing its report. Rust's schema only admits their shape.
+/// State: The profile echo worker provides actual capability bytes over stdio.
+/// Concurrency: The fixture's exclusive echo lease serializes the exchange.
 #[tokio::test]
 async fn capabilities_test_echo() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
+    let mut lease = common::echo_worker::EchoWorker::Profile
+        .checkout()
         .await
         .expect("checkout failed");
     let caps = lease.capabilities().await.expect("capabilities failed");
@@ -307,22 +233,17 @@ async fn capabilities_test_echo() {
     assert!(!caps.free_threaded);
 }
 
+/// Guards: Live single and batch infer replies preserve input payloads and
+/// order through Python routing and Rust control completion.
+/// Kind: contract
+/// Not a type: The peer can return different payloads despite replying in the
+/// correct shape. Association and order depend on the actual wire values.
+/// State: The profile echo worker supplies both reply forms over one stdio pipe.
+/// Concurrency: One exclusive lease retains the pipe for both exchanges.
 #[tokio::test]
 async fn infer_echo_returns_payload() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
+    let mut lease = common::echo_worker::EchoWorker::Profile
+        .checkout()
         .await
         .expect("checkout failed");
     let payload = json!({"words": ["hello", "world"], "lang": "eng"});
@@ -330,28 +251,8 @@ async fn infer_echo_returns_payload() {
         .infer(&infer_request(payload.clone()))
         .await
         .expect("infer failed");
-    assert_eq!(response.outcome.result().cloned(), Some(payload));
-    assert!(response.outcome.error().is_none());
-}
+    assert_eq!(response.outcome.result(), Some(&payload));
 
-#[tokio::test]
-async fn batch_infer_echo_returns_items() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
-        .await
-        .expect("checkout failed");
     let items = vec![
         json!({"words": ["hello"], "lang": "eng"}),
         json!({"words": ["world"], "lang": "eng"}),
@@ -360,129 +261,66 @@ async fn batch_infer_echo_returns_items() {
         .batch_infer(&batch_request(InferTask::Morphosyntax, items.clone()))
         .await
         .expect("batch infer failed");
-    assert_eq!(response.results.len(), 2);
-    assert_eq!(
-        response.results[0].outcome.result().cloned(),
-        Some(items[0].clone())
-    );
-    assert_eq!(
-        response.results[1].outcome.result().cloned(),
-        Some(items[1].clone())
-    );
+    let produced: Vec<_> = response
+        .results
+        .iter()
+        .map(|item| item.outcome.result())
+        .collect();
+    assert_eq!(produced, items.iter().map(Some).collect::<Vec<_>>());
 }
 
+/// Guards: Both real echo batches pass through the same idle stdio worker and shutdown empties the pool.
+/// Kind: journey
+/// Not a type: The native child could be replaced between otherwise successful IPC calls.
+/// State: One private pool, real Python worker, two batch payloads and its structured status.
+/// Concurrency: The second exchange runs after the first handle returns to its queue.
 #[tokio::test]
 async fn pool_dispatch_batch_infer_spawns_and_processes() {
     let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
         test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
+    let lang = LanguageCode3::eng();
 
-    let item = json!({"words": ["hello", "pool"], "lang": "eng"});
-    let response = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Morphosyntax, vec![item.clone()]),
-        )
-        .await
-        .expect("dispatch failed");
-    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
-
-    assert_eq!(pool.worker_count().await, 1);
-    let summary = pool.worker_summary().await;
-    assert_eq!(summary.len(), 1);
-    assert!(summary[0].starts_with("profile:stanza:eng:pid="));
-    assert!(summary[0].contains(":transport=stdio"));
-    let runtimes = pool.observed_worker_runtimes();
-    assert_eq!(runtimes.len(), 1);
-    assert_eq!(runtimes[0].python_executable_sha256().as_str().len(), 64);
-
-    pool.shutdown().await;
-    assert_eq!(pool.worker_count().await, 0);
-}
-
-#[tokio::test]
-async fn pool_reuses_existing_worker() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
-    });
-
-    for i in 0..3 {
-        let item = json!({"request": i});
+    let mut original = None;
+    for marker in ["first", "second"] {
+        let item = json!({"words": [marker], "lang": "eng"});
         let response = pool
             .dispatch_batch_infer(
-                &LanguageCode3::eng(),
+                &lang,
                 &batch_request(InferTask::Morphosyntax, vec![item.clone()]),
             )
             .await
             .expect("dispatch failed");
-        assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
+        assert_eq!(response.results[0].outcome.result(), Some(&item));
+        assert_eq!(pool.worker_count().await, 1);
+        let summary = pool.worker_summary_entries().await;
+        let [worker] = summary.as_slice() else {
+            panic!("expected one idle echo worker, got {summary:?}");
+        };
+        assert_eq!(worker.profile, "profile:stanza");
+        assert_eq!(worker.lang, lang.as_ref());
+        assert_eq!(
+            worker.transport,
+            batchalign::worker::pool::WorkerTransport::Stdio
+        );
+        assert_eq!(*original.get_or_insert(worker.pid), worker.pid);
     }
-
-    assert_eq!(pool.worker_count().await, 1);
+    assert_eq!(pool.observed_worker_runtimes().len(), 1);
     pool.shutdown().await;
+    assert_eq!(pool.worker_count().await, 0);
 }
 
-#[tokio::test]
-async fn pool_multiple_task_groups() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
-    });
-
-    let morph_item = json!({"task": "morph"});
-    let fa_item = json!({"task": "fa"});
-    let r1 = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Morphosyntax, vec![morph_item.clone()]),
-        )
-        .await
-        .expect("dispatch 1 failed");
-    let r2 = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Fa, vec![fa_item.clone()]),
-        )
-        .await
-        .expect("dispatch 2 failed");
-    assert_eq!(r1.results[0].outcome.result().cloned(), Some(morph_item));
-    assert_eq!(r2.results[0].outcome.result().cloned(), Some(fa_item));
-    assert_eq!(pool.worker_count().await, 2);
-
-    pool.shutdown().await;
-}
-
+/// Guards: Task bootstrap separates two Stanza tasks into correctly labelled workers.
+/// Kind: contract
+/// Not a type: The valid enum values must still survive argv and pool routing to separate real children.
+/// State: A private task-bootstrap pool and two model-free stdio launches.
+/// Concurrency: Sequential requests expose reuse of the wrong group if it occurs.
 #[tokio::test]
 async fn pool_task_bootstrap_separates_same_profile_tasks() {
     let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -491,7 +329,7 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         runtime: WorkerRuntimeConfig::for_tests().with_bootstrap_mode(WorkerBootstrapMode::Task),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     let morph_item = json!({"task": "morph"});
@@ -530,11 +368,15 @@ async fn pool_task_bootstrap_separates_same_profile_tasks() {
     pool.shutdown().await;
 }
 
+/// Guards: Pre-scaling morphotag and align publishes their Stanza and GPU worker routes.
+/// Kind: contract
+/// Not a type: A valid released command can still pre-scale the wrong live route.
+/// State: A private echo pool pre-starts the two actual processes.
+/// Concurrency: Launches end before inspecting the pool and shutting it down.
 #[tokio::test]
 async fn pool_pre_scale_uses_infer_targets() {
     let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -542,7 +384,7 @@ async fn pool_pre_scale_uses_infer_targets() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     pool.pre_scale(
@@ -598,7 +440,6 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
             .expect("spawn external tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -607,7 +448,7 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
         worker_registry_path: Some(registry_path.clone()),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     let (first, concurrent) =
@@ -660,6 +501,11 @@ async fn discover_from_registry_seeds_capabilities_from_external_tcp_daemon() {
     );
 }
 
+/// Guards: Discovery removes a stale server-owned registry row and terminates that daemon.
+/// Kind: journey
+/// Not a type: An admitted registry row can outlive its actual owner process and retain a live daemon.
+/// State: One real server-owned TCP worker and a private registry.
+/// Concurrency: The fixture waits for the native exit before inspecting the remaining file.
 #[cfg(unix)]
 #[tokio::test]
 async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
@@ -678,7 +524,6 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
             .expect("spawn stale server-owned tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -692,7 +537,7 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
             ..WorkerRuntimeConfig::for_tests()
         },
         worker_registry_path: Some(registry_path.clone()),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     let discovered = pool.discover_from_registry().await;
@@ -711,6 +556,11 @@ async fn discover_from_registry_reaps_stale_foreign_server_owned_daemon() {
     pool.shutdown().await;
 }
 
+/// Guards: Pool shutdown retires its server-owned daemon and preserves an external daemon.
+/// Kind: journey
+/// Not a type: The persisted ownership tags must select the correct real process during shutdown.
+/// State: A private registry, two real TCP daemons and their recorded ownership.
+/// Concurrency: The test verifies the owned daemon exits, then reaps supplied external work.
 #[cfg(unix)]
 #[tokio::test]
 async fn shutdown_only_kills_current_server_owned_daemons() {
@@ -736,7 +586,6 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
             .expect("spawn server-owned tcp daemon");
 
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -746,7 +595,7 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
         verbose: 0,
         runtime: owned_runtime,
         worker_registry_path: Some(registry_path.clone()),
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     pool.shutdown().await;
@@ -769,11 +618,15 @@ async fn shutdown_only_kills_current_server_owned_daemons() {
     wait_for_process_exit(external_pid).await;
 }
 
+/// Guards: Pre-scaling fills exactly two allowed slots even when asked for four.
+/// Kind: contract
+/// Not a type: A runtime cap must govern the real workers that complete startup.
+/// State: Private Stanza echo route and its worker count.
+/// Concurrency: The pool's pre-scale operation finishes before we count or shut down.
 #[tokio::test]
 async fn pool_pre_scale_respects_max_workers_per_key() {
     let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -781,7 +634,7 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(2),
         verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
 
     pool.pre_scale(
@@ -791,26 +644,57 @@ async fn pool_pre_scale_respects_max_workers_per_key() {
     )
     .await;
     let count = pool.worker_count().await;
-    assert!(
-        count <= 2,
-        "Expected at most 2 workers (max_workers_per_key=2), got {count}"
+    assert_eq!(
+        count, 2,
+        "both permitted slots should be live after pre-scaling"
     );
 
     pool.shutdown().await;
 }
 
+/// Guards: Same-key launch windows never overlap while three caller requests contend.
+/// Kind: contract
+/// Not a type: Independent child processes can overlap before readiness while typed claims are held.
+/// State: A private wrapper holds one directory-backed launch witness until the worker publishes.
+/// Concurrency: Three joined callers own unique requests, and the native wrapper latches any overlap.
 #[cfg(unix)]
 #[tokio::test]
 async fn pool_serializes_worker_bootstrap_per_key() {
     let python = crate::prerequisite::worker_test_python();
     let dir = tempfile::TempDir::new().expect("tempdir");
     let wrapped_python = dir.path().join("wrapped-python");
+    let overlap = dir.path().join("overlapped");
+    std::fs::write(dir.path().join("python"), format!("{python}\n")).expect("interpreter");
+    std::fs::write(
+        dir.path().join("bootstrap-proxy.py"),
+        r#"import sys
+from pathlib import Path
+from batchalign.worker import _main
+
+starting = Path(__file__).with_name("starting")
+original = _main.start_worker
+def publish(startup):
+    original(startup)
+    starting.rmdir()
+
+assert sys.argv[1:3] == ["-P", "-c"], sys.argv[1:3]
+sys.argv = ["batchalign-worker", *sys.argv[4:]]
+_main.start_worker = publish
+_main.main()
+"#,
+    )
+    .expect("write startup observer");
     std::fs::write(
         &wrapped_python,
-        format!(
-            "#!/bin/sh\nsleep 0.5\nexec \"{}\" \"$@\"\n",
-            python.replace('"', "\\\"")
-        ),
+        r#"#!/bin/sh
+dir=$(dirname "$0")
+if ! mkdir "$dir/starting"; then
+    : > "$dir/overlapped"
+    exit 1
+fi
+IFS= read -r interpreter < "$dir/python"
+exec "$interpreter" -P "$dir/bootstrap-proxy.py" "$@"
+"#,
     )
     .expect("write wrapped python");
     let mut perms = std::fs::metadata(&wrapped_python)
@@ -820,7 +704,6 @@ async fn pool_serializes_worker_bootstrap_per_key() {
     std::fs::set_permissions(&wrapped_python, perms).expect("chmod wrapped python");
 
     let pool = WorkerPool::new(PoolConfig {
-        python_path: wrapped_python.to_string_lossy().into_owned(),
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -828,7 +711,7 @@ async fn pool_serializes_worker_bootstrap_per_key() {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(3),
         verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(wrapped_python.to_string_lossy().into_owned())
     });
 
     let item1 = json!({"request": 1});
@@ -838,14 +721,11 @@ async fn pool_serializes_worker_bootstrap_per_key() {
     let request1 = batch_request(InferTask::Morphosyntax, vec![item1.clone()]);
     let request2 = batch_request(InferTask::Morphosyntax, vec![item2.clone()]);
     let request3 = batch_request(InferTask::Morphosyntax, vec![item3.clone()]);
-    let started = tokio::time::Instant::now();
     let (r1, r2, r3) = tokio::join!(
         pool.dispatch_batch_infer(&lang, &request1),
         pool.dispatch_batch_infer(&lang, &request2),
         pool.dispatch_batch_infer(&lang, &request3),
     );
-    let elapsed = started.elapsed();
-
     assert_eq!(
         r1.expect("dispatch 1 failed").results[0]
             .outcome
@@ -868,27 +748,23 @@ async fn pool_serializes_worker_bootstrap_per_key() {
         Some(item3)
     );
     assert_eq!(pool.worker_count().await, 3);
-    assert!(
-        elapsed >= std::time::Duration::from_millis(1100),
-        "expected serialized bootstrap to take at least 1.1s, got {:?}",
-        elapsed
-    );
+    assert!(!overlap.exists(), "same-key native bootstrap overlapped");
 
     pool.shutdown().await;
 }
 
+/// Guards: An absent interpreter gives the spawn error variant without reporting ready.
+/// Kind: contract
+/// Not a type: An executable path value cannot guarantee the operating system can open it.
+/// State: A unique nonexistent file in a private directory crosses the real spawn boundary.
+/// Concurrency: No worker or ambient interpreter is needed.
 #[tokio::test]
 async fn spawn_failure_bad_python_path() {
+    let dir = tempfile::tempdir().expect("private absent interpreter directory");
+    let missing = dir.path().join("missing-python");
     let config = WorkerConfig {
-        python_path: "/nonexistent/python3".to_string(),
         test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        num_speakers: NumSpeakers(1),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(missing.to_string_lossy().into_owned())
     };
 
     let err = match WorkerHandle::spawn(
@@ -906,6 +782,11 @@ async fn spawn_failure_bad_python_path() {
     );
 }
 
+/// Guards: A real non-JSON stdout preamble does not prevent ready admission.
+/// Kind: wire
+/// Not a type: A child can emit arbitrary text outside an otherwise correct ready protocol.
+/// State: A private shell emits noisy stdout, then a valid synthetic ready frame.
+/// Concurrency: The test owns the process and the handle retires it on drop.
 #[cfg(unix)]
 #[tokio::test]
 async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
@@ -926,7 +807,6 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
     std::fs::set_permissions(&fake_python, perms).expect("chmod fake python");
 
     let config = WorkerConfig {
-        python_path: fake_python.to_string_lossy().into_owned(),
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
@@ -934,7 +814,7 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
         ),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(fake_python.to_string_lossy().into_owned())
     };
 
     let handle = WorkerHandle::spawn(
@@ -947,58 +827,11 @@ async fn spawn_tolerates_non_json_stdout_preamble_before_ready() {
     assert_eq!(handle.transport(), "stdio");
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn spawn_failure_includes_worker_startup_stderr() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
-    let fake_python = dir.path().join("fake-python");
-    std::fs::write(
-        &fake_python,
-        "#!/bin/sh\nprintf 'synthetic worker startup failure\\n' >&2\nexit 23\n",
-    )
-    .expect("write fake python");
-    let mut perms = std::fs::metadata(&fake_python)
-        .expect("metadata")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&fake_python, perms).expect("chmod fake python");
-
-    let config = WorkerConfig {
-        python_path: fake_python.to_string_lossy().into_owned(),
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        num_speakers: NumSpeakers(1),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let err = match WorkerHandle::spawn(
-        config,
-        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
-    )
-    .await
-    {
-        Err(e) => e,
-        Ok(_) => panic!("expected spawn to fail with synthetic stderr"),
-    };
-    match err {
-        WorkerError::ReadyParseFailed(message) => {
-            assert!(
-                message.contains("worker closed stdout without emitting ready signal"),
-                "missing ready failure detail: {message}"
-            );
-            assert!(
-                message.contains("synthetic worker startup failure"),
-                "missing worker stderr detail: {message}"
-            );
-        }
-        other => panic!("expected ReadyParseFailed, got: {other}"),
-    }
-}
-
+/// Guards: Load noise between requests leaves the subsequent health and shutdown replies readable.
+/// Kind: wire
+/// Not a type: A live worker pipe can interleave arbitrary stdout with valid control frames.
+/// State: A private shell emits a ready frame, load noise and health/shutdown responses.
+/// Concurrency: One mutable handle owns the sequential request and response stream.
 #[cfg(unix)]
 #[tokio::test]
 async fn health_check_tolerates_non_protocol_stdout_between_requests() {
@@ -1019,7 +852,6 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
     std::fs::set_permissions(&fake_python, perms).expect("chmod fake python");
 
     let config = WorkerConfig {
-        python_path: fake_python.to_string_lossy().into_owned(),
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
@@ -1027,7 +859,7 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
         ),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(fake_python.to_string_lossy().into_owned())
     };
 
     let mut handle = WorkerHandle::spawn(
@@ -1044,90 +876,32 @@ async fn health_check_tolerates_non_protocol_stdout_between_requests() {
     handle.shutdown().await.expect("shutdown failed");
 }
 
-/// Two different InferTasks within the same profile share one worker.
+/// Guards: Morphosyntax and utseg echo payloads are served by the same native Stanza process.
+/// Kind: contract
+/// Not a type: Two legal tasks in one profile can still be launched on different processes.
+/// State: One private echo pool and typed child IDs observed after both requests.
+/// Concurrency: Each request returns its worker before the next borrows it.
 #[tokio::test]
 async fn profile_groups_related_tasks_into_single_worker() {
     let python = crate::prerequisite::worker_test_python();
     let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
         test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     });
-
-    // Dispatch morphosyntax and utseg, both Stanza profile.
-    let morph_item = json!({"task": "morph"});
-    let utseg_item = json!({"task": ReleasedCommand::Utseg});
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Morphosyntax, vec![morph_item]),
-    )
-    .await
-    .expect("morphosyntax dispatch failed");
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Utseg, vec![utseg_item]),
-    )
-    .await
-    .expect("utseg dispatch failed");
-
-    // Both should use the same Stanza worker, only 1 worker total.
-    assert_eq!(
-        pool.worker_count().await,
-        1,
-        "morphosyntax and utseg should share a single Stanza profile worker"
-    );
-
-    pool.shutdown().await;
-}
-
-/// Three different profiles produce exactly three workers.
-#[tokio::test]
-async fn each_profile_gets_its_own_worker() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<60>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
-    });
-
-    // Dispatch one task from each profile via batch_infer.
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Morphosyntax, vec![json!({"p": "stanza"})]),
-    )
-    .await
-    .expect("stanza dispatch failed");
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Translate, vec![json!({"p": "io"})]),
-    )
-    .await
-    .expect("io dispatch failed");
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Fa, vec![json!({"p": "gpu"})]),
-    )
-    .await
-    .expect("gpu dispatch failed");
-
-    // Three different profiles -> three workers.
-    assert_eq!(
-        pool.worker_count().await,
-        3,
-        "expected one worker per profile (Stanza, IO, GPU)"
-    );
-
+    let lang = LanguageCode3::eng();
+    let mut original = None;
+    for task in [InferTask::Morphosyntax, InferTask::Utseg] {
+        let item = json!({"task": format!("{task:?}")});
+        let response = pool
+            .dispatch_batch_infer(&lang, &batch_request(task, vec![item.clone()]))
+            .await
+            .expect("same-profile dispatch");
+        assert_eq!(response.results[0].outcome.result(), Some(&item));
+        let summary = pool.worker_summary_entries().await;
+        let [worker] = summary.as_slice() else {
+            panic!("expected one idle same-profile worker: {summary:?}");
+        };
+        assert_eq!(*original.get_or_insert(worker.pid), worker.pid);
+    }
     pool.shutdown().await;
 }

@@ -60,7 +60,7 @@ pub enum FaAlignmentError {
 /// relation among the engine's own numbers and says nothing about the audio.
 ///
 /// The failure it allowed, measured on a real session: a 2.263 second group
-/// (`1257705..1259968`) was rejected by Wave2Vec for exceeding a CTC target
+/// (`1257705..1259968`) was rejected by `Wave2Vec` for exceeding a CTC target
 /// limit and retried on Whisper, which pads its input to a fixed 30 second
 /// window and duly reported tokens out to 29.98 seconds. Offsetting those gave
 /// word timings at 1287685 in a recording 1259968 milliseconds long. Six of 226
@@ -157,7 +157,7 @@ impl<'a> IndexedWordTimings<'a> {
     /// [`FaAlignmentError::IndexedCountMismatch`] when the host returned a
     /// number of slots other than the number of words it was sent. Always a
     /// worker-contract bug.
-    pub(super) fn pair(
+    pub(super) const fn pair(
         words: &'a [FaWord],
         timings: &'a [Option<FaIndexedTiming>],
     ) -> Result<Self, FaAlignmentError> {
@@ -174,7 +174,7 @@ impl<'a> IndexedWordTimings<'a> {
     ///
     /// Also how many timing slots the host returned, because the pairing is
     /// exactly the proof that those two numbers are one number.
-    pub(super) fn word_count(&self) -> usize {
+    pub(super) const fn word_count(&self) -> usize {
         self.words.len()
     }
 }
@@ -400,12 +400,12 @@ impl FaGroupWarning {
     /// have. The sum is the honest count whichever path ran: each path
     /// populates one of the two halves and leaves the other at zero, so the
     /// number is the same one either half would have printed alone.
-    fn outside_window(&self) -> usize {
+    const fn outside_window(&self) -> usize {
         self.untimed.rejected.outside_window + self.labels_rejected.outside_window
     }
 
     /// Whether anything was reported about audio the engine was not given.
-    fn any_outside_window(&self) -> bool {
+    const fn any_outside_window(&self) -> bool {
         self.untimed.rejected.any_outside_window() || self.labels_rejected.any_outside_window()
     }
 
@@ -418,7 +418,7 @@ impl FaGroupWarning {
     }
 
     /// Timings that existed and could not be used, at either level.
-    fn unusable(&self) -> usize {
+    const fn unusable(&self) -> usize {
         self.untimed.rejected.total()
             + self.labels_rejected.total()
             + self.untimed.timing_refused_proven_span
@@ -433,7 +433,7 @@ impl FaGroupWarning {
     }
 
     /// Facts about words that ARE timed.
-    fn adjustments(&self) -> usize {
+    const fn adjustments(&self) -> usize {
         self.assumed_then_clamped + self.invalid_model_score
     }
 
@@ -521,14 +521,14 @@ impl DiscardedTimings {
     /// out of it. Both are two-case values, but only one of them says what the
     /// cases MEAN: `AsGiven` and `ClampedTo` name the fact, while `Some`/`None`
     /// makes the caller remember which way round the question was asked.
-    pub(crate) fn note_clamp(&mut self, outcome: &Clamped<WordSpan>) {
+    pub(crate) const fn note_clamp(&mut self, outcome: &Clamped<WordSpan>) {
         match outcome {
             Clamped::AsGiven(_) => {}
             Clamped::ClampedTo { .. } => self.assumed_then_clamped += 1,
         }
     }
 
-    pub(crate) fn record_invalid_model_score(&mut self) {
+    pub(crate) const fn record_invalid_model_score(&mut self) {
         self.invalid_model_score += 1;
     }
 

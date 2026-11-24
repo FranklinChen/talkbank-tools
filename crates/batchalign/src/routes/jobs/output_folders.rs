@@ -13,7 +13,7 @@ use crate::api::{JobId, JobOutputFolders};
 use crate::error::ServerError;
 
 /// Only a loopback peer can request local output-location authority.
-pub(crate) struct LocalOutputRequest(JobId);
+pub struct LocalOutputRequest(JobId);
 
 impl LocalOutputRequest {
     fn admit(peer: SocketAddr, job_id: String) -> Result<Self, ServerError> {
@@ -51,7 +51,7 @@ impl<S: Send + Sync> FromRequestParts<S> for LocalOutputRequest {
         (status = 404, description = "Job not found", body = crate::openapi::ErrorResponse)
     )
 )]
-pub(crate) async fn get_output_folders(
+pub async fn get_output_folders(
     State(state): State<Arc<AppState>>,
     LocalOutputRequest(job_id): LocalOutputRequest,
 ) -> Result<Json<JobOutputFolders>, ServerError> {

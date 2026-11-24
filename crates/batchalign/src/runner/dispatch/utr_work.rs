@@ -16,7 +16,7 @@ use crate::provenance::{UtrModels, UtrProducer, UtrRecognitionEvidence};
 use crate::runner::util::{FileStage, ProgressSender, ProgressUpdate};
 
 /// Tokens and retained responses prepared together for one correspondence search.
-pub(crate) struct PreparedRecognition {
+pub struct PreparedRecognition {
     tokens: PreparedUtrTokens,
     producer: UtrProducer,
     inputs: UtrRecognitionEvidence,
@@ -24,7 +24,7 @@ pub(crate) struct PreparedRecognition {
 
 /// A completed search and the recognition inputs it actually consumed.
 #[derive(Debug)]
-pub(crate) struct CompletedRecognition {
+pub struct CompletedRecognition {
     observation: UtrObservation,
     producer: UtrProducer,
     inputs: UtrRecognitionEvidence,
@@ -36,7 +36,7 @@ impl PreparedRecognition {
         Self::prepare(
             conversion,
             Vec::new(),
-            context.engine,
+            context.recognizer.engine(),
             context.lang,
             RecognitionOrder::Provider,
             route.into(),
@@ -67,7 +67,7 @@ impl PreparedRecognition {
         Self::prepare(
             first,
             remaining,
-            context.engine,
+            context.recognizer.engine(),
             context.lang,
             RecognitionOrder::Timeline,
             super::UtrRecognitionRoute::Partial,
@@ -124,7 +124,7 @@ impl PreparedRecognition {
         })
     }
 
-    pub(super) fn tokens(&self) -> &PreparedUtrTokens {
+    pub(super) const fn tokens(&self) -> &PreparedUtrTokens {
         &self.tokens
     }
 
@@ -151,7 +151,7 @@ enum RecognitionOrder {
 }
 
 impl CompletedRecognition {
-    pub(super) fn observation(&self) -> &UtrObservation {
+    pub(super) const fn observation(&self) -> &UtrObservation {
         &self.observation
     }
 
@@ -160,7 +160,7 @@ impl CompletedRecognition {
     }
 
     #[cfg(test)]
-    pub(crate) fn synthetic(observation: UtrObservation, producer: UtrProducer) -> Self {
+    pub(crate) const fn synthetic(observation: UtrObservation, producer: UtrProducer) -> Self {
         Self {
             observation,
             producer,

@@ -31,7 +31,7 @@ use crate::types::worker_v2::TranslationItemResultV2;
 
 /// A wait the loop asks for, named so a test can tell the two apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Wait {
+pub enum Wait {
     /// The gap the engine's provider policy keeps between requests.
     Spacing(Duration),
     /// A cooldown before the same item is sent again.
@@ -40,7 +40,7 @@ pub(crate) enum Wait {
 
 impl Wait {
     /// How long to wait, whichever kind it is.
-    pub(crate) fn duration(self) -> Duration {
+    pub(crate) const fn duration(self) -> Duration {
         match self {
             Self::Spacing(duration) | Self::Cooldown(duration) => duration,
         }
@@ -49,7 +49,7 @@ impl Wait {
 
 /// What the loop settled for a batch of items.
 #[derive(Debug)]
-pub(crate) struct ItemsOutcome {
+pub struct ItemsOutcome {
     /// One result per item, in order.
     pub(crate) results: Vec<Result<AdmittedTranslation, TranslateItemFailure>>,
     /// How many translations came back identical to their source text. An
@@ -65,7 +65,7 @@ pub(crate) struct ItemsOutcome {
 /// which a closure over borrowed arguments cannot promise for every lifetime,
 /// and because a test transport is a struct with a script and a log, not a
 /// pair of `RefCell`s captured by closures.
-pub(crate) trait ItemTransport {
+pub trait ItemTransport {
     /// Send one item to the worker and return what it reported.
     fn send(
         &mut self,
@@ -77,7 +77,7 @@ pub(crate) trait ItemTransport {
 }
 
 /// Translate `items` one request at a time under `engine`'s provider policy.
-pub(crate) async fn translate_items<Transport: ItemTransport>(
+pub async fn translate_items<Transport: ItemTransport>(
     items: &[TranslateBatchItem],
     engine: &TranslateEngineName,
     punct_refs: &[&str],
@@ -276,6 +276,11 @@ mod tests {
         }
     }
 
+    /// Guards: Google translation preserves ordered sends and places only one spacing wait between successful items.
+    /// Kind: contract
+    /// Not a type: A typed provider policy can still be applied one step late or after the last item.
+    /// State: A scripted transport gives two item replies and records send and wait effects.
+    /// Concurrency: One awaited deterministic script, with no wall-clock waits.
     #[tokio::test]
     async fn items_are_sent_one_at_a_time_with_the_engine_spacing_between_them() {
         let (outcome, script) = run(
@@ -294,6 +299,11 @@ mod tests {
         assert_eq!(outcome.echoed, 0);
     }
 
+    /// Guards: Local translations send all three items without requesting provider pacing.
+    /// Kind: contract
+    /// Not a type: An engine's local spacing policy must reach the actual translation scheduling seam.
+    /// State: A local-engine transport double records three sends and all waits.
+    /// Concurrency: One awaited deterministic script, with no worker or timers.
     #[tokio::test]
     async fn a_local_engine_keeps_no_gap() {
         let (_, script) = run(
@@ -306,21 +316,36 @@ mod tests {
         assert!(script.waits.is_empty(), "{:?}", script.waits);
     }
 
+    /// Guards: Transient HTTP status and no-response receipts both wait once and re-send only the original item.
+    /// Kind: contract
+    /// Not a type: The two independently typed provider observations can still schedule a fresh item or an extra delay.
+    /// State: A scripted transport captures the repeated input and admitted cooldown for each response variant.
+    /// Concurrency: Every script owns its sequence and uses no clock.
     #[tokio::test]
-    async fn a_transient_status_is_waited_out_and_the_same_item_sent_again() {
-        let (outcome, script) = run(
-            &["hola."],
-            TranslateEngineName::Google,
-            vec![status(429, Some(2.0)), translated("Hello.")],
-        )
-        .await;
-        assert_eq!(script.sent, vec!["hola.", "hola."]);
-        // The cooldown is the longer of the schedule and the Retry-After, and
-        // no spacing is owed on top of it.
-        assert_eq!(script.waits, vec![Wait::Cooldown(Duration::from_secs(5))]);
-        assert_eq!(text_of(&outcome.results[0]), Some("Hello ."));
+    async fn a_transient_answer_waits_and_sends_the_same_item_again() {
+        for transient in [
+            status(429, Some(2.0)),
+            TranslationItemResultV2::NoResponse {
+                error: "ConnectionResetError".into(),
+            },
+        ] {
+            let (outcome, script) = run(
+                &["hola."],
+                TranslateEngineName::Google,
+                vec![transient, translated("Hello.")],
+            )
+            .await;
+            assert_eq!(script.sent, vec!["hola.", "hola."]);
+            assert_eq!(script.waits, vec![Wait::Cooldown(Duration::from_secs(5))]);
+            assert_eq!(text_of(&outcome.results[0]), Some("Hello ."));
+        }
     }
 
+    /// Guards: Exhausted cooldowns stop dispatch at the first item and mark each later item by that original index.
+    /// Kind: contract
+    /// Not a type: Server replies can spend all allowed retries while additional items remain queued.
+    /// State: A scripted sequence of three transient status responses records sends and waits.
+    /// Concurrency: Awaited scripted transport and no real provider.
     #[tokio::test]
     async fn a_spent_schedule_fails_the_item_and_the_rest_are_not_sent() {
         let (outcome, script) = run(
@@ -358,6 +383,11 @@ mod tests {
         }
     }
 
+    /// Guards: A final provider status aborts the file without waiting and preserves the original diagnostic.
+    /// Kind: contract
+    /// Not a type: A status return and diagnostic come from the provider independently of its scheduling policy.
+    /// State: A scripted final HTTP response with exact text observes sent items and waits.
+    /// Concurrency: Awaited scripted transport and no real provider.
     #[tokio::test]
     async fn a_final_status_stops_the_batch_without_a_wait() {
         let (outcome, script) = run(
@@ -382,6 +412,11 @@ mod tests {
         ));
     }
 
+    /// Guards: A completed item hands the following item a fresh retry schedule.
+    /// Kind: contract
+    /// Not a type: Adjacent valid worker responses can exhaust one item's schedule without exhausting the next.
+    /// State: A two-item scripted transport provides two long retry sequences and records cooldown and spacing.
+    /// Concurrency: One awaited script and no real clock.
     #[tokio::test]
     async fn a_success_hands_the_next_item_a_fresh_schedule() {
         let (outcome, script) = run(
@@ -409,23 +444,11 @@ mod tests {
         assert_eq!(text_of(&outcome.results[1]), Some("Two ."));
     }
 
-    #[tokio::test]
-    async fn no_response_is_waited_out_like_a_transient_status() {
-        let (outcome, script) = run(
-            &["hola."],
-            TranslateEngineName::Google,
-            vec![
-                TranslationItemResultV2::NoResponse {
-                    error: "ConnectionResetError".into(),
-                },
-                translated("Hello."),
-            ],
-        )
-        .await;
-        assert_eq!(script.sent.len(), 2);
-        assert_eq!(text_of(&outcome.results[0]), Some("Hello ."));
-    }
-
+    /// Guards: A terminal worker-supplied item message survives verbatim and stops later sends.
+    /// Kind: wire
+    /// Not a type: The worker can return a whole message independently of the operation's typed disposition.
+    /// State: A scripted local-engine failure and two text items witness the absence of another send.
+    /// Concurrency: Private scripted transport, no live inference.
     #[tokio::test]
     async fn an_engine_reported_failure_is_final_and_verbatim() {
         let (outcome, script) = run(
@@ -448,6 +471,11 @@ mod tests {
         );
     }
 
+    /// Guards: A provider reply that normalizes to no words stops the batch at that item.
+    /// Kind: contract
+    /// Not a type: A syntactically successful response may contain punctuation alone and fail the usable-text policy.
+    /// State: A scripted punctuation-only reply and second queued item observe the stopped sequence.
+    /// Concurrency: Pure scripted attempts and no real provider.
     #[tokio::test]
     async fn an_empty_translation_fails_the_item_and_stops_the_batch() {
         let (outcome, script) = run(
@@ -463,6 +491,11 @@ mod tests {
         assert!(first.to_string().contains("empty translation"), "{first}");
     }
 
+    /// Guards: Source-identical translations are counted separately from genuinely changed text.
+    /// Kind: policy
+    /// Not a type: The worker supplies actual strings that can equal the source text after the chosen normalization.
+    /// State: Three scripted outputs exercise the result counter.
+    /// Concurrency: No real clock or watcher.
     #[tokio::test]
     async fn translations_identical_to_their_source_are_counted() {
         let (outcome, _) = run(
@@ -490,6 +523,11 @@ mod tests {
         }
     }
 
+    /// Guards: A cancelled transport wait ends translation with the original cancellation.
+    /// Kind: contract
+    /// Not a type: An awaited pacing or cooldown effect can independently report job cancellation before the next attempt.
+    /// State: A cancellation-returning double implements the actual transport interface.
+    /// Concurrency: One local async invocation with no wall-clock wait.
     #[tokio::test]
     async fn a_cancelled_pause_stops_the_loop_with_the_cancellation() {
         let items = [item("hola.")];

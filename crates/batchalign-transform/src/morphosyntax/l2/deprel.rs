@@ -31,11 +31,13 @@ impl UdDeprel {
     }
 
     /// The raw UD label (lowercase, colon-separated subtypes).
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// The base relation (before the first colon), e.g., `"obl"` from `"obl:arg"`.
+    #[must_use]
     pub fn base(&self) -> &str {
         self.0.split(':').next().unwrap_or(&self.0)
     }
@@ -81,6 +83,7 @@ pub enum PosConstraint {
 
 impl PosConstraint {
     /// Check whether a POS tag satisfies this constraint.
+    #[must_use]
     pub fn contains(&self, pos: &UniversalPos) -> bool {
         match self {
             Self::Exact(p) => p == pos,
@@ -103,6 +106,7 @@ impl PosConstraint {
 /// The L2 merge uses it in one direction only: to notice that the primary's
 /// relation contradicts the category the secondary model assigned, so the
 /// relation is corrected. It never chooses a category.
+#[must_use]
 pub fn deprel_to_pos_constraint(deprel: &UdDeprel) -> PosConstraint {
     let base = deprel.base();
 
@@ -169,6 +173,7 @@ pub fn deprel_to_pos_constraint(deprel: &UdDeprel) -> PosConstraint {
 /// for unknown words, or a deprel that contradicts the resolved POS like
 /// `obl` for a DET). Returns the corrected deprel, or `None` if no
 /// correction is applicable.
+#[must_use]
 pub fn infer_deprel_from_pos(
     resolved_pos: UniversalPos,
     head_pos: Option<UniversalPos>,

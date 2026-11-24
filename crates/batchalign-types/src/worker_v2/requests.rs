@@ -110,7 +110,7 @@ numeric_id!(
 /// [`Self::as_seconds`] is the only way to read one back out.
 ///
 /// The tuple constructor is unreachable from outside this module (proved
-/// by the compile_fail doctest below); `Default` and `From<f64>` are
+/// by the `compile_fail` doctest below); `Default` and `From<f64>` are
 /// proved absent crate-wide by a `static_assertions::assert_not_impl_any!`
 /// beneath this type, which runs on every `cargo test --lib`.
 ///
@@ -191,6 +191,7 @@ impl DecodeBudgetSeconds {
     /// zero sample rate (never a real artifact, but not excluded by
     /// [`SampleRateHzV2`]'s own type) yields a zero budget rather than
     /// dividing by zero.
+    #[must_use]
     pub fn for_audio(frame_count: FrameCountV2, sample_rate_hz: SampleRateHzV2) -> Self {
         let audio_seconds = if sample_rate_hz.0 == 0 {
             0.0
@@ -203,6 +204,7 @@ impl DecodeBudgetSeconds {
     /// Derive a request's decode budget from a probed duration in
     /// milliseconds (the shape [`crate::api::DurationMs`]-probing call
     /// sites already have).
+    #[must_use]
     pub fn for_duration_ms(duration_ms: u64) -> Self {
         Self((duration_ms as f64 / 1000.0) * DEADLINE_REALTIME_FACTOR)
     }
@@ -211,7 +213,8 @@ impl DecodeBudgetSeconds {
     /// budget: the budget itself plus the named margin, rounded up to the
     /// next whole second so the transport is never shorter than the
     /// fractional-second budget it was computed from.
-    pub fn transport_ceiling(self) -> PositiveSeconds {
+    #[must_use]
+    pub const fn transport_ceiling(self) -> PositiveSeconds {
         let budget_seconds = self.as_seconds().max(0.0).ceil() as u64;
         TRANSPORT_CEILING_MARGIN.saturating_add_seconds(budget_seconds)
     }
@@ -219,13 +222,14 @@ impl DecodeBudgetSeconds {
     /// The budget's raw seconds value.
     ///
     /// The only sanctioned way to read a budget back out: needed by
-    /// `transport_ceiling_seconds` above and by the PyO3 bridge
+    /// `transport_ceiling_seconds` above and by the `PyO3` bridge
     /// (`batchalign-pyo3::worker_asr_exec`), which forwards this number
     /// to Python's `AsrBatchItem.decode_budget_seconds` verbatim. A read
     /// accessor does not reopen the construction hole the private field
     /// closes: it cannot manufacture a budget, only report one that was
     /// already built by `for_audio` or `for_duration_ms`.
-    pub fn as_seconds(self) -> f64 {
+    #[must_use]
+    pub const fn as_seconds(self) -> f64 {
         self.0
     }
 }
@@ -272,7 +276,7 @@ pub enum InferenceTaskV2 {
     Speaker,
     /// Speaker embedding over named spans of one prepared recording.
     SpeakerEmbedding,
-    /// OpenSMILE feature extraction.
+    /// `OpenSMILE` feature extraction.
     Opensmile,
     /// AVQI feature extraction.
     Avqi,
@@ -284,7 +288,7 @@ pub enum InferenceTaskV2 {
 pub enum AsrBackendV2 {
     /// Local Whisper runtime hosted in Python.
     LocalWhisper,
-    /// HuggingFace Whisper community fine-tune, resolved per-language.
+    /// `HuggingFace` Whisper community fine-tune, resolved per-language.
     /// The same worker-side ``WhisperASRHandle`` hosts the model; this
     /// enum variant exists so the control-plane pool key and the worker
     /// bootstrap can select the fine-tune loader over the stock loader.
@@ -293,7 +297,7 @@ pub enum AsrBackendV2 {
     HkTencent,
     /// Aliyun Cantonese ASR provider.
     HkAliyun,
-    /// FunASR Cantonese provider.
+    /// `FunASR` Cantonese provider.
     HkFunaudio,
     /// Qwen3-ASR Cantonese provider (local model via qwen-asr package).
     HkQwen,
@@ -325,9 +329,9 @@ impl AsrBackendV2 {
 pub enum FaBackendV2 {
     /// Whisper token-timestamp alignment.
     Whisper,
-    /// MMS Wave2Vec forced alignment.
+    /// MMS `Wave2Vec` forced alignment.
     Wave2vec,
-    /// Cantonese Wave2Vec forced alignment.
+    /// Cantonese `Wave2Vec` forced alignment.
     Wav2vecCanto,
     /// Qwen3 forced alignment, the standalone form of the aligner the
     /// Qwen3-ASR engine loads for its own word timestamps.
@@ -385,6 +389,7 @@ pub enum SpeakerEmbeddingBackendV2 {
 impl SpeakerEmbeddingBackendV2 {
     /// The serde spelling, written out so the worker's `speaker_embedding`
     /// engine override can name the model without a JSON round trip.
+    #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
             Self::Pyannote => "pyannote",
@@ -392,6 +397,7 @@ impl SpeakerEmbeddingBackendV2 {
     }
 
     /// Parse [`Self::wire_name`], or `None` for any other spelling.
+    #[must_use]
     pub fn from_wire_name(name: &str) -> Option<Self> {
         match name {
             "pyannote" => Some(Self::Pyannote),
@@ -481,7 +487,7 @@ impl ProtocolErrorCodeV2 {
     /// The wire spelling of this code, as it appears in serialized responses.
     ///
     /// Exists so callers that must hand the category to another language (the
-    /// PyO3 boundary passes it to the Python worker layer) can name it without
+    /// `PyO3` boundary passes it to the Python worker layer) can name it without
     /// inventing a second spelling. The test below pins every variant against
     /// what serde actually emits, which is the one case where a second
     /// representation earns a test: this is a WIRE FORMAT, and no type can
@@ -779,10 +785,11 @@ impl ProviderDiarizationV2 {
     /// A count alone cannot promise a capability the selected adapter lacks.
     #[must_use]
     pub fn for_backend(backend: AsrBackendV2, num_speakers: NumSpeakers) -> Self {
-        match backend.separates_speakers() {
-            true => SeparatedSpeakersV2::try_from(num_speakers)
-                .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers }),
-            false => Self::NotRequested,
+        if backend.separates_speakers() {
+            SeparatedSpeakersV2::try_from(num_speakers)
+                .map_or(Self::NotRequested, |speakers| Self::Integrated { speakers })
+        } else {
+            Self::NotRequested
         }
     }
 
@@ -895,7 +902,7 @@ pub struct AsrRequestV2 {
 ///
 /// The schemars output for a `default + skip_serializing_if` map field is
 /// an OPTIONAL field, and the Python models generated from that schema
-/// spell "absent" as `None`, which crosses the PyO3 JSON bridge as
+/// spell "absent" as `None`, which crosses the `PyO3` JSON bridge as
 /// explicit `null`. Plain `#[serde(default)]` only covers the MISSING
 /// case, so `null` used to fail with "invalid type: null, expected a
 /// map"; both spellings must mean "no extras".
@@ -939,7 +946,7 @@ pub struct MorphosyntaxRequestV2 {
     /// Whether Stanza/PyCantonese should re-tokenize the input.
     ///
     /// When `true`, CJK word segmentation is applied before POS tagging:
-    /// - Cantonese (`yue`): PyCantonese `segment()` groups characters into words
+    /// - Cantonese (`yue`): `PyCantonese` `segment()` groups characters into words
     /// - Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text
     ///
     /// Defaults to `false` for backward compatibility with workers that do not
@@ -969,7 +976,7 @@ pub struct UtsegRequestV2 {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UtsegSegmenterV2 {
-    /// The language's pinned TalkBank boundary model, which the worker loaded
+    /// The language's pinned `TalkBank` boundary model, which the worker loaded
     /// at startup from the pin the control plane sent it.
     BoundaryModel,
     /// Stanza constituency parsing, the operator-authorized fallback for a
@@ -981,7 +988,7 @@ impl UtsegSegmenterV2 {
     /// Every segmenter; the wire-spelling test below iterates it.
     pub const ALL: [Self; 2] = [Self::BoundaryModel, Self::StanzaConstituency];
 
-    /// The wire spelling of this segmenter, which the PyO3 executor hands to
+    /// The wire spelling of this segmenter, which the `PyO3` executor hands to
     /// the Python runner. Pinned against serde by the test below.
     #[must_use]
     pub const fn as_wire_str(self) -> &'static str {
@@ -1021,7 +1028,7 @@ mod utseg_segmenter_tests {
 pub enum TranslateBackendV2 {
     /// Public Google Translate through `googletrans`.
     Google,
-    /// Local Meta SeamlessM4T.
+    /// Local Meta `SeamlessM4T`.
     Seamless,
     /// Local Meta NLLB-200.
     Nllb,
@@ -1054,7 +1061,7 @@ pub struct TranslateRequestV2 {
 #[serde(rename_all = "snake_case")]
 pub enum WordSegmenterV2 {
     /// Taiwanese: taibun's dictionary tokeniser, whose lexicon comes from the
-    /// Taiwanese-Chinese Online Dictionary and iTaigi (via ChhoeTaigi).
+    /// Taiwanese-Chinese Online Dictionary and iTaigi (via `ChhoeTaigi`).
     TaibunTaiwanese,
 }
 
@@ -1073,7 +1080,7 @@ impl WordSegmenterV2 {
         }
     }
 
-    /// The wire spelling of this segmenter, which the PyO3 executor hands to
+    /// The wire spelling of this segmenter, which the `PyO3` executor hands to
     /// the Python runner. Pinned against serde by the test below, as for
     /// [`ProtocolErrorCodeV2::as_wire_str`].
     #[must_use]
@@ -1246,7 +1253,7 @@ pub enum TaskRequestV2 {
     Speaker(SpeakerRequestV2),
     /// Speaker-embedding request.
     SpeakerEmbedding(SpeakerEmbeddingRequestV2),
-    /// OpenSMILE request.
+    /// `OpenSMILE` request.
     Opensmile(OpenSmileRequestV2),
     /// AVQI request.
     Avqi(AvqiRequestV2),
@@ -1268,6 +1275,7 @@ pub struct ExecuteRequestV2 {
 impl ExecuteRequestV2 {
     /// How long the worker transport waits for this request's reply, under
     /// the operator's overrides for audio and analysis tasks.
+    #[must_use]
     pub fn transport_timeout(&self, overrides: TaskTimeoutOverrides) -> PositiveSeconds {
         self.payload.transport_timeout(overrides)
     }
@@ -1277,7 +1285,7 @@ impl ExecuteRequestV2 {
 /// operator set no audio override.
 pub const DEFAULT_AUDIO_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<1800>();
 
-/// The transport ceiling for OpenSMILE and AVQI when the operator set no
+/// The transport ceiling for `OpenSMILE` and AVQI when the operator set no
 /// analysis override.
 pub const DEFAULT_ANALYSIS_TASK_TIMEOUT: PositiveSeconds = PositiveSeconds::literal::<120>();
 
@@ -1290,6 +1298,7 @@ const BATCHED_ITEMS_SECONDS_PER_ITEM: u64 = 5;
 /// How long to wait for a batched request of `items` items: five seconds per
 /// item, never less than two minutes. Shared by the V2 text tasks, speaker
 /// embedding (per span) and the V1 `batch_infer` transport.
+#[must_use]
 pub const fn batched_items_timeout(items: u64) -> PositiveSeconds {
     PositiveSeconds::at_least(
         items.saturating_mul(BATCHED_ITEMS_SECONDS_PER_ITEM),
@@ -1309,7 +1318,7 @@ pub const fn batched_items_timeout(items: u64) -> PositiveSeconds {
 pub struct TaskTimeoutOverrides {
     /// Override for audio-heavy tasks (ASR, forced alignment, speaker).
     pub audio: Option<PositiveSeconds>,
-    /// Override for lightweight analysis tasks (OpenSMILE, AVQI).
+    /// Override for lightweight analysis tasks (`OpenSMILE`, AVQI).
     pub analysis: Option<PositiveSeconds>,
 }
 
@@ -1328,7 +1337,8 @@ impl TaskRequestV2 {
     /// as the payload variant. This accessor is what lets the agreement between
     /// them be checked in ONE place (the executor control plane) instead of
     /// re-checked by every executor with its own message.
-    pub fn task(&self) -> InferenceTaskV2 {
+    #[must_use]
+    pub const fn task(&self) -> InferenceTaskV2 {
         match self {
             Self::Asr(_) => InferenceTaskV2::Asr,
             Self::ForcedAlignment(_) => InferenceTaskV2::ForcedAlignment,
@@ -1350,6 +1360,7 @@ impl TaskRequestV2 {
     /// An absent override leaves the task's built-in ceiling
     /// ([`DEFAULT_AUDIO_TASK_TIMEOUT`], [`DEFAULT_ANALYSIS_TASK_TIMEOUT`],
     /// or the budget the request carries).
+    #[must_use]
     pub fn transport_timeout(&self, overrides: TaskTimeoutOverrides) -> PositiveSeconds {
         let audio_override = overrides.audio;
         match self {
@@ -1416,7 +1427,7 @@ impl TaskRequestV2 {
 /// audio, which its type proves.
 ///
 /// A bound is absent when the model predicted no timestamp for it: the
-/// HuggingFace pipeline reports `(start, None)` for a chunk cut off
+/// `HuggingFace` pipeline reports `(start, None)` for a chunk cut off
 /// mid-word, and `(None, None)` for a whole transcript when timestamps were
 /// suppressed. A missing bound is an absence of TIMING, never of words, and
 /// the words travel untimed exactly as a Tencent or Aliyun word with a

@@ -72,7 +72,7 @@ const ANCHOR_EVERY_N_WORDS: usize = 60;
 /// Words per main-speaker utterance.
 const WORDS_PER_UTT: usize = 6;
 
-/// Words per backchannel utterance (InlineBackchannel only).
+/// Words per backchannel utterance (`InlineBackchannel` only).
 const BACKCHANNEL_WORDS: usize = 2;
 
 /// Nominal duration of a main utterance in the synthetic timeline.
@@ -120,7 +120,7 @@ enum UttRole {
 /// Document order in the produced CHAT matches the order of this Vec. The
 /// temporal order (ASR stream) is recovered by flattening per-word timings
 /// across ALL layouts and re-sorting by `start_ms`, that re-sort is what
-/// produces the interleaving that GlobalUtr's document-order DP cannot
+/// produces the interleaving that `GlobalUtr`'s document-order DP cannot
 /// reconcile.
 #[derive(Debug, Clone)]
 struct UttLayout {
@@ -132,7 +132,7 @@ struct UttLayout {
     words: Vec<String>,
 }
 
-/// Geometry for a pair of adjacent overlapping utterances (CaBracket /
+/// Geometry for a pair of adjacent overlapping utterances (`CaBracket` /
 /// LazyPrecedes): the second utterance starts halfway through the first
 /// and extends half a unit past its end, producing a 1500 ms intersection
 /// for `UTT_DURATION_MS = 3000`.
@@ -165,7 +165,7 @@ fn backchannel_ranges(cursor: u64) -> (u64, u64, u64, u64) {
 /// Step 1: place every utterance in time + assign a role. This is the heart of
 /// the redesign: overlap conventions produce intersecting time ranges here,
 /// and document-order CHAT emission downstream preserves the ordering that
-/// GlobalUtr sees while the ASR re-sort breaks it.
+/// `GlobalUtr` sees while the ASR re-sort breaks it.
 fn layout_utterances_in_time(params: DriftParams) -> Vec<UttLayout> {
     // Deterministic Bernoulli: returns true with frequency ~= p, seeded by k.
     let overlap_picked = |k: usize, p: f64| -> bool {
@@ -360,7 +360,7 @@ struct TimedWord {
     start_ms: u64,
     end_ms: u64,
     /// Stable tie-breaker for the temporal sort: preserves layout emission
-    /// order when two words have identical start_ms.
+    /// order when two words have identical `start_ms`.
     insertion_order: usize,
 }
 
@@ -405,7 +405,7 @@ fn interleave_asr(mut words: Vec<TimedWord>) -> Vec<TimedWord> {
 }
 
 /// Step 4: drop tokens with probability `rate`, deterministic on a stable
-/// per-word seed (insertion_order). We cannot use array position because the
+/// per-word seed (`insertion_order`). We cannot use array position because the
 /// temporal re-sort has already happened; we need the drop mask to be
 /// independent of sort order so the same word is always dropped across runs.
 fn apply_asr_drop(words: Vec<TimedWord>, rate: f64) -> Vec<TimedWord> {
@@ -421,7 +421,7 @@ fn apply_asr_drop(words: Vec<TimedWord>, rate: f64) -> Vec<TimedWord> {
 
 /// Step 5: emit the CHAT document in DOCUMENT order (layouts' order). Overlap
 /// markup appears exactly where it belongs but the document never reveals the
-/// temporal interleaving, which is what makes GlobalUtr's document-order DP
+/// temporal interleaving, which is what makes `GlobalUtr`'s document-order DP
 /// mis-align against the temporally re-sorted ASR.
 fn emit_chat_source(layouts: &[UttLayout]) -> String {
     let mut chat = String::new();
@@ -474,7 +474,7 @@ fn emit_chat_source(layouts: &[UttLayout]) -> String {
 ///    nested inside a host's range.
 /// 2. [`place_words_in_time`]: distribute each utt's words uniformly across
 ///    its range, producing a flat Vec of timed tokens tagged with an
-///    insertion_order for stable sort / drop-mask seeding.
+///    `insertion_order` for stable sort / drop-mask seeding.
 /// 3. [`interleave_asr`]: sort the tokens by `start_ms` to produce the
 ///    temporal-order ASR stream. Overlapping utts now have interleaved words
 ///    in the ASR stream by construction.

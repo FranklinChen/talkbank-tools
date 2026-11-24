@@ -91,7 +91,7 @@ const SKIP_DIRS: &[&str] = &[
 const REPO_TALKBANK_TOOLS: &str = "talkbank-tools";
 
 /// Bucket assignment: deterministic function of file path. Recomputed
-/// on every scan; never hand-edited. See classify_bucket().
+/// on every scan; never hand-edited. See `classify_bucket()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bucket {
     /// Must-vet: user-facing public surface. Release-readiness gate.
@@ -103,7 +103,7 @@ pub enum Bucket {
 }
 
 impl Bucket {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Bucket::A => "A",
             Bucket::B => "B",
@@ -126,9 +126,9 @@ pub enum UpsertOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Staleness {
-    /// `Last updated` >= POST_MERGE_BASELINE.
+    /// `Last updated` >= `POST_MERGE_BASELINE`.
     Fresh,
-    /// `Last updated` < POST_MERGE_BASELINE; likeliest to reference
+    /// `Last updated` < `POST_MERGE_BASELINE`; likeliest to reference
     /// deleted crates / moved book paths from the reorgs.
     PreMerge,
     /// No parsable `Last updated` header.
@@ -136,7 +136,7 @@ pub enum Staleness {
 }
 
 impl Staleness {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Staleness::Fresh => "fresh",
             Staleness::PreMerge => "pre-merge",
@@ -1009,14 +1009,14 @@ async fn column_exists(conn: &mut SqliteConnection, table: &str, column: &str) -
 // Staleness flagging (xtask audit-docs flag-staleness)
 // ---------------------------------------------------------------------------
 
-pub(crate) struct FlagPattern {
+pub struct FlagPattern {
     pub(crate) name: &'static str,
     pub(crate) severity: &'static str,
     /// Regex to match against each line of every section body.
     pub(crate) pattern: &'static str,
 }
 
-pub(crate) const FLAG_PATTERNS: &[FlagPattern] = &[
+pub const FLAG_PATTERNS: &[FlagPattern] = &[
     FlagPattern {
         name: "deleted-crate-chat-ops",
         severity: "high",
@@ -1382,7 +1382,7 @@ async fn run_streak(db: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mark a section's vet_state. Records reviewer + reviewed_at; for
+/// Mark a section's `vet_state`. Records reviewer + `reviewed_at`; for
 /// `fixed`, also records the fix commit hash. Verifies the verdict
 /// is a known value before writing.
 async fn run_vet(
@@ -1511,8 +1511,8 @@ async fn compute_streak(conn: &mut SqliteConnection, today: &jiff::ZonedDateTime
 /// staleness and is no longer evidence.
 ///
 /// Required env vars (each overridable by the matching `--flag`):
-///   TB_AUDIT_DB: path to the SQLite catalog
-///   TB_AUDIT_TT_ROOT: path to the talkbank-tools clone being audited
+///   `TB_AUDIT_DB`: path to the SQLite catalog
+///   `TB_AUDIT_TT_ROOT`: path to the talkbank-tools clone being audited
 ///
 /// The `vet` and `streak` subcommands need only `TB_AUDIT_DB`;
 /// `scan` and `flag-staleness` also need `TB_AUDIT_TT_ROOT`. `status`
@@ -1656,7 +1656,7 @@ mod tests {
         Ok(())
     }
 
-    /// A reviewed_at SQLite cannot read as a time is reported with its text,
+    /// A `reviewed_at` SQLite cannot read as a time is reported with its text,
     /// not treated as a gap that quietly ends the streak.
     #[tokio::test]
     async fn compute_streak_refuses_an_unreadable_review_time() -> Result<()> {

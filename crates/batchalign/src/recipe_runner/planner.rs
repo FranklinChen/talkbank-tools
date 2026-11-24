@@ -39,7 +39,7 @@ pub enum PlanningError {
 }
 
 /// Plan typed work units for one command family.
-pub(crate) fn plan_work_units(
+pub fn plan_work_units(
     planner: PlannerKind,
     inputs: &[DiscoveredInput],
 ) -> Result<Vec<PlannedWorkUnit>, PlanningError> {

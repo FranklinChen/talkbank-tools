@@ -6,7 +6,7 @@
 //!
 //! When installed via `uv tool install`, `std::env::current_exe()` returns the
 //! Python interpreter (e.g. `.../python3.12`) because the `batchalign3` command
-//! is a console_scripts wrapper. Spawning `python3.12 serve start --foreground`
+//! is a `console_scripts` wrapper. Spawning `python3.12 serve start --foreground`
 //! fails because Python tries to run a script named "serve".
 //!
 //! Detection: if `current_exe()` filename starts with "python", fall back to
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const SELF_EXE_ENV: &str = "BATCHALIGN_SELF_EXE";
 
 /// Resolve the executable path for spawning a background server or daemon.
-pub(crate) fn resolve_self_exe() -> PathBuf {
+pub fn resolve_self_exe() -> PathBuf {
     if let Some(explicit) = resolve_self_exe_env(std::env::var_os(SELF_EXE_ENV)) {
         return explicit;
     }
@@ -34,7 +34,7 @@ fn resolve_self_exe_env(value: Option<OsString>) -> Option<PathBuf> {
 }
 
 /// Testable core of [`resolve_self_exe`].
-pub(crate) fn resolve_self_exe_from(current_exe: &Path) -> PathBuf {
+pub fn resolve_self_exe_from(current_exe: &Path) -> PathBuf {
     let file_name = current_exe
         .file_name()
         .and_then(|f| f.to_str())

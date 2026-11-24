@@ -267,8 +267,44 @@ Implications:
   copy gets a different identity.
 - **No content hashing is performed**: deliberate performance
   tradeoff.
+- **A file replaced within the same second at the same size keeps
+  its identity**, because the modification time is recorded in whole
+  seconds. Only a program writing the same path twice inside one
+  second, or a copy tool that sets the modification time to a value an
+  earlier version already had, can produce it.
 
-This identity is not used for raw Rev or paid speaker evidence.
+**When the metadata cannot be read**, media resolution records the
+recording's `RecordingIdentity` as unidentified instead of keying it by
+its path alone (which would match, and replay, every earlier version
+of the file). The recording is still aligned, with a warning; under
+`--require-cache` the file is refused with that reason instead, since
+the requirement cannot be met. `RecordingIdentity::read` is the only
+constructor outside tests, so a stable identity exists only when the
+metadata was actually read. The file's FA services carry a
+`RecordingCache` opened from that identity: `fa/cache_storage.rs`
+reads and writes FA rows only through it, and the UTR ASR lookup opens
+it and grants the write to the same handle, so an unidentified
+recording reads and stores no identity-keyed row. Its keys carry a
+fresh random suffix, so they could match no stored row even if one
+were written. Within the file, FA still sends identical requests once;
+UTR, as for a floating model plan, takes no single-flight lease.
+
+`FaServices.pipeline.cache` remains reachable because content-keyed
+evidence (Rev.AI) uses it; that the FA store does not reach around the
+handle is checked by a test against a real cache.
+
+```mermaid
+flowchart LR
+    R[resolve media] --> M{metadata readable?}
+    M -- yes --> S[Stable AudioIdentity] --> K[RecordingCache opened]
+    M -- no --> U[Unidentified, warning] --> W[RecordingCache withheld]
+    K --> FA[FA and UTR rows read and written]
+    W --> N[aligned with no cache row]
+```
+
+This identity is not used for raw Rev or paid speaker evidence. Those
+are keyed by a BLAKE3 digest of the media bytes, so an unidentified
+recording still reuses its Rev.AI evidence.
 
 ### `SpeakerAudioSourceDigest`
 

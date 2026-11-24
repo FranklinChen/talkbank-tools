@@ -483,6 +483,7 @@ fn summarize_http_error_body(status_text: &str, body: &str) -> String {
 }
 
 /// Extract a short hostname label from a server URL (e.g. "myhost").
+#[must_use]
 pub fn server_label(url: &str) -> String {
     let without_scheme = url
         .strip_prefix("https://")
@@ -499,6 +500,7 @@ pub fn server_label(url: &str) -> String {
 }
 
 /// Parse comma-separated server URLs, strip whitespace and trailing slashes.
+#[must_use]
 pub fn parse_servers(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(|s| s.trim().trim_end_matches('/').to_string())

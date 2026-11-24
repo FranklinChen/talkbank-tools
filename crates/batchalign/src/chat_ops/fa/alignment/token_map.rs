@@ -110,7 +110,7 @@ use crate::chat_ops::nlp::FaRawToken;
 /// the one this closes, and closing it means keeping marks rather than
 /// composing them, which changes the key for every language at once; it should
 /// be done deliberately with corpus evidence, not as a side effect of this fix.
-pub(crate) fn normalize_fa_alignment_unit(text: &str) -> String {
+pub fn normalize_fa_alignment_unit(text: &str) -> String {
     text.chars()
         .flat_map(|ch| ch.to_lowercase())
         .nfc()
@@ -126,7 +126,7 @@ pub(crate) fn normalize_fa_alignment_unit(text: &str) -> String {
 /// bare integers. Careful variable naming is what people do instead, and the
 /// careful naming is the tell that the type is owed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct WordSlot(pub(crate) usize);
+pub struct WordSlot(pub(crate) usize);
 
 impl WordSlot {
     /// The word at `index` within its group.
@@ -167,7 +167,7 @@ impl WordSlot {
 /// cursor and the slice belonged together, so an index into a DIFFERENT
 /// sequence type-checked. Here the slots come FROM the track that answers for
 /// them.
-pub(crate) struct WordTrack {
+pub struct WordTrack {
     norms: Vec<String>,
 }
 
@@ -189,7 +189,7 @@ impl WordTrack {
         Ok(Self { norms })
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.norms.len()
     }
 
@@ -221,7 +221,7 @@ impl WordTrack {
 /// are dropped before a `LabelSlot` exists, so this is never an index into the
 /// engine's own token list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct LabelSlot(pub(crate) usize);
+pub struct LabelSlot(pub(crate) usize);
 
 /// A non-empty, contiguous run of labels attributed to ONE word.
 ///
@@ -229,7 +229,7 @@ pub(crate) struct LabelSlot(pub(crate) usize);
 /// produce a run by naming a first and a last slot, so "the labels for this
 /// word" is never a set that might have a hole in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct LabelRun {
+pub struct LabelRun {
     pub(crate) first: LabelSlot,
     pub(crate) last: LabelSlot,
 }
@@ -241,7 +241,7 @@ impl LabelRun {
     }
 
     /// The first label after this run, which is where the word's end comes from.
-    fn after(self) -> LabelSlot {
+    const fn after(self) -> LabelSlot {
         LabelSlot(self.last.0 + 1)
     }
 }
@@ -254,7 +254,7 @@ impl LabelRun {
 /// but care kept them the same length while they were two locals in one long
 /// function. Here they are private to a struct with ONE constructor, so the
 /// pairing is a property of the value rather than a thing to remember.
-pub(crate) struct LabelTrack {
+pub struct LabelTrack {
     norms: Vec<String>,
     onsets: Vec<RecordedInstant>,
     window: FaWindow,
@@ -303,11 +303,11 @@ impl LabelTrack {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.norms.len()
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.norms.is_empty()
     }
 
@@ -349,7 +349,7 @@ impl LabelTrack {
 /// counted in this sentence; the list below is the list, and a prose count
 /// beside it is one more thing to keep true.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UntimedReason {
+pub enum UntimedReason {
     /// The HOST returned no timing for this word at all.
     ///
     /// Not a refusal of ours: an indexed-word-level response carries one
@@ -460,7 +460,7 @@ impl UntimedReason {
 /// was guessed about. [`CharEdits::is_exact`] is the fact worth keeping, and
 /// it is the same question on both former arms.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WordTimingOutcome {
+pub enum WordTimingOutcome {
     /// The word has a timing, whose milliseconds are label onsets.
     Timed {
         /// The timing.
@@ -487,7 +487,7 @@ impl WordTimingOutcome {
     /// borrowing accessor beside it would be a second way to ask the same
     /// question with no caller.
     #[cfg(test)]
-    pub(crate) fn timing(&self) -> Option<&WordTiming> {
+    pub(crate) const fn timing(&self) -> Option<&WordTiming> {
         match self {
             Self::Timed { timing, .. } => Some(timing),
             Self::Untimed { .. } => None,
@@ -507,7 +507,7 @@ impl WordTimingOutcome {
 /// THE lossy step, and the only one: every reason a word has no timing is
 /// dropped here. Both response shapes go through it, so a future consumer that
 /// wants the reason has one place to stop calling rather than two.
-pub(crate) fn lower_outcomes(outcomes: Vec<WordTimingOutcome>) -> Vec<Option<WordTiming>> {
+pub fn lower_outcomes(outcomes: Vec<WordTimingOutcome>) -> Vec<Option<WordTiming>> {
     outcomes
         .into_iter()
         .map(WordTimingOutcome::into_timing)
@@ -515,7 +515,7 @@ pub(crate) fn lower_outcomes(outcomes: Vec<WordTimingOutcome>) -> Vec<Option<Wor
 }
 
 /// One group's worth of attributions, plus what the engine reported unusably.
-pub(crate) struct LabelMapping {
+pub struct LabelMapping {
     outcomes: Vec<WordTimingOutcome>,
     discarded: DiscardedTimings,
     /// How many tokens the engine sent, for the log line's denominator.
@@ -606,7 +606,7 @@ impl LabelMapping {
 /// name, so the same word could be described two ways and only one of the two
 /// carried a number; the count is kept and the route is not.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Attribution {
+pub struct Attribution {
     pub(crate) run: LabelRun,
     /// [`CharEdits::ZERO`] for the in-order stitch, which reconciles every
     /// character by construction, and for a residue fold that did the same.
@@ -634,7 +634,7 @@ struct StitchPrefix {
 /// The seam. Takes what the engine said and what the transcript says, and
 /// answers with one [`WordTimingOutcome`] per word; nothing about the
 /// attribution is left for a caller to re-derive.
-pub(crate) fn map_labels_to_words(
+pub fn map_labels_to_words(
     original: &[FaWord],
     tokens: &[FaRawToken],
     window: &FaWindow,
@@ -815,12 +815,15 @@ fn lower_to_outcome(
             let (start, end) = span.into_parts();
             let (start_at, start_origin) = start.into_parts();
             let (end_at, end_origin) = end.into_parts();
-            let attributed = |origin: Origin| match attribution.edits.is_exact() {
-                true => origin,
-                false => Origin::AttributedByCharAlignment {
-                    was: Box::new(origin),
-                    edits: attribution.edits,
-                },
+            let attributed = |origin: Origin| {
+                if attribution.edits.is_exact() {
+                    origin
+                } else {
+                    Origin::AttributedByCharAlignment {
+                        was: Box::new(origin),
+                        edits: attribution.edits,
+                    }
+                }
             };
             let timing = WordTiming::new(
                 start_at.get(),

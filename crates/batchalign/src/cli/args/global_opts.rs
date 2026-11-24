@@ -41,7 +41,7 @@ pub struct GlobalOpts {
     #[arg(long, global = true, conflicts_with = "force_cpu")]
     pub allow_mps: bool,
 
-    /// Remote server URL (or set BATCHALIGN_SERVER env var).
+    /// Remote server URL (or set `BATCHALIGN_SERVER` env var).
     #[arg(long, env = "BATCHALIGN_SERVER", global = true)]
     pub server: Option<String>,
 
@@ -67,11 +67,11 @@ pub struct GlobalOpts {
 
     /// Directory for pipeline debug artifacts (CHAT/JSON fixtures for
     /// offline replay). Also enables dashboard algorithm trace collection.
-    /// Env fallback: BATCHALIGN_DEBUG_DIR.
+    /// Env fallback: `BATCHALIGN_DEBUG_DIR`.
     #[arg(long, env = "BATCHALIGN_DEBUG_DIR", value_name = "PATH", global = true)]
     pub debug_dir: Option<std::path::PathBuf>,
 
-    /// Engine overrides as JSON (e.g. '{"asr": "tencent", "fa": "cantonese_fa"}').
+    /// Engine overrides as JSON (e.g. '{"asr": "tencent", "fa": "`cantonese_fa`"}').
     ///
     /// Parsed ONCE, here, by the function that owns the payload's grammar, so
     /// this field holds the typed overrides themselves. There is no string
@@ -130,10 +130,12 @@ pub enum RequestedExecution {
 
 impl DryRunFlag {
     /// The one choice the flag makes.
-    pub fn resolve(&self) -> RequestedExecution {
-        match self.dry_run {
-            true => RequestedExecution::PlanOnly,
-            false => RequestedExecution::Submit,
+    #[must_use]
+    pub const fn resolve(&self) -> RequestedExecution {
+        if self.dry_run {
+            RequestedExecution::PlanOnly
+        } else {
+            RequestedExecution::Submit
         }
     }
 }
@@ -167,7 +169,7 @@ pub struct MediaCacheOpts {
     pub require_media_cache: bool,
 
     /// Require existing evidence only for listed cache-backed tasks. Other
-    /// tasks retain their own policy; e.g. require utr_asr while refreshing FA.
+    /// tasks retain their own policy; e.g. require `utr_asr` while refreshing FA.
     #[arg(long, global = true, value_name = "TASKS", value_delimiter = ',',
         conflicts_with_all = ["override_media_cache", "require_media_cache"])]
     pub require_media_cache_tasks: Vec<String>,
@@ -192,7 +194,8 @@ pub struct MediaCacheOpts {
 impl GlobalOpts {
     /// The daemon settings this invocation asked for, built once from
     /// `--workers` and `--timeout`.
-    pub fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
+    #[must_use]
+    pub const fn runtime(&self) -> crate::cli::daemon::RequestedRuntime {
         crate::cli::daemon::RequestedRuntime {
             workers: self.workers,
             timeout: self.timeout,
@@ -252,7 +255,8 @@ pub struct ProgressFlags {
 
 impl ProgressFlags {
     /// The one choice the two spellings make. Neither flag is the TUI.
-    pub fn resolve(&self) -> Progress {
+    #[must_use]
+    pub const fn resolve(&self) -> Progress {
         match (self.tui, self.no_tui) {
             (_, true) => Progress::Plain,
             (true, false) | (false, false) => Progress::Tui,
@@ -284,7 +288,8 @@ pub struct DashboardFlags {
 
 impl DashboardFlags {
     /// The one choice the two spellings make.
-    pub fn resolve(&self) -> Dashboard {
+    #[must_use]
+    pub const fn resolve(&self) -> Dashboard {
         match (self.open_dashboard, self.no_open_dashboard) {
             (_, true) => Dashboard::Closed,
             (true, false) => Dashboard::Open,

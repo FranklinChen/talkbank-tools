@@ -98,18 +98,19 @@ impl Overwrite {
     /// The authority `--overwrite` grants. The argument layer is the only
     /// caller: a flag the user typed is the one place this may come from
     /// outside admission.
-    pub(crate) fn by_flag() -> Self {
+    pub(crate) const fn by_flag() -> Self {
         Self(OverwriteGrant::Flag)
     }
 
     /// The authority an explicit output directory grants, minted only by
     /// admission when `-o` was given.
-    fn by_output_directory() -> Self {
+    const fn by_output_directory() -> Self {
         Self(OverwriteGrant::OutputDirectory)
     }
 
     /// What granted it, as the plan prints it.
-    pub fn granted_by(self) -> &'static str {
+    #[must_use]
+    pub const fn granted_by(self) -> &'static str {
         match self.0 {
             OverwriteGrant::Flag => "--overwrite",
             OverwriteGrant::OutputDirectory => "the output directory",
@@ -173,12 +174,14 @@ impl ResultDestinations {
     }
 
     /// What admission decided for one planned result, by its exact name.
+    #[must_use]
     pub fn write_decision(&self, name: &str) -> Option<WriteDecision> {
         self.artifacts.get(name).map(|artifact| artifact.decision)
     }
 
     /// Every admitted destination, ordered by source then name, so a plan
     /// prints the same way twice. A projection: it grants no write.
+    #[must_use]
     pub fn planned(&self) -> Vec<PlannedDestination<'_>> {
         let mut planned: Vec<PlannedDestination<'_>> = self
             .artifacts

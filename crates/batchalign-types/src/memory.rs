@@ -96,7 +96,7 @@ pub struct MemoryTier {
     /// Host headroom reserve: the coordinator refuses reservations that
     /// would leave available RAM below this threshold.
     pub headroom_mb: MemoryMb,
-    /// Startup reservation for a GPU worker (Whisper, Wave2Vec, speaker).
+    /// Startup reservation for a GPU worker (Whisper, `Wave2Vec`, speaker).
     pub gpu_startup_mb: MemoryMb,
     /// Startup reservation for a Stanza worker (morphosyntax, utseg, coref).
     pub stanza_startup_mb: MemoryMb,
@@ -109,7 +109,8 @@ pub struct MemoryTier {
 impl MemoryTier {
     /// Select a tier from total system RAM (in MB). Pure function, no
     /// sysinfo dependency, fully testable with arbitrary values.
-    pub fn from_total_mb(total_mb: u64) -> Self {
+    #[must_use]
+    pub const fn from_total_mb(total_mb: u64) -> Self {
         //                  (kind, headroom, gpu, stanza, io, max_workers)
         let (kind, headroom, gpu, stanza, io, max_workers) = if total_mb < 24_000 {
             (MemoryTierKind::Small, 2_000, 6_000, 3_000, 2_000, 1)
@@ -151,6 +152,7 @@ impl MemoryTier {
 /// The "envelope" is the tier's per-profile startup reservation, see
 /// [`WorkerProfile::startup_reservation_mb_for_tier`]. That method is
 /// the canonical accessor; this estimator delegates to it.
+#[must_use]
 pub fn estimate_per_worker_peak_mb_with_profile(
     worst_case: MemoryMb,
     profile: WorkerProfile,
@@ -176,6 +178,7 @@ pub fn estimate_per_worker_peak_mb_with_profile(
 /// `runtime::estimate_per_worker_peak_mb_legacy`. Phase β Task 4 will
 /// replace that lookup with `command_spec_for(name).profile == Gpu`,
 /// at which point this `bool` parameter retires.
+#[must_use]
 pub fn estimate_per_worker_peak_mb(
     worst_case: MemoryMb,
     is_gpu_heavy: bool,

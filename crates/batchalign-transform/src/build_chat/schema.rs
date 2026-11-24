@@ -71,11 +71,13 @@ impl TranscriptLanguages {
 
     /// The primary language: `@ID` headers carry it, and a word-level
     /// utterance in another language gets a `[- lang]` precode.
-    pub fn primary(&self) -> &LanguageCode {
+    #[must_use]
+    pub const fn primary(&self) -> &LanguageCode {
         &self.primary
     }
 
     /// Every language, primary first, as `@Languages` lists them.
+    #[must_use]
     pub fn all(&self) -> Vec<LanguageCode> {
         std::iter::once(self.primary.clone())
             .chain(self.secondary.iter().cloned())
@@ -190,6 +192,7 @@ pub enum DescribedTiming {
 impl DescribedTiming {
     /// Admit optional millisecond bounds, as the post-processing word type
     /// stores them. Inadmissible bounds are untimed with their cause.
+    #[must_use]
     pub fn admit_millis(start_ms: Option<i64>, end_ms: Option<i64>) -> Self {
         match asr_postprocess::WordTiming::from_millis(start_ms, end_ms) {
             Ok(timing) => Self::of(timing),
@@ -198,6 +201,7 @@ impl DescribedTiming {
     }
 
     /// The description of an admitted ASR word timing.
+    #[must_use]
     pub fn of(timing: asr_postprocess::WordTiming) -> Self {
         match timing.positive() {
             Ok(interval) => Self::Positive(interval),
@@ -206,7 +210,8 @@ impl DescribedTiming {
     }
 
     /// The positive interval, when there is one.
-    pub fn positive(self) -> Option<asr_postprocess::PositiveInterval> {
+    #[must_use]
+    pub const fn positive(self) -> Option<asr_postprocess::PositiveInterval> {
         match self {
             Self::Positive(interval) => Some(interval),
             Self::Untimed(_) => None,

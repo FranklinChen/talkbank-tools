@@ -8,17 +8,17 @@ use super::{CommandKernelPlan, DispatchPlanRefusal, HostExecutionPolicy};
 
 /// A selected option family, bound to the same configuration and workload.
 /// Fields are private so planning cannot receive independently paired facts.
-pub(crate) struct PlanRequest<'a, Options> {
+pub struct PlanRequest<'a, Options> {
     options: &'a Options,
     context: PlanContext<'a>,
 }
 
 impl<'a, Options> PlanRequest<'a, Options> {
-    pub(super) fn options(&self) -> &'a Options {
+    pub(super) const fn options(&self) -> &'a Options {
         self.options
     }
 
-    pub(super) fn context(&self) -> &PlanContext<'a> {
+    pub(super) const fn context(&self) -> &PlanContext<'a> {
         &self.context
     }
 }
@@ -32,7 +32,7 @@ pub(super) struct PlanContext<'a> {
 }
 
 impl<'a> PlanContext<'a> {
-    fn from_dispatch(dispatch: &'a RunnerDispatchConfig, file_count: usize) -> Self {
+    const fn from_dispatch(dispatch: &'a RunnerDispatchConfig, file_count: usize) -> Self {
         Self {
             command: dispatch.command,
             language: &dispatch.lang,
@@ -48,7 +48,7 @@ impl<'a> PlanContext<'a> {
 }
 
 /// The selected family is established at configuration admission once.
-pub(crate) trait PlanOptions: Sized {
+pub trait PlanOptions: Sized {
     fn select(command: ReleasedCommand, options: &CommandOptions) -> Option<&Self>;
 }
 
@@ -100,21 +100,21 @@ pub(super) enum MediaOptions<'a> {
     Diarize(&'a crate::options::DiarizeOptions),
 }
 
-pub(crate) struct MediaAnalysisRequest<'a> {
+pub struct MediaAnalysisRequest<'a> {
     options: MediaOptions<'a>,
     context: PlanContext<'a>,
 }
 
 impl<'a> MediaAnalysisRequest<'a> {
-    pub(super) fn options(&self) -> &MediaOptions<'a> {
+    pub(super) const fn options(&self) -> &MediaOptions<'a> {
         &self.options
     }
 
-    pub(super) fn context(&self) -> &PlanContext<'a> {
+    pub(super) const fn context(&self) -> &PlanContext<'a> {
         &self.context
     }
 
-    pub(crate) fn from_dispatch(
+    pub(crate) const fn from_dispatch(
         dispatch: &'a RunnerDispatchConfig,
         file_count: usize,
     ) -> Result<Self, DispatchPlanRefusal> {

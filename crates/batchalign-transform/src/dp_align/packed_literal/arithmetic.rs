@@ -494,9 +494,10 @@ pub(in crate::dp_align) fn score_cuts_aligned<C: WorkControl + ?Sized>(
     }
     let reverse = reverse.padded();
     // A matched cut reads the reverse profile one bit on: B(k+1).
-    let from = match matched {
-        true => WindowStart::At(1),
-        false => WindowStart::At(0),
+    let from = if matched {
+        WindowStart::At(1)
+    } else {
+        WindowStart::At(0)
     };
     let mut base = total as i64;
     let target = if matched {

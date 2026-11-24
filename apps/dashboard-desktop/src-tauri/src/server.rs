@@ -43,7 +43,7 @@ enum CliAction {
 }
 
 impl CliAction {
-    fn request(self) -> CliRequest {
+    const fn request(self) -> CliRequest {
         CliRequest {
             action: self,
             deadline: Duration::from_secs(match self {
@@ -53,14 +53,14 @@ impl CliAction {
         }
     }
 
-    fn args(self) -> &'static [&'static str] {
+    const fn args(self) -> &'static [&'static str] {
         match self {
             Self::Observe => &["serve", "status", "--format", "json"],
             Self::Start => &["serve", "start"],
         }
     }
 
-    fn description(self) -> &'static str {
+    const fn description(self) -> &'static str {
         match self {
             Self::Observe => "checking the local service",
             Self::Start => "starting the local service",
@@ -207,9 +207,10 @@ pub async fn sign_same_user(method: String, path: String, body: String) -> Resul
         .await
         .map_err(|_| "signing the request timed out".to_owned())?
         .map_err(|error| error.to_string())?;
-    match output.status.success() {
-        true => Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned()),
-        false => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
     }
 }
 

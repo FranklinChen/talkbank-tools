@@ -553,7 +553,7 @@ fn copy_nonmatching_all_generation_commands() {
 ///     │   ├── child2.cha
 ///     │   └── deep/
 ///     │       └── nested.cha
-///     └── empty_sub/
+///     └── `empty_sub`/
 fn make_nested_tree(root: &Path) {
     fs::create_dir_all(root.join("session1")).unwrap();
     fs::create_dir_all(root.join("session2/deep")).unwrap();

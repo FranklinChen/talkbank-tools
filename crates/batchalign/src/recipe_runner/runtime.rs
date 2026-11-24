@@ -13,12 +13,12 @@ use super::work_unit::{DiscoveredInput, PlannedWorkUnit};
 mod targets;
 #[cfg(test)]
 mod targets_tests;
-pub(crate) use targets::{ChatMetricsOutputs, OutputSourceIdentity, OutputTarget, SourceOutputs};
+pub use targets::{ChatMetricsOutputs, OutputSourceIdentity, OutputTarget, SourceOutputs};
 
 /// Options used by legacy naming controls only, not production admission.
 /// Commands with mandatory user choices must supply those explicitly.
 #[cfg(test)]
-pub(crate) fn test_options(command: ReleasedCommand) -> crate::options::CommandOptions {
+pub fn test_options(command: ReleasedCommand) -> crate::options::CommandOptions {
     use crate::chat_ops::speaker_identity::{
         EnrollmentSet, EnrollmentSpec, MatchThreshold, documented_permutation_plan,
     };
@@ -40,7 +40,7 @@ pub(crate) fn test_options(command: ReleasedCommand) -> crate::options::CommandO
 }
 
 /// Derive one discovered input from the runner's current filesystem layout.
-pub(crate) fn discover_input_for_pending_file(
+pub fn discover_input_for_pending_file(
     filesystem: &RunnerFilesystemConfig,
     file: &PendingJobFile,
 ) -> DiscoveredInput {
@@ -57,7 +57,7 @@ pub(crate) fn discover_input_for_pending_file(
 }
 
 /// Derive all discovered inputs for one runner job.
-pub(crate) fn discover_inputs_for_job(job: &RunnerJobSnapshot) -> Vec<DiscoveredInput> {
+pub fn discover_inputs_for_job(job: &RunnerJobSnapshot) -> Vec<DiscoveredInput> {
     job.pending_files
         .iter()
         .map(|file| discover_input_for_pending_file(&job.filesystem, file))
@@ -65,7 +65,7 @@ pub(crate) fn discover_inputs_for_job(job: &RunnerJobSnapshot) -> Vec<Discovered
 }
 
 /// Plan command-family-specific work units from the runner snapshot.
-pub(crate) fn plan_work_units_for_job(
+pub fn plan_work_units_for_job(
     command: ReleasedCommand,
     job: &RunnerJobSnapshot,
 ) -> Result<Vec<PlannedWorkUnit>, PlanningError> {
@@ -74,7 +74,7 @@ pub(crate) fn plan_work_units_for_job(
 }
 
 /// Plan all materialized artifacts for one released command and source path.
-pub(crate) fn planned_output_artifacts(
+pub fn planned_output_artifacts(
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
@@ -86,7 +86,7 @@ pub(crate) fn planned_output_artifacts(
 }
 
 /// Return the primary result artifact for one command/input pair.
-pub(crate) fn primary_output_artifact(
+pub fn primary_output_artifact(
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
     source_display_path: &DisplayPath,
@@ -99,7 +99,7 @@ pub(crate) fn primary_output_artifact(
 }
 
 /// Derive only the primary result display path for one command/input pair.
-pub(crate) fn result_display_path_for_command(
+pub fn result_display_path_for_command(
     command: ReleasedCommand,
     options: &crate::options::CommandOptions,
     filename: &str,
@@ -113,7 +113,7 @@ pub(crate) fn result_display_path_for_command(
 /// `compare.csv` come through it, so no runner path truncates a user's file
 /// before refilling it. The path and content are copied for the blocking
 /// task, as `tokio::fs::write` copied the content.
-pub(crate) async fn publish_text(path: &Path, content: &str) -> std::io::Result<()> {
+pub async fn publish_text(path: &Path, content: &str) -> std::io::Result<()> {
     let path = path.to_path_buf();
     let content = content.to_owned();
     crate::blocking::spawn_in_span(move || crate::atomic_file::write_text_artifact(&path, &content))
@@ -126,7 +126,7 @@ pub(crate) async fn publish_text(path: &Path, content: &str) -> std::io::Result<
 /// Paths-mode jobs still write to the execution host's requested output path,
 /// but they also preserve a staged copy so the submitting CLI can download and
 /// write the same result back to its own local filesystem.
-pub(crate) async fn write_text_output_artifact(
+pub async fn write_text_output_artifact(
     target: OutputTarget<'_, impl Sized>,
     content: &str,
 ) -> std::io::Result<()> {
@@ -170,15 +170,15 @@ pub(crate) async fn write_text_output_artifact(
 /// A skipped write touches nothing; a performed one goes through
 /// [`publish_text`].
 ///
-/// The primary write_path and the staged output path are evaluated
-/// independently. In the common paths_mode layout the staged copy lives
+/// The primary `write_path` and the staged output path are evaluated
+/// independently. In the common `paths_mode` layout the staged copy lives
 /// in `staging_dir/output/...` and is fresh per job, so it almost always
 /// triggers a write; the primary path is the one the gate effectively
 /// guards. We still apply the same logic to both for symmetry, there
 /// is no scenario where it is correct to update one and not the other.
 ///
 /// [`WritableChat`]: crate::pipeline::post_validate::WritableChat
-pub(crate) async fn write_chat_output_artifact_with_provenance_gate(
+pub async fn write_chat_output_artifact_with_provenance_gate(
     target: OutputTarget<'_, super::materialize::PrimaryArtifact>,
     document: &impl crate::pipeline::post_validate::WritableChat,
 ) -> std::io::Result<()> {
@@ -195,8 +195,8 @@ pub(crate) async fn write_chat_output_artifact_with_provenance_gate(
 /// for the specific `command`'s provenance gate, and write only if a
 /// real (non-provenance-only) difference exists.
 ///
-/// The read is best-effort: any read error other than NotFound is
-/// surfaced. NotFound is treated as "first run" and triggers a write.
+/// The read is best-effort: any read error other than `NotFound` is
+/// surfaced. `NotFound` is treated as "first run" and triggers a write.
 ///
 /// Cheap pre-check: the gate only fires when the existing-vs-candidate
 /// difference is bounded to a single provenance line. If the candidate's
@@ -357,6 +357,11 @@ mod tests {
     /// the stamps its recipe writes (transcribe, utseg, morphotag) and the
     /// warning's build identity, so the file on disk is not rewritten. A
     /// changed engine in a composed stage's stamp is written.
+    /// Guards: An identical result from a new build avoids writeback while a new model changes the output.
+    /// Kind: journey
+    /// Not a type: Actual files can differ only in cosmetic stamp fields or have meaningful producer changes.
+    /// State: A temporary saved file and two regenerated CHAT outputs drive real writes.
+    /// Concurrency: Each awaited publication finishes before reading the target.
     #[tokio::test]
     async fn a_transcribe_rerun_on_a_new_build_leaves_identical_content_unwritten() {
         let dir = tempfile::tempdir().expect("tempdir");

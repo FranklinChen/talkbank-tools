@@ -43,6 +43,7 @@ impl ClientPath {
     }
 
     /// The raw path string as submitted by the client.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -51,6 +52,7 @@ impl ClientPath {
     ///
     /// Used for inferring the media mapping key from a client's source
     /// directory path.
+    #[must_use]
     pub fn contains_component(&self, component: &str) -> bool {
         let pattern = format!("/{component}/");
         let suffix = format!("/{component}");
@@ -109,6 +111,7 @@ impl ClientPath {
     /// - `"/Users/operator/chat-data/slabank-data/French/Newcastle"` → `Some("French/Newcastle")`
     /// - `"/Users/operator/chat-data/aphasia-data"` → `Some("")`  (at repo root)
     /// - `"/Users/operator/Desktop/other"` → `None`
+    #[must_use]
     pub fn suffix_after_component(&self, component: &str) -> Option<&str> {
         let interior = format!("/{component}/");
         let terminal = format!("/{component}");
@@ -160,6 +163,7 @@ impl ServerPath {
     }
 
     /// The underlying `Path` reference, safe for filesystem I/O.
+    #[must_use]
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -170,6 +174,7 @@ impl ServerPath {
     }
 
     /// The raw string representation.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.to_str().unwrap_or("")
     }
@@ -369,6 +374,10 @@ fn folds_case(folder: &Path) -> bool {
         };
         // `pathconf` reads a property of the volume and writes nothing; on
         // failure (-1) the macOS default, case-insensitive, is assumed.
+        // Reason: `_PC_CASE_SENSITIVE` is Apple-only, and `nix`'s safe
+        // `pathconf` has no variant for it, so the call goes to libc.
+        #[allow(unsafe_code)]
+        // SAFETY: `name` is a valid NUL-terminated path that outlives the call.
         let sensitive = unsafe { libc::pathconf(name.as_ptr(), libc::_PC_CASE_SENSITIVE) };
         sensitive != 1
     }
@@ -393,40 +402,46 @@ fn fold_name(name: &str, folds_case: bool) -> String {
     };
     #[cfg(not(target_os = "macos"))]
     let name = name.to_owned();
-    match folds_case {
-        true => name.to_lowercase(),
-        false => name,
+    if folds_case {
+        name.to_lowercase()
+    } else {
+        name
     }
 }
 
 impl AdmittedPath {
     /// Which file this path named when it was admitted: for telling
     /// whether two admitted paths are one file.
-    pub fn identity(&self) -> &FileIdentity {
+    #[must_use]
+    pub const fn identity(&self) -> &FileIdentity {
         &self.identity
     }
 
     /// The path on the server, for I/O.
-    pub fn server(&self) -> &ServerPath {
+    #[must_use]
+    pub const fn server(&self) -> &ServerPath {
         &self.server
     }
 
     /// The path as the client submitted it, for records and display.
-    pub fn client(&self) -> &ClientPath {
+    #[must_use]
+    pub const fn client(&self) -> &ClientPath {
         &self.client
     }
 }
 
 impl AllowedRoots {
     /// No folder: paths mode is off.
-    pub fn none() -> Self {
+    #[must_use]
+    pub const fn none() -> Self {
         Self(Authority::Folders(Vec::new()))
     }
 
     /// The user's own process (the in-process CLI runner, and test fixtures
     /// standing in for it): every absolute path without `.` or `..`, kept as
     /// given, with no folder to be inside.
-    pub fn same_user() -> Self {
+    #[must_use]
+    pub const fn same_user() -> Self {
         Self(Authority::SameUser)
     }
 
@@ -502,16 +517,17 @@ impl AllowedRoots {
             Containment::Strict => resolved.starts_with(root) && resolved != *root,
             Containment::RootOrInside => resolved.starts_with(root),
         };
-        match roots.iter().any(inside) {
-            true => Ok(admitted(identity)),
-            false => Err(PathRefusal::Outside {
+        if roots.iter().any(inside) {
+            Ok(admitted(identity))
+        } else {
+            Err(PathRefusal::Outside {
                 path: path.as_str().to_owned(),
                 roots: roots
                     .iter()
                     .map(|root| root.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", "),
-            }),
+            })
         }
     }
 }
@@ -530,7 +546,7 @@ enum Containment {
 /// output that does not exist yet is judged by where its folder really is.
 ///
 /// A component is treated as not yet created only when nothing at all is
-/// there (`symlink_metadata` reports NotFound). Anything that is there must
+/// there (`symlink_metadata` reports `NotFound`). Anything that is there must
 /// resolve: a dangling symbolic link, whose target does not exist yet, is an
 /// error rather than a name to append, since writing through it would create
 /// its target wherever it points. Any other error (permission, a loop, a file
@@ -608,16 +624,19 @@ impl RepoRelativePath {
         Ok(Self(names.join("/")))
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Combine with a server root to produce an absolute server path, which
     /// stays under the root: every component is a plain name.
+    #[must_use]
     pub fn resolve_on_server(&self, root: &ServerPath) -> ServerPath {
         if self.0.is_empty() {
             root.clone()
@@ -627,6 +646,7 @@ impl RepoRelativePath {
     }
 
     /// Append a subdirectory, itself admitted.
+    #[must_use]
     pub fn join(&self, sub: &RepoRelativePath) -> Self {
         if self.0.is_empty() {
             sub.clone()
@@ -686,6 +706,7 @@ impl MediaMappingKey {
         Self(s.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -720,7 +741,7 @@ impl From<&str> for MediaMappingKey {
 /// repo-relative subdir (everything after the key in the client path).
 ///
 /// Example:
-/// - client_dir: `/Users/operator/chat-data/slabank-data/French/Newcastle/Photos`
+/// - `client_dir`: `/Users/operator/chat-data/slabank-data/French/Newcastle/Photos`
 /// - mappings: `{"slabank-data" → "/Volumes/Other/slabank"}`
 /// - returns: `("slabank-data", "/Volumes/Other/slabank", "French/Newcastle/Photos")`
 pub fn infer_media_mapping<'a>(
@@ -745,14 +766,16 @@ pub fn infer_media_mapping<'a>(
 
 impl ClientPath {
     /// Whether the path is empty (not set).
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
 
 impl MediaMappingKey {
     /// Whether the key is empty (not set).
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
@@ -990,12 +1013,12 @@ mod tests {
         Ok(())
     }
 
-    /// Regression: when the client's source_dir IS the repo root (ends with the
-    /// repo component, no trailing slash), suffix_after_component must return
-    /// Some("") so infer_media_mapping can still fire.
+    /// Regression: when the client's `source_dir` IS the repo root (ends with the
+    /// repo component, no trailing slash), `suffix_after_component` must return
+    /// Some("") so `infer_media_mapping` can still fire.
     ///
     /// This happens when a --file-list batch spans multiple subdirectories
-    /// (e.g. Cantonese/ and Croatian/): infer_base_dir finds the common ancestor
+    /// (e.g. Cantonese/ and Croatian/): `infer_base_dir` finds the common ancestor
     /// which is the repo root itself, not a subdirectory within it.
     #[test]
     fn suffix_after_component_at_repo_root() {
@@ -1199,7 +1222,7 @@ mod tests {
     }
 
     /// Ensure an operator's existing scenario still works with the fixed join-first
-    /// approach: source_dir already embeds the full subdir, filename has a
+    /// approach: `source_dir` already embeds the full subdir, filename has a
     /// shallow dir component.
     #[test]
     fn infer_media_mapping_joins_a_nested_file_onto_a_deep_source_dir()

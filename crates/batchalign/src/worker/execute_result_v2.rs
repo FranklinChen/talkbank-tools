@@ -98,7 +98,7 @@ pub(crate) enum ModelLocality {
 
 impl ModelLocality {
     /// Where an ASR backend's model runs.
-    pub(crate) fn of_asr(backend: crate::types::worker_v2::AsrBackendV2) -> Self {
+    pub(crate) const fn of_asr(backend: crate::types::worker_v2::AsrBackendV2) -> Self {
         use crate::types::worker_v2::AsrBackendV2;
         match backend {
             AsrBackendV2::LocalWhisper
@@ -110,7 +110,7 @@ impl ModelLocality {
     }
 
     /// Where a speaker backend's model runs.
-    pub(crate) fn of_speaker(backend: crate::types::worker_v2::SpeakerBackendV2) -> Self {
+    pub(crate) const fn of_speaker(backend: crate::types::worker_v2::SpeakerBackendV2) -> Self {
         use crate::types::worker_v2::SpeakerBackendV2;
         match backend {
             SpeakerBackendV2::Pyannote => Self::Local,
@@ -119,7 +119,7 @@ impl ModelLocality {
     }
 
     /// Where a translation backend's model runs.
-    pub(crate) fn of_translate(backend: crate::types::worker_v2::TranslateBackendV2) -> Self {
+    pub(crate) const fn of_translate(backend: crate::types::worker_v2::TranslateBackendV2) -> Self {
         use crate::types::worker_v2::TranslateBackendV2;
         match backend {
             TranslateBackendV2::Seamless | TranslateBackendV2::Nllb => Self::Local,
@@ -132,11 +132,13 @@ impl ModelLocality {
 
 impl ExecuteFailureRead {
     /// The protocol code the worker's response carried.
-    pub fn code(&self) -> ProtocolErrorCodeV2 {
+    #[must_use]
+    pub const fn code(&self) -> ProtocolErrorCodeV2 {
         self.code
     }
 
     /// The fully formatted diagnostic.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }

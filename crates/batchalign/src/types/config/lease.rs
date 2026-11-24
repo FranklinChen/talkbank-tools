@@ -43,6 +43,7 @@ impl LeaseTtl {
     }
 
     /// The lifetime.
+    #[must_use]
     pub const fn get(self) -> Duration {
         self.0
     }

@@ -14,11 +14,13 @@ pub struct SourceWordAddress {
 
 impl SourceWordAddress {
     /// Zero-based chunk address before speaker and utterance splitting.
-    pub fn chunk(&self) -> usize {
+    #[must_use]
+    pub const fn chunk(&self) -> usize {
         self.chunk
     }
     /// Zero-based token-slot address within that prepared chunk.
-    pub fn word(&self) -> usize {
+    #[must_use]
+    pub const fn word(&self) -> usize {
         self.word
     }
 }
@@ -96,19 +98,23 @@ pub struct WordAssignmentEvidence {
 
 impl WordAssignmentEvidence {
     /// Locate this token slot in the exact prepared input.
-    pub fn source(&self) -> SourceWordAddress {
+    #[must_use]
+    pub const fn source(&self) -> SourceWordAddress {
         self.source
     }
     /// Read the selected index together with its coordinate space.
-    pub fn coordinate(&self) -> SpeakerCoordinate {
+    #[must_use]
+    pub const fn coordinate(&self) -> SpeakerCoordinate {
         self.coordinate
     }
     /// Inspect the available timing evidence independently of fallback policy.
-    pub fn timing(&self) -> &TimingSupport {
+    #[must_use]
+    pub const fn timing(&self) -> &TimingSupport {
         &self.timing
     }
     /// Inspect the producer's actual assignment decision.
-    pub fn basis(&self) -> &AssignmentBasis {
+    #[must_use]
+    pub const fn basis(&self) -> &AssignmentBasis {
         &self.basis
     }
 }
@@ -209,16 +215,18 @@ impl SpeakerProjectionEvidence {
         self.assignments.push(assignment);
     }
 
-    pub(super) fn record_boundary(&mut self) {
+    pub(super) const fn record_boundary(&mut self) {
         self.speaker_boundaries += 1;
     }
 
     /// Read source-ordered observations, one per prepared input token slot.
+    #[must_use]
     pub fn assignments(&self) -> &[WordAssignmentEvidence] {
         &self.assignments
     }
 
     /// Derive the historical aggregate projection counters.
+    #[must_use]
     pub fn stats(&self) -> SpeakerProjectionStats {
         SpeakerProjectionStats {
             contested_timed_words: self.assignments.iter().filter(|entry| {
@@ -232,6 +240,7 @@ impl SpeakerProjectionEvidence {
     }
 
     /// Derive disjoint support/fallback counts rather than cache caller claims.
+    #[must_use]
     pub fn summary(&self) -> SpeakerAssignmentSummary {
         let mut summary = SpeakerAssignmentSummary {
             words: self.assignments.len(),
@@ -257,11 +266,12 @@ impl SpeakerProjectionEvidence {
 
     /// Whether any slot lacks positive overlap with exactly one label.
     /// False does not certify model accuracy or named-person identity.
+    #[must_use]
     pub fn needs_review(&self) -> bool {
         self.summary().directly_supported != self.assignments.len()
     }
 
-    pub(super) fn admit(
+    pub(super) const fn admit(
         self,
         policy: SpeakerProjectionPolicy,
     ) -> AdmittedSpeakerProjectionEvidence {
@@ -274,10 +284,12 @@ impl SpeakerProjectionEvidence {
 
 impl AdmittedSpeakerProjectionEvidence {
     /// Read the exact observations admitted by the selected output policy.
-    pub fn observations(&self) -> &SpeakerProjectionEvidence {
+    #[must_use]
+    pub const fn observations(&self) -> &SpeakerProjectionEvidence {
         &self.evidence
     }
     /// Derive the review requirement from the producer-owned observations.
+    #[must_use]
     pub fn needs_review(&self) -> bool {
         self.evidence.needs_review()
     }

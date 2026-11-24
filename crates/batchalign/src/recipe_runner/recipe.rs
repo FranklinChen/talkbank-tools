@@ -7,7 +7,7 @@ use crate::runner::util::FileStage;
 
 /// How a command recipe owns execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExecutionMode {
+pub enum ExecutionMode {
     /// One work unit progresses through an ordered recipe.
     SequentialPerUnit,
     /// One or more stages explicitly batch work units together.
@@ -20,7 +20,7 @@ pub(crate) enum ExecutionMode {
 
 /// Stable identifiers for recipe-runner stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum RecipeStageId {
+pub enum RecipeStageId {
     /// Turn discovered files into typed work units.
     PlanWorkUnits,
     /// Read main CHAT inputs.
@@ -71,7 +71,7 @@ impl RecipeStageId {
         self as u8 == other as u8
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::PlanWorkUnits => "plan_work_units",
             Self::ReadChatInputs => "read_chat_inputs",
@@ -98,7 +98,7 @@ impl RecipeStageId {
 
 /// Which provenance stamp, if any, a recipe stage writes into its output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StageProvenance {
+pub enum StageProvenance {
     /// The stage writes no stamp.
     None,
     /// The stage stamps its output as this command.
@@ -149,7 +149,7 @@ impl fmt::Display for RecipeStageId {
 
 /// Whether a stage is always present or controlled by command options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecipeStagePresence {
+pub enum RecipeStagePresence {
     /// The stage must always run.
     Required,
     /// The stage is part of the recipe but option-gated at runtime.
@@ -158,7 +158,7 @@ pub(crate) enum RecipeStagePresence {
 
 /// Whether a stage runs per work unit, across work units, or by delegating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StageExecutionKind {
+pub enum StageExecutionKind {
     /// Each work unit runs the stage independently.
     PerWorkUnit,
     /// The stage pools multiple work units into one dispatch.
@@ -169,7 +169,7 @@ pub(crate) enum StageExecutionKind {
 
 /// Static metadata for one recipe stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RecipeStage {
+pub struct RecipeStage {
     /// Stable stage id.
     pub id: RecipeStageId,
     /// Whether the stage is always present.
@@ -208,7 +208,7 @@ impl RecipeStage {
 /// "the message contains 'declared after'" is a substring check standing in
 /// for a fact the type can carry outright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecipeCheck {
+pub enum RecipeCheck {
     /// The stage list is a legal recipe.
     Ok,
     /// A stage lists itself as its own prerequisite.
@@ -255,7 +255,7 @@ struct Validated;
 /// remembered to walk them
 /// (`rg -c 'const \w+_RECIPE: Recipe' recipes.rs` counts them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Recipe {
+pub struct Recipe {
     /// Top-level execution mode for the command.
     pub mode: ExecutionMode,
     /// Ordered recipe stages.

@@ -35,16 +35,18 @@ const ADMISSION_CHAT: &str = "@UTF8\n@Begin\n@Languages:\teng\n\
 @Participants:\tCHI Target_Child\n@ID:\teng|test|CHI||female|||Target_Child|||\n\
 *CHI:\thello world .\n@End\n";
 
+/// Guards: Secondary extraction failure preserves the utterance without inventing a word position.
+/// Kind: transcript
+/// Not a type: Actual source annotations can fail extraction before a concrete span is established.
+/// State: Admitted multilingual CHAT and a synthetic response exercise diagnosis with inert services.
+/// Concurrency: The model and report are fixture-owned.
 #[tokio::test]
 async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_positions() {
     // Keep a primary-language word: tagging every lexical word @s would be
     // invalid CHAT (a whole-turn switch requires a precode). Both words have
     // explicit synthesis, so malformed model alignment can preserve them.
     let chat = ADMISSION_CHAT.replace("hello world", "hi@i camino@s:spa");
-    let temp = tempfile::tempdir().unwrap();
-    let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
-        .await
-        .unwrap();
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let mut params = test_params(&mwt);
@@ -97,15 +99,17 @@ async fn secondary_extraction_failure_reaches_the_output_report_without_guessed_
 /// a second outcome here (a `registry_unavailable` failure), reachable only
 /// by a test: a file is analyzed only once its primary language was
 /// admitted, by a registry its proof now carries.
+/// Guards: Unsupported secondary analysis is excluded with span evidence while primary analysis is retained.
+/// Kind: policy
+/// Not a type: A valid primary model response can coexist with a secondary language that is not supported.
+/// State: Multilingual CHAT, a registry double and scripted primary result exercise the exclusion.
+/// Concurrency: All input and output facts are fixture-owned.
 #[tokio::test]
 async fn an_unsupported_secondary_language_is_excluded() {
     use crate::api::OutputExclusionRecord;
     use crate::pipeline::post_validate::{OutputReport, ProducedOutput};
     let chat = ADMISSION_CHAT.replace("hello world", "hello mundo@s:spa");
-    let temp = tempfile::tempdir().unwrap();
-    let cache = UtteranceCache::sqlite(Some(temp.path().join("cache")))
-        .await
-        .unwrap();
+    let cache = UtteranceCache::noop();
     // The pool holds no registry; the file's proof does.
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
@@ -170,6 +174,11 @@ async fn an_unsupported_secondary_language_is_excluded() {
     );
 }
 
+/// Guards: A contradicted regeneration plan is classified as a system failure and keeps the cause.
+/// Kind: policy
+/// Not a type: Invalid user input and a system plan contradiction call for different operator actions.
+/// State: Typed refusals exercise classification and rendering directly.
+/// Concurrency: No worker, cache or filesystem starts.
 #[test]
 fn a_contradicted_replacement_plan_is_a_system_failure_not_invalid_chat() {
     let error = crate::error::ServerError::ReplacementPlanContradicted {
@@ -187,6 +196,11 @@ fn a_contradicted_replacement_plan_is_a_system_failure_not_invalid_chat() {
     );
 }
 
+/// Guards: Regeneration admits damaged replaced tiers and still refuses defects in retained source regions.
+/// Kind: transcript
+/// Not a type: Real parse findings can land on opposite sides of the admitted replacement boundary.
+/// State: Representative malformed CHAT sources enter the actual replacement and retained edges.
+/// Concurrency: Each source model is fixture-owned.
 #[test]
 fn regeneration_admission_distinguishes_replaced_and_retained_faults() {
     use crate::options::CaMorphotagPolicy::{Analyze, Honor};
@@ -231,15 +245,20 @@ fn regeneration_admission_distinguishes_replaced_and_retained_faults() {
     }
 }
 
+/// Guards: CA decline preserves contributor comments and drops legacy decision tiers.
+/// Kind: transcript
+/// Not a type: Actual CA input can combine authored comments and obsolete generated annotations.
+/// State: One CA source, inert services and an exact output snapshot.
+/// Concurrency: The command returns before output inspection.
 #[tokio::test]
 async fn admitted_ca_pass_through_preserves_ordinary_comment_tiers() {
     let chat = ADMISSION_CHAT
         .replace("@ID:", "@Options:\tCA\n@ID:")
-        .replace("@End", "%com:\tordinary contributor content\n@End");
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+        .replace(
+            "@End",
+            "%com:\tordinary contributor content\n%xalign:\tlegacy\n%xrev:\t[?]\n@End",
+        );
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
@@ -248,7 +267,9 @@ async fn admitted_ca_pass_through_preserves_ordinary_comment_tiers() {
         .expect("valid CA requires no worker")
         .into_text();
     assert!(output.contains("%com:\tordinary contributor content"));
-    assert!(!output.contains("%mor:"));
+    for removed in ["%mor:", "%xalign:", "%xrev:"] {
+        assert!(!output.contains(removed), "{output}");
+    }
     insta::assert_snapshot!(output, @"
     @UTF8
     @Begin
@@ -262,13 +283,15 @@ async fn admitted_ca_pass_through_preserves_ordinary_comment_tiers() {
     ");
 }
 
+/// Guards: An invalid prior is discarded and analysis uses only the admitted current source.
+/// Kind: transcript
+/// Not a type: Saved prior annotations can be invalid even when the current version admits.
+/// State: Before and after CHAT and an inert cache/pool exercise the real incremental command.
+/// Concurrency: The fixture owns both source versions.
 #[tokio::test]
 async fn incremental_morphology_discards_invalid_prior_and_analyzes_current() {
     let before = ADMISSION_CHAT.replace("@End", "%mor:\tnoun|hello\n@End");
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
@@ -338,6 +361,11 @@ fn primary_capability(
     Ok(())
 }
 
+/// Guards: Unchanged input copies only the admitted prior morphology and grammar pair.
+/// Kind: transcript
+/// Not a type: Two revisions can disagree in generated tiers while retaining the same analysis content.
+/// State: A reusable prior pair, stale current tiers and exact output snapshot.
+/// Concurrency: No worker is started during reuse.
 #[tokio::test]
 async fn incremental_morphology_copies_only_admitted_prior_analysis_without_inference() {
     let before = ADMISSION_CHAT.replace(
@@ -350,10 +378,7 @@ async fn incremental_morphology_copies_only_admitted_prior_analysis_without_infe
         "@Comment:\t[ba3 morphotag | engine=stanza-1.10.0 | 2026-03-28T10:00:00-04:00]\n*CHI:",
     );
     let after = ADMISSION_CHAT.replace("@End", "%mor:\tnoun|wrong\n@End");
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     let output = crate::morphosyntax::process_morphosyntax_incremental(
         &before,
@@ -381,12 +406,14 @@ async fn incremental_morphology_copies_only_admitted_prior_analysis_without_infe
     ");
 }
 
+/// Guards: Reused morphology retains its producer stamp or explicitly reports missing provenance.
+/// Kind: transcript
+/// Not a type: A prior transcript can have missing or malformed metadata independently of reusable morphology.
+/// State: Prior and current revision matrices and an isolated registry double.
+/// Concurrency: Every transformation owns its source models.
 #[tokio::test]
 async fn reused_morphology_carries_its_own_stamps_without_requiring_readable_metadata() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     let morphology = "%mor:\tintj|hello noun|world .\n%gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n";
     let other_stamp = "[ba3 transcribe | asr=whisper | 2026-03-28T10:00:00-04:00]";
@@ -441,6 +468,11 @@ async fn reused_morphology_carries_its_own_stamps_without_requiring_readable_met
     }
 }
 
+/// Guards: Unsupported primary language keeps the catalog gap and actionable advice.
+/// Kind: policy
+/// Not a type: An actual registry may lack an advertised language and advice must preserve truthful CHAT declarations.
+/// State: A Quechua source exercises a limited registry and diagnostic renderer.
+/// Concurrency: Pure lookup and rendering over local fixtures.
 #[test]
 fn unsupported_primary_language_returns_actionable_error_message() {
     let chat = "@UTF8\n\
@@ -477,23 +509,11 @@ fn unsupported_primary_language_returns_actionable_error_message() {
     );
 }
 
-#[test]
-fn supported_primary_language_passes() {
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Languages:\teng\n\
-                @Participants:\tCHI Target_Child\n\
-                @ID:\teng|test|CHI||female|||Target_Child|||\n\
-                *CHI:\tcan't go$v .\n\
-                @End\n";
-    let chat_file = parse(chat);
-    assert!(
-        primary_capability(&chat_file).is_ok(),
-        "eng must pass the Stanza-supported gate",
-    );
-}
-
+/// Guards: A supported language alone cannot admit a transcript lacking required headers.
+/// Kind: transcript
+/// Not a type: Actual source bytes may fail structural checks even when a matching registry serves that language.
+/// State: A positive English registry control and missing-header CHAT exercise distinct edges.
+/// Concurrency: One immutable registry double is shared locally.
 #[test]
 fn a_language_support_predicate_is_not_complete_input_admission() {
     // No unsupported code is present, but missing required headers must still
@@ -524,94 +544,43 @@ fn a_language_support_predicate_is_not_complete_input_admission() {
     ));
 }
 
+/// Guards: Single and bilingual headers select the primary language and missing headers fail.
+/// Kind: transcript
+/// Not a type: Source bytes can name unexpected primary languages or omit the declaration altogether.
+/// State: Czech, Spanish-primary bilingual and absent header cases enter shared resolution.
+/// Concurrency: A local parser owns each source observation.
 #[test]
 fn resolve_per_file_lang_uses_primary_languages_header() {
-    // Regression test for the 2026-05-03 morning incident: the morphotag
-    // pipeline took its lang from the job-level CommandProfile sentinel
-    // ("eng") instead of the file's @Languages header, so every Czech /
-    // Spanish / Polish / etc. file got tagged with English Stanza and a
-    // falsified `lang=eng` provenance comment.
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Languages:\tces\n\
-                @Participants:\tCHI Target_Child\n\
-                @ID:\tces|test|CHI||female|||Target_Child|||\n\
-                *CHI:\tahoj .\n\
-                @End\n";
-    let chat_file = parse(chat);
-    let resolved =
-        super::resolve_per_file_lang(&chat_file).expect("Czech header must resolve cleanly");
-    assert_eq!(
-        resolved.as_ref(),
-        "ces",
-        "Czech file must resolve to ces, not the job-level sentinel",
-    );
+    for (languages, primary) in [("ces", "ces"), ("spa, eng", "spa")] {
+        let source = ADMISSION_CHAT
+            .replace("@Languages:\teng", &format!("@Languages:\t{languages}"))
+            .replace("@ID:\teng|", &format!("@ID:\t{primary}|"));
+        let resolved = super::resolve_per_file_lang(&parse(&source)).unwrap();
+        assert_eq!(resolved.as_ref(), primary);
+    }
+    let missing = ADMISSION_CHAT.replace("@Languages:\teng\n", "");
+    let refusal = super::resolve_per_file_lang(&parse(&missing)).unwrap_err();
+    assert!(refusal.to_string().contains("`@Languages:`"));
 }
 
-#[test]
-fn resolve_per_file_lang_errors_when_languages_absent() {
-    // No silent eng fallback, a CHAT file with no `@Languages:` header
-    // is a real provenance failure. Surface a typed error so the
-    // operator fixes the header and re-runs.
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Participants:\tCHI Target_Child\n\
-                @ID:\teng|test|CHI||female|||Target_Child|||\n\
-                *CHI:\thello .\n\
-                @End\n";
-    let chat_file = parse(chat);
-    let err = super::resolve_per_file_lang(&chat_file)
-        .expect_err("missing @Languages must error, not silently default to eng");
-    assert!(
-        err.to_string().contains("`@Languages:`"),
-        "error must point at the missing header: {err}"
-    );
-}
-
-#[test]
-fn resolve_per_file_lang_uses_primary_only_when_bilingual() {
-    // Bilingual file: primary lang wins. Secondary is consumed by the
-    // multilingual policy / per-utterance routing, not by the pipeline's
-    // top-level lang choice for inference + provenance.
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Languages:\tspa, eng\n\
-                @Participants:\tCHI Target_Child\n\
-                @ID:\tspa|test|CHI||female|||Target_Child|||\n\
-                *CHI:\thola .\n\
-                @End\n";
-    let chat_file = parse(chat);
-    let resolved = super::resolve_per_file_lang(&chat_file)
-        .expect("primary lang must resolve cleanly for bilingual file");
-    assert_eq!(
-        resolved.as_ref(),
-        "spa",
-        "primary lang wins; secondary is for per-utterance routing only",
-    );
-}
-
+/// Guards: English primary morphology admits with or without an unsupported secondary declaration.
+/// Kind: policy
+/// Not a type: A real header can name a served primary and an unsupported secondary without requesting it.
+/// State: Two English source variants enter the real registry check.
+/// Concurrency: Only immutable local fixtures are used.
 #[test]
 fn supported_language_with_unsupported_secondary_passes() {
-    // Declaring an unsupported secondary is not itself a request to analyze
-    // an utterance in that language. Per-word L2 retains its own policy.
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Languages:\teng, srp\n\
-                @Participants:\tCHI Target_Child\n\
-                @ID:\teng|test|CHI||female|||Target_Child|||\n\
-                *CHI:\thello .\n\
-                @End\n";
-    let chat_file = parse(chat);
-    assert!(
-        primary_capability(&chat_file).is_ok(),
-        "primary=eng with secondary=srp must pass (gate is on primary only)",
-    );
+    for languages in ["eng", "eng, srp"] {
+        let chat = ADMISSION_CHAT.replace("@Languages:\teng", &format!("@Languages:\t{languages}"));
+        assert!(primary_capability(&parse(&chat)).is_ok(), "{languages}");
+    }
 }
 
+/// Guards: An unsupported primary returns typed analysis unavailability before output.
+/// Kind: contract
+/// Not a type: A transcript's admitted language can lack an engine at actual command entry.
+/// State: A Quechua CHAT fixture and a registry-backed inert pool reach the command path.
+/// Concurrency: One source and effect environment belong to this test.
 #[tokio::test]
 async fn unsupported_primary_language_returns_typed_analysis_unavailable() {
     let chat = "@UTF8\n\
@@ -622,10 +591,7 @@ async fn unsupported_primary_language_returns_typed_analysis_unavailable() {
                 @ID:\tque|test|CHI||female|||Target_Child|||\n\
                 *CHI:\twasi .\n\
                 @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     let services = PipelineServices::new(&pool, &cache);
 
@@ -650,12 +616,14 @@ async fn unsupported_primary_language_returns_typed_analysis_unavailable() {
     );
 }
 
+/// Guards: Unsupported effective precode stops analysis without partial output and names the gap.
+/// Kind: contract
+/// Not a type: An available primary can coexist with an unsupported language requested by actual utterance syntax.
+/// State: Code-switched CHAT with inert services and a limited registry.
+/// Concurrency: One source owns all command effects.
 #[tokio::test]
 async fn effective_precode_capability_refuses_without_inference_or_partial_output() {
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     // Supported English registry but no workers: refusal happens at admission,
     // not a worker timeout or missing response. Mixed files refuse as a whole.
@@ -688,6 +656,11 @@ async fn effective_precode_capability_refuses_without_inference_or_partial_outpu
     }
 }
 
+/// Guards: Complete prior analysis reuses unsupported precode while fresh analysis still requires capability.
+/// Kind: transcript
+/// Not a type: Previously valid tiers may survive unchanged even when the current registry cannot serve their language.
+/// State: Prior/current CHAT and a deliberately limited registry exercise both routes.
+/// Concurrency: Input model pairs are independently owned.
 #[tokio::test]
 async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
     let chat = ADMISSION_CHAT
@@ -698,10 +671,7 @@ async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
         "%mor:\tintj|hello noun|world .\n\
 %gra:\t1|0|ROOT 2|1|OBJ 3|1|PUNCT\n@End",
     );
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = registry_pool();
     let output = crate::morphosyntax::process_morphosyntax_incremental(
         &before,
@@ -735,6 +705,11 @@ async fn incremental_complete_unsupported_precode_needs_no_model_capability() {
     ));
 }
 
+/// Guards: No primary capability, nonlexical input and CA decline produce distinct verdicts.
+/// Kind: policy
+/// Not a type: A catalog gap, actual nonlexical words and a CA option are independently observable.
+/// State: Three source shapes enter the real parse and policy boundary.
+/// Concurrency: One local immutable catalog supplies observations.
 #[test]
 fn unsupported_primary_nonlexical_policy_and_ca_disposition_remain_distinct() {
     let chat = ADMISSION_CHAT
@@ -770,6 +745,11 @@ fn unsupported_primary_nonlexical_policy_and_ca_disposition_remain_distinct() {
     ));
 }
 
+/// Guards: `NoAlign` still receives morphology and its actual provenance.
+/// Kind: transcript
+/// Not a type: Existing `NoAlign` source syntax can bypass alignment while still qualifying for morphology.
+/// State: `NoAlign` CHAT and synthetic worker data exercise output and stamp.
+/// Concurrency: All resources are fixture-owned and inert.
 #[tokio::test]
 async fn noalign_files_get_morphotagged_with_provenance() {
     // Pin the post-2026-05-07 inversion: NoAlign no longer skips
@@ -783,10 +763,7 @@ async fn noalign_files_get_morphotagged_with_provenance() {
                 @ID:\teng|test|CHI||female|||Target_Child|||\n\
                 *CHI:\thello .\n\
                 @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
@@ -846,6 +823,11 @@ async fn noalign_files_get_morphotagged_with_provenance() {
 /// the file applied. Nothing on the pipeline's services can reach it: they
 /// carry no engine version, which is how `transcribe` (which runs this same
 /// pipeline through `process_morphosyntax`) used to stamp its ASR engine here.
+/// Guards: Morphology provenance names the worker's reported model and language.
+/// Kind: wire
+/// Not a type: Actual worker model identifiers can differ from configured engine aliases or version names.
+/// State: A synthetic provider response drives output and its stamp.
+/// Concurrency: The test uses inert services and local evidence.
 #[tokio::test]
 async fn morphotag_provenance_names_the_worker_reported_model() {
     let chat = "@UTF8\n\
@@ -856,10 +838,7 @@ async fn morphotag_provenance_names_the_worker_reported_model() {
                 @ID:\teng|test|CHI||female|||Target_Child|||\n\
                 *CHI:\thello .\n\
                 @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
@@ -908,6 +887,11 @@ async fn morphotag_provenance_names_the_worker_reported_model() {
 }
 
 /// Worker cardinality is an analysis fault, not invalid source CHAT.
+/// Guards: Too few or too many worker replies refuse morphology as protocol failure.
+/// Kind: wire
+/// Not a type: A worker can return cardinality that disagrees with the exact admitted item population.
+/// State: A checked CHAT fixture and zero or two typed responses exercise admission.
+/// Concurrency: Each case owns its prepared population.
 #[test]
 fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
     let parser = talkbank_parser::TreeSitterParser::new().expect("parser");
@@ -963,6 +947,11 @@ fn worker_response_count_failure_cannot_admit_inference_or_blame_valid_chat() {
 /// utterance the model's analysis does not cover is declined, left without
 /// `%mor`, and named as a shortfall of the written file. One utterance never
 /// fails the file (it did until 2026-11-12).
+/// Guards: Incomplete worker analysis declines the affected utterance with the exact shortfall cause.
+/// Kind: transcript
+/// Not a type: An otherwise valid response may be empty or fail realignment after request admission.
+/// State: Scripted result cases exercise full and incremental completion and report text.
+/// Concurrency: Each case owns its analysis observations.
 #[tokio::test]
 async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
     let chat = "@UTF8\n@Begin\n@Languages:\teng\n\
@@ -1093,37 +1082,11 @@ async fn incomplete_model_analysis_is_declined_and_reported_not_certified() {
     }
 }
 
-#[tokio::test]
-async fn ca_pass_through_strips_legacy_decision_tiers() {
-    let chat = "@UTF8\n\
-                @PID:\t11312/c-test\n\
-                @Begin\n\
-                @Languages:\teng\n\
-                @Participants:\tCHI Target_Child\n\
-                @Options:\tCA\n\
-                @ID:\teng|test|CHI||female|||Target_Child|||\n\
-                *CHI:\thello .\n\
-                %xalign:\tlegacy\n\
-                %xrev:\t[?]\n\
-                @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
-    let pool = WorkerPool::new(PoolConfig::for_tests());
-    let services = PipelineServices::new(&pool, &cache);
-
-    let mwt = MwtDict::default();
-    let params = test_params(&mwt);
-    let output = run_morphosyntax_pipeline(chat, services, &params)
-        .await
-        .expect("CA input should remain a successful pass-through")
-        .into_text();
-
-    assert!(!output.contains("%xalign:"), "output: {output}");
-    assert!(!output.contains("%xrev:"), "output: {output}");
-}
-
+/// Guards: Explicit CA analysis clears stale morphology and installs the observed response.
+/// Kind: transcript
+/// Not a type: CA source can contain old generated analysis even when policy authorizes fresh tagging.
+/// State: Admitted CA source with stale tiers and a synthetic worker result.
+/// Concurrency: The model and proof are fixture-owned.
 #[tokio::test]
 async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology() {
     let chat = "@UTF8\n\
@@ -1137,10 +1100,7 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
                 %mor:\tnoun|wrong .\n\
                 %gra:\t1|0|ROOT 2|1|PUNCT\n\
                 @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
@@ -1201,6 +1161,11 @@ async fn explicit_ca_analyze_policy_injects_result_and_clears_stale_morphology()
     assert!(serialized.contains("intj|hello"), "CHAT: {serialized}");
 }
 
+/// Guards: POS evidence reaches retokenizing analysis and applies only to the intended word.
+/// Kind: transcript
+/// Not a type: Source hint positions can diverge from actual worker positions after retokenization.
+/// State: A contraction with a POS hint and synthetic response enter real retokenization.
+/// Concurrency: All model observations are local.
 #[tokio::test]
 async fn pos_hint_evidence_survives_retokenization() {
     let chat = "@UTF8\n\
@@ -1211,10 +1176,7 @@ async fn pos_hint_evidence_survives_retokenization() {
                 @ID:\teng|test|CHI||female|||Target_Child|||\n\
                 *CHI:\tcan't go$v .\n\
                 @End\n";
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
 
@@ -1258,6 +1220,11 @@ async fn pos_hint_evidence_survives_retokenization() {
     assert!(!serialized.contains("verb|not"), "CHAT: {serialized}");
 }
 
+/// Guards: POS hints select the right admitted morphology positions around repeated words and punctuation.
+/// Kind: transcript
+/// Not a type: Actual punctuation and repeated words can move intended hints relative to worker ordinals.
+/// State: A table of source utterances and typed analysis replies exercises the real projection.
+/// Concurrency: Each control owns its morphology response.
 #[tokio::test]
 async fn morphosyntax_pos_hints_follow_admitted_mor_positions() {
     use talkbank_model::model::{MorStem, PosCategory};
@@ -1283,10 +1250,7 @@ async fn morphosyntax_pos_hints_follow_admitted_mor_positions() {
         ("I run$v [: run$n] home .", ordinary),
         ("I run$v [/] run$n home .", ordinary),
     ];
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let services = PipelineServices::new(&pool, &cache);
     let mwt = MwtDict::default();
@@ -1419,13 +1383,15 @@ fn one_word_analysis(word: &str) -> AdmittedMorphosyntaxResponse {
 /// (two responses pair with exactly the two other utterances), keeps its
 /// form with no `%mor`, and the result is judged afresh: still diagnosed,
 /// for that word alone. Before, the whole file went untagged.
+/// Guards: Localized analysis tags sound utterances around a held-out faulty utterance.
+/// Kind: transcript
+/// Not a type: A diagnosed document may have unaffected neighboring utterances that still require actual work.
+/// State: A source with one invalid word, neighboring utterances and scripted worker data.
+/// Concurrency: No live worker or shared cache is started.
 #[tokio::test]
 async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
     use super::states::LocalizedParse;
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let cache = UtteranceCache::sqlite(Some(tempdir.path().join("cache")))
-        .await
-        .expect("cache");
+    let cache = UtteranceCache::noop();
     let pool = WorkerPool::new(PoolConfig::for_tests());
     let mwt = MwtDict::default();
     let params = test_params(&mwt);
@@ -1474,6 +1440,11 @@ async fn a_diagnosed_transcript_is_tagged_outside_its_faulty_utterance() {
 /// strict gate refuses an admitted document's stage output, even though the
 /// document was diagnosed before the stage: its findings must stay the
 /// held-out utterances' own.
+/// Guards: Localized analysis refuses a new finding outside the held-out original region.
+/// Kind: transcript
+/// Not a type: A real output edit can add a defect outside the source's original diagnosis.
+/// State: A bound diagnosis and deliberately changed neighbor enter actual output judgment.
+/// Concurrency: All document and finding effects stay in memory.
 #[test]
 fn an_analysis_that_adds_a_finding_outside_the_held_out_utterances_is_refused() {
     use talkbank_model::model::{Line, TierContentItems, UtteranceContent, Word};

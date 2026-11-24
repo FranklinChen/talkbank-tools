@@ -84,7 +84,7 @@ pub enum EvalCommandError {
         path: PathBuf,
         /// 1-based line number that failed to decode.
         line_no: usize,
-        /// Underlying serde_json error.
+        /// Underlying `serde_json` error.
         #[source]
         source: serde_json::Error,
     },
@@ -109,7 +109,7 @@ impl From<EvalCommandError> for CliError {
 // Eval-set loading
 // ---------------------------------------------------------------------------
 
-/// Read `eval-set.jsonl`, returning a basename→pair_key map.
+/// Read `eval-set.jsonl`, returning a `basename→pair_key` map.
 ///
 /// Matching by basename mirrors the Python runner's convention: the
 /// `--morphotag-output` directory holds files whose basenames correspond

@@ -5,9 +5,9 @@
 //! [`HanScriptNormalization::for_language`]:
 //!
 //! - Cantonese (`yue`): simplified to Hong Kong traditional via embedded
-//!   OpenCC rules, then a domain-specific replacement table for
+//!   `OpenCC` rules, then a domain-specific replacement table for
 //!   Cantonese-specific characters.
-//! - Taiwanese (`nan`): simplified to Taiwan-standard traditional. TalkBank's
+//! - Taiwanese (`nan`): simplified to Taiwan-standard traditional. `TalkBank`'s
 //!   Taiwanese transcripts are written in traditional script, while a
 //!   Taiwanese recognizer labelled as Chinese emits simplified characters.
 //!
@@ -15,7 +15,7 @@
 //!
 //! Until 2026-09-16 three places ran the Cantonese normalization: the pyo3
 //! provider bridge (per token for Tencent and Aliyun, per joined segment for
-//! FunASR), the server's stage 4b (per word, after number expansion), and the
+//! `FunASR`), the server's stage 4b (per word, after number expansion), and the
 //! character tokenizer itself. The normalization is NOT idempotent, so running
 //! it twice is not a harmless repetition: the table maps `繫` to `係`, so a
 //! second pass turns an already-converted `聯繫` back into `聯係`. Running it
@@ -164,7 +164,7 @@ pub enum HanScriptNormalization {
     /// replacement table.
     HongKongCantonese,
     /// `nan`: simplified to Taiwan-standard traditional, and nothing else. No
-    /// domain table: written Taiwanese in TalkBank is traditional script, and
+    /// domain table: written Taiwanese in `TalkBank` is traditional script, and
     /// a Taiwanese recognizer labelled as Chinese emits simplified characters,
     /// so the conversion restores the corpus script only.
     TaiwanTraditional,
@@ -175,6 +175,7 @@ impl HanScriptNormalization {
     pub const ALL: [Self; 2] = [Self::HongKongCantonese, Self::TaiwanTraditional];
 
     /// The normalization a language's ASR text receives, if any.
+    #[must_use]
     pub fn for_language(language: &str) -> Option<Self> {
         match language {
             "yue" => Some(Self::HongKongCantonese),
@@ -250,7 +251,7 @@ struct CountChanged {
 
 impl CountChanged {
     /// Name the normalization that produced these counts.
-    fn under(self, normalization: HanScriptNormalization) -> NormalizationChangedLength {
+    const fn under(self, normalization: HanScriptNormalization) -> NormalizationChangedLength {
         NormalizationChangedLength {
             normalization,
             units: self.units,
@@ -318,11 +319,13 @@ impl AlignedNormalization {
     }
 
     /// The normalized surfaces, one per source unit, in the source order.
+    #[must_use]
     pub fn units(&self) -> &[String] {
         &self.units
     }
 
     /// Take the normalized surfaces, one per source unit, in the source order.
+    #[must_use]
     pub fn into_units(self) -> Vec<String> {
         self.units
     }
@@ -481,7 +484,7 @@ mod tests {
     /// This is the single-character half of the length question, settled
     /// exhaustively over the code points the pipeline calls ideographs rather
     /// than argued from the dictionary's shape. The phrase half is measured by
-    /// `examples/han_script_length_audit.rs` over OpenCC's own dictionaries.
+    /// `examples/han_script_length_audit.rs` over `OpenCC`'s own dictionaries.
     #[test]
     fn normalization_preserves_character_count_for_every_han_code_point() {
         let ideographs: Vec<char> = (0x3400u32..=0x2FA1Fu32)

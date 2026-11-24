@@ -64,7 +64,7 @@ pub struct TimingCursor<'a> {
 
 impl<'a> TimingCursor<'a> {
     /// Create a new cursor starting at the given offset.
-    pub fn with_offset(timings: &'a [Option<WordTiming>], offset: usize) -> Self {
+    pub const fn with_offset(timings: &'a [Option<WordTiming>], offset: usize) -> Self {
         Self {
             timings,
             pos: offset,
@@ -82,7 +82,7 @@ impl<'a> TimingCursor<'a> {
     }
 
     /// Current read position.
-    pub fn position(&self) -> usize {
+    pub const fn position(&self) -> usize {
         self.pos
     }
 }

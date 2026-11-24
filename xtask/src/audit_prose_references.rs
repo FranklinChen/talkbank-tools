@@ -58,7 +58,7 @@ const ALLOW_LIST: &[AllowEntry] = &[AllowEntry {
 }];
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Violation {
+pub struct Violation {
     pub(crate) path: String,
     pub(crate) line: usize,
     pub(crate) pattern_name: &'static str,
@@ -222,7 +222,7 @@ pub fn run(repo_root: &Path) -> crate::Result<()> {
 /// Scan a set of `(rel_path, content)` pairs for high-severity prose-
 /// reference hits. Deduplicated by `(path, line, pattern)` so a single
 /// line referenced by overlapping section ranges is reported once.
-pub(crate) fn scan_docs(docs: &[(String, String)]) -> crate::Result<Vec<Violation>> {
+pub fn scan_docs(docs: &[(String, String)]) -> crate::Result<Vec<Violation>> {
     let high_severity: Vec<(&'static str, Regex)> = FLAG_PATTERNS
         .iter()
         .filter(|p| p.severity == "high")

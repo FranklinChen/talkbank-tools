@@ -27,6 +27,9 @@ pub(super) struct PendingWindow<'a> {
     attempt: Attempt,
     window: FaWindow,
     context: UtrPassContext<'a>,
+    /// The worker-hosted backend the route was admitted with; windows are
+    /// cut from the prepared WAV and recognized by it alone.
+    backend: crate::transcribe::NonRevAsrBackend,
 }
 
 pub(super) struct CompletedPartialRecognition<'a> {
@@ -60,6 +63,7 @@ impl<'a> PendingWindow<'a> {
     pub(super) fn start(
         windows: Vec<FaWindow>,
         context: UtrPassContext<'a>,
+        backend: crate::transcribe::NonRevAsrBackend,
     ) -> Result<Self, UtrFullRoute> {
         let planned = windows.iter().copied().map(UtrWindowBounds::from).collect();
         let mut remaining = windows.into_iter();
@@ -74,6 +78,7 @@ impl<'a> PendingWindow<'a> {
                 attempt,
                 window,
                 context,
+                backend,
             }),
             None => Err(attempt.abandon(PartialExecutionStop::NoWindows)),
         }
@@ -84,67 +89,67 @@ impl<'a> PendingWindow<'a> {
         let window = self.window;
         let (start_ms, end_ms) = (window.audio_start().get(), window.end().get());
         let key = crate::chat_ops::fa::utr_asr_segment_cache_key(
-            context.audio_identity,
-            context.engine,
+            context.audio.audio_identity,
+            context.recognizer.engine(),
             start_ms,
             end_ms,
             context.lang,
         );
         let cached = lookup_utr_asr_cache(
-            context.services.pipeline.cache,
+            context.services.recording_cache,
             &key,
             &utr_cache_eligibility(context),
             context.cache_policy.response(),
         )
         .await?;
-        let response =
-            match cached {
-                UtrAsrCacheLookup::Hit(cached) => {
-                    info!(context.filename, start_ms, end_ms, "UTR segment cache hit");
-                    *cached
-                }
-                UtrAsrCacheLookup::Miss(miss) => {
-                    let path =
-                        match crate::ensure_wav::extract_audio_segment(context.audio_path, window)
-                            .await
-                        {
-                            Ok(path) => path,
-                            Err(error) => {
-                                warn!(
-                                    context.filename, error = %error, start_ms, end_ms,
-                                    "Failed to extract audio segment, falling back to full UTR"
-                                );
-                                drop(miss);
-                                return Ok(WindowResult::Abandoned(self.attempt.abandon(
-                                    PartialExecutionStop::SegmentExtraction {
-                                        window: window.into(),
-                                        error: error.to_string(),
-                                    },
-                                )));
-                            }
-                        };
-                    let budget = Some(DecodeBudgetSeconds::for_duration_ms(window.len().0));
-                    match miss.infer(&path, budget, context).await {
-                        Ok(inferred) => {
-                            inferred
-                                .commit(context.services.pipeline.cache, &key, context.filename)
-                                .await
-                        }
-                        Err(error) => {
-                            warn!(
-                                context.filename, error = %error,
-                                "UTR segment ASR failed, falling back to full-file recovery"
-                            );
-                            return Ok(WindowResult::Abandoned(self.attempt.abandon(
-                                PartialExecutionStop::Recognition {
-                                    window: window.into(),
-                                    error: error.to_string(),
-                                },
-                            )));
-                        }
+        let response = match cached {
+            UtrAsrCacheLookup::Hit(cached) => {
+                info!(context.filename, start_ms, end_ms, "UTR segment cache hit");
+                *cached
+            }
+            UtrAsrCacheLookup::Miss(miss) => {
+                let path = match crate::ensure_wav::extract_audio_segment(
+                    context.audio.audio_path(),
+                    window,
+                )
+                .await
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        warn!(
+                            context.filename, error = %error, start_ms, end_ms,
+                            "Failed to extract audio segment, falling back to full UTR"
+                        );
+                        drop(miss);
+                        return Ok(WindowResult::Abandoned(self.attempt.abandon(
+                            PartialExecutionStop::SegmentExtraction {
+                                window: window.into(),
+                                error: error.to_string(),
+                            },
+                        )));
+                    }
+                };
+                let budget = Some(DecodeBudgetSeconds::for_duration_ms(window.len().0));
+                match miss
+                    .infer_segment(self.backend, &path, budget, context)
+                    .await
+                {
+                    Ok(inferred) => inferred.commit(&key, context.filename).await,
+                    Err(error) => {
+                        warn!(
+                            context.filename, error = %error,
+                            "UTR segment ASR failed, falling back to full-file recovery"
+                        );
+                        return Ok(WindowResult::Abandoned(self.attempt.abandon(
+                            PartialExecutionStop::Recognition {
+                                window: window.into(),
+                                error: error.to_string(),
+                            },
+                        )));
                     }
                 }
-            };
+            }
+        };
         Ok(WindowResult::Recognized(Box::new(
             self.recognized(response),
         )))
@@ -154,7 +159,7 @@ impl<'a> PendingWindow<'a> {
         let conversion = asr_response_to_utr_tokens(
             response,
             self.window,
-            &EngineId::new(self.context.engine.as_wire_name()),
+            &EngineId::new(self.context.recognizer.engine().as_wire_name()),
         );
         conversion.warn_if_lossy(&self.context);
         let mut attempt = self.attempt;
@@ -175,6 +180,7 @@ impl<'a> PendingWindow<'a> {
                     attempt,
                     window,
                     context: self.context,
+                    backend: self.backend,
                 })
             }
             None => RecognizedWindow::Completed(CompletedPartialRecognition {

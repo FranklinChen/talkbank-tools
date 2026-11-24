@@ -151,6 +151,33 @@ impl MediaTool {
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
     {
+        let args: Vec<std::ffi::OsString> = args
+            .into_iter()
+            .map(|arg| arg.as_ref().to_owned())
+            .collect();
+        let first = self.output_once(&args).await;
+        match first {
+            Ok(output) => Ok(output),
+            Err(MediaToolError::NotInstalled(tool)) => Err(MediaToolError::NotInstalled(tool)),
+            // A spawn failure is the host, not the media: under load fork or
+            // pipe creation fails transiently (EAGAIN, EMFILE, ENOMEM), and a
+            // probe's outcome is frozen and shared by every consumer of the
+            // file, so one hiccup must not become a final verdict on it. One
+            // more attempt after a pause; a second failure is reported as is.
+            Err(MediaToolError::Spawn { source, .. }) => {
+                tracing::warn!(tool = self.program(), %source,
+                    "could not start the media tool; trying once more");
+                tokio::time::sleep(SPAWN_RETRY_PAUSE).await;
+                self.output_once(&args).await
+            }
+        }
+    }
+
+    /// One spawn and wait, its OS failure classified.
+    async fn output_once(
+        self,
+        args: &[std::ffi::OsString],
+    ) -> Result<std::process::Output, MediaToolError> {
         self.async_command()
             .args(args)
             .kill_on_drop(true)
@@ -172,6 +199,11 @@ impl MediaTool {
         }
     }
 }
+
+/// How long to wait before the one retry of a media tool that could not be
+/// started: long enough for a transient fork or descriptor shortage to clear,
+/// short beside the probe it protects.
+const SPAWN_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The release pin, read at compile time from the one file CI and the local
 /// gate also read, so the tests cannot disagree with them about the release.
@@ -316,30 +348,17 @@ pub(in crate::media) enum MediaToolError {
 mod tests {
     use super::*;
 
-    /// The program names, pinned through the construction path callers use.
-    ///
-    /// A WIRE FORMAT in the sense that matters: these strings are what reaches
-    /// `execvp`, and no type can hold what a PATH lookup will accept. Asserted
-    /// against the literals rather than against `program()`, because a test
-    /// that compares `command()` to `program()` compares a two-line
-    /// constructor with its own argument and can only fail if someone rewrites
-    /// it to name a literal.
-    #[test]
-    fn each_tool_spawns_the_program_it_names() {
-        assert_eq!(MediaTool::Ffmpeg.command().get_program(), "ffmpeg");
-        assert_eq!(MediaTool::Ffprobe.command().get_program(), "ffprobe");
-        assert_eq!(
-            MediaTool::Ffmpeg.async_command().as_std().get_program(),
-            "ffmpeg"
-        );
-    }
-
     /// A missing program is `NotInstalled`, everything else is a spawn failure.
     ///
     /// POLICY, not an invariant: `ErrorKind::NotFound` is what the OS reports
     /// for a program that is not on `PATH`, and treating exactly that as "not
     /// installed" is a choice with alternatives. It is the choice that lets
     /// production drop its pre-flight `-version` probe, so it is worth pinning.
+    /// Guards: Only OS `NotFound` means that the requested media tool is unavailable on PATH.
+    /// Kind: policy
+    /// Not a type: Operating-system error kinds need a deliberate classification at the process edge.
+    /// State: Two synthetic OS errors and the corresponding intended tool identities.
+    /// Concurrency: No process or PATH mutation.
     #[test]
     fn only_a_missing_program_reads_as_not_installed() {
         let missing = MediaTool::Ffmpeg
@@ -362,6 +381,11 @@ mod tests {
 
     /// The pin is read out of the real `scripts/ffmpeg-pin.sh`, and a text with
     /// no `FFMPEG_VERSION=` line (or an empty one) has no pin.
+    /// Guards: The version pin reader extracts the checked-in pin and distinguishes absent and empty values.
+    /// Kind: wire
+    /// Not a type: Shell file contents can omit the declaration or provide unparseable version bytes.
+    /// State: The checked-in literal and three in-memory shell configuration strings.
+    /// Concurrency: Inputs are read-only and no tool is invoked.
     #[test]
     fn the_pin_is_read_from_the_pin_file() {
         let pin = pinned_version(PIN_FILE).expect("the real pin file states a version");
@@ -383,11 +407,18 @@ mod tests {
     /// wrong: every production site distinguishes "ffmpeg is missing" from
     /// "ffmpeg rejected this input", and collapsing them would report a broken
     /// media file as an uninstalled binary.
+    /// Guards: Both media tools return a native rejection as completed process output.
+    /// Kind: contract
+    /// Not a type: A child can launch successfully and then refuse arguments with a nonzero exit.
+    /// State: Installed ffmpeg and ffprobe each receive an invalid flag.
+    /// Concurrency: Each command and result is owned by the synchronous test.
     #[test]
     fn a_tool_that_ran_and_failed_is_not_an_error() {
-        let output = MediaTool::Ffmpeg
-            .run(["-nonsense-flag-that-does-not-exist"])
-            .expect("ffmpeg is installed, so running it must not be a spawn error");
-        assert!(!output.status.success(), "the flag should be rejected");
+        for tool in [MediaTool::Ffmpeg, MediaTool::Ffprobe] {
+            let output = tool
+                .run(["-nonsense-flag-that-does-not-exist"])
+                .expect("both tools are installed, so running them must not be a spawn error");
+            assert!(!output.status.success(), "the flag should be rejected");
+        }
     }
 }

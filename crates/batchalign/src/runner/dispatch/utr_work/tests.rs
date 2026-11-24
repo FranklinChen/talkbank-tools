@@ -34,6 +34,11 @@ fn tokens() -> PreparedUtrTokens {
     .expect("English has no script normalization to refuse")
 }
 
+/// Guards: Both completed UTR strategies preserve the admitted source while returning their observed candidates.
+/// Kind: transcript
+/// Not a type: Two real transformation strategies can each accidentally mutate or lose original CHAT evidence.
+/// State: One admitted source and typed tokens across two strategies.
+/// Concurrency: Original document retained separately from each completed candidate.
 #[tokio::test]
 async fn completed_observation_preserves_source_for_both_strategies() {
     for strategy in [
@@ -70,6 +75,11 @@ struct HeldSearch {
     stopped: std::sync::Mutex<Option<oneshot::Sender<bool>>>,
 }
 
+/// Guards: Owned long-document execution preserves exact recovery and work-budget behavior.
+/// Kind: measurement
+/// Not a type: Actual transcript size and search choices determine results beyond ownership alone.
+/// State: Synthetic long-turn source and both execution interfaces.
+/// Concurrency: The test awaits each independently held execution.
 #[tokio::test]
 async fn long_document_owned_execution_preserves_recovery_and_budget_results() {
     use crate::chat_ops::fa::utr::region_tests::long_turn_fixture;
@@ -139,6 +149,11 @@ impl UtrStrategy for HeldSearch {
 
 /// The default single-thread executor must be able to receive the entry signal
 /// while CPU work is held elsewhere. No latency assertion or sleep is needed.
+/// Guards: Dropping pending UTR work cancels the actual producer and preserves the source.
+/// Kind: contract
+/// Not a type: A blocked producer may keep working after its caller drops the future.
+/// State: An owned document and gated strategy double on a real blocking task.
+/// Concurrency: Channels witness entry, release and cancellation.
 #[tokio::test]
 async fn dropping_pending_work_stops_the_search_and_preserves_source() {
     let original = source();
@@ -178,6 +193,11 @@ impl UtrStrategy for Panics {
     }
 }
 
+/// Guards: A panicking UTR producer cannot install a candidate and returns system failure.
+/// Kind: contract
+/// Not a type: An asynchronous strategy can panic after source admission and before completion.
+/// State: An admitted source and panic-injected worker with real join/HTTP classification.
+/// Concurrency: The original outlives the failed producer task.
 #[tokio::test]
 async fn producer_panic_is_system_failure_and_cannot_install_candidate() {
     let original = source();
@@ -215,6 +235,11 @@ impl WorkControl for StopAt {
     }
 }
 
+/// Guards: Live UTR strategies propagate interruption without turning it into normal unmatched output.
+/// Kind: policy
+/// Not a type: Strategy checkpoint timing can meet a real interruption at different internal stages.
+/// State: Two strategies and an explicit interruption counter on an owned fixture.
+/// Concurrency: No global cancellation or mutable shared transcript.
 #[test]
 fn actual_strategies_propagate_interruption_instead_of_budget_or_unmatched() {
     for strategy in [&GlobalUtr as &dyn UtrStrategy, &TwoPassOverlapUtr::new()] {
@@ -264,6 +289,11 @@ impl UtrStrategy for NeverStarted {
     }
 }
 
+/// Guards: Cancellation drops a queued search before its strategy starts.
+/// Kind: contract
+/// Not a type: Runtime cancellation can race with blocking worker entry despite a valid owned task.
+/// State: Dedicated runtime, occupied blocking slot and instrumented search double.
+/// Concurrency: Channels keep the slot occupied until cancellation is observed.
 #[test]
 fn cancellation_aborts_queued_work_before_search_entry() {
     let runtime = tokio::runtime::Builder::new_current_thread()

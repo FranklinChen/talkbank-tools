@@ -89,6 +89,7 @@ impl TranslatableWordText {
     }
 
     /// The text an engine receives for this word.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,7 +109,7 @@ impl TranslatableSeparator {
     /// the engine as a symbol to translate or echo, so none is sent. Closed,
     /// like the per-word and terminator rules, so a separator added later has
     /// to state its own answer.
-    fn of_separator(separator: &Separator) -> Option<Self> {
+    const fn of_separator(separator: &Separator) -> Option<Self> {
         match separator {
             Separator::Comma { .. } => Some(Self(",")),
             Separator::Semicolon { .. }
@@ -129,7 +130,8 @@ impl TranslatableSeparator {
     }
 
     /// The punctuation an engine receives for this separator.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         self.0
     }
 }
@@ -194,6 +196,7 @@ pub enum WritingSystem {
 
 impl WritingSystem {
     /// The writing system `lang` is written in.
+    #[must_use]
     pub fn of_language(lang: &LanguageCode) -> Self {
         Self::of_language_code(lang.as_str())
     }
@@ -207,6 +210,7 @@ impl WritingSystem {
     /// provider's model, and a second copy of the Chinese varieties there is
     /// exactly how the Python side came to carry a five-code list that omitted
     /// Mandarin.
+    #[must_use]
     pub fn of_language_code(lang: &str) -> Self {
         if HAN_SCRIPT_LANGUAGES.contains(&lang) {
             Self::Han
@@ -281,6 +285,7 @@ impl TranslationSource {
     /// THE one place source text is built. Nothing that is CHAT notation
     /// rather than readable text reaches the engine: a separator or terminator
     /// with no ordinary-language spelling contributes nothing.
+    #[must_use]
     pub fn render(&self, script: WritingSystem) -> TranslateBatchItem {
         let mut text = String::new();
         for unit in &self.units {
@@ -322,7 +327,7 @@ impl TranslationSource {
 /// the question and exclamation marks are sent as written, which is what
 /// batchalign2's Chinese branch did with everything but the period (its Google
 /// engine replaced spaces and `.` only).
-fn render_terminator(terminator: &Terminator, script: WritingSystem) -> Option<&'static str> {
+const fn render_terminator(terminator: &Terminator, script: WritingSystem) -> Option<&'static str> {
     match terminator {
         Terminator::Period { .. } => Some(match script {
             WritingSystem::Han => IDEOGRAPHIC_FULL_STOP,
@@ -347,11 +352,12 @@ fn render_terminator(terminator: &Terminator, script: WritingSystem) -> Option<&
 // Payload collection
 // ---------------------------------------------------------------------------
 
-/// Collect translate payloads from all utterances in a ChatFile.
+/// Collect translate payloads from all utterances in a `ChatFile`.
 ///
 /// Returns `(line_idx, TranslationSource)` pairs. Utterances that produced no
 /// words are skipped. `line_idx` is the index into `chat_file.lines` (needed
 /// for injection).
+#[must_use]
 pub fn collect_translate_payloads(chat_file: &ChatFile) -> Vec<(usize, TranslationSource)> {
     chat_file
         .lines
@@ -411,6 +417,7 @@ impl TranslationText {
     }
 
     /// The text written to the `%xtra` tier.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -445,7 +452,7 @@ pub fn inject_translation(utterance: &mut Utterance, translation: &TranslationTe
 // Result application
 // ---------------------------------------------------------------------------
 
-/// Apply translation results to a ChatFile.
+/// Apply translation results to a `ChatFile`.
 ///
 /// `results` maps `line_idx` to an admitted translation. Lines whose indices
 /// are not in the map are left unchanged. There is no failure to report: every
@@ -480,6 +487,7 @@ pub struct TranslationStringsEntry {
 }
 
 /// Extract `%xtra` tier content from specified utterances for caching.
+#[must_use]
 pub fn extract_translation_strings(
     chat_file: &ChatFile,
     line_indices: &[usize],
@@ -519,6 +527,7 @@ pub fn extract_translation_strings(
 ///
 /// Includes both MOR separators (vocative ‡, tag „, comma ,) and terminators
 /// (. ? ! +... +/. +/? etc.).
+#[must_use]
 pub fn chat_punct_chars() -> Vec<String> {
     use talkbank_model::Location;
     use talkbank_model::model::content::{Separator, Terminator};
@@ -594,6 +603,7 @@ pub fn chat_punct_chars() -> Vec<String> {
 /// - Zero-width spaces removed
 /// - Tab → space
 /// - Punctuation spacing (add space before each punct char)
+#[must_use]
 pub fn postprocess_translation(raw: &str, punct_chars: &[&str]) -> String {
     // Single-pass normalization: char mapping + zero-width space removal
     let mut result: String = raw

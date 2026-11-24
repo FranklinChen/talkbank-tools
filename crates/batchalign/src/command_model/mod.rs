@@ -15,21 +15,21 @@
 
 mod catalog;
 
-pub(crate) use crate::recipe_runner::command_spec::{
+pub use crate::recipe_runner::command_spec::{
     BatchingPolicy, CapabilityPlan, CatalogEntry, CommandCapabilityKind, CommandIoProfile,
     ConstrainedHostPolicy, InferenceRequirement, ModelSharingPolicy, ParallelismPolicy,
     ResourceLane, RunnerDispatchKind, SchedulingPolicy,
 };
 #[allow(unused_imports)]
-pub(crate) use crate::recipe_runner::materialize::{
+pub use crate::recipe_runner::materialize::{
     FileNamingPolicy, MaterializedArtifactRole, OutputPolicy, PlannedMaterializedFile, StemRewrite,
 };
 #[allow(unused_imports)]
-pub(crate) use crate::recipe_runner::recipe::{
+pub use crate::recipe_runner::recipe::{
     ExecutionMode, Recipe, RecipeStage, RecipeStageId, RecipeStagePresence, StageExecutionKind,
 };
 
-pub(crate) use catalog::{command_spec, command_specs, commands_stamped_by};
+pub use catalog::{command_spec, command_specs, commands_stamped_by};
 
 use crate::ReleasedCommand;
 
@@ -39,6 +39,6 @@ use crate::ReleasedCommand;
 /// `catalog::tests::every_released_command_has_a_spec` pins full coverage, so
 /// there is no "unknown command" case for a caller to handle. The previous
 /// `Option` return was a sentinel for a state the type system already excludes.
-pub(crate) fn command_runner_dispatch_kind(command: ReleasedCommand) -> RunnerDispatchKind {
+pub fn command_runner_dispatch_kind(command: ReleasedCommand) -> RunnerDispatchKind {
     command_spec(command).runner_dispatch_kind
 }

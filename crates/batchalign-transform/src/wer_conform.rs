@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-/// Compound word lookup: maps joined compound → (part_a, part_b) for O(1) splitting.
+/// Compound word lookup: maps joined compound → (`part_a`, `part_b`) for O(1) splitting.
 ///
 /// Reuses the same data file as [`asr_postprocess::compounds`](crate::asr_postprocess).
 // Data is compile-time-constant: `include_str!` embeds the JSON at build time.
@@ -113,7 +113,8 @@ impl WerNormalization {
 
     /// The normalization two transcripts can share: English only when both
     /// would be normalized as English.
-    pub fn shared(self, other: Self) -> Self {
+    #[must_use]
+    pub const fn shared(self, other: Self) -> Self {
         match (self, other) {
             (Self::English, Self::English) => Self::English,
             (Self::KeepNames, _) | (_, Self::KeepNames) => Self::KeepNames,
@@ -121,6 +122,7 @@ impl WerNormalization {
     }
 
     /// Normalize a word list, one word at a time.
+    #[must_use]
     pub fn conform_words(self, words: &[String]) -> Vec<String> {
         let mut result = Vec::with_capacity(words.len());
         for word in words {

@@ -97,6 +97,7 @@ batchalign-transform = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
+nix = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

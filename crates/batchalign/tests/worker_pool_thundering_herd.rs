@@ -56,6 +56,11 @@ const REJECTION_BUDGET: u64 = ((MAX_TOTAL + EXTRA) * 3 / 2) as u64;
 /// the first worker returns.
 const TEST_DELAY_MS: u64 = 100;
 
+/// Guards: Every oversubscribed request finishes without turning returns into global-cap rejection storms.
+/// Kind: measurement
+/// Not a type: Scheduler interleavings determine whether waiters contend repeatedly on each returned slot.
+/// State: Private echo workers across four groups with real admission and rejection counters.
+/// Concurrency: A bounded dispatch burst shares the pool; completion and launch progress bound the wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stress_oversubscribe_does_not_storm_global_cap_rejections() {
     let python = crate::prerequisite::PythonWorker::require().interpreter();

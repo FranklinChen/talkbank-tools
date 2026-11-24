@@ -280,7 +280,7 @@ fn write_run_receipt(
     Ok(())
 }
 
-fn policy_receipt_name(policy: UtsegDecisionPolicy) -> &'static str {
+const fn policy_receipt_name(policy: UtsegDecisionPolicy) -> &'static str {
     match policy {
         UtsegDecisionPolicy::WorkerDeclared => "worker-declared",
         UtsegDecisionPolicy::ReapplyBoundaryModel(
@@ -292,7 +292,7 @@ fn policy_receipt_name(policy: UtsegDecisionPolicy) -> &'static str {
     }
 }
 
-fn selected_policy(args: &TranscribeReplayRunArgs) -> UtsegDecisionPolicy {
+const fn selected_policy(args: &TranscribeReplayRunArgs) -> UtsegDecisionPolicy {
     match args.utseg_policy {
         TranscribeReplayUtsegPolicy::WorkerDeclared => UtsegDecisionPolicy::WorkerDeclared,
         TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1 => {
@@ -417,12 +417,22 @@ mod tests {
         admit_legacy_replay_manifest(&manifest).expect("admitted")
     }
 
+    /// Guards: Replay admission rejects two input manifests claiming the same output identity.
+    /// Kind: boundary
+    /// Not a type: A manifest population can contain repeated external names before admission has inspected them.
+    /// State: Pure synthetic manifests carry duplicate output names.
+    /// Concurrency: none
     #[test]
     fn batch_refuses_duplicate_output_identities() {
         let batch = [admitted("same", false), admitted("same", false)];
         assert!(validate_batch(&batch, false).is_err());
     }
 
+    /// Guards: Diarized replay requires turns in every manifest and disabled diarization accepts their absence.
+    /// Kind: boundary
+    /// Not a type: The external manifest can omit turns regardless of the operator's chosen mode.
+    /// State: Synthetic manifests and supplied command mode exercise admission directly.
+    /// Concurrency: none
     #[test]
     fn diarized_run_requires_turns_in_every_admitted_manifest() {
         let batch = [admitted("one", true), admitted("two", false)];
@@ -430,6 +440,11 @@ mod tests {
         assert!(validate_batch(&batch, false).is_ok());
     }
 
+    /// Guards: Disabled utterance segmentation refuses an explicit candidate or an explicit pass scope.
+    /// Kind: policy
+    /// Not a type: Independent external CLI switches can form incompatible requests before the typed execution is built.
+    /// State: Pure parser-shaped arguments vary each external switch independently.
+    /// Concurrency: none
     #[test]
     fn candidate_policy_cannot_exist_in_a_segmentation_disabled_run() {
         let args = run_args(
@@ -437,8 +452,17 @@ mod tests {
             TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1,
         );
         assert!(admit_utseg_execution(&args).is_err());
+
+        let mut args = run_args(true, TranscribeReplayUtsegPolicy::WorkerDeclared);
+        args.utseg_passes = TranscribeReplayUtsegPasses::PreChatOnly;
+        assert!(admit_utseg_execution(&args).is_err());
     }
 
+    /// Guards: Candidate admission chooses the exact suppress-earlier revision for the default pass scope.
+    /// Kind: policy
+    /// Not a type: Operator policy spelling and selected revision are values supplied at runtime.
+    /// State: Pure parser-shaped candidate arguments produce a typed execution plan.
+    /// Concurrency: none
     #[test]
     fn admitted_candidate_policy_preserves_its_typed_revision() {
         let args = run_args(
@@ -459,6 +483,11 @@ mod tests {
         );
     }
 
+    /// Guards: A phase-specific override preserves the worker policy on the other phase in both directions.
+    /// Kind: policy
+    /// Not a type: Mapping external pre-chat and post-chat choices onto stages is a semantic decision.
+    /// State: Pure argument fixtures exercise both single-phase overrides.
+    /// Concurrency: none
     #[test]
     fn post_only_candidate_scope_holds_the_pre_chat_policy_at_production() {
         let mut args = run_args(
@@ -475,10 +504,7 @@ mod tests {
                 ),
             }
         );
-    }
 
-    #[test]
-    fn pre_only_candidate_scope_holds_the_post_chat_policy_at_production() {
         let mut args = run_args(
             false,
             TranscribeReplayUtsegPolicy::SuppressEarlierAdjacentBoundariesV1,
@@ -493,12 +519,5 @@ mod tests {
                 post_chat: UtsegDecisionPolicy::WorkerDeclared,
             }
         );
-    }
-
-    #[test]
-    fn disabled_segmentation_cannot_carry_a_pass_scope() {
-        let mut args = run_args(true, TranscribeReplayUtsegPolicy::WorkerDeclared);
-        args.utseg_passes = TranscribeReplayUtsegPasses::PreChatOnly;
-        assert!(admit_utseg_execution(&args).is_err());
     }
 }

@@ -103,6 +103,7 @@ impl Footprint {
     }
 
     /// The most the load holds while running a request.
+    #[must_use]
     pub const fn in_use(self) -> MemoryMb {
         match self.0 {
             FootprintKind::Measured { in_use, .. } | FootprintKind::Estimated(in_use) => in_use,
@@ -112,6 +113,7 @@ impl Footprint {
     /// The part of [`Self::in_use`] that building the model leaves unread,
     /// so the host's reading of used memory does not show it until the first
     /// request: nothing for an estimate, which has no built figure apart.
+    #[must_use]
     pub const fn unread(self) -> MemoryMb {
         match self.0 {
             FootprintKind::Measured { built, in_use } => MemoryMb(in_use.0 - built.0),
@@ -120,6 +122,7 @@ impl Footprint {
     }
 
     /// How the footprint is known.
+    #[must_use]
     pub const fn basis(self) -> Basis {
         match self.0 {
             FootprintKind::Measured { .. } => Basis::Measured,
@@ -129,18 +132,21 @@ impl Footprint {
 
     /// The activation margin: [`ACTIVATION_MARGIN_PERCENT`] of the in-use
     /// figure, rounded up so a small load still reserves something.
+    #[must_use]
     pub const fn margin(self) -> MemoryMb {
         MemoryMb((self.in_use().0 * ACTIVATION_MARGIN_PERCENT).div_ceil(100))
     }
 
     /// What a lease for this load reserves before the model is resident:
     /// the in-use figure and its margin.
+    #[must_use]
     pub const fn reserved(self) -> MemoryMb {
         MemoryMb(self.in_use().0 + self.margin().0)
     }
 
     /// What the lease keeps once the worker holds the model: the unread
     /// part and the margin (see the module docs).
+    #[must_use]
     pub const fn settled(self) -> MemoryMb {
         MemoryMb(self.unread().0 + self.margin().0)
     }
@@ -180,7 +186,7 @@ const MORPHOSYNTAX: Footprint =
 const UTSEG: Footprint = Footprint::estimated(STANZA_MORPHOSYNTAX_PIPELINE_MB + 460);
 
 /// The Stanza English coreference pipeline (tokenize with the RoBERTa-large
-/// LoRA coreference package), built once by the load and again by every
+/// `LoRA` coreference package), built once by the load and again by every
 /// batch. Measured: +519 MiB built; +2568 MiB in use resolving a 27-word
 /// document (about the same over three batches on one build); a release
 /// after use returns about 1.6 GB.
@@ -228,6 +234,7 @@ impl Residency {
     /// Exhaustive over [`InferTask`] and over each engine family, with no
     /// catch-all, so a new task or engine breaks compilation here until its
     /// author says what it holds.
+    #[must_use]
     pub fn of(task: InferTask, engines: &EngineOverrides) -> Self {
         match task {
             InferTask::Morphosyntax => Self::WorkerLife(MORPHOSYNTAX),
@@ -271,6 +278,7 @@ impl Residency {
     /// What the load's lease reserves while the load runs, `None` when it
     /// takes no lease. A per-batch model is built once by its load, so the
     /// load reserves one build.
+    #[must_use]
     pub const fn loading(self) -> Option<MemoryMb> {
         match self {
             Self::Nothing => None,
@@ -282,6 +290,7 @@ impl Residency {
     /// model: a model kept for the worker's life keeps its settled figure
     /// ([`Footprint::settled`]), and a per-batch model keeps nothing, since
     /// its batches reserve their own use.
+    #[must_use]
     pub const fn resident(self) -> MemoryMb {
         match self {
             Self::Nothing | Self::PerBatch(_) => MemoryMb(0),
@@ -290,6 +299,7 @@ impl Residency {
     }
 
     /// What one batch's lease reserves, for a per-batch model only.
+    #[must_use]
     pub const fn batch(self) -> Option<MemoryMb> {
         match self {
             Self::Nothing | Self::WorkerLife(_) => None,

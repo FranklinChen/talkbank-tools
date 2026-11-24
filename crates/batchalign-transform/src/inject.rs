@@ -53,6 +53,7 @@ pub struct MisalignmentDiagnostic {
 impl MisalignmentDiagnostic {
     /// The model's tokens could not be placed on the transcript's words: no
     /// word owns them, so the words and the tokens are reported side by side.
+    #[must_use]
     pub fn unplaced(words: &[crate::extract::ExtractedWord], tokens: Vec<String>) -> Self {
         Self {
             chat_words: words
@@ -70,7 +71,7 @@ impl MisalignmentDiagnostic {
 /// Which stage a morphotag misalignment came from, set by the code that
 /// observed it. Only classes some producer sets exist: a class reached by
 /// guessing named the wrong stage (every retokenize refusal was once
-/// "mwt_reassembly_bug").
+/// "`mwt_reassembly_bug`").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MisalignmentClass {
     /// `%mor` chunk count and `%gra` relation count disagreed at injection
@@ -90,7 +91,8 @@ pub enum MisalignmentClass {
 
 impl MisalignmentClass {
     /// Stable label for tracing and structured decision evidence.
-    pub fn as_str(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::MorGraCountMismatch => "mor_gra_count_mismatch",
             Self::MergeCrossesContent => "merge_crosses_content",
@@ -539,15 +541,15 @@ mod tests {
         );
     }
 
-    /// Mor/Gra count mismatch (mors_total_chunks + 1 != gra_relations.len())
+    /// Mor/Gra count mismatch (`mors_total_chunks` + 1 != `gra_relations.len()`)
     /// must surface as an Err, silent emission of a misaligned pair was the
     /// dona@s bug class.
     ///
-    /// Setup: HELLO_CHAT's first utterance is `hello .` (1 alignable word).
+    /// Setup: `HELLO_CHAT`'s first utterance is `hello .` (1 alignable word).
     /// Supply 1 Mor (matching word count, so the upstream check passes) and
-    /// gra_relations of length 1, short by one (missing the terminator's
-    /// PUNCT entry that AppendTrailingPunct should have produced upstream).
-    /// MorTier with terminator counts 2 chunks; GraTier has 1 relation;
+    /// `gra_relations` of length 1, short by one (missing the terminator's
+    /// PUNCT entry that `AppendTrailingPunct` should have produced upstream).
+    /// `MorTier` with terminator counts 2 chunks; `GraTier` has 1 relation;
     /// inject must reject.
     #[test]
     fn inject_morphosyntax_gra_count_mismatch_returns_err() {

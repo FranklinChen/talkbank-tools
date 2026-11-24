@@ -23,7 +23,7 @@ use tracing::debug;
 /// An exclusive lock on one lock file, held while this value lives; dropping
 /// it releases the lock.
 #[derive(Debug)]
-pub(crate) struct HeldFileLock {
+pub struct HeldFileLock {
     path: PathBuf,
     /// Holding the descriptor is holding the lock; `Drop` releases it.
     file: std::fs::File,
@@ -132,7 +132,7 @@ impl Drop for HeldFileLock {
 }
 
 /// The lock file guarding `state_file`: `<state_file>.lock` beside it.
-pub(crate) fn lock_file_for(state_file: &Path) -> PathBuf {
+pub fn lock_file_for(state_file: &Path) -> PathBuf {
     let mut lock = state_file.as_os_str().to_os_string();
     lock.push(".lock");
     PathBuf::from(lock)
@@ -178,16 +178,26 @@ mod tests {
     /// Released by closing alone, the lock stayed held for that window, which
     /// made `a_publish_cannot_land_inside_a_removal` fail intermittently
     /// whenever another test spawned a process at that moment.
+    /// Guards: Dropping the parent guard releases the OS lock while its child still holds an inherited descriptor.
+    /// Kind: contract
+    /// Not a type: Rust ownership ends in one process while the kernel retains the shared open file description.
+    /// State: A private file and a forked child exercise the inherited descriptor before exec.
+    /// Concurrency: The parent tries reacquisition while the child sleeps and then reaps that child.
     #[cfg(unix)]
     #[test]
     fn dropping_releases_the_lock_while_a_forked_child_shares_the_descriptor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("slot.lock");
         let held = HeldFileLock::acquire(&path).expect("acquire");
+        // Reason: the property under test is a forked child sharing the
+        // descriptor, which only `fork` produces; `std::process` closes it
+        // on exec.
+        #[allow(unsafe_code)]
         // SAFETY: the child calls only async-signal-safe functions (`sleep`,
         // `_exit`) before it is killed below.
         let child = unsafe { libc::fork() };
         if child == 0 {
+            #[allow(unsafe_code)] // Reason: see `fork` above; this is its child.
             unsafe {
                 libc::sleep(30);
                 libc::_exit(0);
@@ -196,6 +206,8 @@ mod tests {
         assert!(child > 0, "fork failed");
         drop(held);
         let reacquired = HeldFileLock::try_acquire(&path).expect("try");
+        // Reason: `waitpid` reaps the child `fork` made above.
+        #[allow(unsafe_code)]
         // SAFETY: `child` is the process forked above.
         unsafe {
             libc::kill(child, libc::SIGKILL);

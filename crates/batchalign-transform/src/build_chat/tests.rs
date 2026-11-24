@@ -4,7 +4,7 @@ use crate::parse::{TreeSitterParser, parse_lenient};
 use crate::serialize::to_chat_string;
 use talkbank_model::model::TranscriptName;
 
-/// Helper: create a regular WordDesc with validated text and explicit kind.
+/// Helper: create a regular `WordDesc` with validated text and explicit kind.
 fn wd(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDesc {
     WordDesc {
         text: asr_postprocess::ChatWordText::try_from(text)
@@ -686,7 +686,7 @@ fn test_empty_participants_error() {
 
 // -- Retrace AST construction tests --
 
-/// Helper: create a retrace WordDesc.
+/// Helper: create a retrace `WordDesc`.
 fn wd_retrace(text: &str, start_ms: Option<u64>, end_ms: Option<u64>) -> WordDesc {
     WordDesc {
         text: asr_postprocess::ChatWordText::try_from(text)
@@ -923,15 +923,15 @@ fn media_header_has_comma_separator() {
     );
 }
 
-/// Bug 2: When transcript_from_asr_utterances generates participants
+/// Bug 2: When `transcript_from_asr_utterances` generates participants
 /// from speaker IDs, it must set name and role from the speaker code.
 /// PAR → Participant, INV → Investigator. No silent defaults.
 ///
 /// a user saw: `PAR Participant Participant, INV Participant Participant`
 /// Expected:   `PAR Participant , INV Investigator`
 ///
-/// The root cause is transcript_from_asr_utterances setting name=None,
-/// role=None and build_chat silently defaulting both to "Participant".
+/// The root cause is `transcript_from_asr_utterances` setting name=None,
+/// role=None and `build_chat` silently defaulting both to "Participant".
 #[test]
 fn asr_pipeline_sets_correct_participant_roles() {
     use asr_postprocess::{AsrWord, SpeakerIndex, Utterance};
@@ -1257,7 +1257,7 @@ fn user_report_proper_nouns_preserved_from_rev_ai() {
 // §4 for the triage rationale.
 // -------------------------------------------------------------------
 
-/// Build a one-speaker AsrOutput from (value, start_s, end_s) triples.
+/// Build a one-speaker `AsrOutput` from (value, `start_s`, `end_s`) triples.
 /// Small helper kept for the user canary; re-used if additional
 /// end-to-end B-witnesses are added later.
 fn asr_single_speaker(elements: &[(&str, f64, f64)]) -> asr_postprocess::AsrOutput {
@@ -1277,8 +1277,8 @@ fn asr_single_speaker(elements: &[(&str, f64, f64)]) -> asr_postprocess::AsrOutp
     }
 }
 
-/// Run the full Rev.AI-facing chain: process_raw_asr → transcript builder
-/// → build_chat → serialize → re-parse. Returns the serialized CHAT and
+/// Run the full Rev.AI-facing chain: `process_raw_asr` → transcript builder
+/// → `build_chat` → serialize → re-parse. Returns the serialized CHAT and
 /// the parse errors the lenient parser emits on the re-parse.
 fn asr_to_chat_roundtrip(
     output: &asr_postprocess::AsrOutput,

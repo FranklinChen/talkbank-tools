@@ -204,7 +204,7 @@ fn install_spans(
 ///    `infer_batch`
 /// 3. Merges each span with its secondary analysis (the secondary owns the
 ///    words' morphology, the primary the span's attachment)
-/// 4. Splices the merged spans into the ChatFile, replacing `L2|xxx`
+/// 4. Splices the merged spans into the `ChatFile`, replacing `L2|xxx`
 ///
 /// Words of unsupported languages, failed dispatches and spans whose
 /// secondary analysis does not merge keep `L2|xxx`, each reported.
@@ -214,7 +214,7 @@ fn install_spans(
 /// primary-language ones and counts their repairs with the rest.
 /// Cancellation is not a successful placeholder fallback: it aborts this
 /// transition, so callers cannot post-validate or write a stopped analysis.
-pub(crate) async fn dispatch_secondary_l2(
+pub async fn dispatch_secondary_l2(
     chat_file: &mut ChatFile,
     deferred: Vec<l2::L2DeferredPosition>,
     primary: &Admitted<Morphosyntax>,
@@ -223,14 +223,16 @@ pub(crate) async fn dispatch_secondary_l2(
     cancellation: Cancellation<'_>,
 ) -> Result<AppliedAnalyses, ServerError> {
     cancellation
-        .supervise(Box::pin(dispatch_secondary_l2_active(
-            chat_file,
-            deferred,
-            primary,
-            services,
-            filename,
-            cancellation,
-        )))
+        .supervise(|| {
+            Box::pin(dispatch_secondary_l2_active(
+                chat_file,
+                deferred,
+                primary,
+                services,
+                filename,
+                cancellation,
+            ))
+        })
         .await?
 }
 
@@ -366,6 +368,11 @@ mod tests {
         )
     }
 
+    /// Guards: Missing, extra and empty secondary replies record specific shortfalls without editing CHAT or provenance.
+    /// Kind: wire
+    /// Not a type: External results may have the wrong count or empty content after valid span planning.
+    /// State: A parsed source, retained span and scripted empty responses feed production completion.
+    /// Concurrency: Independent source and results for each response shape.
     #[test]
     fn unanswered_and_empty_secondary_spans_are_reported_without_provenance_or_mutation() {
         for response_count in [0, 1, 2] {
@@ -411,6 +418,11 @@ mod tests {
         }
     }
 
+    /// Guards: A successfully planned secondary analysis contributes provenance only after installation.
+    /// Kind: transcript
+    /// Not a type: A real morphology response can be admitted before any of its actual annotation reaches the document.
+    /// State: One parsed source and a synthetic word analysis exercise merge, install and serialized output.
+    /// Concurrency: All operations use one owned source in order.
     #[test]
     fn secondary_provenance_is_recorded_only_after_actual_installation() {
         let (mut chat, spans) = planned_fixture();
@@ -443,6 +455,11 @@ mod tests {
         assert!(batchalign_transform::serialize::to_chat_string(&chat).contains("noun|mundo"));
     }
 
+    /// Guards: A cancelled secondary transition reports cancellation and preserves the source bytes.
+    /// Kind: contract
+    /// Not a type: A valid source and a stopped job can arrive together before the transition judges its work.
+    /// State: One parsed source, a stopped token and inert pipeline services give the real secondary gate its inputs.
+    /// Concurrency: The token is already cancelled before dispatch is polled.
     #[tokio::test]
     async fn cancelled_secondary_transition_cannot_admit_applied_analysis() {
         use crate::cache::UtteranceCache;
@@ -454,10 +471,7 @@ mod tests {
         let (mut chat, _) =
             batchalign_transform::parse::parse_lenient(&crate::chat_parser(), input);
         let before = batchalign_transform::serialize::to_chat_string(&chat);
-        let scratch = tempfile::tempdir().expect("test cache directory");
-        let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
-            .await
-            .expect("test cache");
+        let cache = UtteranceCache::noop();
         let pool = WorkerPool::new(PoolConfig::for_tests());
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
@@ -477,6 +491,11 @@ mod tests {
         );
     }
 
+    /// Guards: A jobless secondary transition with no work succeeds and keeps source bytes.
+    /// Kind: policy
+    /// Not a type: No work may be an admissible runtime outcome even in the absence of a local job token.
+    /// State: One parsed source, an empty deferred list and inert pipeline services witness the no-op.
+    /// Concurrency: One task owns the before and after transcript.
     #[tokio::test]
     async fn secondary_transition_with_no_work_and_no_job_remains_successful() {
         use crate::cache::UtteranceCache;
@@ -488,10 +507,7 @@ mod tests {
         let (mut chat, _) =
             batchalign_transform::parse::parse_lenient(&crate::chat_parser(), input);
         let before = batchalign_transform::serialize::to_chat_string(&chat);
-        let scratch = tempfile::tempdir().expect("test cache directory");
-        let cache = UtteranceCache::sqlite(Some(scratch.path().join("cache")))
-            .await
-            .expect("test cache");
+        let cache = UtteranceCache::noop();
         let pool = WorkerPool::new(PoolConfig::for_tests());
         let result = dispatch_secondary_l2(
             &mut chat,

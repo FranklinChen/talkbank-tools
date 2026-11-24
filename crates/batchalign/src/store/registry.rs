@@ -27,7 +27,7 @@ use super::job::{
 /// Currently used only by the test-only queue-claim path.
 #[cfg(test)]
 #[derive(Debug, Clone)]
-pub(crate) struct ClaimedLeaseRecord {
+pub struct ClaimedLeaseRecord {
     /// Job whose runner claim was acquired.
     pub(crate) job_id: JobId,
     /// Lease details that should be written to SQLite.
@@ -43,7 +43,7 @@ pub(crate) struct ClaimedLeaseRecord {
 /// `store/queries/dispatch.rs`, so its home is beside the wrapper below.
 #[cfg(test)]
 #[derive(Debug, Default)]
-pub(crate) struct QueuePoll {
+pub struct QueuePoll {
     /// Job IDs that are ready to run now and have been claimed by the backend.
     pub ready_job_ids: Vec<JobId>,
     /// Earliest future eligibility timestamp among still-queued jobs.
@@ -55,7 +55,7 @@ pub(crate) struct QueuePoll {
 /// Currently used only by the test-only queue-claim path.
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct ClaimedQueuePoll {
+pub struct ClaimedQueuePoll {
     /// Queue wakeup information for the dispatcher loop.
     pub(crate) poll: QueuePoll,
     /// Leases that must be mirrored into SQLite after the lock is released.
@@ -63,19 +63,19 @@ pub(crate) struct ClaimedQueuePoll {
 }
 
 /// The dispatch's actual exit, distinct from the derived job status.
-pub(crate) enum RunExit {
+pub enum RunExit {
     Dispatched,
     Failed(String),
 }
 
 /// Cleanup admitted by a run claim, ready for persistence and notification.
-pub(crate) struct ForcedFileUpdate {
+pub struct ForcedFileUpdate {
     pub update: FileUpdateProjection,
     pub failure: FileFailureRecord,
 }
 
 /// Effects of the registry's atomic completion transition.
-pub(crate) struct FinishedRunProjection {
+pub struct FinishedRunProjection {
     pub job_update: JobListItem,
     pub files: Vec<ForcedFileUpdate>,
     pub cleanup: CompletionCleanup,
@@ -83,19 +83,19 @@ pub(crate) struct FinishedRunProjection {
 
 /// Attempt bookkeeping admitted with the file cleanup, never inferred again
 /// from an error message or a possibly restarted job.
-pub(crate) enum CompletionCleanup {
+pub enum CompletionCleanup {
     Cancelled,
     SystemFailures(usize),
 }
 
 /// Superseded claims cannot produce file updates or a terminal projection.
-pub(crate) enum RunFinishProjection {
+pub enum RunFinishProjection {
     Superseded,
     Finished(Box<FinishedRunProjection>),
 }
 
 /// Admitted effects retain the old owner's claim until persistence ends.
-pub(crate) struct FinishingRun {
+pub struct FinishingRun {
     pub claim: crate::store::RunnerClaim,
     pub projection: RunFinishProjection,
 }
@@ -104,7 +104,7 @@ pub(crate) struct FinishingRun {
 /// a different fact: two are expected in a run's ordinary life, two say the
 /// runner and the store disagree about the job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefusedFileWrite {
+pub enum RefusedFileWrite {
     /// The job is no longer in the store.
     NoSuchJob,
     /// The run was cancelled or restarted; the job's files now belong to
@@ -143,7 +143,7 @@ impl RefusedFileWrite {
 
 /// One file update projected into the WebSocket/dashboard shape.
 #[derive(Debug, Clone)]
-pub(crate) struct FileUpdateProjection {
+pub struct FileUpdateProjection {
     /// Parent job that owns the updated file.
     pub job_id: JobId,
     /// Current API-facing file status entry.
@@ -156,7 +156,7 @@ pub(crate) struct FileUpdateProjection {
 
 /// Restart result that carries both REST and WebSocket projections.
 #[derive(Debug, Clone)]
-pub(crate) struct JobRestartProjection {
+pub struct JobRestartProjection {
     /// REST response payload for the restart endpoint.
     pub info: JobInfo,
     /// Summary row that should be published to WebSocket listeners.
@@ -186,11 +186,11 @@ enum RegistryCommand {
 /// In-memory registry of all known jobs.
 ///
 /// `JobStore` owns one registry instance for the lifetime of the server. The
-/// registry intentionally does not know about SQLite, WebSockets, or route
+/// registry intentionally does not know about SQLite, `WebSockets`, or route
 /// semantics; it is only the in-memory ownership boundary around the current
 /// set of jobs. The collection itself now lives inside one owned actor task, so
 /// callers talk to a message boundary rather than directly sharing a mutex.
-pub(crate) struct JobRegistry {
+pub struct JobRegistry {
     commands: UnboundedSender<RegistryCommand>,
 }
 

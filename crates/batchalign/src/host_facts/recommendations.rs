@@ -102,7 +102,7 @@ impl<T: Copy> PerProfile<T> {
     /// Lookup by profile. Single source of truth for the
     /// `WorkerProfile -> field` mapping; replaces inline match arms
     /// at admission-control and metrics-snapshot callsites.
-    pub fn get(&self, profile: crate::worker::WorkerProfile) -> T {
+    pub const fn get(&self, profile: crate::worker::WorkerProfile) -> T {
         match profile {
             crate::worker::WorkerProfile::Gpu => self.gpu,
             crate::worker::WorkerProfile::Stanza => self.stanza,
@@ -114,7 +114,7 @@ impl<T: Copy> PerProfile<T> {
     /// Used at the `EffectiveConfig → PoolConfig` boundary when an
     /// operator override carries a single value to apply to all
     /// profiles uniformly.
-    pub fn uniform(value: T) -> Self {
+    pub const fn uniform(value: T) -> Self {
         Self {
             gpu: value,
             stanza: value,
@@ -139,6 +139,7 @@ impl<T: Copy> PerProfile<T> {
 /// Every field of `RecommendedKnobs` is computed by its own helper so
 /// the per-knob rationale stays close to the per-knob value. Adding a
 /// new knob is a two-line change here plus a new helper plus tests.
+#[must_use]
 pub fn recommend(facts: &HostFacts) -> RecommendedKnobs {
     RecommendedKnobs {
         gpu_thread_pool_size: recommend_gpu_thread_pool_size(facts),
@@ -154,7 +155,7 @@ pub fn recommend(facts: &HostFacts) -> RecommendedKnobs {
 /// Rule: match the Python `ThreadPoolExecutor` capacity to the
 /// underlying compute device's real parallelism.
 ///
-/// - **CUDA-capable host**: 4. PyTorch releases the GIL during native
+/// - **CUDA-capable host**: 4. `PyTorch` releases the GIL during native
 ///   CUDA calls, so four Python threads sharing one process can run
 ///   four inferences concurrently. Matches today's static default.
 /// - **CPU-only host** (no functional GPU detected, including Apple
@@ -168,12 +169,13 @@ pub fn recommend(facts: &HostFacts) -> RecommendedKnobs {
 /// default was a CUDA-host assumption baked into a constant. On
 /// Apple Silicon (the entire current fleet), 4 produces silent
 /// contention without any throughput gain. The architectural fix
-/// for the dispatch_semaphore (see
+/// for the `dispatch_semaphore` (see
 /// `book/src/batchalign/developer/worker-protocol-v2.md` § "The dispatch
 /// semaphore contract") removed the spurious-timeout failure mode;
 /// matching K to the real device parallelism removes the
 /// contention-without-gain failure mode.
-pub fn recommend_gpu_thread_pool_size(facts: &HostFacts) -> u32 {
+#[must_use]
+pub const fn recommend_gpu_thread_pool_size(facts: &HostFacts) -> u32 {
     if facts.gpu.is_functional_for_batchalign() {
         4
     } else {
@@ -239,6 +241,7 @@ const TOTAL_WORKERS_FALLBACK_ON_ZERO_RAM: u32 = 4;
 /// on currently-available bytes). The runtime memory gate continues
 /// to refuse spawns that would exceed real-time pressure thresholds,
 /// so the higher cap does not cause over-spawn.
+#[must_use]
 pub fn recommend_max_total_workers(facts: &HostFacts) -> u32 {
     if facts.ram_total_mb == 0 {
         return TOTAL_WORKERS_FALLBACK_ON_ZERO_RAM;
@@ -320,7 +323,7 @@ const PEAK_RAM_PER_STANZA_WORKER_MB: u64 = 12_000;
 /// capabilities. That blocked startup on 16 GB laptops doing
 /// morphotag-only work, exactly the laptop-class scenario the
 /// rearch was meant to support. The runtime gates
-/// (memory_gate.rs admission, idle_eviction.rs eviction, RSS observer
+/// (`memory_gate.rs` admission, `idle_eviction.rs` eviction, RSS observer
 /// Mode B) are tier-aware via [`MemoryTier`]'s
 /// `{gpu,stanza,io}_startup_mb` fields; this function now consults the
 /// same source of truth. The boot-time gate's job is to refuse
@@ -333,6 +336,7 @@ const PEAK_RAM_PER_STANZA_WORKER_MB: u64 = 12_000;
 /// Stanza 3 GB, IO 2 GB → returns 6 GB. On Large/Fleet (≥ 48 GB),
 /// returns 16 GB (the eager-load GPU profile). The runtime gates
 /// still refuse actual at-spawn OOM via observed RSS.
+#[must_use]
 pub fn worst_case_per_job_peak_ram_mb(tier: &runtime::MemoryTier) -> u64 {
     let MemoryMb(gpu) = tier.gpu_startup_mb;
     let MemoryMb(stanza) = tier.stanza_startup_mb;
@@ -363,6 +367,7 @@ pub fn worst_case_per_job_peak_ram_mb(tier: &runtime::MemoryTier) -> u64 {
 ///
 /// On a typical Large-tier host (64 GB), the recommendation is 4 for
 /// GPU and 5 for Stanza, close to today's flat 4, no surprises.
+#[must_use]
 pub fn recommend_max_workers_per_key(facts: &HostFacts) -> PerProfile<u32> {
     let max_gpu = u32::try_from(crate::runtime::max_gpu_workers()).unwrap_or(u32::MAX);
     let max_thread = u32::try_from(crate::runtime::max_thread_workers()).unwrap_or(u32::MAX);
@@ -408,6 +413,7 @@ fn ram_divided(ram_total_mb: u64, divisor_mb: u64) -> u32 {
 /// (≥128 GB) the recommendation now climbs to 8 instead of being
 /// pinned at 4; admission control moves to the live gates in
 /// `worker/pool/cpu_gate.rs` and `worker/pool/memory_gate.rs`.
+#[must_use]
 pub fn recommend_max_concurrent_jobs(facts: &HostFacts) -> u32 {
     let tier = crate::runtime::MemoryTier::from_total_mb(facts.ram_total_mb);
     let by_cpu: usize = usize::try_from(facts.cpu_logical_count.max(1)).unwrap_or(usize::MAX);
@@ -428,7 +434,8 @@ pub fn recommend_max_concurrent_jobs(facts: &HostFacts) -> u32 {
 /// device-availability fact, not a tuning choice. There is no host
 /// where "GPU is functional and we recommend forcing CPU"; that
 /// situation is exclusively an operator override.
-pub fn recommend_force_cpu(facts: &HostFacts) -> bool {
+#[must_use]
+pub const fn recommend_force_cpu(facts: &HostFacts) -> bool {
     !facts.gpu.is_functional_for_batchalign()
 }
 
@@ -438,6 +445,7 @@ mod tests {
         CpuArch, DetectionWarning, GpuPresence, MpsExclusionReason, OperatingSystem,
     };
     use super::*;
+    // Test concurrency pure-recommendation: None. Every recommendation helper is a pure function of an in-memory `HostFacts` value, so these tests share no resource and can run in any order or in parallel.
 
     /// Synthesize a `HostFacts` for tests. Builder-style: callers tweak
     /// the fields they care about and accept the rest as defaults. The
@@ -503,199 +511,97 @@ mod tests {
         )
     }
 
-    // -------------------------------------------------------------------
-    // Apple Silicon: the entire current fleet. Every fleet RAM size
-    // gets its own row so a future formula change that accidentally
-    // returns >1 on small or large hosts trips a test.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn apple_silicon_16gb_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&apple_silicon(16)), 1);
+    fn cmd(name: &str) -> ReleasedCommand {
+        ReleasedCommand::try_from(name).expect("test command literal must be a known command")
     }
 
+    /// Guards: Every detected GPU shape maps to the device-parallelism cap the dispatch semaphore reads: functional GPU 4, otherwise 1.
+    /// Kind: policy
+    /// Not a type: `GpuPresence` is a closed enum and `is_functional_for_batchalign` is a pure query, but the choice that functional means four in-flight calls and every excluded class means one is a policy the type cannot carry; each original shape stays a row so a formula change cannot silently alter one class.
+    /// State: None. Twelve in-memory host shapes cover five fleet RAM sizes, single and dual CUDA, both no-GPU OS classes, zero-device CUDA and both Other-flag values.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn apple_silicon_32gb_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&apple_silicon(32)), 1);
-    }
-
-    #[test]
-    fn apple_silicon_64gb_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&apple_silicon(64)), 1);
-    }
-
-    #[test]
-    fn apple_silicon_96gb_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&apple_silicon(96)), 1);
-    }
-
-    #[test]
-    fn apple_silicon_256gb_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&apple_silicon(256)), 1);
-    }
-
-    // -------------------------------------------------------------------
-    // CUDA: the value the legacy static default was implicitly tuned
-    // for. Single-device and multi-device should both recommend 4.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn linux_single_cuda_recommends_four_threads() {
-        assert_eq!(
-            recommend_gpu_thread_pool_size(&linux_cuda(64, 1, 24_000)),
-            4
-        );
-    }
-
-    #[test]
-    fn linux_dual_cuda_recommends_four_threads() {
-        assert_eq!(
-            recommend_gpu_thread_pool_size(&linux_cuda(256, 2, 48_000)),
-            4
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // CPU-only fallthroughs: Linux without CUDA, Windows without a
-    // characterized GPU. Both must conservatively recommend 1.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn linux_without_gpu_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&linux_no_gpu(64)), 1);
-    }
-
-    #[test]
-    fn windows_without_gpu_recommends_one_thread() {
-        assert_eq!(recommend_gpu_thread_pool_size(&windows_no_gpu(32)), 1);
-    }
-
-    // -------------------------------------------------------------------
-    // Edge cases for `GpuPresence`. The function inspects only
-    // `is_functional_for_batchalign`; verifying that the wrapper
-    // matches the field-level expectation guards against a future
-    // refactor that breaks the contract.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn cuda_with_zero_devices_recommends_one_thread() {
-        // Zero device_count means the probe parsed but found nothing;
-        // is_functional_for_batchalign returns false, so K = 1.
-        assert_eq!(recommend_gpu_thread_pool_size(&linux_cuda(64, 0, 0)), 1);
-    }
-
-    #[test]
-    fn other_gpu_marked_functional_recommends_four() {
-        // A future CUDA-equivalent (e.g., AMD ROCm) can be made
-        // functional by setting the flag; the recommendation function
-        // honors the flag without needing to know the device kind.
-        let mut other = facts(
-            OperatingSystem::Linux,
-            CpuArch::X86_64,
-            GpuPresence::Other {
-                device_kind: "rocm".into(),
-                functional_for_batchalign: true,
-            },
-            64,
-        );
-        // The struct is fine as-is; just for clarity:
-        let _ = &mut other;
-        assert_eq!(recommend_gpu_thread_pool_size(&other), 4);
-    }
-
-    #[test]
-    fn other_gpu_marked_nonfunctional_recommends_one() {
-        let other = facts(
-            OperatingSystem::Linux,
-            CpuArch::X86_64,
-            GpuPresence::Other {
-                device_kind: "rocm".into(),
-                functional_for_batchalign: false,
-            },
-            64,
-        );
-        assert_eq!(recommend_gpu_thread_pool_size(&other), 1);
-    }
-
-    // -------------------------------------------------------------------
-    // force_cpu: derived from `GpuPresence::is_functional_for_batchalign`,
-    // inverted. Apple Silicon and any non-functional GPU recommend
-    // force_cpu = true; CUDA recommends force_cpu = false. Same fact
-    // shapes as gpu_thread_pool_size so a future divergence in either
-    // recommendation surfaces as a row mismatch.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn apple_silicon_recommends_force_cpu_true() {
-        for ram_gb in [16, 32, 64, 96, 256] {
-            assert!(
-                recommend_force_cpu(&apple_silicon(ram_gb)),
-                "Apple Silicon at {ram_gb}GB must recommend force_cpu = true"
+    fn gpu_thread_pool_size_matches_device_parallelism() {
+        let other = |functional| {
+            facts(
+                OperatingSystem::Linux,
+                CpuArch::X86_64,
+                GpuPresence::Other {
+                    device_kind: "rocm".into(),
+                    functional_for_batchalign: functional,
+                },
+                64,
+            )
+        };
+        let cases: Vec<(&str, HostFacts, u32)> = vec![
+            ("apple 16gb", apple_silicon(16), 1),
+            ("apple 32gb", apple_silicon(32), 1),
+            ("apple 64gb", apple_silicon(64), 1),
+            ("apple 96gb", apple_silicon(96), 1),
+            ("apple 256gb", apple_silicon(256), 1),
+            ("linux single cuda", linux_cuda(64, 1, 24_000), 4),
+            ("linux dual cuda", linux_cuda(256, 2, 48_000), 4),
+            ("linux no gpu", linux_no_gpu(64), 1),
+            ("windows no gpu", windows_no_gpu(32), 1),
+            ("cuda zero devices", linux_cuda(64, 0, 0), 1),
+            ("other functional", other(true), 4),
+            ("other nonfunctional", other(false), 1),
+        ];
+        for (label, shape, expected) in cases {
+            assert_eq!(
+                recommend_gpu_thread_pool_size(&shape),
+                expected,
+                "{label} must recommend {expected} threads"
             );
         }
     }
 
+    /// Guards: Every detected GPU shape maps to `force_cpu` as the inverse of device functionality.
+    /// Kind: policy
+    /// Not a type: `force_cpu` is derived from the same closed enum query, but that an excluded device forces CPU and a functional one does not is a deployment policy; the original shape set stays as rows so the two knobs cannot drift apart silently.
+    /// State: None. The same twelve declared shapes as the thread-pool matrix, all in memory.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn linux_cuda_recommends_force_cpu_false() {
-        assert!(!recommend_force_cpu(&linux_cuda(64, 1, 24_000)));
-        assert!(!recommend_force_cpu(&linux_cuda(256, 2, 48_000)));
+    fn force_cpu_matches_device_functionality() {
+        let other = |functional| {
+            facts(
+                OperatingSystem::Linux,
+                CpuArch::X86_64,
+                GpuPresence::Other {
+                    device_kind: "rocm".into(),
+                    functional_for_batchalign: functional,
+                },
+                64,
+            )
+        };
+        let cases: Vec<(&str, HostFacts, bool)> = vec![
+            ("apple 16gb", apple_silicon(16), true),
+            ("apple 32gb", apple_silicon(32), true),
+            ("apple 64gb", apple_silicon(64), true),
+            ("apple 96gb", apple_silicon(96), true),
+            ("apple 256gb", apple_silicon(256), true),
+            ("linux single cuda", linux_cuda(64, 1, 24_000), false),
+            ("linux dual cuda", linux_cuda(256, 2, 48_000), false),
+            ("linux no gpu", linux_no_gpu(64), true),
+            ("windows no gpu", windows_no_gpu(32), true),
+            ("cuda zero devices", linux_cuda(64, 0, 0), true),
+            ("other functional", other(true), false),
+            ("other nonfunctional", other(false), true),
+        ];
+        for (label, shape, expected) in cases {
+            assert_eq!(
+                recommend_force_cpu(&shape),
+                expected,
+                "{label} must recommend force_cpu = {expected}"
+            );
+        }
     }
 
-    #[test]
-    fn linux_without_gpu_recommends_force_cpu_true() {
-        assert!(recommend_force_cpu(&linux_no_gpu(64)));
-    }
-
-    #[test]
-    fn windows_without_gpu_recommends_force_cpu_true() {
-        assert!(recommend_force_cpu(&windows_no_gpu(32)));
-    }
-
-    #[test]
-    fn cuda_with_zero_devices_recommends_force_cpu_true() {
-        // is_functional_for_batchalign returns false when device_count
-        // is zero, so the recommendation is force_cpu = true even
-        // though the variant is technically NvidiaCuda.
-        assert!(recommend_force_cpu(&linux_cuda(64, 0, 0)));
-    }
-
-    #[test]
-    fn other_gpu_marked_functional_recommends_force_cpu_false() {
-        let other = facts(
-            OperatingSystem::Linux,
-            CpuArch::X86_64,
-            GpuPresence::Other {
-                device_kind: "rocm".into(),
-                functional_for_batchalign: true,
-            },
-            64,
-        );
-        assert!(!recommend_force_cpu(&other));
-    }
-
-    #[test]
-    fn other_gpu_marked_nonfunctional_recommends_force_cpu_true() {
-        let other = facts(
-            OperatingSystem::Linux,
-            CpuArch::X86_64,
-            GpuPresence::Other {
-                device_kind: "rocm".into(),
-                functional_for_batchalign: false,
-            },
-            64,
-        );
-        assert!(recommend_force_cpu(&other));
-    }
-
-    // -------------------------------------------------------------------
-    // Cross-knob consistency: on every fact shape, `force_cpu` and
-    // `gpu_thread_pool_size > 1` must move together. Either both
-    // signal "use the GPU" or both signal "stay on CPU." A future
-    // formula change that breaks this invariant, e.g., a host with
-    // force_cpu=true but gpu_thread_pool_size=4: is incoherent and
-    // should fail this test loudly.
-    // -------------------------------------------------------------------
-
+    /// Guards: `force_cpu` and `gpu_thread_pool_size` agree across every host shape: `force_cpu` exactly when the thread cap is 1.
+    /// Kind: contract
+    /// Not a type: Both knobs derive from `is_functional_for_batchalign`, but the compiler cannot prove two independently written helpers stay consistent; the closed shape set is the remaining boundary.
+    /// State: None. Seven declared host shapes built in memory.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn force_cpu_and_gpu_thread_pool_size_agree_across_shapes() {
         let shapes: Vec<HostFacts> = vec![
@@ -726,68 +632,45 @@ mod tests {
     // test grows alongside.
     // -------------------------------------------------------------------
 
-    // -------------------------------------------------------------------
-    // max_total_workers: RAM-derived cap. One row per fleet RAM bucket
-    // plus clamp boundaries plus the zero-RAM fallback.
-    // -------------------------------------------------------------------
-
+    /// Guards: The RAM-derived global worker cap matches the legacy formula at every fleet bucket, its two clamp boundaries, the zero-RAM sysinfo fallback and u64 overflow.
+    /// Kind: measurement
+    /// Not a type: The cap is a u32 clamp over a u64 RAM reading; the compiler cannot pin the 6 GB divisor, the [2, 32] bounds or the distinct zero-fallback branch, so each boundary stays a row.
+    /// State: None. Nine declared in-memory shapes; zero and `u64::MAX` RAM override one shape's reading.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn max_total_workers_8gb_clamps_to_min() {
-        // 8 / 6 = 1, clamped to MIN = 2.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(8)), 2);
+    fn max_total_workers_matches_ram_formula_and_bounds() {
+        let ram = |mb| {
+            let mut shape = apple_silicon(8);
+            shape.ram_total_mb = mb;
+            shape
+        };
+        let cases: Vec<(&str, HostFacts, u32)> = vec![
+            ("8gb clamps to min", apple_silicon(8), 2),
+            ("16gb at min", apple_silicon(16), 2),
+            ("32gb", apple_silicon(32), 5),
+            ("64gb", apple_silicon(64), 10),
+            ("96gb", apple_silicon(96), 16),
+            ("192gb at max", apple_silicon(192), 32),
+            ("256gb clamps to max", apple_silicon(256), 32),
+            ("zero ram fallback", ram(0), 4),
+            ("u64 overflow clamps to max", ram(u64::MAX), 32),
+        ];
+        for (label, shape, expected) in cases {
+            assert_eq!(
+                recommend_max_total_workers(&shape),
+                expected,
+                "{label} must recommend {expected} total workers"
+            );
+        }
     }
 
-    #[test]
-    fn max_total_workers_16gb_clamps_to_min() {
-        // 16 / 6 = 2, exactly at MIN.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(16)), 2);
-    }
-
-    #[test]
-    fn max_total_workers_32gb() {
-        // 32 / 6 = 5; no clamp.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(32)), 5);
-    }
-
-    #[test]
-    fn max_total_workers_64gb() {
-        // 64 / 6 = 10; no clamp.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(64)), 10);
-    }
-
-    #[test]
-    fn max_total_workers_96gb() {
-        // 96 / 6 = 16; no clamp.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(96)), 16);
-    }
-
-    #[test]
-    fn max_total_workers_192gb_at_clamp_boundary() {
-        // 192 / 6 = 32, exactly at MAX.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(192)), 32);
-    }
-
-    #[test]
-    fn max_total_workers_256gb_clamps_to_max() {
-        // 256 / 6 = 42, clamped to MAX = 32.
-        assert_eq!(recommend_max_total_workers(&apple_silicon(256)), 32);
-    }
-
-    #[test]
-    fn max_total_workers_zero_ram_returns_fallback() {
-        // Pathological: ram_total_mb = 0 indicates a sysinfo failure.
-        // Conservative fallback prevents the recommendation from
-        // returning the MIN clamp (which would be 2) and giving the
-        // false impression of a tiny but real host.
-        let mut shape = apple_silicon(8);
-        shape.ram_total_mb = 0;
-        assert_eq!(recommend_max_total_workers(&shape), 4);
-    }
-
+    /// Guards: The global worker cap depends on RAM, not GPU class.
+    /// Kind: policy
+    /// Not a type: A private RAM-only view could hide GPU fields inside the formula, but the supported public helper takes `&HostFacts`; preserving that interface means a future contributor can still consult GPU class at the boundary, so four equal-RAM shapes remain the oracle.
+    /// State: None. Four declared in-memory shapes share 64 GB RAM.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn max_total_workers_independent_of_gpu_presence() {
-        // The cap is a function of RAM, not GPU, so identical RAM on
-        // different GPU classes must produce the same recommendation.
         let apple = apple_silicon(64);
         let cuda = linux_cuda(64, 1, 24_000);
         let no_gpu = linux_no_gpu(64);
@@ -798,115 +681,51 @@ mod tests {
         assert_eq!(recommend_max_total_workers(&win), expected);
     }
 
+    /// Guards: Concurrent job slots follow the RAM tier ceiling and CPU count together across Small, Medium, Large and Fleet tiers, their shared boundary, zero CPU and the high-CPU clamp.
+    /// Kind: measurement
+    /// Not a type: `max_concurrent_jobs` is a u32 clamped by two independent axes (CPU and tier ceiling) and an off-by-one RAM boundary at 48 GB; the compiler cannot pin either the boundary or which axis binds, so each original probe remains a row.
+    /// State: None. Declared in-memory shapes; CPU count and RAM bytes are overridden per row without touching the host.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn max_total_workers_overflow_safe_on_huge_ram() {
-        // u64::MAX / 6 GB exceeds u32::MAX; the saturating conversion
-        // must not panic and the clamp must still cap at MAX.
-        let mut shape = apple_silicon(64);
-        shape.ram_total_mb = u64::MAX;
-        assert_eq!(recommend_max_total_workers(&shape), 32);
-    }
-
-    // -------------------------------------------------------------------
-    // max_concurrent_jobs: RAM-tier × CPU-count, with both axes
-    // constraining the result.
-    // -------------------------------------------------------------------
-
-    /// Small tier (<24 GB) is memory-limited to 1 regardless of CPU count.
-    #[test]
-    fn max_concurrent_jobs_small_tier_is_one() {
-        for cpu in [1, 4, 8, 16] {
+    fn max_concurrent_jobs_follows_tier_and_cpu() {
+        let shaped = |ram: u64, cpu| {
             let mut shape = apple_silicon(16);
+            shape.ram_total_mb = ram;
             shape.cpu_logical_count = cpu;
+            shape
+        };
+        // 47 GB * 1024 = 48128, so the exact boundary is expressed in MB.
+        let cases: Vec<(&str, HostFacts, u32)> = vec![
+            ("small tier 1 cpu", shaped(16 * 1024, 1), 1),
+            ("small tier 4 cpu", shaped(16 * 1024, 4), 1),
+            ("small tier 8 cpu", shaped(16 * 1024, 8), 1),
+            ("small tier 16 cpu", shaped(16 * 1024, 16), 1),
+            ("medium tier 1 cpu", shaped(32 * 1024, 1), 1),
+            ("medium tier 8 cpu", shaped(32 * 1024, 8), 1),
+            ("medium tier 16 cpu", shaped(32 * 1024, 16), 1),
+            ("large tier memory bound", shaped(64 * 1024, 12), 4),
+            ("large tier cpu bound", shaped(64 * 1024, 2), 2),
+            ("fleet tier memory bound", shaped(256 * 1024, 24), 8),
+            ("fleet tier cpu bound", shaped(256 * 1024, 4), 4),
+            ("just below large boundary", shaped(47_999, 12), 1),
+            ("at large boundary", shaped(48_000, 12), 4),
+            ("zero cpu", shaped(64 * 1024, 0), 1),
+            ("high cpu fleet clamps at eight", shaped(256 * 1024, 32), 8),
+        ];
+        for (label, shape, expected) in cases {
             assert_eq!(
                 recommend_max_concurrent_jobs(&shape),
-                1,
-                "small-tier host with {cpu} CPUs must recommend 1 (memory-limited)"
+                expected,
+                "{label} must recommend {expected} concurrent jobs"
             );
         }
     }
 
-    /// Medium tier (24-48 GB) is also memory-limited to 1.
-    #[test]
-    fn max_concurrent_jobs_medium_tier_is_one() {
-        for cpu in [1, 8, 16] {
-            let mut shape = apple_silicon(32);
-            shape.cpu_logical_count = cpu;
-            assert_eq!(recommend_max_concurrent_jobs(&shape), 1);
-        }
-    }
-
-    /// Large tier (48-128 GB) caps at 4; CPU-bound below that.
-    #[test]
-    fn max_concurrent_jobs_large_tier_memory_bound() {
-        let mut shape = apple_silicon(64);
-        shape.cpu_logical_count = 12;
-        assert_eq!(recommend_max_concurrent_jobs(&shape), 4);
-    }
-
-    #[test]
-    fn max_concurrent_jobs_large_tier_cpu_bound() {
-        let mut shape = apple_silicon(64);
-        shape.cpu_logical_count = 2;
-        assert_eq!(
-            recommend_max_concurrent_jobs(&shape),
-            2,
-            "Large-tier host with only 2 CPUs must be CPU-bound to 2"
-        );
-    }
-
-    /// Fleet tier (≥128 GB) recommendation is bounded by the
-    /// `max_suggested_workers = 8` tier ceiling and the
-    /// `AUTO_CONCURRENT_MAX_SLOTS = 8` CPU clamp; both upper bounds
-    /// are 8, so any Fleet host with ≥8 CPUs recommends 8. The
-    /// previous empirical-knee cap at 4 was retired in favor of the
-    /// live admission gates.
-    #[test]
-    fn max_concurrent_jobs_fleet_tier_memory_bound() {
-        let mut shape = apple_silicon(256);
-        shape.cpu_logical_count = 24;
-        assert_eq!(recommend_max_concurrent_jobs(&shape), 8);
-    }
-
-    #[test]
-    fn max_concurrent_jobs_fleet_tier_cpu_bound() {
-        let mut shape = apple_silicon(256);
-        shape.cpu_logical_count = 4;
-        assert_eq!(
-            recommend_max_concurrent_jobs(&shape),
-            4,
-            "Fleet-tier host with only 4 CPUs is CPU-bound to 4"
-        );
-    }
-
-    /// Cross-tier boundary: a host that crosses the 48 GB Large boundary
-    /// goes from 1 (Medium) to 4 (Large). This pins the boundary so a
-    /// future MemoryTier change does not silently shift it.
-    #[test]
-    fn max_concurrent_jobs_boundary_47gb_vs_48gb() {
-        let mut just_below = apple_silicon(47);
-        just_below.cpu_logical_count = 12;
-        let mut just_at = apple_silicon(48);
-        just_at.cpu_logical_count = 12;
-        // 47 GB = 47 * 1024 = 48128 MB, which IS >= 48000, so this is Large.
-        // Tighten the test by using 47 GB - 1 MB:
-        just_below.ram_total_mb = 47_999;
-        assert_eq!(recommend_max_concurrent_jobs(&just_below), 1);
-        just_at.ram_total_mb = 48_000;
-        assert_eq!(recommend_max_concurrent_jobs(&just_at), 4);
-    }
-
-    /// Zero CPU count is treated as 1; we never recommend 0 jobs.
-    #[test]
-    fn max_concurrent_jobs_zero_cpu_returns_one() {
-        let mut shape = apple_silicon(64);
-        shape.cpu_logical_count = 0;
-        assert_eq!(recommend_max_concurrent_jobs(&shape), 1);
-    }
-
-    /// Independent of GPU presence: same RAM + same CPU = same value
-    /// regardless of GPU class. Pins the architectural rule that this
-    /// knob is RAM/CPU-derived only.
+    /// Guards: Concurrent job slots depend on RAM and CPU, not GPU class.
+    /// Kind: policy
+    /// Not a type: A private CPU-and-RAM view could hide GPU fields inside the formula, but the supported public helper takes `&HostFacts`; narrowing that interface is outside this review, so two equal-shape hosts remain the oracle that GPU class is ignored.
+    /// State: None. Two declared in-memory shapes with identical RAM and CPU.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn max_concurrent_jobs_independent_of_gpu_presence() {
         let make = |gpu: GpuPresence| {
@@ -926,231 +745,166 @@ mod tests {
         );
     }
 
-    /// CPU clamp at 8: a host with 32 CPUs must not recommend 32.
-    /// 32-CPU Fleet host: CPU axis clamps at 8 internally and the
-    /// tier axis caps at 8, so 8 is the recommendation. (Previously
-    /// the empirical cap pinned this to 4; that cap was retired in
-    /// favor of live admission gates.)
+    /// Guards: The per-job cap matches the CPU-vs-GPU formula at each host class: GPU-heavy on excluded GPUs stays 1, on CUDA reaches the thread-pool and tier caps, CPU-only commands use the thread cap, and small tier or zero CPU clamp to 1.
+    /// Kind: measurement
+    /// Not a type: `recommend_max_workers_per_job` combines command classification, functional-GPU state, CPU count and tier ceiling; no type pins which branch binds, so every original host/command pair is a row.
+    /// State: None. Declared in-memory shapes; CPU count is overridden per row. No command is dispatched.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn max_concurrent_jobs_high_cpu_fleet_host_clamped_at_eight() {
-        let mut shape = apple_silicon(256);
-        shape.cpu_logical_count = 32;
-        assert_eq!(recommend_max_concurrent_jobs(&shape), 8);
-    }
-
-    // -------------------------------------------------------------------
-    // max_workers_per_job per command: GPU-heavy vs CPU-only branches
-    // across tier sizes. The category cap is the load-bearing piece.
-    // -------------------------------------------------------------------
-
-    fn cmd(name: &str) -> ReleasedCommand {
-        ReleasedCommand::try_from(name).expect("test command literal must be a known command")
-    }
-
-    /// On Apple Silicon, transcribe (GPU-heavy) is capped at 1 because
-    /// `recommend_gpu_thread_pool_size` returns 1 (no functional GPU)
-    /// and the formula's GPU branch takes the min with that value.
-    #[test]
-    fn max_workers_per_job_transcribe_apple_silicon_64gb() {
-        let mut shape = apple_silicon(64);
-        shape.cpu_logical_count = 12;
-        assert_eq!(recommend_max_workers_per_job(&shape, &cmd("transcribe")), 1);
-    }
-
-    /// On a CUDA host, transcribe gets 4, the recommended GPU thread
-    /// pool size on functional GPUs, capped by the Large-tier
-    /// max_suggested_workers (also 4) and max_gpu_workers (8).
-    #[test]
-    fn max_workers_per_job_transcribe_linux_cuda_64gb() {
-        let mut shape = linux_cuda(64, 1, 24_000);
-        shape.cpu_logical_count = 12;
-        assert_eq!(recommend_max_workers_per_job(&shape, &cmd("transcribe")), 4);
-    }
-
-    /// All four GPU-heavy commands behave identically, they share one
-    /// classification branch.
-    #[test]
-    fn max_workers_per_job_all_gpu_heavy_commands_match() {
-        let mut shape = linux_cuda(64, 1, 24_000);
-        shape.cpu_logical_count = 12;
-        let expected = recommend_max_workers_per_job(&shape, &cmd("transcribe"));
-        for name in ["align", "transcribe", "transcribe_s", "benchmark"] {
-            assert_eq!(
-                recommend_max_workers_per_job(&shape, &cmd(name)),
-                expected,
-                "GPU-heavy command `{name}` must match `transcribe`"
-            );
-        }
-    }
-
-    /// CPU-only commands (morphotag, utseg, etc.) take the
-    /// `max_thread_workers` branch instead of `max_gpu_workers ⌒
-    /// recommended_thread_pool`. On a Large-tier host with 12 CPUs,
-    /// the formula yields min(12, max_thread_workers ⌒ tier_cap = 8 ⌒ 4) = 4.
-    #[test]
-    fn max_workers_per_job_morphotag_apple_silicon_64gb() {
-        let mut shape = apple_silicon(64);
-        shape.cpu_logical_count = 12;
-        assert_eq!(recommend_max_workers_per_job(&shape, &cmd("morphotag")), 4);
-    }
-
-    /// Small-tier hosts max_workers_per_job is 1 regardless of command
-    /// (memory tier dominates).
-    #[test]
-    fn max_workers_per_job_small_tier_is_one_for_every_command() {
-        let mut shape = apple_silicon(16);
-        shape.cpu_logical_count = 12;
-        for name in ["transcribe", "align", "morphotag", "utseg"] {
-            assert_eq!(
-                recommend_max_workers_per_job(&shape, &cmd(name)),
+    fn max_workers_per_job_follows_command_and_host_caps() {
+        let shaped = |shape: HostFacts, cpu| {
+            let mut shape = shape;
+            shape.cpu_logical_count = cpu;
+            shape
+        };
+        let cases: Vec<(&str, HostFacts, &str, u32)> = vec![
+            (
+                "apple transcribe",
+                shaped(apple_silicon(64), 12),
+                "transcribe",
                 1,
-                "Small-tier host must cap at 1 for `{name}`"
+            ),
+            (
+                "cuda transcribe",
+                shaped(linux_cuda(64, 1, 24_000), 12),
+                "transcribe",
+                4,
+            ),
+            (
+                "apple morphotag",
+                shaped(apple_silicon(64), 12),
+                "morphotag",
+                4,
+            ),
+            (
+                "small tier transcribe",
+                shaped(apple_silicon(16), 12),
+                "transcribe",
+                1,
+            ),
+            (
+                "small tier align",
+                shaped(apple_silicon(16), 12),
+                "align",
+                1,
+            ),
+            (
+                "small tier morphotag",
+                shaped(apple_silicon(16), 12),
+                "morphotag",
+                1,
+            ),
+            (
+                "small tier utseg",
+                shaped(apple_silicon(16), 12),
+                "utseg",
+                1,
+            ),
+            (
+                "fleet apple transcribe",
+                shaped(apple_silicon(256), 24),
+                "transcribe",
+                1,
+            ),
+            (
+                "fleet apple morphotag",
+                shaped(apple_silicon(256), 24),
+                "morphotag",
+                8,
+            ),
+            (
+                "cuda cpu bound",
+                shaped(linux_cuda(64, 1, 24_000), 2),
+                "transcribe",
+                2,
+            ),
+            (
+                "cuda zero cpu",
+                shaped(linux_cuda(64, 1, 24_000), 0),
+                "transcribe",
+                1,
+            ),
+        ];
+        for (label, shape, command, expected) in cases {
+            assert_eq!(
+                recommend_max_workers_per_job(&shape, &cmd(command)),
+                expected,
+                "{label} must recommend {expected} per-job workers"
             );
         }
     }
 
-    /// Fleet-tier on Apple Silicon: GPU-heavy still capped at 1
-    /// (no functional GPU); CPU-only capped at 8 (CPU clamp / max_thread).
+    /// Guards: Every released command whose worker profile is GPU gets the GPU-branch per-job cap (bounded by the recommended thread pool), and every other command gets the thread-worker cap, on hosts where the two branches differ.
+    /// Kind: policy
+    /// Not a type: `command_spec_for` maps the closed `ReleasedCommand` set to profiles at runtime, and which branch a profile takes is the policy itself; iterating `ReleasedCommand::ALL` means a newly released command is covered without editing this test.
+    /// State: None. Two declared in-memory host shapes and the full released command set.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn max_workers_per_job_fleet_apple_silicon() {
-        let mut shape = apple_silicon(256);
-        shape.cpu_logical_count = 24;
-        assert_eq!(
-            recommend_max_workers_per_job(&shape, &cmd("transcribe")),
-            1,
-            "Fleet Apple Silicon transcribe still capped at 1 (no functional GPU)"
-        );
-        assert_eq!(
-            recommend_max_workers_per_job(&shape, &cmd("morphotag")),
-            8,
-            "Fleet Apple Silicon morphotag uses min(24 cpu, 8 max_thread, 8 tier_cap) = 8"
-        );
-    }
+    fn max_workers_per_job_follows_worker_profile_for_every_command() {
+        use batchalign_types::command_spec::command_spec_for;
+        use batchalign_types::worker_profile::WorkerProfile;
 
-    /// CPU-bound case: a Large-tier host with only 2 CPUs caps at 2,
-    /// not at the tier's 4.
-    #[test]
-    fn max_workers_per_job_cpu_bound_below_tier_cap() {
-        let mut shape = linux_cuda(64, 1, 24_000);
-        shape.cpu_logical_count = 2;
-        assert_eq!(
-            recommend_max_workers_per_job(&shape, &cmd("transcribe")),
-            2,
-            "2-CPU host with CUDA still caps at 2 by CPU"
-        );
-    }
-
-    /// Zero CPU count is treated as 1; we never recommend 0 workers.
-    #[test]
-    fn max_workers_per_job_zero_cpu_returns_one() {
-        let mut shape = linux_cuda(64, 1, 24_000);
-        shape.cpu_logical_count = 0;
-        assert_eq!(recommend_max_workers_per_job(&shape, &cmd("transcribe")), 1);
-    }
-
-    /// Architectural decoupling: on a CUDA host the GPU branch uses
-    /// `recommend_gpu_thread_pool_size(facts)` rather than any
-    /// operator-set value. Since `RecommendedKnobs` is the only input
-    /// the recommendation can see, the cascading-override behavior of
-    /// the legacy formula is gone by construction. This test verifies
-    /// the value matches the recommended thread pool size for both
-    /// CUDA and Apple Silicon classes.
-    #[test]
-    fn max_workers_per_job_uses_recommended_gpu_thread_pool_size() {
-        let mut cuda = linux_cuda(64, 1, 24_000);
-        cuda.cpu_logical_count = 12;
-        let cuda_result = recommend_max_workers_per_job(&cuda, &cmd("transcribe"));
-        assert_eq!(
-            cuda_result,
-            recommend_gpu_thread_pool_size(&cuda).min(4) // tier cap also 4
-        );
-
+        // Apple Silicon: the GPU is excluded, so the recommended thread
+        // pool is 1 and GPU-profile commands are capped at 1.
         let mut apple = apple_silicon(64);
         apple.cpu_logical_count = 12;
-        let apple_result = recommend_max_workers_per_job(&apple, &cmd("transcribe"));
-        assert_eq!(
-            apple_result,
-            recommend_gpu_thread_pool_size(&apple).min(4) // recommended = 1, so result = 1
-        );
+        // CUDA: the thread pool is 4, so GPU-profile commands get 4 while
+        // thread-profile commands may use more.
+        let mut cuda = linux_cuda(128, 1, 24_000);
+        cuda.cpu_logical_count = 12;
+
+        for (label, shape, gpu_cap, thread_cap) in
+            [("apple silicon", &apple, 1, 4), ("cuda", &cuda, 4, 8)]
+        {
+            for command in ReleasedCommand::ALL {
+                let is_gpu = command_spec_for(command).profile == Some(WorkerProfile::Gpu);
+                let expected = if is_gpu { gpu_cap } else { thread_cap };
+                assert_eq!(
+                    recommend_max_workers_per_job(shape, &command),
+                    expected,
+                    "{label}: `{command:?}` (gpu profile: {is_gpu})"
+                );
+            }
+        }
     }
 
-    // -------------------------------------------------------------------
-    // max_workers_per_key_by_profile: per-profile RAM-derived caps.
-    // Tests pin the formula at every fleet RAM size: 16/32/64/96/256.
-    // -------------------------------------------------------------------
-
-    /// 16 GB host: gpu = 16/16 = 1, stanza = 16/12 = 1, io = 1 flat.
-    /// Smaller than today's flat 4, and that's the point.
+    /// Guards: Per-profile per-key caps follow RAM and clamp to [1, 8] with IO flat at 1, across every fleet size, sub-one RAM, zero-RAM sysinfo failure and u64 overflow.
+    /// Kind: measurement
+    /// Not a type: `PerProfile`<u32> holds three counts whose divisors (16 GB GPU, 12 GB Stanza), clamps and flat-IO rule are policy the type cannot carry; each original RAM case stays a row and IO keeps its own wide sweep.
+    /// State: None. Declared in-memory shapes; zero and `u64::MAX` RAM override one reading. No workers are spawned.
+    /// Concurrency: [pure-recommendation]
     #[test]
-    fn max_workers_per_key_16gb() {
-        let p = recommend_max_workers_per_key(&apple_silicon(16));
-        assert_eq!(p.gpu, 1);
-        assert_eq!(p.stanza, 1);
-        assert_eq!(p.io, 1);
+    fn max_workers_per_key_follows_ram_by_profile() {
+        let ram = |mb| {
+            let mut shape = apple_silicon(8);
+            shape.ram_total_mb = mb;
+            shape
+        };
+        let cases: Vec<(&str, HostFacts, (u32, u32, u32))> = vec![
+            ("8gb", apple_silicon(8), (1, 1, 1)),
+            ("16gb", apple_silicon(16), (1, 1, 1)),
+            ("32gb", apple_silicon(32), (2, 2, 1)),
+            ("64gb", apple_silicon(64), (4, 5, 1)),
+            ("96gb", apple_silicon(96), (6, 8, 1)),
+            ("256gb clamps", apple_silicon(256), (8, 8, 1)),
+            ("zero ram", ram(0), (1, 1, 1)),
+            ("u64 overflow", ram(u64::MAX), (8, 8, 1)),
+        ];
+        for (label, shape, (gpu, stanza, io)) in cases {
+            let p = recommend_max_workers_per_key(&shape);
+            assert_eq!(
+                (p.gpu, p.stanza, p.io),
+                (gpu, stanza, io),
+                "{label} profile caps"
+            );
+        }
     }
 
-    /// 32 GB host: gpu = 32/16 = 2, stanza = 32/12 = 2, io = 1.
-    #[test]
-    fn max_workers_per_key_32gb() {
-        let p = recommend_max_workers_per_key(&apple_silicon(32));
-        assert_eq!(p.gpu, 2);
-        assert_eq!(p.stanza, 2);
-        assert_eq!(p.io, 1);
-    }
-
-    /// 64 GB host: gpu = 64/16 = 4 (matches today's flat default),
-    /// stanza = 64/12 = 5, io = 1.
-    #[test]
-    fn max_workers_per_key_64gb() {
-        let p = recommend_max_workers_per_key(&apple_silicon(64));
-        assert_eq!(p.gpu, 4);
-        assert_eq!(p.stanza, 5);
-        assert_eq!(p.io, 1);
-    }
-
-    /// 96 GB host: gpu = 96/16 = 6, stanza = 96/12 = 8, io = 1.
-    #[test]
-    fn max_workers_per_key_96gb() {
-        let p = recommend_max_workers_per_key(&apple_silicon(96));
-        assert_eq!(p.gpu, 6);
-        assert_eq!(p.stanza, 8);
-        assert_eq!(p.io, 1);
-    }
-
-    /// 256 GB Fleet host: gpu = 256/16 = 16 → clamped to 8,
-    /// stanza = 256/12 = 21 → clamped to 8, io = 1.
-    #[test]
-    fn max_workers_per_key_256gb_clamps_at_eight() {
-        let p = recommend_max_workers_per_key(&apple_silicon(256));
-        assert_eq!(p.gpu, 8);
-        assert_eq!(p.stanza, 8);
-        assert_eq!(p.io, 1);
-    }
-
-    /// 8 GB host: gpu = 8/16 = 0 → clamped to 1 (floor), stanza = 0 → 1.
-    #[test]
-    fn max_workers_per_key_under_one_worker_clamps_to_one() {
-        let p = recommend_max_workers_per_key(&apple_silicon(8));
-        assert_eq!(p.gpu, 1);
-        assert_eq!(p.stanza, 1);
-        assert_eq!(p.io, 1);
-    }
-
-    /// Zero RAM (sysinfo failure): all fields fall back to 1.
-    #[test]
-    fn max_workers_per_key_zero_ram_returns_ones() {
-        let mut shape = apple_silicon(8);
-        shape.ram_total_mb = 0;
-        let p = recommend_max_workers_per_key(&shape);
-        assert_eq!(p.gpu, 1);
-        assert_eq!(p.stanza, 1);
-        assert_eq!(p.io, 1);
-    }
-
-    /// IO is always flat 1 regardless of RAM. If a future contributor
-    /// changes the formula to derive IO from RAM, this test fires
-    /// the architectural decision (documented in the design doc) is
-    /// that opensmile/avqi don't benefit from per-key parallelism.
+    /// Guards: The IO profile stays flat at 1 across small through terabyte hosts.
+    /// Kind: policy
+    /// Not a type: A unit IO type would prove flatness internally, but `PerProfile<u32>` and the public helper are supported interfaces; keeping the io field means a future RAM-derived IO formula must still fail this oracle.
+    /// State: None. Nine declared in-memory shapes.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn max_workers_per_key_io_is_always_one() {
         for ram_gb in [8, 16, 32, 64, 96, 192, 256, 512, 1024] {
@@ -1162,9 +916,11 @@ mod tests {
         }
     }
 
-    /// Independent of GPU presence: same RAM = same per-profile counts
-    /// regardless of GPU class. Pins the architectural rule that this
-    /// knob is RAM-derived only.
+    /// Guards: Per-profile per-key caps depend on RAM, not GPU class.
+    /// Kind: policy
+    /// Not a type: A private RAM-only view could hide GPU fields inside the formula, but the supported public helper takes `&HostFacts` and its per-profile shape is public; preserving both interfaces leaves the RAM-only policy as a semantic choice, so two equal-RAM hosts remain the oracle.
+    /// State: None. Two declared in-memory shapes with identical RAM.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn max_workers_per_key_independent_of_gpu_presence() {
         let make = |gpu: GpuPresence| facts(OperatingSystem::Linux, CpuArch::X86_64, gpu, 64);
@@ -1180,18 +936,11 @@ mod tests {
         );
     }
 
-    /// u64::MAX overflow safety: ram_divided's u32 conversion must
-    /// not panic; clamping enforces the upper bound.
-    #[test]
-    fn max_workers_per_key_overflow_safe_on_huge_ram() {
-        let mut shape = apple_silicon(64);
-        shape.ram_total_mb = u64::MAX;
-        let p = recommend_max_workers_per_key(&shape);
-        assert_eq!(p.gpu, 8);
-        assert_eq!(p.stanza, 8);
-        assert_eq!(p.io, 1);
-    }
-
+    /// Guards: The bundled recommendation equals each per-knob helper on the same host.
+    /// Kind: contract
+    /// Not a type: recommend assembles five independently written helpers; a type cannot prove the bundle wires each field to its own helper, so the field-by-field comparison remains the oracle.
+    /// State: None. One declared in-memory host.
+    /// Concurrency: [pure-recommendation]
     #[test]
     fn recommend_bundles_per_knob_helpers() {
         let host = apple_silicon(64);

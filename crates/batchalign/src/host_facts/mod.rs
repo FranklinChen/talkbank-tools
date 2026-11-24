@@ -51,7 +51,7 @@ pub use recommendations::{
     PerProfile, RecommendedKnobs, recommend, recommend_force_cpu, recommend_gpu_thread_pool_size,
     recommend_max_concurrent_jobs, recommend_max_total_workers, recommend_max_workers_per_key,
 };
-pub use validation::{ConfigError, ConfigValidation, ConfigWarning, validate};
+pub use validation::{ConfigError, ConfigValidation, ConfigWarning, StartupVerdict, validate};
 pub use warnings::DetectionWarning;
 
 use crate::api::MachineTime;
@@ -218,6 +218,7 @@ pub struct MockHostFactsSource {
 
 impl MockHostFactsSource {
     /// Build a mock source that always returns `facts`.
+    #[must_use]
     pub fn new(facts: HostFacts) -> Self {
         Self {
             facts: Arc::new(facts),
@@ -236,6 +237,11 @@ mod tests {
     use super::test_helpers::apple_silicon_64gb;
     use super::*;
 
+    /// Guards: `MockHostFactsSource::detect` returns byte-for-byte the facts it was constructed with.
+    /// Kind: contract
+    /// Not a type: `MockHostFactsSource` stores an Arc<HostFacts> and cannot encode that detect must return that exact snapshot; this is the double behaving as its production source contract.
+    /// State: None. One declared host snapshot is cloned in memory.
+    /// Concurrency: None. One synchronous detect call owns both values.
     #[test]
     fn mock_source_round_trips_facts() {
         let original = apple_silicon_64gb();
@@ -249,46 +255,34 @@ mod tests {
         );
     }
 
+    /// Guards: The closed `GpuPresence` variants map to the functional-for-batchalign policy the recommender reads.
+    /// Kind: policy
+    /// Not a type: The Apple MPS kernel-deadlock exclusion and the CUDA device-count rule are a policy matrix over a closed enum; the enum forbids new variants but cannot decide which are functional.
+    /// State: None. Three in-memory variants cover excluded MPS, functional CUDA and absent GPU.
+    /// Concurrency: None. Each query is a pure read of an owned enum value.
     #[test]
-    fn gpu_presence_apple_silicon_is_not_functional() {
-        let facts = apple_silicon_64gb();
+    fn gpu_presence_functionality_matches_the_policy_matrix() {
+        let apple = apple_silicon_64gb();
         assert!(
-            !facts.gpu.is_functional_for_batchalign(),
-            "Apple Silicon MPS must surface as non-functional for batchalign3 \
-             until the kernel-deadlock policy is reversed; \
-             recommend() depends on this contract."
+            !apple.gpu.is_functional_for_batchalign(),
+            "Apple Silicon MPS stays excluded until the kernel-deadlock policy is reversed"
         );
-    }
 
-    #[test]
-    fn gpu_presence_cuda_is_functional() {
         let cuda = GpuPresence::NvidiaCuda {
             device_count: 1,
             total_vram_mb: 24_000,
             driver_version: "555.42".into(),
         };
         assert!(cuda.is_functional_for_batchalign());
-    }
 
-    #[test]
-    fn gpu_presence_none_is_not_functional() {
         assert!(!GpuPresence::None.is_functional_for_batchalign());
     }
 
-    /// On an Apple Silicon dev/fleet host, live detection must surface
-    /// `AppleMps { functional_for_batchalign: false, reason:
-    /// AppleSiliconKernelDeadlock }`: the policy decision that
-    /// downstream `recommend()` and `validate()` both depend on.
-    ///
-    /// This is the integration test for Phase A4 of the migration:
-    /// confirms that the wiring through `RealHostFactsSource::detect()`
-    /// → `detect_gpu_presence` → Apple Silicon short-circuit produces
-    /// the correct variant on the actual host this test runs on.
-    ///
-    /// Skipped on non-Apple-Silicon hosts so the suite stays portable
-    /// (a CUDA host would fail the assertion); the unit tests in
-    /// `gpu.rs` cover the Linux + nvidia-smi paths against synthetic
-    /// probes.
+    /// Guards: Live detection on this Apple Silicon host surfaces excluded MPS with no nvidia-smi warnings.
+    /// Kind: journey
+    /// Not a type: `RealHostFactsSource` reads this host's memory and OS/arch; the wiring through `detect_gpu_presence` is an external effect no type can pin to a variant.
+    /// State: Reads the live host's memory once. On a non-Apple-Silicon host this returns before the boundary and stays unverified for that host.
+    /// Concurrency: None. One synchronous detection call in this process.
     #[test]
     fn real_source_gpu_on_apple_silicon_is_mps_excluded() {
         if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {

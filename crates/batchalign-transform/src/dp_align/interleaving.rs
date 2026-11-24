@@ -33,7 +33,7 @@ pub enum SpeakerChain {
 }
 
 impl SpeakerChain {
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Self::First => 0,
             Self::Second => 1,
@@ -95,30 +95,36 @@ pub struct CommonInterleavingMatch<'source>(InterleavingMatch<'source>);
 
 impl<'source> CommonInterleavingMatch<'source> {
     /// Inspect the addressed words without giving selected paths proof authority.
-    pub fn matched(self) -> InterleavingMatch<'source> {
+    #[must_use]
+    pub const fn matched(self) -> InterleavingMatch<'source> {
         self.0
     }
 }
 
 impl<'source> InterleavingMatch<'source> {
     /// Source speaker chain.
-    pub fn chain(self) -> SpeakerChain {
+    #[must_use]
+    pub const fn chain(self) -> SpeakerChain {
         self.address.chain
     }
     /// Word's ordinal within that speaker chain.
-    pub fn word_index(self) -> usize {
+    #[must_use]
+    pub const fn word_index(self) -> usize {
         self.address.word
     }
     /// Word's ordinal in this analysis's reference.
-    pub fn reference_index(self) -> usize {
+    #[must_use]
+    pub const fn reference_index(self) -> usize {
         self.address.reference
     }
     /// Source spelling retained by the producer.
-    pub fn source_text(self) -> &'source str {
+    #[must_use]
+    pub const fn source_text(self) -> &'source str {
         self.source
     }
     /// Reference spelling retained by the producer.
-    pub fn reference_text(self) -> &'source str {
+    #[must_use]
+    pub const fn reference_text(self) -> &'source str {
         self.reference
     }
 }
@@ -136,6 +142,7 @@ impl<'source> InterleavingWord<'_, 'source> {
     }
 
     /// At least one optimal assignment omits this source word.
+    #[must_use]
     pub fn can_be_missing(&self) -> bool {
         self.evidence().can_be_missing
     }
@@ -152,6 +159,7 @@ impl<'source> InterleavingWord<'_, 'source> {
     }
 
     /// Correspondence common to every optimal assignment, if there is one.
+    #[must_use]
     pub fn common(&self) -> Option<CommonInterleavingMatch<'source>> {
         let evidence = self.evidence();
         if evidence.can_be_missing || evidence.candidates.len() != 1 {
@@ -178,7 +186,8 @@ impl<'source> TwoSpeakerAlignment<'source> {
     }
 
     /// Maximum matched lexical population, not an acoustic-quality score.
-    pub fn matched_words(&self) -> usize {
+    #[must_use]
+    pub const fn matched_words(&self) -> usize {
         self.optimum
     }
 
@@ -377,7 +386,7 @@ impl AdmittedShape {
         })
     }
 
-    fn at(&self, first: usize, second: usize, reference: usize) -> usize {
+    const fn at(&self, first: usize, second: usize, reference: usize) -> usize {
         (first * self.second + second) * self.reference + reference
     }
 }

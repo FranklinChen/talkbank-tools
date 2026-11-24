@@ -55,7 +55,7 @@ pub(super) enum MorphosyntaxResponseSource {
 /// where it came from. Constructed only by the dispatch code that receives the
 /// worker result. Unsupported primary work cannot mint a response.
 #[derive(Debug, Clone)]
-pub(crate) struct AdmittedMorphosyntaxResponse {
+pub struct AdmittedMorphosyntaxResponse {
     response: AdmittedUdResponse,
     source: MorphosyntaxResponseSource,
 }
@@ -80,7 +80,7 @@ impl AdmittedMorphosyntaxResponse {
 
     /// A failure the worker reported for this one item, or an analysis that
     /// could not be admitted. It declines this item's utterance only.
-    pub(crate) fn worker_failed(reason: String) -> Self {
+    pub(crate) const fn worker_failed(reason: String) -> Self {
         Self {
             response: AdmittedUdResponse::worker_failed(reason),
             source: MorphosyntaxResponseSource::WorkerFailed,
@@ -88,7 +88,7 @@ impl AdmittedMorphosyntaxResponse {
     }
 
     /// The empty response for an item the worker had no words to analyze.
-    pub(super) fn no_words() -> Self {
+    pub(super) const fn no_words() -> Self {
         Self {
             response: AdmittedUdResponse::empty(),
             source: MorphosyntaxResponseSource::NoWordsToAnalyze,
@@ -96,13 +96,13 @@ impl AdmittedMorphosyntaxResponse {
     }
 
     /// The UD analysis.
-    pub(crate) fn response(&self) -> &AdmittedUdResponse {
+    pub(crate) const fn response(&self) -> &AdmittedUdResponse {
         &self.response
     }
 
     /// Where the analysis came from. Scoped to this module tree with the type
     /// it returns.
-    pub(super) fn source(&self) -> &MorphosyntaxResponseSource {
+    pub(super) const fn source(&self) -> &MorphosyntaxResponseSource {
         &self.source
     }
 
@@ -199,7 +199,7 @@ impl MorphosyntaxRepairs {
     /// `NonZeroUsize` rather than `usize`, so "some repairs" and "no repairs"
     /// are different values rather than a number a caller must remember to
     /// compare against zero. The stamp writes a field only in the first case.
-    fn count(&self) -> Option<NonZeroUsize> {
+    const fn count(&self) -> Option<NonZeroUsize> {
         NonZeroUsize::new(self.0.len())
     }
 
@@ -226,7 +226,7 @@ impl MorphosyntaxRepairs {
 /// so a phase that carried one and not the other would be a phase that can
 /// stamp a file whose repairs nobody counted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct AppliedAnalyses {
+pub struct AppliedAnalyses {
     engines: MorphosyntaxEngines,
     repairs: MorphosyntaxRepairs,
     primary: super::report::PrimaryReport,
@@ -311,7 +311,7 @@ impl AppliedAnalyses {
         Ok(())
     }
 
-    pub(super) fn secondary_mut(&mut self) -> &mut super::report::SecondaryReport {
+    pub(super) const fn secondary_mut(&mut self) -> &mut super::report::SecondaryReport {
         &mut self.secondary
     }
 
@@ -345,7 +345,7 @@ impl AppliedAnalyses {
     }
 
     /// How many repairs were made, of every kind, or `None` when none were.
-    pub(crate) fn repair_count(&self) -> Option<NonZeroUsize> {
+    pub(crate) const fn repair_count(&self) -> Option<NonZeroUsize> {
         self.repairs.count()
     }
 
@@ -386,6 +386,11 @@ mod tests {
             .map(|joined| joined.as_str().to_owned())
     }
 
+    /// Guards: Only empty or single-sentence worker replies admit a morphology item and its producer identity.
+    /// Kind: wire
+    /// Not a type: The worker can return more sentence entries than one item can bind to.
+    /// State: Synthetic UD replies with zero through three sentences use the actual response constructor.
+    /// Concurrency: Pure admission of independent result populations.
     #[test]
     fn worker_response_admission_refuses_multiple_sentences_before_identity_can_be_applied() {
         let model = MorphosyntaxModelIdentityV2 {
@@ -427,6 +432,11 @@ mod tests {
         }
     }
 
+    /// Guards: Applied model names are ordered and deduplicated and no-model responses add no identity.
+    /// Kind: transcript
+    /// Not a type: Several valid responses can name different languages or repeat a producer in arbitrary order.
+    /// State: A synthetic applied batch mixes multiple named producers and a no-work result.
+    /// Concurrency: Pure accumulation in one response population.
     #[test]
     fn engines_name_distinct_worker_models_and_skip_items_no_model_ran_for() {
         let applied = vec![
@@ -446,6 +456,11 @@ mod tests {
     /// The pipeline variant is part of the identity: the same Stanza version
     /// and language through a different pipeline is a different model. Names
     /// are joined in text order, like every engine list.
+    /// Guards: Provenance names distinct Mandarin pipeline variants and suppresses repetitions.
+    /// Kind: wire
+    /// Not a type: The worker may report distinct pipeline variants for the same language and version.
+    /// State: Three explicit model identities exercise the result naming contract.
+    /// Concurrency: One local accumulator receives all reports.
     #[test]
     fn the_pipeline_variant_is_named() {
         let mut applied = AppliedAnalyses::none();
@@ -470,6 +485,11 @@ mod tests {
         );
     }
 
+    /// Guards: No worker analysis contributes neither a repair count nor an engine name.
+    /// Kind: policy
+    /// Not a type: A successful no-work result can accidentally be counted at aggregation despite its closed variant.
+    /// State: Synthetic no-work analysis and empty accumulators require no worker.
+    /// Concurrency: Pure comparison over admitted observations.
     #[test]
     fn no_analysis_names_no_engine_and_repairs_nothing() {
         let (_, applied) =
@@ -483,6 +503,11 @@ mod tests {
     /// Repairs accumulate across the items of a batch and across batches, and
     /// they are counted, not deduplicated: the same rewrite on two words is
     /// two repairs.
+    /// Guards: Primary and secondary repair evidence combines repeated and distinct repair kinds.
+    /// Kind: policy
+    /// Not a type: Repairs are provided per response and must sum correctly across independently applied batches.
+    /// State: Two admitted producer batches and one no-work item supply literal repair evidence.
+    /// Concurrency: One owned accumulator consumes the secondary batch.
     #[test]
     fn repairs_are_counted_across_items_and_batches() {
         let (_, mut applied) = AppliedAnalyses::take_applied(vec![
@@ -522,6 +547,11 @@ mod tests {
     /// feature name and a replaced lemma count exactly as a rewritten
     /// relation does. (Lemma and feature-name repairs were applied and never
     /// counted until the one list existed.)
+    /// Guards: Each known repair kind contributes to the expected total and serialized tally.
+    /// Kind: policy
+    /// Not a type: Exhaustive repair types do not specify exact user-facing tally order or totals.
+    /// State: The enumerated repair examples enter a single synthetic admitted result.
+    /// Concurrency: Pure tally computation and rendering.
     #[test]
     fn one_repair_of_every_kind_is_counted_and_tallied() {
         let (_, applied) = AppliedAnalyses::take_applied(vec![
@@ -548,6 +578,11 @@ mod tests {
 
     /// A response no model produced cannot carry repairs: the source that
     /// holds them is the one that names a model.
+    /// Guards: A no-model response contributes zero to its own repair metadata.
+    /// Kind: policy
+    /// Not a type: A valid no-model item still has an observable repair projection that could regress.
+    /// State: A pure admitted no-work result goes through the response accessor.
+    /// Concurrency: No shared cache or floating state.
     #[test]
     fn a_response_no_model_produced_carries_no_repairs() {
         assert_eq!(

@@ -55,10 +55,11 @@ not know its file, and should not. The file is attached by a tracing span
 instead:
 
 - **Per-file work runs in a `file` span** (`file=`, `role=`, and `job_id=`
-  inside a runner), built by `runner::current_file_span` from the job scope.
-  The supervised file tasks (`spawn_supervised_file_task`: align, transcribe,
-  benchmark, media analysis, speaker identity) and the morphotag and utseg
-  fan-outs enter it. A server log line then reads
+  inside a runner), built from the job scope by
+  `spawn_supervised_file_task`, which every per-file fan-out uses: align,
+  transcribe, benchmark, media analysis, speaker identity, native media
+  export, and the morphotag and utseg fan-outs through `SupervisedFileTasks`.
+  A server log line then reads
   `file{job_id=... file=lecture.cha role=...}: WARN pipeline decision ...`.
 - **Blocking work keeps the span.** A `tokio::task::spawn_blocking` thread
   starts with no span, so anything logged there names no file.
@@ -66,8 +67,10 @@ instead:
   span across, and the workspace `clippy.toml` disallows `spawn_blocking`
   directly, so the gate refuses a new call site that would drop the context.
 
-When adding a new way to fan files out, enter `current_file_span` around each
-file's future; `tokio::spawn` does not inherit spans.
+When adding a new way to fan files out, spawn each file through
+`spawn_supervised_file_task`; `tokio::spawn` inherits neither spans nor the
+job's task-locals, and the supervised task also settles its file if it panics
+or is stopped by cancellation.
 
 ## Verbosity Levels
 

@@ -60,8 +60,8 @@ use tracing::{info, warn};
 
 use crate::error::ServerError;
 use crate::infer_retry::{Cancellation, dispatch_execute_v2_with_retry};
-use crate::pipeline::text_infer::{TextBatchHooks, run_text_batch_pipeline};
-use crate::text_batch::{ItemFailure, TextBatchFileInput, TextBatchFileResults};
+use crate::pipeline::text_infer::{TextBatchHooks, run_admitted_text_source};
+use crate::text_batch::{ItemFailure, TextBatchFileResults};
 
 use self::items::{ItemTransport, Wait, translate_items};
 use self::provider::ProviderGiveUp;
@@ -87,13 +87,13 @@ impl TranslationRoute {
         }
     }
 
-    pub(crate) fn source(&self) -> &LanguageCode3 {
+    pub(crate) const fn source(&self) -> &LanguageCode3 {
         &self.source
     }
-    pub(crate) fn target(&self) -> &LanguageCode3 {
+    pub(crate) const fn target(&self) -> &LanguageCode3 {
         &self.target
     }
-    pub(crate) fn engine(&self) -> &TranslateEngineName {
+    pub(crate) const fn engine(&self) -> &TranslateEngineName {
         &self.engine
     }
 
@@ -196,7 +196,7 @@ pub(crate) enum AdmittedTranslation {
 
 impl AdmittedTranslation {
     /// The translation to apply, if there is one.
-    fn translation(&self) -> Option<&TranslationText> {
+    const fn translation(&self) -> Option<&TranslationText> {
         match self {
             Self::Translated { text, .. } => Some(text),
             Self::BlankInput => None,
@@ -205,35 +205,31 @@ impl AdmittedTranslation {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-file batch translate processing
+// Admitted single-source translation
 // ---------------------------------------------------------------------------
 
-/// Translate one CHAT file through the text pipeline.
+/// Translate the exact admitted CHAT model that selected the route.
 ///
 /// One file, by signature: the per-item loop stops a file at its first failed
 /// utterance and reports the rest as not attempted by their index in that
-/// file, which is only true of a file that was sent alone. The pipeline
-/// underneath still takes a slice; this is the only translate caller, and it
-/// hands it exactly one element.
+/// file. The shared collection and response path receives one source.
 ///
 /// Returns `(filename, Ok(output) | Err(error))` for the file.
 pub(crate) async fn process_translate_file(
-    file: &TextBatchFileInput,
-    route: &TranslationRoute,
+    submission: crate::execution::text_io::TranslateSubmission<'_>,
     pool: &WorkerPool,
-    cancellation: Cancellation<'_>,
 ) -> TextBatchFileResults {
-    run_text_batch_pipeline(
-        std::slice::from_ref(file),
+    let (file, route, cancellation) = submission.into_parts();
+    run_admitted_text_source(
+        file,
         route.source(),
-        pool,
         TextBatchHooks {
             command: crate::api::ReleasedCommand::Translate,
             collect: collect_translate_payloads,
             apply: apply_translate_file,
             provenance: translation_provenance,
         },
-        async move |pool, items, _lang| infer_batch(pool, items, route, cancellation).await,
+        async |items| infer_batch(pool, items, &route, cancellation).await,
     )
     .await
 }
@@ -365,7 +361,7 @@ impl ItemTransport for WorkerTransport<'_> {
         let response = dispatch_execute_v2_with_retry(
             self.pool,
             self.route.source(),
-            &request,
+            request,
             self.cancellation,
         )
         .await?;
@@ -404,6 +400,11 @@ fn single_item(
 mod tests {
     use super::*;
 
+    /// Guards: Translation route arguments serialize the exact source, target and selected engine in the worker packet.
+    /// Kind: wire
+    /// Not a type: Valid language and engine types can still be assigned to the wrong outbound fields.
+    /// State: A literal Spanish-to-French route and one text request query the actual packet builder.
+    /// Concurrency: Pure request creation, with no network.
     #[test]
     fn translate_route_binds_the_exact_request_languages_and_engine() {
         let options = crate::options::TranslateOptions {
@@ -436,12 +437,22 @@ mod tests {
         }
     }
 
+    /// Guards: An exact one-item worker envelope retains its item variant.
+    /// Kind: wire
+    /// Not a type: The actual runtime array can have the one admitted element required by the request.
+    /// State: A synthetic singleton worker response enters cardinality admission.
+    /// Concurrency: Pure in-memory request correspondence.
     #[test]
     fn a_one_item_request_yields_its_one_item() {
         let item = single_item(vec![TranslationItemResultV2::BlankInput]).expect("one item");
         assert!(matches!(item, TranslationItemResultV2::BlankInput));
     }
 
+    /// Guards: Zero or two reply items cause a translation protocol refusal naming the received count.
+    /// Kind: wire
+    /// Not a type: A worker can return zero or multiple values for one input despite using the correct envelope.
+    /// State: Two explicit invalid response populations feed the actual cardinality check.
+    /// Concurrency: Pure in-memory request correspondence.
     #[test]
     fn a_count_other_than_one_is_a_protocol_error_not_an_item_failure() {
         for items in [
@@ -464,6 +475,11 @@ mod tests {
     /// The empty-translation failure names the engine and the remedy, and the
     /// file's verdict is terminal: the same request gets the same answer, so
     /// the control plane must not be told to expect a different one.
+    /// Guards: Empty translated text carries a terminal provider verdict and named engine guidance.
+    /// Kind: policy
+    /// Not a type: Command error policy and rendered operator guidance are selected independently of the variant's shape.
+    /// State: A synthetic empty-translation failure enters actual report construction.
+    /// Concurrency: One direct error render with no effects.
     #[test]
     fn an_empty_translation_fails_the_file_terminally() {
         let failure = crate::text_batch::TextWorkflowFileError::item_errors(
@@ -484,6 +500,11 @@ mod tests {
         assert!(rendered.contains("--translate-engine"), "{rendered}");
     }
 
+    /// Guards: An unattempted item diagnostic identifies the actual earlier failed index.
+    /// Kind: wire
+    /// Not a type: An arbitrary item index passes through user-visible rendering where the wrong index can be substituted.
+    /// State: One explicit not-attempted receipt with stop index three.
+    /// Concurrency: Pure in-memory error rendering.
     #[test]
     fn a_not_attempted_item_names_the_item_that_stopped_the_file() {
         let rendered = TranslateFailure::NotAttempted { after_item: 3 }.to_string();
@@ -495,6 +516,11 @@ mod tests {
 
     /// A blank input is admitted as its own outcome: nothing to apply, and no
     /// engine to name.
+    /// Guards: A blank input produces no translation and does not stamp producer provenance.
+    /// Kind: transcript
+    /// Not a type: A valid no-text response must propagate through transcript stamping as its actual absence.
+    /// State: One typed blank input result uses the content and provenance projections.
+    /// Concurrency: No file, worker or cache effect.
     #[test]
     fn blank_input_translates_nothing_and_names_no_engine() {
         let applied = vec![AdmittedTranslation::BlankInput];
@@ -506,6 +532,11 @@ mod tests {
     }
 
     /// The translate stamp names the engine the translations named.
+    /// Guards: Applied translation stamps name the reported engine and correct source language.
+    /// Kind: transcript
+    /// Not a type: A successful result can name an engine distinct from configuration and the exact output is textual.
+    /// State: One synthetic admitted translation exercises the real provenance formatter.
+    /// Concurrency: Pure Chat stamp formatting without a worker.
     #[test]
     fn translation_provenance_names_the_engine_of_the_applied_results() {
         let applied = vec![admitted("Hello .")];

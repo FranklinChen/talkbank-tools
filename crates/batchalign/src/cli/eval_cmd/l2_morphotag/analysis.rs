@@ -259,6 +259,7 @@ pub fn analyze_chat_file(
 /// | `N > 0`   | `Some(N)`       | `Aligned` (happy path)               |
 /// | `N > 0`   | `Some(m ≠ N)`   | `CountMismatchInFile` (anomaly)      |
 /// | `N > 0`   | `None`          | `PipelineAbsorbedFailure` (anomaly)  |
+#[must_use]
 pub fn classify_utterance_outcome(
     alignable: MorAlignableWordCount,
     mor_count: Option<MorItemCount>,
@@ -364,6 +365,7 @@ fn features_to_set(features: &[MorFeature]) -> FeatureSet {
 /// Lowercase view of a POS category, CHAT POS tags are lowercase but the
 /// typed `PosCategory` preserves whatever casing was in the file. Heuristics
 /// compare against `"noun"`, `"propn"`, `"verb"`; always lowercase first.
+#[must_use]
 pub fn pos_as_lowercase(pos: &PosCategory) -> String {
     pos.as_str().to_ascii_lowercase()
 }
@@ -373,6 +375,7 @@ pub fn pos_as_lowercase(pos: &PosCategory) -> String {
 /// only the serialized form.
 ///
 /// Returns `(None, None, None)` for malformed input (no `|`).
+#[must_use]
 pub fn extract_pos_lemma_features(
     mor_item: &str,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -408,6 +411,7 @@ pub fn extract_pos_lemma_features(
 
 /// Extract the DEPREL token from a serialized GRA item (`id|head|DEPREL`).
 /// Returns `None` for malformed input.
+#[must_use]
 pub fn extract_gra_deprel(gra_item: &str) -> Option<GrammaticalRelationType> {
     let parts: Vec<&str> = gra_item.splitn(3, '|').collect();
     if parts.len() != 3 {

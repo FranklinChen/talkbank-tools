@@ -49,6 +49,13 @@ as a whole.
 
 ## Startup identity handshake
 
+The [Python launch admission](../../architecture/runtime/batchalign-workers.md#python-launch-admission)
+checks the target, transport and serving mode before startup. The default
+stdio transport requires a positive supervisor PID. TCP accepts port zero
+for automatic selection. Malformed launch arguments exit with an argv
+diagnostic before a ready record can exist. A valid echo launch can omit a
+target, and two selectors are rejected even for echo.
+
 The JSON ready envelope precedes V2 task dispatch and is a separate startup
 control boundary. Current stdio workers emit `ready`, `pid`, `transport`, and a
 schema-1 `runtime` object. Runtime evidence contains Python version plus full
@@ -727,8 +734,13 @@ Current implementation status:
   `execute_v2(task="speaker")` using Rust-prepared audio attachments only
 - `crates/batchalign/src/worker/speaker_request_v2.rs` now builds typed
   speaker requests on the Rust side from prepared audio artifacts
-- speaker results now round-trip as typed raw segment payloads rather than
-  generic JSON bags
+- speaker results carry typed evidence by backend. Local results carry segments
+  and can report the three SHA-256 digests owned by the loaded Pyannote graph.
+  The production local host always supplies this graph. An older worker reply
+  or the echo fixture can omit it. Hosted results carry the provider job ID and
+  completed job payload. The
+  [speaker receipt](../architecture/observability.md#speaker-invocation-and-cache-evidence)
+  preserves the observation through cache replay
 - the old legacy `batch_infer(task="speaker")` route is no longer part of the
   live worker dispatch table
 - `speaker` remains a low-level infer-task name rather than a CLI command;

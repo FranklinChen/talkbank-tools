@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::asr_model::HubCommitV2;
 use crate::segmentation::{BoundaryTerminator, UtteranceSegmentation};
 
-/// Closed label vocabulary emitted by the TalkBank utterance-boundary model.
+/// Closed label vocabulary emitted by the `TalkBank` utterance-boundary model.
 ///
 /// Names describe model semantics instead of exposing classifier label indices,
 /// whose numeric ordering is an implementation detail of the Python model.
@@ -37,7 +37,8 @@ impl UtsegBoundaryActionV2 {
     ///
     /// Typed rather than a `bool`: the three boundary actions differ in the
     /// terminator they predict, and that difference is what a split writes.
-    pub fn boundary(self) -> Option<BoundaryTerminator> {
+    #[must_use]
+    pub const fn boundary(self) -> Option<BoundaryTerminator> {
         match self {
             Self::PeriodBoundary => Some(BoundaryTerminator::Period),
             Self::QuestionBoundary => Some(BoundaryTerminator::Question),
@@ -46,7 +47,7 @@ impl UtsegBoundaryActionV2 {
         }
     }
 
-    fn is_nonordinary(self) -> bool {
+    const fn is_nonordinary(self) -> bool {
         !matches!(self, Self::Ordinary)
     }
 }
@@ -70,7 +71,7 @@ pub enum UtsegAdjacencyPolicyRevisionV2 {
 }
 
 impl UtsegAdjacencyPolicyRevisionV2 {
-    fn suppresses(self, left: UtsegBoundaryActionV2, right: UtsegBoundaryActionV2) -> bool {
+    const fn suppresses(self, left: UtsegBoundaryActionV2, right: UtsegBoundaryActionV2) -> bool {
         match self {
             Self::SuppressEarlierAdjacentNonordinaryV1 => {
                 left.is_nonordinary() && right.is_nonordinary()
@@ -138,7 +139,7 @@ pub enum UtsegWordBoundaryEvidenceV2 {
 /// model identity needed to interpret or reproduce it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct UtsegBoundaryModelEvidenceV2 {
-    /// HuggingFace model identifier the control plane pinned.
+    /// `HuggingFace` model identifier the control plane pinned.
     pub model_id: String,
     /// The exact revision the worker loaded, and never anything else.
     ///
@@ -192,6 +193,7 @@ pub struct ReappliedUtsegBoundaryEvidenceV2 {
 
 impl ReappliedUtsegBoundaryEvidenceV2 {
     /// Consume the proof and return its mutually consistent parts.
+    #[must_use]
     pub fn into_parts(self) -> (UtsegBoundaryModelEvidenceV2, UtteranceSegmentation) {
         (self.evidence, self.segmentation)
     }
@@ -213,6 +215,7 @@ impl UtsegBoundaryModelEvidenceV2 {
     /// Model inference is not repeated. Normalization omissions retain their
     /// positions, while adjacency is evaluated over the classified-word
     /// sequence exactly as it was in the worker.
+    #[must_use]
     pub fn reapply_adjacency_policy(
         &self,
         policy: UtsegAdjacencyPolicyRevisionV2,

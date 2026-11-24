@@ -10,7 +10,7 @@ use super::{RetokenizeContext, excluded_from_mor, should_retokenize};
 use crate::retokenize::{resolve_token_text, try_parse_token_as_word};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ExpansionRefusal {
+pub enum ExpansionRefusal {
     #[error("no character-level mapping for scoped word")]
     Unmapped,
     #[error("the mapped source word does not match this scoped word")]
@@ -34,7 +34,7 @@ struct ExpandedWords {
 }
 
 impl ExpandedWords {
-    fn retained(word: Word) -> Self {
+    const fn retained(word: Word) -> Self {
         Self {
             first: word,
             rest: Vec::new(),

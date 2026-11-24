@@ -30,7 +30,7 @@ use super::audio_output::{FileOutput, write_primary_output_artifact};
 
 /// Command-owned inner task for one audio-backed file.
 #[async_trait]
-pub(crate) trait AudioFileTask {
+pub trait AudioFileTask {
     type AttemptOutput: Send;
 
     /// Run one inner attempt with a fresh per-attempt progress channel.
@@ -68,7 +68,7 @@ pub(crate) trait AudioFileTask {
 /// function, where `WorkUnitKind::FileInfer` and `FileStage::Transcribing`
 /// could be swapped between two commands without the compiler noticing.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct AudioTaskReporting {
+pub struct AudioTaskReporting {
     /// The work unit this file books.
     pub work_unit_kind: WorkUnitKind,
     /// The stage a user sees while the attempt runs.
@@ -78,7 +78,7 @@ pub(crate) struct AudioTaskReporting {
 }
 
 /// Shared runner-owned shell for one audio-backed file task.
-pub(crate) async fn run_audio_file_task<Task>(
+pub async fn run_audio_file_task<Task>(
     job: &RunnerJobSnapshot,
     sink: Arc<dyn RunnerEventSink>,
     file: &PendingJobFile,

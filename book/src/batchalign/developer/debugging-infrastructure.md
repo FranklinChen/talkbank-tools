@@ -1,7 +1,7 @@
 # Debugging Infrastructure
 
 **Status:** Current
-**Last updated:** 2026-11-05 21:04 EST
+**Last updated:** 2026-11-18 10:13 EST
 
 > Release note: this document describes the current source tree. The
 > fail-closed FA/speaker evidence and content-addressed worker identity added in
@@ -218,9 +218,38 @@ issue.
 ### `batchalign3 doctor`
 
 Pre-flight diagnostic that validates the worker pipeline on the current
-machine. Sends known test inputs through the actual worker and validates
-output structure. Catches machine-specific issues (stale models, wrong
-pipeline, missing processors) before they become production failures.
+machine. Catches machine-specific issues (stale models, wrong pipeline,
+missing processors) before they become production failures.
+
+Doctor owns no worker client. Its two worker checks go through
+`PoolConfig::spawn_standalone` (`worker/pool/standalone.rs`), which derives
+the worker key a pool derives for the morphotag request
+(`TaskLoad::worker_key`) and spawns through the pool's own config builder,
+and `StandaloneWorker::execute`, which loads the task and sends the request
+through the same `execute_v2` preparation, memory lease and stall windows a
+pool dispatch uses. The probe is built by `collect_payloads` and
+`build_morphosyntax_request_v2`, as a job builds it, and the reply is
+admitted by `admit_morphosyntax_result`, the job's own decoder. The only
+thing doctor decides is its verdict: every item must be analyzed into a
+sentence with words.
+
+```mermaid
+flowchart LR
+    Probe["probe transcript"] --> Collect["collect_payloads"]
+    Collect --> Build["build_morphosyntax_request_v2"]
+    Build --> Spawn["PoolConfig::spawn_standalone\n(pool's worker key and config)"]
+    Spawn --> Exec["StandaloneWorker::execute\n(ensure_task lease, execute_v2)"]
+    Exec --> Admit["admit_morphosyntax_result\n(the job's decoder)"]
+    Admit --> Verdict["doctor's verdict"]
+```
+
+Its earlier private client drifted from the real path three times: it lacked
+`--serving`, so the worker refused it; it read the reply at a path the worker
+no longer used, so it passed with "0 words"; and it sent `batch_infer`, which
+morphotag jobs no longer send. Its timeouts fired only when a line arrived,
+so a silent worker hung it; the shared path's stall windows do not. One
+consequence of sharing the path: on a busy host doctor waits for memory, as
+a job would.
 
 ### `batchalign3 replay`
 

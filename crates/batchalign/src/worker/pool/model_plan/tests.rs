@@ -172,8 +172,8 @@ fn family_routes_preserve_bootstrap_probe_and_fallback_policy() {
 /// load wire overrides retain diarization, embedding or hosted model absence.
 /// Kind: wire
 /// Not a type: model-sharing and named wire-key choices are semantic and byte
-/// obligations after TaskLoad and route constructors retain their actual producers.
-/// State: typed speaker plans and the normal TaskLoad producer need no model or process.
+/// obligations after `TaskLoad` and route constructors retain their actual producers.
+/// State: typed speaker plans and the normal `TaskLoad` producer need no model or process.
 /// Concurrency: none
 #[test]
 fn the_speaker_model_is_a_load_not_a_worker_key() {

@@ -1,7 +1,7 @@
 //! Whisper chunk spans with non-decreasing boundaries.
 //!
 //! Two producers hand the pipeline `WhisperChunkSpanV2` lists: the Python
-//! HuggingFace worker and the in-process whisper.cpp backend. Both stitch audio
+//! `HuggingFace` worker and the in-process whisper.cpp backend. Both stitch audio
 //! chunks, and at a seam a word can start before the previous word ends; a
 //! chunk can even arrive with its end before its start. Neither producer is
 //! asked to repair that. The repair belongs where the spans are CONSUMED:
@@ -26,7 +26,7 @@ use crate::types::worker_v2::WhisperChunkSpanV2;
 ///
 /// Blocks carry `(sum, count)` so a merge is an addition; means are taken
 /// once, when the blocks are expanded.
-pub(crate) fn project_non_decreasing(values: &[f64]) -> Vec<f64> {
+pub fn project_non_decreasing(values: &[f64]) -> Vec<f64> {
     let mut blocks: Vec<(f64, usize)> = Vec::with_capacity(values.len());
     for &value in values {
         let mut block = (value, 1);
@@ -52,7 +52,7 @@ pub(crate) fn project_non_decreasing(values: &[f64]) -> Vec<f64> {
 /// missing either bound keeps what it had and goes downstream untimed on
 /// that side, where the timing admission already handles a missing bound.
 #[derive(Debug)]
-pub(crate) struct MonotoneChunk<'a> {
+pub struct MonotoneChunk<'a> {
     pub(crate) text: &'a str,
     pub(crate) start_s: Option<AudioPositionSeconds>,
     pub(crate) end_s: Option<AudioPositionSeconds>,
@@ -61,7 +61,7 @@ pub(crate) struct MonotoneChunk<'a> {
 /// Chunk spans whose timed boundaries never decrease, built by
 /// [`Self::project`] only.
 #[derive(Debug)]
-pub(crate) struct MonotoneChunkSpans<'a> {
+pub struct MonotoneChunkSpans<'a> {
     chunks: Vec<MonotoneChunk<'a>>,
     adjusted_boundaries: usize,
 }
@@ -127,7 +127,7 @@ impl<'a> MonotoneChunkSpans<'a> {
 
     /// How many boundaries the projection moved; zero when the input was
     /// already monotone.
-    pub(crate) fn adjusted_boundaries(&self) -> usize {
+    pub(crate) const fn adjusted_boundaries(&self) -> usize {
         self.adjusted_boundaries
     }
 

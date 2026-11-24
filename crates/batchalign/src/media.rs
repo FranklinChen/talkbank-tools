@@ -1,6 +1,6 @@
 //! Media listing and lookup: originally a port of `batchalign/serve/media.py`.
 //!
-//! Lists configured media_roots for audio/video files. Results are cached
+//! Lists configured `media_roots` for audio/video files. Results are cached
 //! with a 60-second TTL to avoid rescanning NFS mounts on every request.
 //!
 //! Finding media and PROCESSING it are both media concerns, so the external
@@ -48,6 +48,7 @@ impl MediaEntry {
     ///
     /// Uses `Path::join` for platform-safe path construction (correct on
     /// Windows where the separator is `\`, not `/`).
+    #[must_use]
     pub fn full_path(&self) -> String {
         std::path::Path::new(&self.dir_path)
             .join(&self.filename)
@@ -109,6 +110,7 @@ pub struct MediaResolver {
 
 impl MediaResolver {
     /// Create a resolver with an empty walk cache.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             cache: std::sync::Arc::new(DashMap::new()),
@@ -253,7 +255,7 @@ impl MediaResolver {
         names
     }
 
-    /// List audio/video filenames available under media_roots.
+    /// List audio/video filenames available under `media_roots`.
     fn list_files(&self, media_roots: &[String], subdir: &str) -> Vec<String> {
         let mut found = Vec::new();
 

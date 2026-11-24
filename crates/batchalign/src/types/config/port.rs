@@ -54,6 +54,7 @@ impl PortRequest {
     /// deliberately public and easy to reach; the type that must not be
     /// fabricated from a loose integer is
     /// [`BoundPort`](crate::server_handshake::BoundPort), not this one.
+    #[must_use]
     pub const fn from_u16(value: u16) -> Self {
         match NonZeroU16::new(value) {
             Some(port) => Self::Fixed(port),
@@ -65,6 +66,7 @@ impl PortRequest {
     ///
     /// `0` for [`Ephemeral`](Self::Ephemeral) is not a sentinel here: it is
     /// what the sockets API itself defines as "choose one for me".
+    #[must_use]
     pub const fn bind_value(self) -> u16 {
         match self {
             Self::Fixed(port) => port.get(),
@@ -78,6 +80,7 @@ impl PortRequest {
     /// knowable until the server has bound. Callers that want to build a URL
     /// want the published [`BoundPort`](crate::server_handshake::BoundPort)
     /// instead; this is for reporting what was ASKED for.
+    #[must_use]
     pub const fn fixed(self) -> Option<NonZeroU16> {
         match self {
             Self::Fixed(port) => Some(port),
@@ -92,6 +95,7 @@ impl PortRequest {
     /// `Display` would make `.to_string()` the natural call for both while only
     /// one of them is right. Use [`bind_value`](Self::bind_value) for anything
     /// a machine reads.
+    #[must_use]
     pub fn describe(self) -> String {
         match self {
             Self::Fixed(port) => port.to_string(),

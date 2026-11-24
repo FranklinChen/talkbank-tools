@@ -127,22 +127,26 @@ impl PendingJobFile {
     }
 
     /// Its index into the job's inputs, and into the job's file order.
-    pub fn file_index(&self) -> usize {
+    #[must_use]
+    pub const fn file_index(&self) -> usize {
         self.file_index
     }
 
     /// Its display name.
-    pub fn filename(&self) -> &DisplayPath {
+    #[must_use]
+    pub const fn filename(&self) -> &DisplayPath {
         &self.filename
     }
 
     /// Transcript or recording.
-    pub fn kind(&self) -> InputKind {
+    #[must_use]
+    pub const fn kind(&self) -> InputKind {
         self.kind
     }
 
     /// Where it is read and written.
-    pub fn location(&self) -> &InputLocation {
+    #[must_use]
+    pub const fn location(&self) -> &InputLocation {
         &self.location
     }
 
@@ -180,7 +184,7 @@ pub(crate) struct InPlaceMedia {
 }
 
 impl InPlaceMedia {
-    pub(crate) fn filename(&self) -> &DisplayPath {
+    pub(crate) const fn filename(&self) -> &DisplayPath {
         &self.filename
     }
     pub(crate) fn source(&self) -> &ServerPath {

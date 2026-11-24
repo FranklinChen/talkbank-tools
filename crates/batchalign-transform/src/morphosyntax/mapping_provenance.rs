@@ -20,6 +20,7 @@ pub struct MappedItem {
 
 impl MappedItem {
     /// A one-chunk item.
+    #[must_use]
     pub fn word(word: MorWord, chunk: ChunkProvenance) -> Self {
         Self {
             mor: Mor::new(word),
@@ -28,6 +29,7 @@ impl MappedItem {
     }
 
     /// This item with one more post-clitic chunk.
+    #[must_use]
     pub fn with_post_clitic(mut self, clitic: MorWord, chunk: ChunkProvenance) -> Self {
         self.mor = self.mor.with_post_clitic(clitic);
         self.provenance.push(chunk);
@@ -35,16 +37,19 @@ impl MappedItem {
     }
 
     /// The `%mor` item.
-    pub fn mor(&self) -> &Mor {
+    #[must_use]
+    pub const fn mor(&self) -> &Mor {
         &self.mor
     }
 
     /// One entry per chunk of the item, main first.
+    #[must_use]
     pub fn provenance(&self) -> &[ChunkProvenance] {
         &self.provenance
     }
 
     /// The item and its chunks' provenance.
+    #[must_use]
     pub fn into_parts(self) -> (Mor, MorProvenance) {
         (self.mor, self.provenance)
     }
@@ -72,7 +77,8 @@ pub enum ChunkHead {
 
 impl ChunkHead {
     /// Where a UD word's head is: the root, or another UD word.
-    pub fn of_word(word: &UdWord) -> Self {
+    #[must_use]
+    pub const fn of_word(word: &UdWord) -> Self {
         match word.head {
             UdHead::Root => Self::Root,
             UdHead::Word(head) => Self::FromUd(head),
@@ -83,6 +89,7 @@ impl ChunkHead {
 impl ChunkProvenance {
     /// The chunk of one UD word: its own id (a range row stands for its
     /// first component; an empty node has none), head and relation.
+    #[must_use]
     pub fn of_word(word: &UdWord, deprel: GrammaticalRelationType) -> Self {
         Self {
             source_ud_ids: UdWordId::of_row(word).into_iter().collect(),
@@ -107,6 +114,7 @@ impl ChunkProvenance {
 
     /// A post-clitic our tables synthesized: no UD word resolves to it, and
     /// it depends on its item's main chunk.
+    #[must_use]
     pub fn synthetic_post_clitic(deprel: GrammaticalRelationType) -> Self {
         Self {
             source_ud_ids: SmallVec::new(),
@@ -116,17 +124,20 @@ impl ChunkProvenance {
     }
 
     /// The UD words whose head references resolve to this chunk.
+    #[must_use]
     pub fn source_ud_ids(&self) -> &[UdWordId] {
         &self.source_ud_ids
     }
 
     /// Where the chunk's head is.
-    pub fn head(&self) -> &ChunkHead {
+    #[must_use]
+    pub const fn head(&self) -> &ChunkHead {
         &self.head
     }
 
     /// The chunk's relation.
-    pub fn deprel(&self) -> &GrammaticalRelationType {
+    #[must_use]
+    pub const fn deprel(&self) -> &GrammaticalRelationType {
         &self.deprel
     }
 }

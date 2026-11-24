@@ -64,7 +64,7 @@ pub struct CacheStats {
     pub total_entries: u64,
     /// Entry count by task name.
     pub by_task: HashMap<String, u64>,
-    /// Entry count by "task engine_version".
+    /// Entry count by "task `engine_version`".
     pub by_engine_version: HashMap<String, u64>,
 }
 

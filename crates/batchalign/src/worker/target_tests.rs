@@ -4,7 +4,7 @@ use crate::api::ReleasedCommand;
 /// bootstrap mode, and released command requirements choose their declared task.
 /// Kind: wire
 /// Not a type: The actual Python-visible labels and command to profile mappings are
-/// explicit wire and semantic choices after InferenceRequirement admission.
+/// explicit wire and semantic choices after `InferenceRequirement` admission.
 /// State: immutable requirements and targets require no pool or process.
 /// Concurrency: none
 #[test]

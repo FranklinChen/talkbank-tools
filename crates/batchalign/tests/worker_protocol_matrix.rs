@@ -34,78 +34,79 @@ use batchalign::types::worker_v2::{
     SpeakerEmbeddingOutcomeV2, SpeakerInferenceEvidenceV2, TaskRequestV2, TaskResultV2,
     WhisperObservationsV2, WorkerArtifactIdV2,
 };
-use batchalign::worker::WorkerProfile;
-use batchalign::worker::handle::WorkerConfig;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
-/// One fixture manifest entry shared by the Rust and Python V2 drift tests.
-#[derive(Debug, Clone, Deserialize)]
+/// The schema in each manifest entry controls which decoder can read it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum FixtureSchema {
+    HelloRequest,
+    HelloResponse,
+    ExecuteRequest,
+    ExecuteResponse,
+    ProgressEvent,
+    ShutdownRequest,
+}
+
+#[derive(Debug, Deserialize)]
 struct FixtureEntry {
-    /// Logical schema name used to select the parser.
-    schema: String,
-    /// Fixture filename relative to the worker-protocol fixture root.
+    schema: FixtureSchema,
     file: String,
 }
 
-/// Top-level manifest for the shared worker-protocol V2 fixtures.
 #[derive(Debug, Deserialize)]
 struct FixtureManifest {
-    /// Canonical fixture entries consumed by both test suites.
     fixtures: Vec<FixtureEntry>,
 }
 
-/// Return the shared repo-level fixture directory for worker protocol V2.
+/// The typed payload still carries the name of the bytes it came from.
+struct DecodedFixture<T> {
+    file: String,
+    value: T,
+}
+
+impl<T: DeserializeOwned> DecodedFixture<T> {
+    fn read(file: String) -> Self {
+        let raw = fs::read_to_string(fixture_root().join(&file))
+            .unwrap_or_else(|error| panic!("read fixture {file}: {error}"));
+        let value = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("decode fixture {file}: {error}"));
+        Self { file, value }
+    }
+}
+
+enum ExecuteFixtureSource {
+    Request(String),
+    Response(String),
+}
+
+impl FixtureManifest {
+    fn read() -> Self {
+        let raw = fs::read_to_string(fixture_root().join("manifest.json")).expect("read manifest");
+        serde_json::from_str(&raw).expect("decode manifest")
+    }
+
+    fn into_execute_sources(self) -> impl Iterator<Item = ExecuteFixtureSource> {
+        self.fixtures
+            .into_iter()
+            .filter_map(|entry| match entry.schema {
+                FixtureSchema::ExecuteRequest => Some(ExecuteFixtureSource::Request(entry.file)),
+                FixtureSchema::ExecuteResponse => Some(ExecuteFixtureSource::Response(entry.file)),
+                FixtureSchema::HelloRequest
+                | FixtureSchema::HelloResponse
+                | FixtureSchema::ProgressEvent
+                | FixtureSchema::ShutdownRequest => None,
+            })
+    }
+}
+
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/worker_protocol_v2")
 }
 
-/// Load and deserialize the shared fixture manifest.
-fn load_manifest() -> FixtureManifest {
-    let path = fixture_root().join("manifest.json");
-    let raw = fs::read_to_string(path).expect("worker protocol v2 manifest should exist");
-    serde_json::from_str(&raw).expect("worker protocol v2 manifest should parse")
-}
-
-/// Load one execute-request fixture through the Rust schema.
-fn load_execute_request(file: &str) -> ExecuteRequestV2 {
-    let path = fixture_root().join(file);
-    let raw = fs::read_to_string(path).expect("worker protocol v2 request fixture should exist");
-    serde_json::from_str(&raw).expect("worker protocol v2 request fixture should parse")
-}
-
-/// Load one execute-response fixture through the Rust schema.
-fn load_execute_response(file: &str) -> ExecuteResponseV2 {
-    let path = fixture_root().join(file);
-    let raw = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("response fixture {file} should exist: {e}"));
-    // Refusal at deserialization replaced the per-fixture invariant arms, so
-    // the panic must name the file and the serde detail or a bad fixture in a
-    // manifest loop is unattributable.
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("response fixture {file} failed to parse: {e}"))
-}
-
-/// Return the canonical execute-request fixture entries from the shared manifest.
-fn execute_request_entries() -> Vec<FixtureEntry> {
-    load_manifest()
-        .fixtures
-        .into_iter()
-        .filter(|entry| entry.schema == "execute_request")
-        .collect()
-}
-
-/// Return the canonical execute-response fixture entries from the shared manifest.
-fn execute_response_entries() -> Vec<FixtureEntry> {
-    load_manifest()
-        .fixtures
-        .into_iter()
-        .filter(|entry| entry.schema == "execute_response")
-        .collect()
-}
-
 /// Return the payload-kind label for one typed request payload.
-fn payload_kind_name(payload: &TaskRequestV2) -> &'static str {
+const fn payload_kind_name(payload: &TaskRequestV2) -> &'static str {
     match payload {
         TaskRequestV2::Asr(_) => "asr",
         TaskRequestV2::ForcedAlignment(_) => "forced_alignment",
@@ -122,7 +123,7 @@ fn payload_kind_name(payload: &TaskRequestV2) -> &'static str {
 }
 
 /// Return the expected payload-kind label for one top-level V2 task.
-fn expected_payload_kind(task: InferenceTaskV2) -> &'static str {
+const fn expected_payload_kind(task: InferenceTaskV2) -> &'static str {
     match task {
         InferenceTaskV2::Asr => "asr",
         InferenceTaskV2::ForcedAlignment => "forced_alignment",
@@ -139,7 +140,7 @@ fn expected_payload_kind(task: InferenceTaskV2) -> &'static str {
 }
 
 /// Return the stable label for one ASR backend.
-fn asr_backend_label(backend: AsrBackendV2) -> &'static str {
+const fn asr_backend_label(backend: AsrBackendV2) -> &'static str {
     match backend {
         AsrBackendV2::LocalWhisper => "local_whisper",
         AsrBackendV2::WhisperHub => "whisper_hub",
@@ -152,7 +153,7 @@ fn asr_backend_label(backend: AsrBackendV2) -> &'static str {
 }
 
 /// Return the stable label for one FA backend.
-fn fa_backend_label(backend: FaBackendV2) -> &'static str {
+const fn fa_backend_label(backend: FaBackendV2) -> &'static str {
     match backend {
         FaBackendV2::Whisper => "whisper",
         FaBackendV2::Wave2vec => "wave2vec",
@@ -176,7 +177,7 @@ enum FixtureCoverage {
     NotOnThisWire,
 }
 
-fn asr_fixture_coverage(backend: AsrBackendV2) -> FixtureCoverage {
+const fn asr_fixture_coverage(backend: AsrBackendV2) -> FixtureCoverage {
     match backend {
         AsrBackendV2::LocalWhisper
         | AsrBackendV2::WhisperHub
@@ -191,7 +192,7 @@ fn asr_fixture_coverage(backend: AsrBackendV2) -> FixtureCoverage {
     }
 }
 
-fn fa_fixture_coverage(backend: FaBackendV2) -> FixtureCoverage {
+const fn fa_fixture_coverage(backend: FaBackendV2) -> FixtureCoverage {
     match backend {
         FaBackendV2::Whisper
         | FaBackendV2::Wave2vec
@@ -200,13 +201,13 @@ fn fa_fixture_coverage(backend: FaBackendV2) -> FixtureCoverage {
     }
 }
 
-fn speaker_fixture_coverage(backend: SpeakerBackendV2) -> FixtureCoverage {
+const fn speaker_fixture_coverage(backend: SpeakerBackendV2) -> FixtureCoverage {
     match backend {
         SpeakerBackendV2::PyannoteAi | SpeakerBackendV2::Pyannote => FixtureCoverage::Required,
     }
 }
 
-fn speaker_backend_label(backend: SpeakerBackendV2) -> &'static str {
+const fn speaker_backend_label(backend: SpeakerBackendV2) -> &'static str {
     match backend {
         SpeakerBackendV2::PyannoteAi => "pyannote_ai",
         SpeakerBackendV2::Pyannote => "pyannote",
@@ -240,7 +241,7 @@ fn assert_every_required_backend_has_a_fixture<Backend: Copy>(
 }
 
 /// Return the stable label for one ASR input transport.
-fn asr_input_kind_name(input: &AsrInputV2) -> &'static str {
+const fn asr_input_kind_name(input: &AsrInputV2) -> &'static str {
     match input {
         AsrInputV2::PreparedAudio(_) => "prepared_audio",
         AsrInputV2::ProviderMedia(_) => "provider_media",
@@ -249,7 +250,7 @@ fn asr_input_kind_name(input: &AsrInputV2) -> &'static str {
 }
 
 /// Return the stable label for one execute result kind.
-fn result_kind_name(result: &TaskResultV2) -> &'static str {
+const fn result_kind_name(result: &TaskResultV2) -> &'static str {
     match result {
         TaskResultV2::FaPreparation(_) => "fa_preparation",
         TaskResultV2::WhisperChunkResult(_) => "whisper_chunk_result",
@@ -293,7 +294,7 @@ fn expected_result_kind(file: &str) -> Option<&'static str> {
 }
 
 /// Return the stable id of one attachment descriptor.
-fn attachment_id(attachment: &ArtifactRefV2) -> &WorkerArtifactIdV2 {
+const fn attachment_id(attachment: &ArtifactRefV2) -> &WorkerArtifactIdV2 {
     match attachment {
         ArtifactRefV2::PreparedAudio(value) => &value.id,
         ArtifactRefV2::PreparedText(value) => &value.id,
@@ -302,7 +303,7 @@ fn attachment_id(attachment: &ArtifactRefV2) -> &WorkerArtifactIdV2 {
 }
 
 /// Return the stable kind label of one attachment descriptor.
-fn attachment_kind_name(attachment: &ArtifactRefV2) -> &'static str {
+const fn attachment_kind_name(attachment: &ArtifactRefV2) -> &'static str {
     match attachment {
         ArtifactRefV2::PreparedAudio(_) => "prepared_audio",
         ArtifactRefV2::PreparedText(_) => "prepared_text",
@@ -793,7 +794,7 @@ fn validate_task_result_shape(result: &TaskResultV2) -> Result<(), String> {
                     })
                     .collect::<Option<Vec<_>>>()
                     .ok_or_else(|| "pyannoteAI speaker segments must have timings".to_owned())?,
-                SpeakerInferenceEvidenceV2::Pyannote { segments } => segments
+                SpeakerInferenceEvidenceV2::Pyannote { segments, .. } => segments
                     .iter()
                     .map(|segment| {
                         (
@@ -921,35 +922,60 @@ fn mismatched_execute_request(request_id: &str, task: InferenceTaskV2) -> Execut
     }
 }
 
+/// Guards: The manifest covers each required live backend and successful
+/// result shape, and its execute fixtures preserve their attachment semantics.
+/// Kind: wire
+/// Not a type: External manifest rows and fixture bytes can omit a supported
+/// backend or name the wrong attachment, despite a structurally valid decoder.
+/// State: Read the versioned JSON manifest once and decode each fixture once.
+/// Concurrency: The manifest and all decoded values belong to this test.
 #[test]
-fn worker_protocol_v2_request_manifest_covers_live_backend_matrix() {
+fn worker_protocol_v2_manifest_covers_live_requests_and_responses() {
     let mut asr_backends = BTreeSet::new();
     let mut fa_backends = BTreeSet::new();
     let mut speaker_backends = BTreeSet::new();
+    let mut result_kinds = BTreeSet::new();
 
-    for entry in execute_request_entries() {
-        let request = load_execute_request(&entry.file);
-        validate_execute_request_invariants(&request).unwrap_or_else(|error| {
-            panic!("request fixture {} failed invariants: {error}", entry.file)
-        });
-        match &request.payload {
-            TaskRequestV2::Asr(value) => {
-                asr_backends.insert(asr_backend_label(value.backend).to_string());
+    for fixture in FixtureManifest::read().into_execute_sources() {
+        match fixture {
+            ExecuteFixtureSource::Request(file) => {
+                let DecodedFixture {
+                    file,
+                    value: request,
+                } = DecodedFixture::<ExecuteRequestV2>::read(file);
+                validate_execute_request_invariants(&request)
+                    .unwrap_or_else(|error| panic!("request fixture {file} failed: {error}"));
+                match request.payload {
+                    TaskRequestV2::Asr(value) => {
+                        asr_backends.insert(asr_backend_label(value.backend).to_string());
+                    }
+                    TaskRequestV2::ForcedAlignment(value) => {
+                        fa_backends.insert(fa_backend_label(value.backend).to_string());
+                    }
+                    TaskRequestV2::Speaker(value) => {
+                        speaker_backends.insert(speaker_backend_label(value.backend).to_string());
+                    }
+                    TaskRequestV2::Morphosyntax(_)
+                    | TaskRequestV2::Utseg(_)
+                    | TaskRequestV2::Translate(_)
+                    | TaskRequestV2::WordSegmentation(_)
+                    | TaskRequestV2::Coref(_)
+                    | TaskRequestV2::SpeakerEmbedding(_)
+                    | TaskRequestV2::Opensmile(_)
+                    | TaskRequestV2::Avqi(_) => {}
+                }
             }
-            TaskRequestV2::ForcedAlignment(value) => {
-                fa_backends.insert(fa_backend_label(value.backend).to_string());
+            ExecuteFixtureSource::Response(file) => {
+                let DecodedFixture {
+                    file,
+                    value: response,
+                } = DecodedFixture::<ExecuteResponseV2>::read(file);
+                validate_execute_response_invariants(&file, &response)
+                    .unwrap_or_else(|error| panic!("response fixture {file} failed: {error}"));
+                if let ExecuteOutcomeRef::Success(result) = response.read() {
+                    result_kinds.insert(result_kind_name(result).to_string());
+                }
             }
-            TaskRequestV2::Speaker(value) => {
-                speaker_backends.insert(speaker_backend_label(value.backend).to_string());
-            }
-            TaskRequestV2::Morphosyntax(_)
-            | TaskRequestV2::Utseg(_)
-            | TaskRequestV2::Translate(_)
-            | TaskRequestV2::WordSegmentation(_)
-            | TaskRequestV2::Coref(_)
-            | TaskRequestV2::SpeakerEmbedding(_)
-            | TaskRequestV2::Opensmile(_)
-            | TaskRequestV2::Avqi(_) => {}
         }
     }
 
@@ -980,21 +1006,6 @@ fn worker_protocol_v2_request_manifest_covers_live_backend_matrix() {
         speaker_backend_label,
         &speaker_backends,
     );
-}
-
-#[test]
-fn worker_protocol_v2_response_manifest_covers_result_shape_matrix() {
-    let mut result_kinds = BTreeSet::new();
-
-    for entry in execute_response_entries() {
-        let response = load_execute_response(&entry.file);
-        validate_execute_response_invariants(&entry.file, &response).unwrap_or_else(|error| {
-            panic!("response fixture {} failed invariants: {error}", entry.file)
-        });
-        if let ExecuteOutcomeRef::Success(result) = response.read() {
-            result_kinds.insert(result_kind_name(result).to_string());
-        }
-    }
 
     for result_kind in [
         "whisper_chunk_result",
@@ -1016,16 +1027,18 @@ fn worker_protocol_v2_response_manifest_covers_result_shape_matrix() {
     }
 }
 
+/// Guards: Fixture validation rejects unsupported backend/transport and
+/// backend/text pairs, and an FA payload missing its utterance-index field.
+/// Kind: wire
+/// Not a type: A peer can independently choose valid wire discriminants and
+/// provide opaque JSON values that fail the backend or attachment contract.
+/// State: Three checked-in sources decoded in memory and deliberately corrupted.
+/// Concurrency: Each mutation owns its decoded value.
 #[test]
 fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
-    let mut invalid_task_payload =
-        load_execute_request("execute_request_speaker_prepared_audio.json");
-    invalid_task_payload.task = InferenceTaskV2::Morphosyntax;
-    let error = validate_execute_request_invariants(&invalid_task_payload)
-        .expect_err("mismatched task/payload pair should fail");
-    assert!(error.contains("expected payload kind morphosyntax"));
-
-    let mut invalid_asr_transport = load_execute_request("execute_request_asr_prepared_audio.json");
+    let mut invalid_asr_transport =
+        DecodedFixture::<ExecuteRequestV2>::read("execute_request_asr_prepared_audio.json".into())
+            .value;
     let TaskRequestV2::Asr(asr_request) = &mut invalid_asr_transport.payload else {
         panic!("asr fixture should deserialize as an ASR request");
     };
@@ -1037,8 +1050,10 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
         .expect_err("local whisper with provider_media should fail");
     assert!(error.contains("local_whisper requires prepared_audio"));
 
-    let mut invalid_fa_text_mode =
-        load_execute_request("execute_request_fa_wave2vec_prepared_audio.json");
+    let mut invalid_fa_text_mode = DecodedFixture::<ExecuteRequestV2>::read(
+        "execute_request_fa_wave2vec_prepared_audio.json".into(),
+    )
+    .value;
     let TaskRequestV2::ForcedAlignment(fa_request) = &mut invalid_fa_text_mode.payload else {
         panic!("forced-alignment fixture should deserialize as an FA request");
     };
@@ -1047,7 +1062,9 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
         .expect_err("wave2vec with char_joined text should fail");
     assert!(error.contains("wave2vec requires space_joined"));
 
-    let mut invalid_fa_inline_json = load_execute_request("execute_request_fa_prepared_audio.json");
+    let mut invalid_fa_inline_json =
+        DecodedFixture::<ExecuteRequestV2>::read("execute_request_fa_prepared_audio.json".into())
+            .value;
     let TaskRequestV2::ForcedAlignment(fa_request) = &invalid_fa_inline_json.payload else {
         panic!("forced-alignment fixture should deserialize as an FA request");
     };
@@ -1069,7 +1086,7 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
 }
 
 /// Guards: Python's real execute boundary returns the original request ID and a
-/// typed InvalidPayload response for mismatched task and payload bytes.
+/// typed `InvalidPayload` response for mismatched task and payload bytes.
 /// Kind: contract
 /// Not a type: Rust deliberately forwards malformed protocol inputs for native
 /// validation, and the independently implemented Python decoder can reject differently.
@@ -1077,20 +1094,8 @@ fn worker_protocol_v2_request_invariants_reject_invalid_live_combinations() {
 /// Concurrency: the shared worker pool grants this test an exclusive configured lease.
 #[tokio::test]
 async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_matrix() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    let mut lease = common::test_worker_pool::shared_test_worker_pool()
-        .checkout(&config)
+    let mut lease = common::echo_worker::EchoWorker::Profile
+        .checkout()
         .await
         .expect("checkout failed");
 
@@ -1103,15 +1108,6 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
         ("req-v2-mismatch-fa", InferenceTaskV2::ForcedAlignment),
     ] {
         let request = mismatched_execute_request(request_id, task);
-        // An echo worker builds nothing, so its loads take no lease.
-        let preparation = batchalign::worker::pool::LoadPreparation {
-            admission: batchalign::worker::pool::LoadAdmission::new(
-                config.runtime.host.memory_coordinator(),
-                batchalign::worker::pool::ModelHosting::TestEcho,
-                std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
-            ),
-            stall: batchalign::worker::LoadingStall::DEFAULT_ENSURE_TASK,
-        };
         let batchalign::worker::pool::DispatchPreparation::Ready(ready) =
             batchalign::worker::pool::DispatchPreparation::begin(&request)
                 .expect("malformed task pairs reach native validation unchanged")
@@ -1119,7 +1115,7 @@ async fn worker_execute_v2_returns_typed_invalid_payload_for_mismatched_task_mat
             panic!("a mismatched task must not become a valid FA preparation")
         };
         let response = lease
-            .execute_v2(ready, &preparation)
+            .execute_v2(ready)
             .await
             .expect("worker should return a typed invalid-payload response");
 

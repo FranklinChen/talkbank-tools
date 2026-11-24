@@ -41,7 +41,7 @@ fn recognizer_boundary_language(
 /// bounded window where the language keeps recognizer boundaries, otherwise
 /// the chunker default with punctuation left to segmentation. An auto-detect
 /// request (`None`) has no recognizer-boundary language.
-pub(crate) fn qwen_recognition(language: Option<&LanguageCode3>) -> QwenRecognitionV2 {
+pub fn qwen_recognition(language: Option<&LanguageCode3>) -> QwenRecognitionV2 {
     match language.and_then(recognizer_boundary_language) {
         Some(entry) => QwenRecognitionV2 {
             window: DecodeWindowV2::BoundedSeconds {
@@ -57,7 +57,7 @@ pub(crate) fn qwen_recognition(language: Option<&LanguageCode3>) -> QwenRecognit
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TranscribeSegmentation(SegmentationRoute);
+pub struct TranscribeSegmentation(SegmentationRoute);
 
 #[derive(Clone, Debug)]
 enum SegmentationRoute {
@@ -83,14 +83,14 @@ impl TranscribeSegmentation {
         }
     }
 
-    pub(crate) fn language(&self) -> &LanguageCode3 {
+    pub(crate) const fn language(&self) -> &LanguageCode3 {
         match &self.0 {
             SegmentationRoute::Model(route) => route.language(),
             SegmentationRoute::AsrBoundaries { language } => language,
         }
     }
 
-    pub(crate) fn model(&self) -> Option<&UtsegRoute> {
+    pub(crate) const fn model(&self) -> Option<&UtsegRoute> {
         match &self.0 {
             SegmentationRoute::Model(route) => Some(route),
             SegmentationRoute::AsrBoundaries { .. } => None,

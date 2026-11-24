@@ -80,7 +80,7 @@ pub(crate) fn parse_engine_overrides_json(input: &str) -> Result<EngineOverrides
 }
 
 /// Resolve a simple `--foo` / `--no-foo` pair after clap has applied defaults.
-fn resolve_flag_pair(enabled: bool, disabled: bool) -> bool {
+const fn resolve_flag_pair(enabled: bool, disabled: bool) -> bool {
     enabled && !disabled
 }
 
@@ -100,7 +100,7 @@ fn resolve_wor_tier_policy(enabled: bool, disabled: bool) -> WorTierPolicy {
 /// byte-for-byte symmetric on review-tier verbosity.
 ///
 /// [`ReviewLevel`]: crate::chat_ops::fa::ReviewLevel
-fn resolve_review_level(
+const fn resolve_review_level(
     level: super::commands::CliReviewLevel,
 ) -> crate::chat_ops::fa::ReviewLevel {
     use super::commands::CliReviewLevel;
@@ -382,7 +382,8 @@ fn build_typed_options_with_cwd(
 }
 
 /// Extract `CommonOpts` from a processing command, if present.
-pub fn common_opts(cmd: &Commands) -> Option<&CommonOpts> {
+#[must_use]
+pub const fn common_opts(cmd: &Commands) -> Option<&CommonOpts> {
     match cmd {
         Commands::Convert(a) => Some(&a.common),
         Commands::Align(a) => Some(&a.common),
@@ -400,6 +401,7 @@ pub fn common_opts(cmd: &Commands) -> Option<&CommonOpts> {
 }
 
 /// Extract `--before` from commands that support incremental processing.
+#[must_use]
 pub fn extract_before(cmd: &Commands) -> Option<&std::path::Path> {
     match cmd {
         Commands::Align(a) => a.incremental.before.as_deref(),
@@ -413,6 +415,7 @@ pub fn extract_before(cmd: &Commands) -> Option<&std::path::Path> {
 /// Every command that flattens [`OverwriteFlag`] must be named here, or its
 /// flag would parse and change nothing; `overwrite_flag_reaches_dispatch` in
 /// the tests holds the two lists together.
+#[must_use]
 pub fn extract_overwrite(cmd: &Commands) -> Option<crate::cli::output::Overwrite> {
     match cmd {
         Commands::Transcribe(a) => a.overwrite.authority(),
@@ -424,6 +427,7 @@ pub fn extract_overwrite(cmd: &Commands) -> Option<crate::cli::output::Overwrite
 }
 
 /// Extract --bank from a processing command, if applicable.
+#[must_use]
 pub fn extract_bank(cmd: &Commands) -> Option<&str> {
     match cmd {
         Commands::Benchmark(a) => a.bank.as_deref(),
@@ -433,6 +437,7 @@ pub fn extract_bank(cmd: &Commands) -> Option<&str> {
 }
 
 /// Extract --subdir from a processing command, if applicable.
+#[must_use]
 pub fn extract_subdir(cmd: &Commands) -> Option<&str> {
     match cmd {
         Commands::Benchmark(a) => a.subdir.as_deref(),
@@ -442,6 +447,7 @@ pub fn extract_subdir(cmd: &Commands) -> Option<&str> {
 }
 
 /// Extract --lexicon path from morphotag, if present.
+#[must_use]
 pub fn extract_lexicon(cmd: &Commands) -> Option<&str> {
     match cmd {
         Commands::Morphotag(a) => a.lexicon.as_deref(),

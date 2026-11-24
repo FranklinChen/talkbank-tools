@@ -412,7 +412,7 @@ impl ServerTestDeadline {
     }
 
     /// How long to sleep between probes for this subject.
-    pub fn poll_interval(&self) -> Duration {
+    pub const fn poll_interval(&self) -> Duration {
         self.subject.budget.poll_interval
     }
 
@@ -597,13 +597,13 @@ pub enum HarnessBudget {
 
 impl HarnessBudget {
     /// The wall-clock budget for this operation.
-    pub fn as_duration(self) -> Duration {
+    pub const fn as_duration(self) -> Duration {
         self.as_positive_seconds().duration()
     }
 
     /// The same budget as the non-zero whole seconds the worker config
     /// fields take.
-    pub fn as_positive_seconds(self) -> batchalign::api::PositiveSeconds {
+    pub const fn as_positive_seconds(self) -> batchalign::api::PositiveSeconds {
         match self {
             Self::SessionShutdown => batchalign::api::PositiveSeconds::literal::<5>(),
             Self::FixtureWorkerReady => batchalign::api::PositiveSeconds::literal::<300>(),

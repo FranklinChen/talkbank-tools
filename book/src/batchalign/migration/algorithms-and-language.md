@@ -893,6 +893,14 @@ flowchart TD
 the bullet into the gap by `min(gap/2, 1500ms)`. This ensures the FA audio
 window includes the filler without stealing from the neighbor.
 
+The edge words are the first and last words that occupy a `%wor` slot, the
+same set FA aligns (`walk_wor_units` in `chat_ops/fa/extraction.rs`). An
+untranscribed word (`xxx`), a phonological fragment (`&+fr`) or a nonword
+(`&~ah`) at the edge is skipped, so `*CHI: xxx &-um hello .` expands for its
+leading filler. Until November 2026 the pass read every leaf of a
+`%wor`-domain walk as alignable, but that domain only selects which groups
+the walk enters, so such an edge word hid the filler beside it.
+
 **Source:** `crates/batchalign/src/chat_ops/fa/expand_for_fillers.rs::expand_bullets_for_edge_fillers`.
 
 ### 8.3) FA group trailing gap extension

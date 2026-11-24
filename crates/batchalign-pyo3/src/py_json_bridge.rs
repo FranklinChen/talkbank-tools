@@ -4,7 +4,7 @@
 //! through this function, so what it accepts is the real wire contract. Until
 //! 2026-09-16 it asked its questions in the wrong order: numeric extraction ran
 //! before strings and containers, and each test was "can this be read as an
-//! `i64`" rather than "is this an `int`". PyO3's numeric extraction honours
+//! `i64`" rather than "is this an `int`". `PyO3`'s numeric extraction honours
 //! `__int__` / `__float__` / `__index__`, so anything number-like answered yes.
 //! A `numpy.float64` became a JSON number silently, which is defensible, and a
 //! type nobody had considered became one too, which is not: the conversion was
@@ -52,7 +52,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyModule, PyString, Py
 /// converts millions of values and must not allocate a breadcrumb for each one,
 /// while a refusal (which allocates once, when rendering) is rare.
 #[derive(Clone, Copy)]
-pub(crate) enum ValuePath<'a> {
+pub enum ValuePath<'a> {
     /// The value handed to the conversion.
     Root,
     /// A value under a dictionary key.
@@ -85,7 +85,7 @@ impl std::fmt::Display for ValuePath<'_> {
 ///
 /// The Rust boundary, not Python, decides which shapes are accepted; see the
 /// module documentation for the exact order and why it is that order.
-pub(crate) fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+pub fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     convert(value, &ValuePath::Root)
 }
 
@@ -255,7 +255,7 @@ fn convert_int(value: &Bound<'_, PyAny>, path: &ValuePath<'_>) -> PyResult<serde
 /// produces and the JSON Schema in `ipc-schema/` is generated from. A dict
 /// assembled by hand at the call site would be a second spelling of the same
 /// wire shape, free to drift from both while still compiling.
-pub(crate) fn json_value_to_py<'py>(
+pub fn json_value_to_py<'py>(
     py: Python<'py>,
     value: &serde_json::Value,
 ) -> PyResult<Bound<'py, PyAny>> {

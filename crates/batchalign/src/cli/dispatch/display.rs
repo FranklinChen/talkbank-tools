@@ -75,7 +75,7 @@ pub(super) enum DashboardLaunch {
 /// asked for this submission's page. With neither flag the page opens once,
 /// on the invocation that started the daemon: an already-running server has
 /// had its page opened by whoever started it, or the operator shut it.
-pub(super) fn dashboard_launch(
+pub(super) const fn dashboard_launch(
     dashboard: Dashboard,
     origin: ServerOrigin,
     session: Session,

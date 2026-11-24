@@ -18,16 +18,19 @@ pub struct PlannedServerInput {
 
 impl PlannedServerInput {
     /// Canonical source read by either transport.
+    #[must_use]
     pub fn source(&self) -> &Path {
         &self.source
     }
 
     /// Source-relative identity submitted to the server.
+    #[must_use]
     pub fn server_name(&self) -> &str {
         &self.server_name
     }
 
     /// Absolute output anchor supplied to the shared-filesystem runner.
+    #[must_use]
     pub fn output_anchor(&self) -> &Path {
         &self.output_anchor
     }
@@ -45,11 +48,13 @@ pub struct ServerInputPlan {
 
 impl ServerInputPlan {
     /// Ordered, immutable source relationships.
+    #[must_use]
     pub fn inputs(&self) -> &[PlannedServerInput] {
         &self.inputs
     }
 
     /// Hand the admitted write capability to the result consumer.
+    #[must_use]
     pub fn into_destinations(self) -> ResultDestinations {
         self.destinations
     }

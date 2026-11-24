@@ -183,11 +183,13 @@ impl WordSpan {
     }
 
     /// Where the word begins.
+    #[must_use]
     pub const fn start(&self) -> &RecordedInstant {
         &self.start
     }
 
     /// Where the word ends.
+    #[must_use]
     pub const fn end(&self) -> &RecordedInstant {
         &self.end
     }
@@ -203,6 +205,7 @@ impl WordSpan {
     ///
     /// The borrowing accessors stay for readers that keep the span; this adds
     /// no way to BUILD one, so the constructor gate above is untouched.
+    #[must_use]
     pub fn into_parts(self) -> (RecordedInstant, RecordedInstant) {
         (self.start, self.end)
     }
@@ -391,7 +394,7 @@ impl SpanRejections {
     ///
     /// Exhaustive rather than a catch-all: a new [`SpanFault`] variant must be
     /// given a home here instead of silently joining a bucket.
-    pub fn record_span_fault(&mut self, fault: SpanFault) {
+    pub const fn record_span_fault(&mut self, fault: SpanFault) {
         match fault {
             SpanFault::NoExtent { .. } => self.no_extent += 1,
             SpanFault::Inverted { .. } => self.inverted += 1,
@@ -401,7 +404,7 @@ impl SpanRejections {
     /// A pair of reported ends refused as an interval
     /// (`AdmittedInterval::admit_positions`): an inverted pair counts with the
     /// inverted spans, any other refusal as inadmissible.
-    pub fn record_refusal(&mut self, refusal: batchalign_types::interval::IntervalRefusal) {
+    pub const fn record_refusal(&mut self, refusal: batchalign_types::interval::IntervalRefusal) {
         use batchalign_types::interval::IntervalRefusal;
         match refusal {
             IntervalRefusal::Inverted { .. } => self.inverted += 1,
@@ -420,7 +423,8 @@ impl SpanRejections {
     }
 
     /// How many timings were rejected, for any reason.
-    pub fn total(self) -> usize {
+    #[must_use]
+    pub const fn total(self) -> usize {
         self.no_extent + self.inverted + self.outside_window + self.inadmissible
     }
 
@@ -428,7 +432,8 @@ impl SpanRejections {
     ///
     /// Named because it is the one class that used to corrupt output rather
     /// than merely losing a timing, so it earns the headline in a log line.
-    pub fn any_outside_window(self) -> bool {
+    #[must_use]
+    pub const fn any_outside_window(self) -> bool {
         self.outside_window > 0
     }
 }

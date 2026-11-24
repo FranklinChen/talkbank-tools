@@ -14,7 +14,7 @@ use crate::worker::error::WorkerError;
 use super::channel::SharedGpuChannel;
 
 /// A GPU daemon that serves V2 requests concurrently over one TCP connection.
-pub(crate) struct SharedGpuTcpWorker {
+pub struct SharedGpuTcpWorker {
     channel: SharedGpuChannel<tokio::io::WriteHalf<tokio::net::TcpStream>>,
 }
 
@@ -98,7 +98,7 @@ impl SharedGpuTcpWorker {
     }
 
     /// The worker process ID.
-    pub(crate) fn pid(&self) -> WorkerPid {
+    pub(crate) const fn pid(&self) -> WorkerPid {
         self.channel.pid()
     }
 }

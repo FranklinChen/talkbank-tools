@@ -11,9 +11,11 @@ type EngineSelection = { kind: "whisper" } | { kind: "rev"; credentials: Credent
 type EngineStep = { kind: "engine"; selection: EngineSelection; error: string | null };
 type KeyStep = { kind: "api-key"; credentials: Credentials; error: string | null };
 type EditableStep = { kind: "welcome" } | EngineStep | KeyStep;
-type WizardState = EditableStep
-  | { kind: "saving"; edit: PreferenceEdit; previous: EngineStep | KeyStep }
-  | { kind: "done"; receipt: SavedPreferences };
+type DoneStep = { kind: "done"; receipt: SavedPreferences };
+/** What a screen can show: while saving, the step being saved stays on screen. */
+type ShownStep = EditableStep | DoneStep;
+type WizardState = ShownStep
+  | { kind: "saving"; edit: PreferenceEdit; previous: EngineStep | KeyStep };
 interface SetupWizardProps { onComplete: () => void }
 
 /** Configure one validated edit and keep failures on the screen that owns it. */
@@ -53,17 +55,22 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
   }
 
   const view = state.kind === "saving" ? state.previous : state;
-  return <div className="min-h-screen flex items-center justify-center bg-[var(--bg-page)]">
-    <div className="max-w-lg w-full mx-4 space-y-4">
-      <fieldset disabled={state.kind === "saving"} className="space-y-5">
-        {view.kind === "welcome" && <div className="text-center space-y-6">
+
+  /** The one screen for the current step: every state the view can be in has
+   * exactly one case, and the `never` default makes a new step a compile error
+   * here instead of a blank screen. */
+  function screen(view: ShownStep) {
+    switch (view.kind) {
+      case "welcome":
+        return <div className="text-center space-y-6">
           <h1 className="text-2xl font-bold">Welcome to {DESKTOP_APP_NAME}</h1>
           <p>Set up {DESKTOP_APP_NAME} to use your installed batchalign3 CLI.</p>
           <p>Rev.AI uploads recordings to a paid cloud service. Whisper runs locally and needs model downloads. You can change the preference later in Settings.</p>
           <button type="button" onClick={() => navigate({ kind: "engine", selection: { kind: "whisper" }, error: null })}
             className="rounded bg-indigo-600 text-white px-6 py-3">Let's Get Started</button>
-        </div>}
-        {view.kind === "engine" && <div className="space-y-5">
+          </div>;
+      case "engine":
+        return <div className="space-y-5">
           <h2 className="text-lg font-semibold">Choose your ASR engine</h2>
           <p className="text-sm">This sets the default for speech-to-text tasks.</p>
           <EngineCard name="Rev.AI" description="Paid cloud service; uploads recordings."
@@ -77,8 +84,9 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <button type="button" onClick={() => navigate({ kind: "welcome" })}>Back</button>
             <button type="button" onClick={() => { void advance(view); }} className="rounded border px-4 py-2">{view.selection.kind === "rev" ? "Next" : "Finish Setup"}</button>
           </div>
-        </div>}
-        {view.kind === "api-key" && <div className="space-y-5">
+          </div>;
+      case "api-key":
+        return <div className="space-y-5">
           <h2 className="text-lg font-semibold">Rev.AI API Key</h2>
           <p className="text-sm">Enter your Rev.AI key. It is saved locally in ~/.batchalign.ini.</p>
           <label className="block text-sm">API key
@@ -96,13 +104,25 @@ export function SetupWizard({ onComplete }: SetupWizardProps) {
             <button type="button" onClick={() => navigate({ kind: "engine", selection: { kind: "rev", credentials: view.credentials }, error: null })}>Back</button>
             <button type="button" onClick={() => { void advance(view); }} className="rounded border px-4 py-2">Save &amp; Finish</button>
           </div>
-        </div>}
-        {view.kind === "done" && <div className="text-center space-y-6">
+          </div>;
+      case "done":
+        return <div className="text-center space-y-6">
           <h2 className="text-xl font-bold">You're all set!</h2>
           <p>Default ASR engine: {view.receipt.engine === "rev" ? "Rev.AI" : "Whisper"}</p>
           <p className="text-sm">You can change this in Settings. Other provider credentials are preserved.</p>
           <button type="button" onClick={onComplete} className="rounded bg-emerald-600 text-white px-6 py-3">Get Started</button>
-        </div>}
+          </div>;
+      default: {
+        const unhandled: never = view;
+        return unhandled;
+      }
+    }
+  }
+
+  return <div className="min-h-screen flex items-center justify-center bg-[var(--bg-page)]">
+    <div className="max-w-lg w-full mx-4 space-y-4">
+      <fieldset disabled={state.kind === "saving"} className="space-y-5">
+        {screen(view)}
       </fieldset>
       {state.kind === "saving" && <p role="status">Saving setup...</p>}
     </div>

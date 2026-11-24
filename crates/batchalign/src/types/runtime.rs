@@ -73,7 +73,7 @@ static CONSTANTS: LazyLock<RuntimeConstants> =
 
 /// Which Python runtime the workers run on, detected once at process
 /// startup from the `PYTHON_GIL` environment variable: `PYTHON_GIL=0` means
-/// CPython's GIL is disabled (Python 3.14t+). This is the same variable that
+/// `CPython`'s GIL is disabled (Python 3.14t+). This is the same variable that
 /// controls Python worker startup and is inherited by the Rust server binary
 /// when launched from a free-threaded context. It selects each command's
 /// memory budget (`CommandSpec::execution_budget_mb`).
@@ -84,11 +84,13 @@ static PYTHON_RUNTIME: LazyLock<PythonRuntime> =
     });
 
 /// The Python runtime the workers run on.
+#[must_use]
 pub fn python_runtime() -> PythonRuntime {
     *PYTHON_RUNTIME
 }
 
 /// Command name -> pipeline task string (e.g. "align" -> "fa").
+#[must_use]
 pub fn cmd2task() -> HashMap<&'static str, &'static str> {
     CONSTANTS
         .cmd2task
@@ -98,21 +100,25 @@ pub fn cmd2task() -> HashMap<&'static str, &'static str> {
 }
 
 /// Known engine-override keys (passed via --engine-overrides).
+#[must_use]
 pub fn known_engine_keys() -> &'static [String] {
     &CONSTANTS.known_engine_keys.keys
 }
 
 /// Hard cap on concurrent GPU-bound workers (transcribe, align, benchmark).
+#[must_use]
 pub fn max_gpu_workers() -> usize {
     CONSTANTS.worker_caps.max_gpu_workers
 }
 
 /// Hard cap on concurrent process-isolated workers (non-free-threaded Python).
+#[must_use]
 pub fn max_process_workers() -> usize {
     CONSTANTS.worker_caps.max_process_workers
 }
 
 /// Hard cap on concurrent thread workers (free-threaded Python 3.14t+).
+#[must_use]
 pub fn max_thread_workers() -> usize {
     CONSTANTS.worker_caps.max_thread_workers
 }
@@ -121,11 +127,13 @@ pub fn max_thread_workers() -> usize {
 /// in this process's Python runtime: the command's own spec
 /// (`CommandSpec::execution_budget_mb`), which the host planner reads too.
 /// Every released command has a spec, so there is no fallback figure.
+#[must_use]
 pub fn command_execution_budget_mb(command: ReleasedCommand) -> MemoryMb {
     batchalign_types::command_spec::command_spec_for(command).execution_budget_mb(python_runtime())
 }
 
 /// Additional memory budget (MB) allocated per file queued to a worker.
+#[must_use]
 pub fn mb_per_file_mb() -> MemoryMb {
     MemoryMb(CONSTANTS.memory.mb_per_file_mb)
 }

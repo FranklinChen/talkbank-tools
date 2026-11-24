@@ -45,10 +45,12 @@ impl WhisperAttentionCaptureRequestV2 {
         })
     }
     /// Exclusive-create output destination.
-    pub fn destination(&self) -> &WorkerArtifactPathV2 {
+    #[must_use]
+    pub const fn destination(&self) -> &WorkerArtifactPathV2 {
         &self.destination
     }
     /// Semantic FA cache key of the exact planned request.
+    #[must_use]
     pub fn semantic_key(&self) -> &str {
         &self.semantic_key
     }

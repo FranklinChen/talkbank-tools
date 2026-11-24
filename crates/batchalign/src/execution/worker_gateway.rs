@@ -5,13 +5,14 @@ use async_trait::async_trait;
 
 use crate::cache::UtteranceCache;
 use crate::error::ServerError;
-use crate::infer_retry::Cancellation;
+use crate::execution::kernel::CompareMorphologySubmission;
+use crate::execution::text_io::{
+    CorefSubmission, MorphotagSource, MorphotagSubmission, TranslateSubmission, UtsegSubmission,
+};
 use crate::params::MorphosyntaxParams;
 use crate::pipeline::PipelineServices;
 use crate::pipeline::post_validate::PostValidated;
-use crate::text_batch::{TextBatchFileInput, TextBatchFileResults};
-use crate::translate::TranslationRoute;
-use crate::utseg_route::ServableUtsegRoute;
+use crate::text_batch::TextBatchFileResults;
 use crate::worker::pool::WorkerPool;
 
 /// Runtime morphotag options resolved from command options for execution.
@@ -19,8 +20,7 @@ use crate::worker::pool::WorkerPool;
 /// Owned (no borrowed `MwtDict`) so the value can move freely across
 /// `tokio::spawn` boundaries used by per-file fanout in
 /// `dispatch_morphotag_job`.
-#[derive(Clone)]
-pub(crate) struct MorphotagRuntimeOptions {
+pub struct MorphotagRuntimeOptions {
     pub(crate) tokenization_mode: TokenizationMode,
     pub(crate) multilingual_policy: MultilingualPolicy,
     pub(crate) mwt: Arc<MwtDict>,
@@ -37,7 +37,7 @@ pub(crate) struct MorphotagRuntimeOptions {
 
 /// The only worker effect available to an admitted comparison.
 #[async_trait]
-pub(crate) trait CompareMorphology: Send + Sync {
+pub trait CompareMorphology: Send + Sync {
     /// Run the compare command's morphosyntax stage on one CHAT input.
     ///
     /// Returns the PROOF, for the same reason [`MorphotagGateway::morphotag_single`] does,
@@ -53,15 +53,13 @@ pub(crate) trait CompareMorphology: Send + Sync {
     /// be passed here and discarded.
     async fn morphotag_for_compare(
         &self,
-        chat_text: &str,
-        mwt: &MwtDict,
-        cancellation: Cancellation<'_>,
+        submission: CompareMorphologySubmission<'_>,
     ) -> Result<PostValidated, ServerError>;
 }
 
 /// Morphology effects available to a morphotag file task.
 #[async_trait]
-pub(crate) trait MorphotagGateway: Send + Sync {
+pub trait MorphotagGateway: Send + Sync {
     /// Run morphotag on one CHAT file.
     ///
     /// `progress` is this file's port into the job's batch-progress reporter, or
@@ -75,32 +73,23 @@ pub(crate) trait MorphotagGateway: Send + Sync {
     /// output passed post-validation.
     async fn morphotag_single(
         &self,
-        chat_text: &str,
-        before_text: Option<&str>,
-        options: MorphotagRuntimeOptions,
-        progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
-        cancellation: Cancellation<'_>,
+        submission: MorphotagSubmission<'_>,
     ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, ServerError>;
 }
 
 /// Segmentation of one source on its admitted route.
 #[async_trait]
-pub(crate) trait UtsegGateway: Send + Sync {
+pub trait UtsegGateway: Send + Sync {
     /// Segment one CHAT source while retaining the admitted route.
     ///
     /// `route` is the admitted route: its language and the one segmenter the
     /// worker request names, so the worker never chooses a segmenter itself.
-    async fn utseg_file(
-        &self,
-        file: &TextBatchFileInput,
-        route: &ServableUtsegRoute,
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults;
+    async fn utseg_file(&self, submission: UtsegSubmission<'_>) -> TextBatchFileResults;
 }
 
 /// Translation of one source on its admitted route.
 #[async_trait]
-pub(crate) trait TranslateGateway: Send + Sync {
+pub trait TranslateGateway: Send + Sync {
     /// Translate one CHAT input. Each result names the engine that
     /// translated it.
     ///
@@ -109,17 +98,12 @@ pub(crate) trait TranslateGateway: Send + Sync {
     /// alone. The sealed route holds the file's source, job's target and engine;
     /// its engine keys the worker that serves
     /// the requests and sets the pacing and retry policy they are sent under.
-    async fn translate_file(
-        &self,
-        file: &TextBatchFileInput,
-        route: &TranslationRoute,
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults;
+    async fn translate_file(&self, submission: TranslateSubmission<'_>) -> TextBatchFileResults;
 }
 
 /// Coreference effects available to the batch dispatcher.
 #[async_trait]
-pub(crate) trait CorefGateway: Send + Sync {
+pub trait CorefGateway: Send + Sync {
     /// Run coreference resolution over one cross-file batch of CHAT inputs.
     /// Each result names the engine that resolved it.
     ///
@@ -129,11 +113,7 @@ pub(crate) trait CorefGateway: Send + Sync {
     /// parameter that used to sit here was passed the job's language, which
     /// for a per-file command is never a resolved code, and was then discarded
     /// unread by the implementation.
-    async fn coref_batch(
-        &self,
-        files: &[TextBatchFileInput],
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults;
+    async fn coref_batch(&self, submission: CorefSubmission<'_>) -> TextBatchFileResults;
 }
 
 /// Worker gateway backed by the existing worker pool and cache.
@@ -141,14 +121,14 @@ pub(crate) trait CorefGateway: Send + Sync {
 /// Carries no engine identity: every text stage names its engines from the
 /// results it applies.
 #[derive(Clone)]
-pub(crate) struct PooledWorkerGateway {
+pub struct PooledWorkerGateway {
     pool: Arc<WorkerPool>,
     cache: Arc<UtteranceCache>,
 }
 
 impl PooledWorkerGateway {
     /// Build a pool-backed worker gateway for one execution attempt.
-    pub(crate) fn new(pool: Arc<WorkerPool>, cache: Arc<UtteranceCache>) -> Self {
+    pub(crate) const fn new(pool: Arc<WorkerPool>, cache: Arc<UtteranceCache>) -> Self {
         Self { pool, cache }
     }
 }
@@ -157,10 +137,9 @@ impl PooledWorkerGateway {
 impl CompareMorphology for PooledWorkerGateway {
     async fn morphotag_for_compare(
         &self,
-        chat_text: &str,
-        mwt: &MwtDict,
-        cancellation: Cancellation<'_>,
+        submission: CompareMorphologySubmission<'_>,
     ) -> Result<PostValidated, ServerError> {
+        let (chat_text, mwt, cancellation) = submission.into_parts();
         let params = MorphosyntaxParams {
             tokenization_mode: TokenizationMode::Preserve,
             multilingual_policy: MultilingualPolicy::ProcessAll,
@@ -183,7 +162,7 @@ impl CompareMorphology for PooledWorkerGateway {
         // `compare::process_compare_morphotagged_main`, which is the only
         // consumer and takes nothing else.
         crate::morphosyntax::process_morphosyntax(
-            chat_text,
+            &chat_text,
             PipelineServices::new(&self.pool, &self.cache),
             &params,
         )
@@ -196,12 +175,9 @@ impl CompareMorphology for PooledWorkerGateway {
 impl MorphotagGateway for PooledWorkerGateway {
     async fn morphotag_single(
         &self,
-        chat_text: &str,
-        before_text: Option<&str>,
-        options: MorphotagRuntimeOptions,
-        progress: Option<&crate::execution::morphotag::progress::BackendProgressPort>,
-        cancellation: Cancellation<'_>,
+        submission: MorphotagSubmission<'_>,
     ) -> Result<crate::morphosyntax::report::MorphosyntaxOutput, ServerError> {
+        let (source, options, progress, cancellation) = submission.into_parts();
         let params = MorphosyntaxParams {
             tokenization_mode: options.tokenization_mode,
             multilingual_policy: options.multilingual_policy,
@@ -212,58 +188,41 @@ impl MorphotagGateway for PooledWorkerGateway {
                 ca_policy: options.ca_policy,
             },
             review_level: options.review_level,
-            progress,
+            progress: progress.as_ref(),
             cancellation,
         };
         let services = PipelineServices::new(&self.pool, &self.cache);
-        if let Some(before) = before_text {
-            crate::morphosyntax::process_morphosyntax_incremental(
-                before, chat_text, services, &params,
-            )
-            .await
-        } else {
-            crate::morphosyntax::process_morphosyntax(chat_text, services, &params).await
+        match source {
+            MorphotagSource::Full(text) => {
+                crate::morphosyntax::process_morphosyntax(&text, services, &params).await
+            }
+            MorphotagSource::Incremental { before, after } => {
+                crate::morphosyntax::process_morphosyntax_incremental(
+                    &before, &after, services, &params,
+                )
+                .await
+            }
         }
     }
 }
 
 #[async_trait]
 impl UtsegGateway for PooledWorkerGateway {
-    async fn utseg_file(
-        &self,
-        file: &TextBatchFileInput,
-        route: &ServableUtsegRoute,
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults {
-        crate::utseg::process_utseg_batch(
-            std::slice::from_ref(file),
-            route,
-            &self.pool,
-            cancellation,
-        )
-        .await
+    async fn utseg_file(&self, submission: UtsegSubmission<'_>) -> TextBatchFileResults {
+        crate::utseg::process_utseg_file(submission, &self.pool).await
     }
 }
 
 #[async_trait]
 impl TranslateGateway for PooledWorkerGateway {
-    async fn translate_file(
-        &self,
-        file: &TextBatchFileInput,
-        route: &TranslationRoute,
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults {
-        crate::translate::process_translate_file(file, route, &self.pool, cancellation).await
+    async fn translate_file(&self, submission: TranslateSubmission<'_>) -> TextBatchFileResults {
+        crate::translate::process_translate_file(submission, &self.pool).await
     }
 }
 
 #[async_trait]
 impl CorefGateway for PooledWorkerGateway {
-    async fn coref_batch(
-        &self,
-        files: &[TextBatchFileInput],
-        cancellation: Cancellation<'_>,
-    ) -> TextBatchFileResults {
-        crate::coref::process_coref_batch(files, &self.pool, cancellation).await
+    async fn coref_batch(&self, submission: CorefSubmission<'_>) -> TextBatchFileResults {
+        crate::coref::process_coref_batch(submission, &self.pool).await
     }
 }

@@ -12,7 +12,7 @@ use super::GroupsMap;
 use super::rss_observer::{IdleMember, IdlePopulation, Measured};
 
 /// Pressure relief follows the current host's admitted tier and headroom floor.
-pub(super) fn pressure_threshold(host: &crate::host_facts::RuntimeHost) -> u64 {
+pub(super) const fn pressure_threshold(host: &crate::host_facts::RuntimeHost) -> u64 {
     super::memory_gate::host_min_free_mb_threshold_for_tier(&host.tier()).saturating_mul(2)
 }
 
@@ -84,7 +84,7 @@ pub(super) async fn retire_sampled(sample: Measured<IdleMember>) -> bool {
 /// for: one reclaim retires the largest idle worker, which releases its
 /// leases and its memory.
 #[derive(Clone)]
-pub(crate) struct IdleWorkers(pub(super) GroupsMap);
+pub struct IdleWorkers(pub(super) GroupsMap);
 
 #[async_trait::async_trait]
 impl MemoryReclaim for IdleWorkers {
@@ -119,7 +119,7 @@ mod tests {
     use crate::worker::{WorkerProfile, WorkerTarget};
     use std::sync::Arc;
 
-    /// Guards: Memory reclamation retires the actual idle subprocess, consumes its availability and original capacity, then reports NothingIdle.
+    /// Guards: Memory reclamation retires the actual idle subprocess, consumes its availability and original capacity, then reports `NothingIdle`.
     /// Kind: contract
     /// Not a type: Slot ownership excludes manual refunds. Actual resident-memory sampling, subprocess shutdown and the queue's reclaim selection remain operating-system and adapter effects requiring the real admitted worker.
     /// State: One owned shell stub reports its real PID so RSS sampling observes the actual process. Its slot enters through normal publication. The test uses real process teardown with no model, network service or live memory lease.

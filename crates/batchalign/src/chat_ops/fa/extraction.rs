@@ -16,19 +16,36 @@ use talkbank_model::model::{UtteranceContent, Word};
 /// * `content` - The top-level content items of an utterance.
 /// * `out` - Accumulator that word texts are pushed into.
 pub fn collect_fa_words(content: &[UtteranceContent], out: &mut Vec<String>) {
-    // domain=None: recurse into all groups unconditionally (FA needs all words)
-    walk_words(content, None, &mut |leaf| match leaf {
-        WordItem::Word(word) => {
-            if counts_for_tier(word, TierDomain::Wor) {
-                push_fa_word(word, out);
-            }
+    walk_wor_units(content, &mut |word| push_fa_word(word, out));
+}
+
+/// Call `f` for each word that occupies a `%wor` slot, in main-tier order:
+/// the one walk every FA pass that asks "which words does FA align" uses.
+///
+/// # Why this exists
+///
+/// `walk_words`'s domain argument decides only which CONTAINERS the walk
+/// enters; it filters no leaf. Whether a word occupies a `%wor` slot is
+/// `counts_for_tier(word, Wor)`, which excludes untranscribed words (`xxx`),
+/// phonological fragments (`&+fr`), nonwords (`&~`) and omissions. Passing
+/// `Some(TierDomain::Wor)` and reading every leaf as alignable looks right
+/// and is wrong: an utterance-initial `xxx` became the "first alignable
+/// word" and hid a leading filler from the edge-filler pass. Owning the walk
+/// and the predicate together here removes that choice from every caller.
+///
+/// A replaced word's FA unit is the word the transcriber wrote, not its
+/// replacement; separators are never FA units. Containers are walked with
+/// no domain, as extraction always has: FA aligns retraced words too.
+pub fn walk_wor_units<'a>(content: &'a [UtteranceContent], f: &mut impl FnMut(&'a Word)) {
+    walk_words(content, None, &mut |leaf| {
+        let word = match leaf {
+            WordItem::Word(word) => word,
+            WordItem::ReplacedWord(replaced) => &replaced.word,
+            WordItem::Separator(_) => return,
+        };
+        if counts_for_tier(word, TierDomain::Wor) {
+            f(word);
         }
-        WordItem::ReplacedWord(replaced) => {
-            if counts_for_tier(&replaced.word, TierDomain::Wor) {
-                push_fa_word(&replaced.word, out);
-            }
-        }
-        WordItem::Separator(_) => {}
     });
 }
 

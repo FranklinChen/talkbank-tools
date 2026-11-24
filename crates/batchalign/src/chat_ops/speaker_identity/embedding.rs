@@ -140,7 +140,7 @@ impl SpeakerEmbedding {
 
     /// How many components this embedding has.
     #[must_use]
-    pub fn width(&self) -> usize {
+    pub const fn width(&self) -> usize {
         self.components.len()
     }
 

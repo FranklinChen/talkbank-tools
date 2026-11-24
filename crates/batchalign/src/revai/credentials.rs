@@ -33,7 +33,7 @@ impl RevAiApiKey {
 
 /// Errors that can occur while loading Rev.AI credentials.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RevAiCredentialError {
+pub enum RevAiCredentialError {
     /// No supported credential source produced a non-empty key.
     #[error(
         "no Rev.AI API key configured; run 'batchalign3 setup' or set BATCHALIGN_REV_API_KEY / REVAI_API_KEY"
@@ -51,7 +51,7 @@ pub(crate) enum RevAiCredentialError {
 
 /// Runtime-owned sources used to resolve Rev.AI credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RevAiCredentialSources {
+pub struct RevAiCredentialSources {
     legacy_ini_path: PathBuf,
     batchalign_rev_api_key: Option<RevAiApiKey>,
     revai_api_key: Option<RevAiApiKey>,
@@ -112,7 +112,7 @@ impl RevAiCredentialSources {
 }
 
 /// Load the Rev.AI API key from the Rust-owned resolution chain.
-pub(crate) fn load_revai_api_key() -> Result<RevAiApiKey, RevAiCredentialError> {
+pub fn load_revai_api_key() -> Result<RevAiApiKey, RevAiCredentialError> {
     RevAiCredentialSources::from_env().load_api_key()
 }
 

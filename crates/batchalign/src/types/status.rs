@@ -50,7 +50,8 @@ impl JobStatus {
     /// Which kind of status this is: the one classification of
     /// [`JobStatus`], matched exhaustively, that every predicate below and
     /// the job lifecycle's typed transitions are defined from.
-    pub fn kind(self) -> StatusKind {
+    #[must_use]
+    pub const fn kind(self) -> StatusKind {
         match self {
             Self::Queued => StatusKind::Active(ActiveStatus::Queued),
             Self::Running => StatusKind::Active(ActiveStatus::Running),
@@ -64,16 +65,19 @@ impl JobStatus {
 
     /// A terminal job is finished: nothing runs it until a restart or
     /// startup recovery queues it again.
-    pub fn is_terminal(self) -> bool {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
         matches!(self.kind(), StatusKind::Finished(_))
     }
 
     /// An active job is either waiting or currently running.
-    pub fn is_active(self) -> bool {
+    #[must_use]
+    pub const fn is_active(self) -> bool {
         matches!(self.kind(), StatusKind::Active(_))
     }
 
     /// A job can be cancelled if it is still active.
+    #[must_use]
     pub fn can_cancel(self) -> bool {
         self.is_active()
     }
@@ -200,7 +204,8 @@ pub enum FileStatusKind {
 
 impl FileStatusKind {
     /// A terminal file will not be processed further.
-    pub fn is_terminal(self) -> bool {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
         match self {
             Self::Done | Self::Diagnosed | Self::Error => true,
             Self::Queued | Self::Processing | Self::Interrupted => false,
@@ -208,7 +213,8 @@ impl FileStatusKind {
     }
 
     /// A resumable file can be reset to queued on job restart.
-    pub fn is_resumable(self) -> bool {
+    #[must_use]
+    pub const fn is_resumable(self) -> bool {
         match self {
             Self::Interrupted | Self::Processing | Self::Queued => true,
             Self::Done | Self::Diagnosed | Self::Error => false,
@@ -218,7 +224,8 @@ impl FileStatusKind {
     /// The file's output was written and is available as a result: a clean
     /// success, or output written with diagnostics. Neither is retried,
     /// neither is requeued by a restart, and neither counts as a failure.
-    pub fn wrote_output(self) -> bool {
+    #[must_use]
+    pub const fn wrote_output(self) -> bool {
         match self {
             Self::Done | Self::Diagnosed => true,
             Self::Queued | Self::Processing | Self::Error | Self::Interrupted => false,
@@ -339,6 +346,7 @@ impl FileProgressStage {
     /// The label is intentionally derived from the enum rather than stored as
     /// an independent source of truth. That keeps control-plane logic typed
     /// while still letting UIs render human-friendly text.
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Processing => "Processing",

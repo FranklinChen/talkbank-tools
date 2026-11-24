@@ -28,6 +28,7 @@ impl Submitter {
     /// An HTTP client, by its peer address and the name that address resolved
     /// to. A resolution that named nothing (a Tailscale peer reporting an
     /// empty host name) records no name rather than an empty one.
+    #[must_use]
     pub fn client(address: std::net::IpAddr, resolved_name: String) -> Self {
         Self {
             address: address.to_string(),
@@ -38,6 +39,7 @@ impl Submitter {
     /// The in-process direct CLI, which has no network peer. It is recorded
     /// as a loopback client named `direct-cli`, the encoding it has always
     /// had, so its jobs still conflict with each other and display the same.
+    #[must_use]
     pub fn direct_cli() -> Self {
         Self {
             address: Self::DIRECT_CLI_ADDRESS.to_string(),
@@ -46,11 +48,13 @@ impl Submitter {
     }
 
     /// The client's address.
+    #[must_use]
     pub fn address(&self) -> &str {
         &self.address
     }
 
     /// The name the address resolved to, when one was recorded.
+    #[must_use]
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
@@ -74,7 +78,7 @@ impl Submitter {
 
     /// The two database columns `(submitted_by, submitted_by_name)` for an
     /// optional submitter, spelling absence as the columns' `''`.
-    pub(crate) fn columns(submitter: Option<&Self>) -> (&str, &str) {
+    pub(crate) const fn columns(submitter: Option<&Self>) -> (&str, &str) {
         match submitter {
             Some(submitter) => (
                 submitter.address.as_str(),
@@ -141,7 +145,7 @@ mod tests {
         );
     }
 
-    /// Guards: an orphan name is returned as NameWithoutAddress for reporting.
+    /// Guards: an orphan name is returned as `NameWithoutAddress` for reporting.
     /// Kind: boundary
     /// Not a type: stored string columns can contain an orphan name even though
     /// Submitter constructors cannot create that malformed database input.

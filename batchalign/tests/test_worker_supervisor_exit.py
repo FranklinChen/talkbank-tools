@@ -1,18 +1,4 @@
-"""A stdio worker busy in a request dies with the server that launched it.
-
-Field failure (2026-09-30): ``batchalign3 serve stop`` escalated to SIGKILL on
-a server whose shutdown had not finished; its Whisper worker, in the middle of
-an inference, was reparented to PID 1 and kept computing until it was killed
-by hand. Nothing it computed could ever be delivered.
-
-The boundary here is the real one: an intermediate process plays the server,
-launches a real worker exactly as the Rust launcher does (its own process
-group, stdin and stdout pipes, ``--supervisor-pid``), hands it one request the
-test-echo worker holds for ten minutes, and is then SIGKILLed. The worker's
-stdout is this test's pipe and nobody else's once the supervisor is dead, so
-end-of-file on it IS the worker exiting: the wait is an event, and the bound
-only decides failure.
-"""
+"""Verify that supervisor death interrupts an actual in-flight worker request."""
 
 from __future__ import annotations
 
@@ -22,6 +8,13 @@ import signal
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from enum import Enum
+from queue import Queue
+from typing import TYPE_CHECKING
+
+import pytest
 
 from batchalign.tests._asr_model_pins import request_models
 from batchalign.worker._types_v2 import (
@@ -32,22 +25,36 @@ from batchalign.worker._types_v2 import (
     PreparedAudioInputV2,
 )
 
-# The worker holds the request this long; it can only exit by itself after.
-HELD_REQUEST_MS = 600_000
-# The worker must be gone this long after its supervisor dies.
-EXIT_BOUND_S = 30.0
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+# Failure bound for the actual pipe effects, not a simulated request duration.
+PIPE_TIMEOUT_S = 30
+
+_WORKER = """
+import runpy
+import threading
+from batchalign.worker import _types
+
+def hold_request():
+    from batchalign.worker._protocol import _write_json
+    _write_json({"fixture": "request-entered"})
+    threading.Event().wait()
+
+_types.sleep_test_delay = hold_request
+runpy.run_module("batchalign.worker", run_name="__main__")
+"""
 
 _SUPERVISOR = """
-import os, subprocess, sys
+import json, os, subprocess, sys
 worker = subprocess.Popen(
-    [sys.executable, "-m", "batchalign.worker", "--test-echo", "--profile", "gpu",
-     "--serving", "sequential", "--test-delay-ms", sys.argv[2],
-     "--supervisor-pid", str(os.getpid())],
+    [sys.executable, "-c", sys.argv[1], "--test-echo", "--profile", "gpu",
+     "--serving", "sequential", "--supervisor-pid", str(os.getpid())],
     stdin=subprocess.PIPE, stdout=sys.stdout, stderr=subprocess.DEVNULL,
     text=True, start_new_session=True,
 )
-print(f"worker-pid {worker.pid}", flush=True)
-worker.stdin.write(sys.argv[1] + "\\n")
+print(json.dumps({"fixture_worker_pid": worker.pid}), flush=True)
+worker.stdin.write(sys.argv[2] + "\\n")
 worker.stdin.flush()
 sys.stdin.read()
 """
@@ -68,40 +75,96 @@ def _held_request() -> str:
     return json.dumps({"op": "execute_v2", "request": request.model_dump(mode="json")})
 
 
-def test_a_worker_busy_in_a_request_exits_when_its_supervisor_is_killed() -> None:
+class PipeEnd(Enum):
+    EOF = "eof"
+
+
+@dataclass(frozen=True, slots=True)
+class InFlightRequest:
+    """The worker has reached the request handler and is holding its pipe open."""
+
+    _supervisor: subprocess.Popen[str]
+    _lines: Queue[str | PipeEnd]
+
+    def kill_supervisor_and_observe_worker_exit(self) -> None:
+        self._supervisor.kill()
+        self._supervisor.wait(timeout=PIPE_TIMEOUT_S)
+        # Once the supervisor exits, only the worker can close the last writer.
+        assert self._lines.get(timeout=PIPE_TIMEOUT_S) is PipeEnd.EOF
+
+
+@contextmanager
+def _in_flight_request() -> Iterator[InFlightRequest]:
+    lines: Queue[str | PipeEnd] = Queue()
     supervisor = subprocess.Popen(
-        [sys.executable, "-c", _SUPERVISOR, _held_request(), str(HELD_REQUEST_MS)],
+        [sys.executable, "-c", _SUPERVISOR, _WORKER, _held_request()],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
     )
+    assert supervisor.stdin is not None
     assert supervisor.stdout is not None
     stdout = supervisor.stdout
-    worker_pid_line = stdout.readline()
-    assert worker_pid_line.startswith("worker-pid "), worker_pid_line
-    worker_pid = int(worker_pid_line.split()[1])
-    ready_line = stdout.readline()
-    assert '"ready": true' in ready_line, ready_line
 
-    supervisor.send_signal(signal.SIGKILL)
-    supervisor.wait(timeout=10)
+    def read_pipe() -> None:
+        for line in stdout:
+            lines.put(line)
+        lines.put(PipeEnd.EOF)
 
-    # EOF arrives when the last writer, the worker, is gone.
-    drained = threading.Event()
-
-    def _drain() -> None:
-        stdout.read()
-        drained.set()
-
-    threading.Thread(target=_drain, daemon=True).start()
+    reader = threading.Thread(target=read_pipe, daemon=True)
+    reader.start()
+    worker_pid: int | None = None
     try:
-        assert drained.wait(timeout=EXIT_BOUND_S), (
-            f"worker {worker_pid} outlived its SIGKILLed supervisor by "
-            f"{EXIT_BOUND_S}s while holding a request"
-        )
+        # Parent PID announcement and worker readiness share the pipe. Either
+        # process can write first, but the handler marker follows both.
+        first = lines.get(timeout=PIPE_TIMEOUT_S)
+        assert isinstance(first, str)
+        first_report = json.loads(first)
+        if "fixture_worker_pid" in first_report:
+            announced_pid = first_report["fixture_worker_pid"]
+            assert type(announced_pid) is int and announced_pid > 0
+            worker_pid = announced_pid
+            ready = lines.get(timeout=PIPE_TIMEOUT_S)
+            assert isinstance(ready, str)
+            report = json.loads(ready)
+        else:
+            report = first_report
+            ownership = lines.get(timeout=PIPE_TIMEOUT_S)
+            assert isinstance(ownership, str)
+            announced_pid = json.loads(ownership)["fixture_worker_pid"]
+            assert type(announced_pid) is int and announced_pid > 0
+            worker_pid = announced_pid
+        assert report["ready"] is True and report["pid"] == worker_pid
+
+        entered = lines.get(timeout=PIPE_TIMEOUT_S)
+        assert isinstance(entered, str)
+        assert json.loads(entered) == {"fixture": "request-entered"}
+        yield InFlightRequest(supervisor, lines)
     finally:
-        if not drained.is_set():
-            os.killpg(worker_pid, signal.SIGKILL)
-        assert supervisor.stdin is not None
+        if supervisor.poll() is None:
+            supervisor.kill()
+            supervisor.wait(timeout=PIPE_TIMEOUT_S)
         supervisor.stdin.close()
-        stdout.close()
+        reader.join(timeout=PIPE_TIMEOUT_S)
+        if reader.is_alive() and worker_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(worker_pid, signal.SIGKILL)
+            reader.join(timeout=PIPE_TIMEOUT_S)
+        if not reader.is_alive():
+            stdout.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires isolated POSIX process groups")
+def test_a_worker_busy_in_a_request_exits_when_its_supervisor_is_killed() -> None:
+    """Guards: The actual worker closes its pipe on supervisor SIGKILL after
+        reaching the V2 request handler.
+    Kind: contract
+    Not a type: Static launch states cannot prove kernel process liveness,
+        delivery of the supervisor death signal, or EOF on the live pipe.
+    State: The test owns a supervisor and one worker, with the echo handler held
+        by an event after real request admission. No model or socket is needed.
+    Concurrency: A reader thread forwards wire lines and EOF. The busy marker
+        precedes the kill, and teardown only targets the fixture's process group.
+    """
+    with _in_flight_request() as request:
+        request.kill_supervisor_and_observe_worker_exit()

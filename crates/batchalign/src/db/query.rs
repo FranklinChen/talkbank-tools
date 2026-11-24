@@ -14,7 +14,7 @@ use crate::error::ServerError;
 use super::{AttemptRow, FileStatusRow, JobDB, JobRow};
 
 impl JobDB {
-    /// Load all jobs with their file_statuses for startup recovery.
+    /// Load all jobs with their `file_statuses` for startup recovery.
     pub async fn load_all_jobs(&self) -> Result<Vec<JobRow>, ServerError> {
         let rows = sqlx::query(
             "SELECT job_id, command, lang, num_speakers, status, error,

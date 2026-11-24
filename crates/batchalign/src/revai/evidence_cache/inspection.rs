@@ -137,7 +137,7 @@ impl AdmittedRevReplayRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub(crate) enum InspectedEvidence {
+pub enum InspectedEvidence {
     Missing,
     NamespaceMismatch { recorded: String, expected: String },
     Refused { reason: String },
@@ -146,7 +146,7 @@ pub(crate) enum InspectedEvidence {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct RevCacheInspection {
+pub struct RevCacheInspection {
     raw_evidence_key: String,
     raw: InspectedEvidence,
     derived_utr: Option<UtrCacheInspection>,
@@ -155,14 +155,14 @@ pub(crate) struct RevCacheInspection {
 }
 
 impl RevCacheInspection {
-    pub(crate) fn raw_is_replayable(&self) -> bool {
+    pub(crate) const fn raw_is_replayable(&self) -> bool {
         matches!(self.raw, InspectedEvidence::Replayable { .. })
     }
 }
 
 /// A metadata-key inspection is not a recording-content attestation.
 #[derive(Debug, Serialize)]
-pub(crate) struct UtrCacheInspection {
+pub struct UtrCacheInspection {
     cache_key: String,
     namespace: String,
     audio_identity: String,
@@ -171,7 +171,7 @@ pub(crate) struct UtrCacheInspection {
 }
 
 impl UtrCacheInspection {
-    pub(crate) fn is_replayable(&self) -> bool {
+    pub(crate) const fn is_replayable(&self) -> bool {
         matches!(self.evidence, InspectedEvidence::DerivedReplayable)
     }
 }
@@ -183,23 +183,15 @@ async fn inspect_utr_response(
     engine: &crate::options::UtrEngine,
 ) -> Result<UtrCacheInspection, crate::cli::error::CliError> {
     use crate::cli::error::CliError;
-    let path = audio.canonicalize()?;
-    let metadata = path.metadata()?;
-    if !metadata.is_file() {
+    if !tokio::fs::metadata(audio).await?.is_file() {
         return Err(CliError::InvalidArgument(
             "UTR audio path must identify a regular file".into(),
         ));
     }
-    let modified = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| CliError::InvalidArgument(error.to_string()))?
-        .as_secs();
-    let path_text = path
-        .to_str()
-        .ok_or_else(|| CliError::InvalidArgument("audio path is not UTF-8".into()))?;
-    let identity =
-        crate::chat_ops::fa::AudioIdentity::from_metadata(path_text, modified, metadata.len());
+    // The identity the runner keys this recording's rows by, read the same way.
+    let identity = crate::chat_ops::fa::AudioIdentity::read(audio)
+        .await
+        .map_err(|error| CliError::InvalidArgument(error.to_string()))?;
     // Read from the account's settings the way the server reads them, so the
     // namespace inspected is the one this account's runs write under.
     let tencent = crate::model_manifest::TencentEngineSetting::from_account();
@@ -246,7 +238,7 @@ async fn inspect_utr_response(
 
 /// Inspect derived UTR evidence independently: no raw trace need exist when
 /// production can already replay a compatible derived response.
-pub(crate) async fn inspect_retained_utr_cache(
+pub async fn inspect_retained_utr_cache(
     audio: &Path,
     db: &Path,
     language: &str,
@@ -305,7 +297,7 @@ async fn read_row(
 /// Read a retained trace and existing cache only. An optional audio path is
 /// inspected for filesystem metadata, never read/hashed or decoded. Its content
 /// binding to the trace remains an external provenance requirement.
-pub(crate) async fn inspect_retained_rev_cache(
+pub async fn inspect_retained_rev_cache(
     trace: &Path,
     db: &Path,
     utr_audio: Option<&Path>,
@@ -427,6 +419,11 @@ mod tests {
         .unwrap()
     }
 
+    /// Guards: Read-only inspection reopens exact cache evidence without the recording and preserves database bytes.
+    /// Kind: journey
+    /// Not a type: An inspector may open SQLite in a write-capable mode or accidentally demand source media.
+    /// State: Private database, serialized trace and absent source make storage and verification effects observable.
+    /// Concurrency: Private directory and ordered byte snapshots.
     #[tokio::test]
     async fn retained_cache_inspection_is_read_only_and_media_need_not_exist() {
         let root = tempfile::tempdir().unwrap();
@@ -455,6 +452,11 @@ mod tests {
         "#);
     }
 
+    /// Guards: Incompatible trace bytes are refused before opening or creating the database.
+    /// Kind: boundary
+    /// Not a type: Operator-supplied trace JSON can name incompatible revisions or missing provenance.
+    /// State: Private trace fixtures and absent database witness failure ordering.
+    /// Concurrency: Private directory with fixture mutations before each read.
     #[tokio::test]
     async fn retained_cache_inspection_refuses_incompatible_traces_without_opening_database() {
         let root = tempfile::tempdir().unwrap();
@@ -496,6 +498,11 @@ mod tests {
         );
     }
 
+    /// Guards: Inspection differentiates missing cache, wrong namespace and corruption without changing the database.
+    /// Kind: boundary
+    /// Not a type: Retained SQLite state can be absent or incompatible despite valid current request schema.
+    /// State: Private database and trace exercise namespace lookup and corrupt payload while checking bytes.
+    /// Concurrency: Private directory with state transitions ordered before inspection.
     #[tokio::test]
     async fn retained_cache_inspection_distinguishes_missing_namespace_and_corruption() {
         let root = tempfile::tempdir().unwrap();
@@ -537,6 +544,11 @@ mod tests {
         }
     }
 
+    /// Guards: Derived UTR metadata can be inspected independently and does not overstate raw or media fidelity.
+    /// Kind: contract
+    /// Not a type: Optional persisted metadata belongs to a separate namespace and may be independently supplied.
+    /// State: Private SQLite and saved trace expose both raw and derived metadata lookups.
+    /// Concurrency: Private directory with writes completed before inspection.
     #[tokio::test]
     async fn retained_cache_inspection_keeps_derived_metadata_lookup_separate() {
         let root = tempfile::tempdir().unwrap();

@@ -24,7 +24,6 @@ use std::time::Duration;
 use crate::live_deadline::{ProgressSnapshot, ServerTestDeadline, WaitSubject};
 use batchalign::api::{LanguageCode3, ReleasedCommand, WorkerLanguage};
 use batchalign::host_facts::PerProfile;
-use batchalign::worker::error::WorkerError;
 use batchalign::worker::handle::{WorkerConfig, WorkerHandle};
 use batchalign::worker::pool::{PoolConfig, WorkerPool};
 use batchalign::worker::{BatchInferRequest, InferTask, WorkerProfile};
@@ -41,7 +40,6 @@ fn batch_request(task: InferTask, items: Vec<Value>) -> BatchInferRequest {
 
 fn test_pool(python: String) -> WorkerPool {
     WorkerPool::new(PoolConfig {
-        python_path: python,
         health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(), // disable periodic health checks
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
@@ -49,7 +47,7 @@ fn test_pool(python: String) -> WorkerPool {
         test_echo: true,
         max_workers_per_key: PerProfile::uniform(8),
         verbose: 0,
-        ..PoolConfig::for_tests()
+        ..PoolConfig::for_tests_with_python(python)
     })
 }
 
@@ -57,161 +55,175 @@ fn test_pool(python: String) -> WorkerPool {
 // T077: Worker crash/restart/retry failure-path tests
 // ---------------------------------------------------------------------------
 
-/// When a worker process is killed (SIGKILL) mid-request, the dispatch call
-/// must return an error, not hang or silently succeed.
+/// Guards: Losing a native worker after it reads a batch returns an error.
+/// Kind: contract
+/// Not a type: A submitted invocation can lose its real pipe after the other
+/// process reads the request but before the response exists.
+/// State: A shell worker emits the ready frame, acknowledges reading the batch
+/// by creating a private marker, and then blocks on its own stdin.
+/// Concurrency: The signal is gated on the read marker and targets that child.
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_killed_mid_batch_infer_returns_error() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python.clone(),
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        // Add a delay so we have time to kill the worker mid-request
-        test_delay_ms: 5000,
-        ..WorkerConfig::for_tests()
-    };
+    use std::os::unix::fs::PermissionsExt;
 
+    let dir = tempfile::tempdir().expect("private shell worker");
+    let executable = dir.path().join("worker");
+    let marker = dir.path().join("batch-active");
+    let ready = crate::worker_integration::synthetic_runtime_ready(1234);
+    let (prefix, suffix) = ready.split_once("\"pid\":1234").expect("ready PID field");
+    std::fs::write(
+        &executable,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' '{prefix}"pid":'"$$"'{suffix}'
+IFS= read -r request || exit 1
+case "$request" in
+    *batch_infer*) : > "$(dirname "$0")/batch-active" ;;
+    *) exit 2 ;;
+esac
+IFS= read -r unused
+"#,
+        ),
+    )
+    .expect("write shell worker");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let config = WorkerConfig {
+        test_echo: true,
+        ..WorkerConfig::for_tests_with_python(executable.to_string_lossy().into_owned())
+    };
     let mut handle = WorkerHandle::spawn(
         config,
         std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
     )
     .await
-    .expect("spawn failed");
-    let pid = *handle.pid();
+    .expect("spawn");
+    let child = FixturePid::admit(handle.pid());
+    let request = batch_request(InferTask::Morphosyntax, vec![json!({"words": ["hello"]})]);
+    let terminate = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !marker.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the child never read the batch request");
+        child.kill();
+    };
 
-    // Send a request that will take 5s (test_delay_ms), then kill the worker
-    // while it's still processing.
-    let request = batch_request(
-        InferTask::Morphosyntax,
-        vec![json!({"words": ["hello"], "lang": "eng"})],
-    );
-    let kill_handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-    });
-
-    let result = handle.batch_infer(&request).await;
-    kill_handle.await.expect("kill task");
-
+    let (result, ()) = tokio::join!(handle.batch_infer(&request), terminate);
     assert!(
         result.is_err(),
-        "batch_infer should return an error after worker is killed"
+        "a killed worker cannot complete the request"
     );
 }
 
-/// After a worker crash, the pool should still be able to spawn a new worker
-/// and dispatch successfully: proving crash recovery works.
+/// Guards: One group's crashed process is replaced and a live sibling group
+/// keeps its original process and answers correctly.
+/// Kind: journey
+/// Not a type: A native exit can invalidate a checked-in worker while other
+/// groups remain usable. The kernel and real pipes witness recovery.
+/// State: Two private live echo groups, one signal and typed pool snapshots.
+/// Concurrency: Wait for the victim to exit before the replacement dispatch.
 #[cfg(unix)]
 #[tokio::test]
 async fn pool_recovers_after_worker_crash() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = test_pool(python);
+    let pool = test_pool(crate::prerequisite::worker_test_python());
+    let lang = LanguageCode3::eng();
+    let dispatch = |task, marker: &'static str| {
+        let pool = &pool;
+        let lang = &lang;
+        async move {
+            let item = json!({"probe": marker});
+            let result = pool
+                .dispatch_batch_infer(lang, &batch_request(task, vec![item.clone()]))
+                .await
+                .expect("echo dispatch");
+            assert_eq!(result.results[0].outcome.result(), Some(&item));
+            let label = WorkerProfile::for_task(task).label();
+            pool.worker_summary_entries()
+                .await
+                .into_iter()
+                .find(|entry| entry.profile == label)
+                .expect("idle worker for the task's profile")
+                .pid
+        }
+    };
+    let victim = dispatch(InferTask::Morphosyntax, "initial").await;
+    let other = dispatch(InferTask::Translate, "other-initial").await;
+    let child = FixturePid::admit(victim);
+    child.kill();
+    child.wait_for_exit().await;
 
-    // First dispatch to warm up the pool with one worker.
-    let item = json!({"words": ["first"], "lang": "eng"});
-    let response = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Morphosyntax, vec![item.clone()]),
-        )
-        .await
-        .expect("first dispatch failed");
-    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
-
-    // Get the worker PID and kill it.
-    let summary = pool.worker_summary().await;
-    let pid_str = summary
-        .first()
-        .expect("should have a worker")
-        .split(':')
-        .find_map(|part| part.strip_prefix("pid="))
-        .expect("should find pid= in summary");
-    let pid: u32 = pid_str.parse().expect("parse pid");
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-    }
-    // Brief pause to let the OS reap the process.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Second dispatch should succeed, pool spawns a replacement worker.
-    let item2 = json!({"words": ["recovered"], "lang": "eng"});
-    let response2 = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Morphosyntax, vec![item2.clone()]),
-        )
-        .await
-        .expect("recovery dispatch should succeed after worker crash");
-    assert_eq!(response2.results[0].outcome.result().cloned(), Some(item2));
-
-    pool.shutdown().await;
-}
-
-/// Killing a worker and then dispatching to a different task group should work
-/// without cross-contamination. The new group should get its own fresh worker.
-#[cfg(unix)]
-#[tokio::test]
-async fn crash_in_one_group_does_not_affect_other_groups() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = test_pool(python);
-
-    // Dispatch to Morphosyntax (Stanza profile).
-    pool.dispatch_batch_infer(
-        &LanguageCode3::eng(),
-        &batch_request(InferTask::Morphosyntax, vec![json!({"p": "stanza"})]),
-    )
-    .await
-    .expect("stanza dispatch failed");
-
-    // Get stanza worker PID and kill it.
-    let stanza_summary = pool.worker_summary().await;
-    let stanza_pid = stanza_summary
-        .iter()
-        .find(|s| s.contains("profile:stanza"))
-        .and_then(|s| {
-            s.split(':')
-                .find_map(|part| part.strip_prefix("pid="))
-                .and_then(|p| p.parse::<u32>().ok())
-        })
-        .expect("should find stanza worker pid");
-    unsafe {
-        libc::kill(stanza_pid as libc::pid_t, libc::SIGKILL);
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Dispatch to Translate (IO profile), should succeed unaffected.
-    let translate_result = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Translate, vec![json!({"p": "io"})]),
-        )
-        .await;
-    assert!(
-        translate_result.is_ok(),
-        "IO profile dispatch should succeed even though Stanza worker crashed"
+    assert_eq!(
+        dispatch(InferTask::Translate, "other-still-serving").await,
+        other
     );
-
+    assert_ne!(dispatch(InferTask::Morphosyntax, "recovered").await, victim);
     pool.shutdown().await;
 }
 
-/// A worker that dies before emitting its ready signal must surface its
-/// stderr (the Python traceback) in the spawn error.
-///
-/// Regression test for the 2026-06-11 incident on a fleet host: four
-/// consecutive align jobs failed with "worker closed stdout without
-/// emitting ready signal" and zero diagnostics, because the worker's
-/// stderr was not captured anywhere. The pre-ready stdout tail alone
-/// (progress_v2 events) cannot explain a crash; the traceback on stderr
-/// can. This test uses a fake interpreter that reproduces the observed
-/// failure shape exactly: one progress event on stdout, a traceback on
-/// stderr, exit without a ready signal.
+/// Only an admitted positive native PID can be signaled in this fixture.
+#[cfg(unix)]
+struct FixturePid(std::num::NonZeroI32);
+
+#[cfg(unix)]
+impl FixturePid {
+    fn admit(pid: batchalign::worker::WorkerPid) -> Self {
+        Self(
+            std::num::NonZeroI32::new(i32::try_from(*pid).expect("Unix PID"))
+                .expect("live worker must have a positive PID"),
+        )
+    }
+
+    fn kill(&self) {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.0.get()),
+            nix::sys::signal::Signal::SIGKILL,
+        )
+        .expect("signal the worker");
+    }
+
+    async fn wait_for_exit(self) {
+        let observe = batchalign::blocking::spawn_in_span(move || {
+            // Observe exit without taking the pool's right to reap its child.
+            let mut info = std::mem::MaybeUninit::uninit();
+            loop {
+                // Reason: `nix` has no `waitid` on macOS, and only `waitid`
+                // with `WNOWAIT` observes an exit without reaping the child.
+                #[allow(unsafe_code)]
+                // SAFETY: `info` is a valid out-pointer for one `siginfo_t`.
+                let status = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        self.0.get() as libc::id_t,
+                        info.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOWAIT,
+                    )
+                };
+                if status == 0 {
+                    return;
+                }
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::ECHILD) => return,
+                    Some(libc::EINTR) => continue,
+                    _ => panic!("observe worker exit: {error}"),
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), observe)
+            .await
+            .expect("worker stayed alive after SIGKILL")
+            .expect("join exit observation");
+    }
+}
+
+/// Guards: The missing-ready error includes the real stderr traceback despite startup progress.
+/// Kind: wire
+/// Not a type: The child's diagnostic and readiness verdict cross independent OS streams and can arrive separately.
+/// State: An executable shell emits advance progress and stderr, then exits without ready.
+/// Concurrency: The test owns the child and both captured streams.
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_death_before_ready_surfaces_stderr() {
@@ -243,14 +255,13 @@ async fn worker_death_before_ready_surfaces_stderr() {
     std::fs::set_permissions(&script_path, perms).expect("chmod script");
 
     let config = WorkerConfig {
-        python_path: script_path.to_string_lossy().into_owned(),
         test_echo: true,
         profile: WorkerProfile::Stanza,
         lang: WorkerLanguage::from(LanguageCode3::eng()),
         startup_stall: batchalign::worker::LoadingStall::new(
             batchalign::api::PositiveSeconds::literal::<30>(),
         ),
-        ..WorkerConfig::for_tests()
+        ..WorkerConfig::for_tests_with_python(script_path.to_string_lossy().into_owned())
     };
 
     let err = match WorkerHandle::spawn(
@@ -262,179 +273,35 @@ async fn worker_death_before_ready_surfaces_stderr() {
         Err(err) => err,
         Ok(_) => panic!("spawn must fail when the worker dies before ready"),
     };
-    let message = err.to_string();
-    assert!(
-        message.contains("RuntimeError: synthetic bootstrap crash for test"),
-        "spawn error must carry the worker's stderr tail for diagnosability; got: {message}"
-    );
+    let batchalign::worker::error::WorkerError::ReadyParseFailed(message) = err else {
+        panic!("expected a missing-ready failure, got {err}");
+    };
+    assert!(message.contains("worker closed stdout without emitting ready signal"));
+    assert!(message.contains("RuntimeError: synthetic bootstrap crash for test"));
 }
 
 // ---------------------------------------------------------------------------
 // T078: Worker timeout integration tests
 // ---------------------------------------------------------------------------
 
-/// A worker whose interpreter cannot be started fails at once with
-/// `SpawnFailed` rather than waiting out its startup window. The startup stall
-/// itself (a worker that starts but reports nothing) is tested where the
-/// window is applied: `read_ready_line`'s `a_silent_starting_worker_is_stalled`.
-#[tokio::test]
-async fn a_worker_that_cannot_spawn_fails_rather_than_waiting() {
-    let python = crate::prerequisite::worker_test_python();
-    let config = WorkerConfig {
-        python_path: python,
-        test_echo: true,
-        profile: WorkerProfile::Stanza,
-        lang: WorkerLanguage::from(LanguageCode3::eng()),
-        // Use an impossibly short timeout (100ms) so the worker can't possibly start in time
-        // ... except test-echo workers start very fast. Instead, use a bad python path
-        // to ensure the worker never sends a ready signal.
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<1>(),
-        ),
-        ..WorkerConfig::for_tests()
-    };
-
-    // We can't easily make a test-echo worker start slowly. Instead, test the
-    // timeout path by using a non-existent python path, the spawn should fail
-    // with a meaningful error (not hang forever).
-    let bad_config = WorkerConfig {
-        python_path: "/nonexistent/python3".into(),
-        ..config
-    };
-    let result = WorkerHandle::spawn(
-        bad_config,
-        std::sync::Arc::new(batchalign::host_memory::NoIdleWorkers),
-    )
-    .await;
-    match result {
-        Err(WorkerError::SpawnFailed(msg)) => {
-            eprintln!("Got expected SpawnFailed: {msg}");
-        }
-        Err(other) => {
-            panic!("expected SpawnFailed, got: {other:?}");
-        }
-        Ok(_) => {
-            panic!("spawning with a bad python path should fail, not succeed");
-        }
-    }
-}
-
-/// Pool dispatch with a fast health-check interval should still work for
-/// immediate requests: the health check loop only evicts under memory
-/// pressure (no longer fires on idle timer).
-#[tokio::test]
-async fn fast_health_check_interval_does_not_break_dispatch() {
-    let python = crate::prerequisite::worker_test_python();
-    let pool = WorkerPool::new(PoolConfig {
-        python_path: python,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<1>(), // fast health checks
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        test_echo: true,
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
-    });
-
-    // Dispatch should succeed immediately.
-    let item = json!({"words": ["hello"]});
-    let response = pool
-        .dispatch_batch_infer(
-            &LanguageCode3::eng(),
-            &batch_request(InferTask::Morphosyntax, vec![item.clone()]),
-        )
-        .await
-        .expect("dispatch should succeed");
-    assert_eq!(response.results[0].outcome.result().cloned(), Some(item));
-
-    pool.shutdown().await;
-}
-
-// ---------------------------------------------------------------------------
-// T079: Partial-results integration tests
-// ---------------------------------------------------------------------------
-
-/// A multi-file job where one file succeeds and a later file fails should
-/// preserve the successful result and record the failure.
-///
-/// Note: with test-echo workers, all files succeed, so we cannot easily inject
-/// per-file failures at the worker level. Instead, we test the HTTP API's
-/// ability to handle and report multi-file results correctly, which is the
-/// layer where partial results are assembled.
+/// Guards: A multi-file job serves each completed file both in the full
+/// results response and individually by its filename.
+/// Kind: journey
+/// Not a type: The HTTP job runner and its result store must preserve names
+/// and content across real submission, completion and retrieval.
+/// State: One isolated HTTP session and three valid synthetic CHAT files.
+/// Concurrency: The fixture leases its server and owns storage until completion.
 #[tokio::test]
 async fn multi_file_job_produces_per_file_results() {
-    let python = crate::prerequisite::worker_test_python();
-
     use batchalign::api::{
-        FilePayload, JobInfo, JobResultResponse, JobStatus, JobSubmission, LanguageSpec, MemoryMb,
+        FilePayload, JobInfo, JobResultResponse, JobStatus, JobSubmission, LanguageSpec,
         NumSpeakers,
     };
-    use batchalign::config::ServerConfig;
-    use batchalign::create_test_app;
     use batchalign::options::{CommandOptions, CommonOptions, MorphotagOptions};
-    use tokio::sync::Semaphore;
 
-    static PARTIAL_SLOTS: Semaphore = Semaphore::const_new(1);
-    let _permit = PARTIAL_SLOTS.acquire().await.expect("semaphore");
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    let jobs_dir = tmp.path().join("jobs");
-    std::fs::create_dir_all(&jobs_dir).expect("mkdir jobs");
-    let db_dir = tmp.path().join("db");
-    std::fs::create_dir_all(&db_dir).expect("mkdir db");
-
-    let config = ServerConfig {
-        host: "127.0.0.1".into(),
-        port: batchalign::config::PortRequest::from_u16(0),
-        job_ttl_days: batchalign::config::JobTtlDays::literal::<7>(),
-        memory_gate_mb: Some(MemoryMb(0)),
-        ..Default::default()
-    };
-    let pool_config = PoolConfig {
-        // The pool runs on the host this test app is built on.
-        runtime: batchalign::worker::handle::WorkerRuntimeConfig::for_tests_on(
-            &batchalign::host_facts::HostSnapshot::for_tests(&config),
-        ),
-        python_path: python,
-        test_echo: true,
-        health_check_interval_s: batchalign::api::PositiveSeconds::literal::<600>(),
-        startup_stall: batchalign::worker::LoadingStall::new(
-            batchalign::api::PositiveSeconds::literal::<30>(),
-        ),
-        max_workers_per_key: PerProfile::uniform(8),
-        verbose: 0,
-        ..PoolConfig::for_tests()
-    };
-
-    let (router, _state) = create_test_app(
-        config,
-        pool_config,
-        Some(jobs_dir.to_string_lossy().into()),
-        Some(db_dir),
-        Some("partial-test".into()),
-        std::sync::Arc::new(batchalign::clock::SystemClock),
-    )
-    .await
-    .expect("create_test_app");
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let port = listener.local_addr().expect("local_addr").port();
-    let base_url = format!("http://127.0.0.1:{port}");
-
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .ok();
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let client = reqwest::Client::new();
+    let session = crate::common::test_server_fixture::acquire_test_server_session().await;
+    let base_url = session.base_url();
+    let client = session.client();
 
     // Submit a job with 3 files. Morphotag requires
     // `LanguageSpec::PerFile`; each file carries `@Languages: eng`
@@ -545,4 +412,5 @@ async fn multi_file_job_produces_per_file_results() {
             "individual file {filename} should be retrievable"
         );
     }
+    session.close().await;
 }

@@ -2975,7 +2975,7 @@ fn translate_engine_global_override_beats_explicit_flag() {
 /// `paraformer` is selectable by name, and resolves to the funaudio engine
 /// carrying the Paraformer checkpoint.
 ///
-/// It is not its own backend: Paraformer is the FunAudio engine loading the
+/// It is not its own backend: Paraformer is the `FunAudio` engine loading the
 /// `paraformer-zh` checkpoint. The name is what people search for, so the name
 /// is what the CLI accepts.
 #[test]

@@ -53,7 +53,7 @@ use crate::api::RevAiJobId;
 /// A typed duration: a bare `Duration` could be any of the intervals below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct PollDeadline(Duration);
+pub struct PollDeadline(Duration);
 
 impl PollDeadline {
     /// A deadline of `duration`.
@@ -76,7 +76,7 @@ impl PollDeadline {
 /// [`UnfinishedCause::TransientBudgetExhausted`], job named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct TransientBudget(u32);
+pub struct TransientBudget(u32);
 
 impl TransientBudget {
     /// A budget of `failures` absorbed failures.
@@ -85,7 +85,7 @@ impl TransientBudget {
     }
 
     /// Whether `failures` transient failures exceed the budget.
-    fn is_exhausted_by(self, failures: usize) -> bool {
+    const fn is_exhausted_by(self, failures: usize) -> bool {
         failures > self.0 as usize
     }
 }
@@ -93,7 +93,7 @@ impl TransientBudget {
 /// The schedule of waits between polls: start at `initial`, double every
 /// three polls, never past `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PollInterval {
+pub struct PollInterval {
     pub(crate) initial: Duration,
     pub(crate) max: Duration,
 }
@@ -119,7 +119,7 @@ impl PollInterval {
 /// no wait is unbounded, and a caller states which job kind's policy applies
 /// rather than passing a bare number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PollPolicy {
+pub struct PollPolicy {
     pub(crate) deadline: PollDeadline,
     pub(crate) transient_budget: TransientBudget,
     pub(crate) interval: PollInterval,
@@ -159,7 +159,7 @@ impl PollPolicy {
 /// Where a wait's time comes from. Held by the client, so production has one
 /// source and a test can run a deadline past in no wall time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PollTiming {
+pub enum PollTiming {
     /// Real time: waits sleep, and elapsed is measured on the monotonic clock.
     Real,
     /// Test only: waits do not sleep; each one advances a virtual clock by the
@@ -217,11 +217,11 @@ impl PollClock {
 /// Built from a submission's reply, or from the evidence cache's record of a
 /// job an earlier run left unfinished; either way Rev.AI named the id.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubmittedJob(RevAiJobId);
+pub struct SubmittedJob(RevAiJobId);
 
 impl SubmittedJob {
     /// A job Rev.AI named, in a submission reply or an earlier run's record.
-    pub(crate) fn named(job: RevAiJobId) -> Self {
+    pub(crate) const fn named(job: RevAiJobId) -> Self {
         Self(job)
     }
 
@@ -244,7 +244,7 @@ impl SubmittedJob {
 /// A job Rev.AI reports as failed is an `Err(RevAiError::JobFailed)` from
 /// [`PolledJob::progress`], so the one verdict table classifies it (terminal)
 /// with every other failure; nothing here decides that a failed job is final.
-pub(crate) enum Progress<R> {
+pub enum Progress<R> {
     /// Still being processed.
     InProgress,
     /// Done; `R` is what the status reply carries (a transcription's detected
@@ -253,7 +253,7 @@ pub(crate) enum Progress<R> {
 }
 
 /// A kind of Rev.AI job that can be waited for: how its status is read.
-pub(crate) trait PolledJob {
+pub trait PolledJob {
     /// What the ready status carries.
     type Ready;
 
@@ -264,7 +264,7 @@ pub(crate) trait PolledJob {
 /// A wait in progress: the job, its policy, its clock, and what has happened
 /// so far. Every field is private; the only way forward is [`Polling::run`].
 #[derive(Debug)]
-pub(crate) struct Polling<K: PolledJob> {
+pub struct Polling<K: PolledJob> {
     job: RevAiJobId,
     policy: PollPolicy,
     clock: PollClock,
@@ -285,7 +285,7 @@ enum PollStep<K: PolledJob> {
 }
 
 /// How a wait ended. Exhaustive: every way out of [`Polling`] is named here.
-pub(crate) enum PollEnd<R> {
+pub enum PollEnd<R> {
     /// Rev.AI finished the job; `R` is what its status carried.
     Ready(RevAiJobId, R),
     /// The wait ended with the job still Rev.AI's, and paid for.
@@ -370,7 +370,7 @@ impl<K: PolledJob> Polling<K> {
 /// What a caller gets back from a bounded wait: the result, or the job by
 /// name because the wait ended first. Never a transient failure dressed as
 /// the job's failure.
-pub(crate) enum Awaited<R> {
+pub enum Awaited<R> {
     Ready(R),
     Unfinished(UnfinishedRevJob),
 }
@@ -381,7 +381,7 @@ pub(crate) enum Awaited<R> {
 /// resume the wait rather than upload again. Serializable because that record
 /// is durable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct UnfinishedRevJob {
+pub struct UnfinishedRevJob {
     pub(crate) job: RevAiJobId,
     pub(crate) cause: UnfinishedCause,
 }
@@ -389,7 +389,7 @@ pub(crate) struct UnfinishedRevJob {
 /// Why a wait ended with the job unfinished.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum UnfinishedCause {
+pub enum UnfinishedCause {
     /// The policy's deadline passed while Rev.AI still reported progress.
     DeadlineExceeded {
         deadline: PollDeadline,

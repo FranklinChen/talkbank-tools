@@ -71,12 +71,14 @@ pub enum UtteranceDelta {
 
 impl UtteranceDelta {
     /// Returns `true` if this delta requires NLP reprocessing (morphotag/utseg).
-    pub fn needs_nlp_reprocessing(&self) -> bool {
+    #[must_use]
+    pub const fn needs_nlp_reprocessing(&self) -> bool {
         matches!(self, Self::WordsChanged { .. } | Self::Inserted { .. })
     }
 
     /// Returns `true` if this delta affects timing/FA alignment.
-    pub fn affects_timing(&self) -> bool {
+    #[must_use]
+    pub const fn affects_timing(&self) -> bool {
         matches!(
             self,
             Self::WordsChanged {
@@ -89,7 +91,8 @@ impl UtteranceDelta {
     }
 
     /// Returns the "before" utterance index, if any.
-    pub fn before_idx(&self) -> Option<UtteranceIdx> {
+    #[must_use]
+    pub const fn before_idx(&self) -> Option<UtteranceIdx> {
         match self {
             Self::Unchanged { before_idx, .. }
             | Self::WordsChanged { before_idx, .. }
@@ -101,7 +104,8 @@ impl UtteranceDelta {
     }
 
     /// Returns the "after" utterance index, if any.
-    pub fn after_idx(&self) -> Option<UtteranceIdx> {
+    #[must_use]
+    pub const fn after_idx(&self) -> Option<UtteranceIdx> {
         match self {
             Self::Unchanged { after_idx, .. }
             | Self::WordsChanged { after_idx, .. }
@@ -132,6 +136,7 @@ pub struct DiffSummary {
 
 impl DiffSummary {
     /// Compute summary from a list of deltas.
+    #[must_use]
     pub fn from_deltas(deltas: &[UtteranceDelta]) -> Self {
         let mut summary = Self {
             unchanged: 0,
@@ -155,12 +160,14 @@ impl DiffSummary {
     }
 
     /// Total number of utterances that need NLP reprocessing.
-    pub fn needs_reprocessing(&self) -> usize {
+    #[must_use]
+    pub const fn needs_reprocessing(&self) -> usize {
         self.words_changed + self.inserted
     }
 
     /// Total number of deltas.
-    pub fn total(&self) -> usize {
+    #[must_use]
+    pub const fn total(&self) -> usize {
         self.unchanged
             + self.words_changed
             + self.timing_only

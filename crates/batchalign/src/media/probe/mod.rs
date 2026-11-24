@@ -47,6 +47,65 @@ pub struct MediaProbe {
     source: PathBuf,
 }
 
+/// A source with an actual header and measured container identity. Only the
+/// header probe can issue this owner; later properties use the same answer.
+#[derive(Debug)]
+pub(crate) struct ObservedMediaHeader {
+    probe: MediaProbe,
+    header: header::SelectedAudioHeader,
+    container: MediaContainer,
+}
+
+impl ObservedMediaHeader {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.probe.source
+    }
+
+    pub(crate) fn into_path(self) -> PathBuf {
+        self.probe.source
+    }
+
+    pub(crate) const fn container(&self) -> MediaContainer {
+        self.container
+    }
+
+    pub(crate) async fn measure(self) -> (PathBuf, Result<AudioDuration, ProbeError>) {
+        let outcome = match self.header.route_for(self.container, &self.probe.input()) {
+            Ok(route) => self.probe.measure(route).await,
+            Err(error) => Err(error),
+        };
+        (self.probe.source, outcome)
+    }
+
+    pub(crate) fn duration_blocking(self) -> Result<AudioDuration, ProbeError> {
+        let route = self.header.route_for(self.container, &self.probe.input())?;
+        self.probe.measure_blocking(route)
+    }
+}
+
+/// A single observed stream. The same header proves its layout and can be
+/// consumed to measure the duration of the source it came from.
+pub(in crate::media) struct ObservedSingleAudio {
+    source: MediaProbe,
+    header: header::SelectedAudioHeader,
+    layout: header::AudioLayout,
+}
+
+impl ObservedSingleAudio {
+    pub(in crate::media) const fn layout(&self) -> &header::AudioLayout {
+        &self.layout
+    }
+
+    pub(in crate::media) fn codec(&self) -> &str {
+        self.header.codec()
+    }
+
+    pub(in crate::media) async fn duration(self) -> Result<AudioDuration, ProbeError> {
+        let route = self.header.route(&self.source.input())?;
+        self.source.measure(route).await
+    }
+}
+
 /// Why a probe could not answer.
 ///
 /// Each variant is an operator action: install something, look at the file,
@@ -135,6 +194,10 @@ pub enum ProbeError {
 /// stated length, and the file's stated length. Reads headers only.
 const HEADER_ENTRIES: &str = "format=format_name,duration:stream=codec_name,duration";
 
+/// Export needs every audio stream's layout and the same header's duration data.
+const EXPORT_ENTRIES: &str =
+    "format=format_name,duration:stream=codec_name,duration,sample_rate,channels";
+
 /// The walk question: every packet's duration and trims, and the clock they
 /// are in. Demuxes the whole file without decoding it.
 const WALK_ENTRIES: &str =
@@ -153,7 +216,45 @@ impl MediaProbe {
         let header = MediaTool::Ffprobe
             .run_async(self.args(HEADER_ENTRIES))
             .await;
-        match self.route(header)? {
+        self.measure(self.route(header)?).await
+    }
+
+    /// Read one header and keep all its facts with their original source.
+    pub(crate) async fn observe(self) -> Result<ObservedMediaHeader, ProbeError> {
+        let output = MediaTool::Ffprobe
+            .run_async(self.args(HEADER_ENTRIES))
+            .await;
+        let input = self.input();
+        let header = self.answer::<header::HeaderAnswer>(output)?.first(&input)?;
+        let container = header.container(&input)?;
+        Ok(ObservedMediaHeader {
+            probe: self,
+            header,
+            container,
+        })
+    }
+
+    /// Observe one export stream, retaining the original source and header.
+    pub(in crate::media) async fn inspect_single_audio(
+        self,
+    ) -> Result<ObservedSingleAudio, ProbeError> {
+        let output = MediaTool::Ffprobe
+            .run_async(self.args_for("a", EXPORT_ENTRIES))
+            .await;
+        let input = self.input();
+        let header = self
+            .answer::<header::HeaderAnswer>(output)?
+            .exactly_one(&input)?;
+        let layout = header.layout(&input)?;
+        Ok(ObservedSingleAudio {
+            source: self,
+            header,
+            layout,
+        })
+    }
+
+    async fn measure(&self, route: header::DurationRoute) -> Result<AudioDuration, ProbeError> {
+        match route {
             header::DurationRoute::Stated(duration) => Ok(duration),
             header::DurationRoute::Walk(reason) => {
                 let walk = MediaTool::Ffprobe.run_async(self.args(WALK_ENTRIES)).await;
@@ -183,7 +284,11 @@ impl MediaProbe {
     /// and [`Self::walked`].
     pub fn duration_blocking(&self) -> Result<AudioDuration, ProbeError> {
         let header = MediaTool::Ffprobe.run(self.args(HEADER_ENTRIES));
-        match self.route(header)? {
+        self.measure_blocking(self.route(header)?)
+    }
+
+    fn measure_blocking(&self, route: header::DurationRoute) -> Result<AudioDuration, ProbeError> {
+        match route {
             header::DurationRoute::Stated(duration) => Ok(duration),
             header::DurationRoute::Walk(reason) => {
                 let walk = MediaTool::Ffprobe.run(self.args(WALK_ENTRIES));
@@ -216,11 +321,15 @@ impl MediaProbe {
     /// The argv for one question: the entries asked for, about the first
     /// audio stream, as compact JSON.
     fn args(&self, entries: &'static str) -> [&OsStr; 9] {
+        self.args_for("a:0", entries)
+    }
+
+    fn args_for(&self, stream: &'static str, entries: &'static str) -> [&OsStr; 9] {
         [
             "-v".as_ref(),
             "error".as_ref(),
             "-select_streams".as_ref(),
-            "a:0".as_ref(),
+            stream.as_ref(),
             "-show_entries".as_ref(),
             entries.as_ref(),
             "-of".as_ref(),
@@ -246,17 +355,16 @@ impl MediaProbe {
                 source,
             },
         })?;
-        match output.status.success() {
-            true => {
-                serde_json::from_slice(&output.stdout).map_err(|error| ProbeError::Unreadable {
-                    input,
-                    detail: error.to_string(),
-                })
-            }
-            false => Err(ProbeError::Refused {
+        if output.status.success() {
+            serde_json::from_slice(&output.stdout).map_err(|error| ProbeError::Unreadable {
+                input,
+                detail: error.to_string(),
+            })
+        } else {
+            Err(ProbeError::Refused {
                 input,
                 diagnostics: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            }),
+            })
         }
     }
 

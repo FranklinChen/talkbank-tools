@@ -18,7 +18,7 @@ use super::FileStage;
 /// The execution engine should report what happened through this sink instead
 /// of reaching into the concrete store implementation directly.
 #[async_trait]
-pub(crate) trait RunnerEventSink: Send + Sync {
+pub trait RunnerEventSink: Send + Sync {
     /// Now, by the clock this sink records with, as the time of an event.
     /// Every event method below takes an [`EventTime`](crate::store::EventTime),
     /// which only the store's clock produces, so a caller cannot record an

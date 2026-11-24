@@ -100,6 +100,7 @@ impl JobDB {
     }
 
     /// The path to the database file.
+    #[must_use]
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
@@ -963,7 +964,7 @@ mod tests {
         );
     }
 
-    /// Recovery must preserve timing evidence (started_at, finished_at) on files
+    /// Recovery must preserve timing evidence (`started_at`, `finished_at`) on files
     /// that were already done or errored before the crash.
     #[tokio::test]
     async fn recovery_preserves_timing_evidence() {

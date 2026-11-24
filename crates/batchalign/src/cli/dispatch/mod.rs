@@ -125,7 +125,7 @@ pub struct DispatchRequest<'a> {
     /// Typed command options for submission. They also name the command:
     /// there is no separate command field to disagree with them.
     pub options: CommandOptions,
-    /// Optional TalkBank bank name.
+    /// Optional `TalkBank` bank name.
     pub bank: Option<&'a str>,
     /// Optional bank subdirectory.
     pub subdir: Option<&'a str>,
@@ -739,7 +739,7 @@ fn health_label(health: &crate::api::HealthResponse) -> String {
 /// single worker stays loaded until host memory pressure forces an
 /// eviction (which never fires under sequential synthetic-test loads
 /// on a developer machine).
-pub(crate) fn apply_sequential_config(cfg: &mut ServerConfig) {
+pub(crate) const fn apply_sequential_config(cfg: &mut ServerConfig) {
     use crate::api::MemoryMb;
     // `Some(MemoryMb(1))` effectively disables the gate, the
     // coordinator requires only 1 MB free, which is always true.

@@ -39,7 +39,7 @@ pub struct PreparedAsrRequestIdsV2 {
 /// The shared-GPU-worker transport routes responses by matching `request_id`
 /// in a pending-requests map; two concurrent callers with the same id would
 /// silently overwrite each other's pending sender and produce "orphaned
-/// execute_v2 response" in the reader. Production callers must always use
+/// `execute_v2` response" in the reader. Production callers must always use
 /// [`PreparedAsrRequestIdsV2::fresh`]; `new(...)` is retained only for tests
 /// and fixture construction that assert against stable ids.
 static ASR_REQUEST_SEQUENCE_V2: AtomicU64 = AtomicU64::new(1);
@@ -223,7 +223,7 @@ mod tests {
     /// (`asr-v2-request` / `asr-v2-audio`) for every concurrent ASR inference,
     /// so the shared-GPU-worker pending-request map (keyed by `request_id`)
     /// silently overwrote pending senders when two UTR ASR requests ran in
-    /// parallel. The reader then reported "orphaned execute_v2 response" and
+    /// parallel. The reader then reported "orphaned `execute_v2` response" and
     /// the worker crashed handling the state corruption.
     #[test]
     fn fresh_produces_distinct_ids_across_calls() {

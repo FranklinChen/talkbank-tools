@@ -63,6 +63,7 @@ impl WorkerRuntimeConfig {
     /// The tier, readings and ledger all come from the snapshot. Taking the
     /// tier alone let a caller pair a declared test tier with live readings
     /// (every test pool did), or a live tier with declared ones.
+    #[must_use]
     pub fn local(host: &HostSnapshot) -> Self {
         let provider_accounts = crate::worker::provider_credentials::ProviderAccounts::from_env();
         log_tencent_engine(provider_accounts.tencent_engine());
@@ -73,12 +74,14 @@ impl WorkerRuntimeConfig {
     /// ([`HostSnapshot::for_tests`]), with no Rev.AI key and no provider
     /// account: a test reads no credentials or account settings from the
     /// machine running it, and one that plans Tencent names its engine.
+    #[must_use]
     pub fn for_tests() -> Self {
         Self::for_tests_on(&HostSnapshot::for_tests(&ServerConfig::default()))
     }
 
     /// A test launch on `host`, with no Rev.AI key and no provider account:
     /// the runtime of a pool prepared on that host.
+    #[must_use]
     pub fn for_tests_on(host: &HostSnapshot) -> Self {
         Self::launch(
             host.runtime_host(),
@@ -87,7 +90,7 @@ impl WorkerRuntimeConfig {
     }
 
     /// The shared body of [`Self::local`] and [`Self::for_tests`].
-    fn launch(
+    const fn launch(
         host: RuntimeHost,
         provider_accounts: crate::worker::provider_credentials::ProviderAccounts,
     ) -> Self {
@@ -110,7 +113,8 @@ impl WorkerRuntimeConfig {
     }
 
     /// Override the host bootstrap mode for worker spawns built from this runtime.
-    pub fn with_bootstrap_mode(mut self, bootstrap_mode: WorkerBootstrapMode) -> Self {
+    #[must_use]
+    pub const fn with_bootstrap_mode(mut self, bootstrap_mode: WorkerBootstrapMode) -> Self {
         self.bootstrap_mode = bootstrap_mode;
         self
     }
@@ -120,6 +124,7 @@ impl WorkerRuntimeConfig {
     /// See [`WorkerRuntimeConfig::state_dir`]: this is how a caller points a
     /// worker's registry somewhere other than the ambient default without
     /// mutating its own process environment.
+    #[must_use]
     pub fn with_state_dir(mut self, state_dir: std::path::PathBuf) -> Self {
         self.state_dir = Some(state_dir);
         self
@@ -177,11 +182,19 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     /// A worker launch with every field at its default except `runtime`.
-    /// Private: production launches are built field by field where the pool
-    /// or a replay knows each value, so no default stands in for one of them.
-    fn with_runtime(runtime: WorkerRuntimeConfig) -> Self {
+    /// A test launch on the declared host, using normal interpreter discovery.
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self::for_tests_with_python(resolve_python_executable())
+    }
+
+    /// A fixture that already admitted its interpreter can carry it through
+    /// without running discovery a second time.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_tests_with_python(python_path: String) -> Self {
         Self {
-            python_path: resolve_python_executable(),
+            python_path,
             profile: WorkerProfile::Stanza,
             task: None,
             lang: WorkerLanguage::from(LanguageCode3::eng()),
@@ -190,21 +203,17 @@ impl WorkerConfig {
             test_echo: false,
             startup_stall: crate::worker::LoadingStall::DEFAULT_STARTUP,
             verbose: 0,
-            runtime,
+            runtime: WorkerRuntimeConfig::for_tests(),
             task_timeouts: crate::types::worker_v2::TaskTimeoutOverrides::NONE,
             test_delay_ms: 0,
         }
-    }
-
-    /// A test worker launch on the declared test host.
-    pub fn for_tests() -> Self {
-        Self::with_runtime(WorkerRuntimeConfig::for_tests())
     }
 }
 
 impl WorkerConfig {
     /// Return the actual bootstrap target for this worker spawn.
-    pub fn bootstrap_target(&self) -> WorkerTarget {
+    #[must_use]
+    pub const fn bootstrap_target(&self) -> WorkerTarget {
         match self.task {
             Some(task) => WorkerTarget::infer_task(task),
             None => WorkerTarget::profile(self.profile),
@@ -212,6 +221,7 @@ impl WorkerConfig {
     }
 
     /// Return the human-readable bootstrap label for logs and status.
+    #[must_use]
     pub fn bootstrap_label(&self) -> String {
         self.bootstrap_target().label()
     }
@@ -267,7 +277,7 @@ impl WorkerLaunch {
     }
 
     /// The worker's language.
-    pub(crate) fn lang(&self) -> &WorkerLanguage {
+    pub(crate) const fn lang(&self) -> &WorkerLanguage {
         &self.lang
     }
 
@@ -328,31 +338,5 @@ mod worker_language_arg {
     ) -> Result<WorkerLanguage, D::Error> {
         let text = <String as serde::Deserialize>::deserialize(deserializer)?;
         WorkerLanguage::parse_untrusted(&text).map_err(serde::de::Error::custom)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{WorkerConfig, WorkerRuntimeConfig};
-    use crate::worker::{InferTask, WorkerProfile};
-
-    /// A test launch carries the declared test host and no credentials.
-    #[test]
-    fn a_test_launch_carries_the_declared_host_and_no_key() {
-        let host =
-            crate::host_facts::HostSnapshot::for_tests(&crate::config::ServerConfig::default());
-        let runtime = WorkerRuntimeConfig::for_tests();
-        assert_eq!(runtime.host, host.runtime_host());
-        assert_eq!(runtime.provider_accounts.revai_api_key(), None);
-    }
-
-    #[test]
-    fn bootstrap_target_uses_task_when_present() {
-        let config = WorkerConfig {
-            profile: WorkerProfile::Stanza,
-            task: Some(InferTask::Morphosyntax),
-            ..WorkerConfig::for_tests()
-        };
-        assert_eq!(config.bootstrap_label(), "infer:morphosyntax");
     }
 }

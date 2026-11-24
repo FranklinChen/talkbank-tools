@@ -1,7 +1,7 @@
 # NLP Pipeline Decision Architecture
 
 **Status:** Current
-**Last updated:** 2026-11-11 23:22 EST
+**Last updated:** 2026-11-18 11:07 EST
 
 This chapter documents how batchalign3's four NLP pipelines (morphotag,
 utseg, coref, forced alignment) represent per-utterance decisions, how
@@ -98,6 +98,7 @@ classDiagram
         FragmentOnly
         NonwordOnly
         UntranscribedOnly
+        OmissionOnly
         AllRetraced
         MixedNonLinguistic
     }

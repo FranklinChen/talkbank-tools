@@ -18,11 +18,11 @@ use crate::worker::InferTask;
 /// so that loaded models are shared within a single process:
 ///
 /// - **Gpu**: ASR, FA, Speaker, GPU-bound models, concurrent via Python
-///   `ThreadPoolExecutor` (PyTorch releases the GIL during CUDA kernels).
-///   Max 1 process per (lang, engine_overrides) key.
+///   `ThreadPoolExecutor` (`PyTorch` releases the GIL during CUDA kernels).
+///   Max 1 process per (lang, `engine_overrides`) key.
 /// - **Stanza**: Morphosyntax, Utseg, Coref, Stanza NLP processors, sequential
 ///   per process. Multiple processes for CPU parallelism (auto-tuned).
-/// - **Io**: Translate, OpenSMILE, AVQI, lightweight API/library calls.
+/// - **Io**: Translate, `OpenSMILE`, AVQI, lightweight API/library calls.
 ///   Max 1 process per key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,13 +31,14 @@ pub enum WorkerProfile {
     Gpu,
     /// Stanza NLP processors (Morphosyntax, Utseg, Coref). Multi-process for CPU parallelism.
     Stanza,
-    /// Lightweight API/library calls (Translate, OpenSMILE, AVQI).
+    /// Lightweight API/library calls (Translate, `OpenSMILE`, AVQI).
     Io,
 }
 
 impl WorkerProfile {
     /// Map one [`InferTask`] to its profile.
-    pub fn for_task(task: InferTask) -> Self {
+    #[must_use]
+    pub const fn for_task(task: InferTask) -> Self {
         match task {
             InferTask::Asr | InferTask::Fa | InferTask::Speaker => Self::Gpu,
             InferTask::Morphosyntax | InferTask::Utseg | InferTask::Coref => Self::Stanza,
@@ -49,7 +50,8 @@ impl WorkerProfile {
     }
 
     /// The string label used in logs and worker keys.
-    pub fn label(&self) -> &'static str {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
         match self {
             Self::Gpu => "profile:gpu",
             Self::Stanza => "profile:stanza",
@@ -58,7 +60,8 @@ impl WorkerProfile {
     }
 
     /// The profile name used in the ``--profile`` CLI arg sent to Python.
-    pub fn name(&self) -> &'static str {
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Gpu => "gpu",
             Self::Stanza => "stanza",
@@ -69,6 +72,7 @@ impl WorkerProfile {
     /// Parse a profile name from a CLI argument or registry entry.
     ///
     /// Returns `None` for unrecognized names.
+    #[must_use]
     pub fn try_from_name(name: &str) -> Option<Self> {
         match name {
             "gpu" => Some(Self::Gpu),
@@ -87,7 +91,8 @@ impl WorkerProfile {
     /// `max_workers_per_key` to scale out; the memory gate admits each spawn.
     /// Stanza: `auto_tune` (multiple processes for CPU parallelism).
     /// IO: 1 process (lightweight).
-    pub fn default_max_workers(&self, auto_tune: usize) -> usize {
+    #[must_use]
+    pub const fn default_max_workers(&self, auto_tune: usize) -> usize {
         match self {
             Self::Gpu => 1,
             Self::Stanza => auto_tune,
@@ -99,7 +104,8 @@ impl WorkerProfile {
     ///
     /// Restored to method form in Phase β Task 2 once `MemoryTier`
     /// joined `WorkerProfile` in `batchalign-types`.
-    pub fn startup_reservation_mb_for_tier(
+    #[must_use]
+    pub const fn startup_reservation_mb_for_tier(
         &self,
         tier: &crate::memory::MemoryTier,
     ) -> crate::api::MemoryMb {
@@ -116,6 +122,7 @@ impl WorkerProfile {
     ///
     /// The shared resource registry owns this mapping. Native-media commands
     /// have no worker profile and never borrow an inference task's identity.
+    #[must_use]
     pub fn for_command(command: ReleasedCommand) -> Option<Self> {
         crate::command_spec::command_spec_for(command).profile
     }

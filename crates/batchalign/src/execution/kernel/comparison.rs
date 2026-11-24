@@ -2,6 +2,7 @@
 
 use crate::compare::{AdmittedComparisonReference, CompareMaterializedOutputs};
 use crate::error::ServerError;
+use crate::infer_retry::Cancellation;
 use crate::pipeline::post_validate::PostValidated;
 use crate::planning::{self, JobPlan};
 use crate::recipe_runner::runtime::{ChatMetricsOutputs, SourceOutputs};
@@ -21,7 +22,7 @@ pub(super) struct ComparisonFile<'a> {
 }
 
 impl<'a> ComparisonFile<'a> {
-    pub(super) fn artifacts(&self) -> &ChatMetricsOutputs<'a> {
+    pub(super) const fn artifacts(&self) -> &ChatMetricsOutputs<'a> {
         &self.artifacts
     }
 
@@ -43,6 +44,25 @@ struct ReadComparison<'a> {
     file: ComparisonFile<'a>,
     main: String,
     reference: AdmittedComparisonReference,
+}
+
+/// One morphology call admitted by the comparison that owns the main input.
+pub struct CompareMorphologySubmission<'a> {
+    main: String,
+    mwt: &'a crate::chat_ops::morphosyntax_ops::MwtDict,
+    cancellation: Cancellation<'a>,
+}
+
+impl<'a> CompareMorphologySubmission<'a> {
+    pub(in crate::execution) fn into_parts(
+        self,
+    ) -> (
+        String,
+        &'a crate::chat_ops::morphosyntax_ops::MwtDict,
+        Cancellation<'a>,
+    ) {
+        (self.main, self.mwt, self.cancellation)
+    }
 }
 
 /// The admitted reference remains associated with completed morphology.
@@ -144,11 +164,11 @@ impl<'a> ReadComparison<'a> {
         // The transcript's own language header selects morphology.
         let main = context
             .gateway
-            .morphotag_for_compare(
-                &self.main,
-                context.mwt,
-                crate::infer_retry::Cancellation::Token(&context.job.cancel_token),
-            )
+            .morphotag_for_compare(CompareMorphologySubmission {
+                main: self.main,
+                mwt: context.mwt,
+                cancellation: Cancellation::Token(&context.job.cancel_token),
+            })
             .await?;
         Ok(MorphotaggedComparison {
             file: self.file,

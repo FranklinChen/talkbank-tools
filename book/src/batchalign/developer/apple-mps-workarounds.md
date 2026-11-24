@@ -370,6 +370,6 @@ available; they do not mean the explicit opt-in is unavailable:
 | `test_load_wave2vec_fa_selects_expected_device` | `tests/pipelines/fa/test_fa_inference.py` | Wave2Vec FA: CPU when MPS-only |
 | `test_load_wave2vec_fa_forces_float32_on_mps` | `tests/pipelines/fa/test_fa_inference.py` | Wave2Vec FA: no MPS-specific `.float()` needed (MPS excluded) |
 | `test_load_whisper_asr_ignores_mps_and_applies_cantonese_overrides` | `tests/pipelines/asr/test_asr_inference.py` | ASR: CPU when MPS available, Cantonese config still applied |
-| `TestGpuHasCudaDevice` (4 tests) | `tests/test_worker_serving_mode.py` | CUDA detection helper: force_cpu interaction |
-| `TestServingModeSelection` (6 tests) | `tests/test_worker_serving_mode.py` | GPU profile: sequential on CPU, concurrent on CUDA only |
+| `test_worker_bootstrap_runtime_resolves_boundary_inputs` | `batchalign/tests/test_worker_bootstrap_runtime.py` | Default, force-CPU and MPS opt-in through the worker parser |
+| `test_model_free_echo_worker_serves_the_launch_it_received` | `batchalign/tests/test_worker_serving_mode.py` | Python follows the launcher's serving mode for model-free workers |
 | Speaker device selection test | `tests/pipelines/speaker/test_speaker_inference.py` | Speaker: CUDA > CPU, MPS never selected |

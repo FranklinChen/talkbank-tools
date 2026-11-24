@@ -123,7 +123,7 @@ impl JobLifecycle {
     /// A job read back from the database. Nothing runs it in this process,
     /// so a stored active status means the server stopped while it ran: it
     /// is interrupted (startup marks such rows so first).
-    pub(crate) fn recovered(status: JobStatus, inputs: StoredInputs) -> Self {
+    pub(crate) const fn recovered(status: JobStatus, inputs: StoredInputs) -> Self {
         let status = match status.kind() {
             StatusKind::Active(_) => FinishedStatus::Interrupted,
             StatusKind::Finished(status) => status,
@@ -132,6 +132,7 @@ impl JobLifecycle {
     }
 
     /// The status.
+    #[must_use]
     pub fn status(&self) -> JobStatus {
         match self {
             Self::Active { status, .. } => (*status).into(),
@@ -147,7 +148,7 @@ impl JobLifecycle {
     }
 
     /// The inputs as stored, borrowed whichever state the job is in.
-    pub(crate) fn stored(&self) -> StoredInputsRef<'_> {
+    pub(crate) const fn stored(&self) -> StoredInputsRef<'_> {
         match self {
             Self::Active { inputs, .. } => StoredInputsRef::Admitted(inputs),
             Self::Finished { inputs, .. } => inputs.as_ref(),

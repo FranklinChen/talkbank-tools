@@ -33,7 +33,7 @@ use crate::api::{LanguageCode3, LanguageSpec, ReleasedCommand, WorkerLanguage};
 /// Declared per command below, with no catch-all arm, so a new released
 /// command cannot compile until it states which shape it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommandLanguageSource {
+pub enum CommandLanguageSource {
     /// No job-level language: each file's `@Languages:` decides.
     PerFile,
     /// No job-level language: the command runs in one language it owns.
@@ -47,7 +47,7 @@ pub(crate) enum CommandLanguageSource {
 /// A language a command owns outright: a closed set, so the code is never a
 /// string literal at a dispatch site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FixedLanguage {
+pub enum FixedLanguage {
     /// English (`eng`).
     English,
 }
@@ -63,13 +63,13 @@ impl FixedLanguage {
 
 /// The language coreference runs in: Stanza's English coreference model. The
 /// one owner of that fact for its worker key, its requests and its stamps.
-pub(crate) const COREF_LANGUAGE: FixedLanguage = FixedLanguage::English;
+pub const COREF_LANGUAGE: FixedLanguage = FixedLanguage::English;
 
 /// The worker language `command`'s capability probe keys by: the fixed
 /// language for a command that owns one, so the probe prepares the very
 /// worker its requests reach; otherwise the job's own language (`per-file`
 /// for a per-file command, whose requests are keyed file by file).
-pub(crate) fn probe_language(command: ReleasedCommand, lang: &LanguageSpec) -> WorkerLanguage {
+pub fn probe_language(command: ReleasedCommand, lang: &LanguageSpec) -> WorkerLanguage {
     match language_source(command) {
         CommandLanguageSource::Fixed(language) => WorkerLanguage::from(language.code()),
         CommandLanguageSource::PerFile | CommandLanguageSource::JobLevel => {
@@ -79,6 +79,7 @@ pub(crate) fn probe_language(command: ReleasedCommand, lang: &LanguageSpec) -> W
 }
 
 /// Whether `command` takes no `--lang` at submission.
+#[must_use]
 pub const fn takes_no_job_language(command: ReleasedCommand) -> bool {
     match language_source(command) {
         CommandLanguageSource::PerFile | CommandLanguageSource::Fixed(_) => true,
@@ -93,7 +94,7 @@ pub const fn takes_no_job_language(command: ReleasedCommand) -> bool {
 /// `matches!` over three command names, and once implicitly in each
 /// dispatcher's `as_resolved()` check. Two spellings of one rule is how the
 /// rule came to disagree with itself, which is what made coref undispatchable.
-pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguageSource {
+pub const fn language_source(command: ReleasedCommand) -> CommandLanguageSource {
     match command {
         // No `--lang` on the CLI. Morphotag, translate and compare (whose
         // internal morphotag of the main transcript is the same per-file
@@ -132,7 +133,7 @@ pub(crate) const fn language_source(command: ReleasedCommand) -> CommandLanguage
 
 /// Whether one command accepts a code-switched language pair such as `eng,spa`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LanguagePairSupport {
+pub enum LanguagePairSupport {
     /// The command is the one that could recognize both languages of a pair,
     /// and withholds it: the only pair model available, Rev.AI's `en/es`, was
     /// measured on 2026-09-17 writing fluent English where Spanish was spoken,
@@ -174,7 +175,7 @@ impl LanguagePairSupport {
 /// Only transcription could: a pair describes a recording, and transcription is
 /// what recognizes one; it withholds the pair today, for the measured reason on
 /// the variant. No catch-all arm, so a new command states its answer.
-pub(crate) const fn language_pair_support(command: ReleasedCommand) -> LanguagePairSupport {
+pub const fn language_pair_support(command: ReleasedCommand) -> LanguagePairSupport {
     match command {
         ReleasedCommand::Transcribe | ReleasedCommand::TranscribeS => LanguagePairSupport::Withheld,
         ReleasedCommand::Morphotag
@@ -200,18 +201,18 @@ pub(crate) const fn language_pair_support(command: ReleasedCommand) -> LanguageP
 /// compiler-checked proof that its command has a job-level language, rather
 /// than a runtime check it could forget.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JobLanguage(LanguageCode3);
+pub struct JobLanguage(LanguageCode3);
 
 impl JobLanguage {
     /// Borrow the resolved ISO 639-3 code.
-    pub(crate) fn code(&self) -> &LanguageCode3 {
+    pub(crate) const fn code(&self) -> &LanguageCode3 {
         &self.0
     }
 }
 
 /// The dispatch shape for one job, derived from its command.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DispatchLanguage {
+pub enum DispatchLanguage {
     /// The command has no job-level language; each file decides.
     PerFile,
     /// The command runs in one language it owns.
@@ -227,7 +228,7 @@ pub(crate) enum DispatchLanguage {
 /// each shape at the wire boundary, so reaching one of these means something
 /// downstream of the CLI built a job by hand.
 #[derive(Debug, Clone, thiserror::Error)]
-pub(crate) enum DispatchLanguageError {
+pub enum DispatchLanguageError {
     /// A per-file command arrived carrying a job-level language.
     #[error(
         "command '{command}' has no --lang and must dispatch per file, but the job carries \

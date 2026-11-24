@@ -43,7 +43,7 @@ use crate::api::NumWorkers;
 use super::MediaAnalysisDispatchPlan;
 
 /// Shared runtime dependencies for top-level media-analysis dispatch.
-pub(crate) struct MediaAnalysisDispatchRuntime {
+pub struct MediaAnalysisDispatchRuntime {
     /// Worker pool used for typed V2 media-analysis requests.
     pub pool: Arc<WorkerPool>,
     /// Shared durable evidence cache used by standalone diarization.
@@ -53,7 +53,7 @@ pub(crate) struct MediaAnalysisDispatchRuntime {
 }
 
 /// Dispatch per-file media-analysis commands through typed worker protocol V2.
-pub(crate) async fn dispatch_media_analysis_v2(
+pub async fn dispatch_media_analysis_v2(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     runtime: MediaAnalysisDispatchRuntime,
@@ -877,7 +877,12 @@ mod tests {
 
     /// Exercise the wire-to-output admission used by both dispatchers, not
     /// only the shared protocol classifier: these paths formerly flattened
-    /// every reported code into ProviderTerminal before retry could see it.
+    /// every reported code into `ProviderTerminal` before retry could see it.
+    /// Guards: Media workers preserve failure code, diagnostic detail and the associated retry decision.
+    /// Kind: wire
+    /// Not a type: An external worker can send distinct error codes that a dispatcher could flatten incorrectly.
+    /// State: Typed JSON refusals cross AVQI and openSMILE response admission.
+    /// Concurrency: All synthetic cases operate without a worker or mutable global state.
     #[test]
     fn media_response_failures_keep_their_category_and_retry_policy() {
         use crate::scheduling::Retryability;
@@ -963,28 +968,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn avqi_pair_resolution_rewrites_cs_to_sv() {
-        let path = Path::new("/tmp/sample.cs.wav");
-        assert_eq!(
-            resolve_avqi_sv_path(path).expect("pair path"),
-            PathBuf::from("/tmp/sample.sv.wav")
-        );
-    }
-
+    /// Guards: AVQI binds both role names from the original filename and
+    /// refuses a cache name with no role suffix.
+    /// Kind: policy
+    /// Not a type: Raw media names supplied by an operator must satisfy
+    /// the role convention before a typed source pair can exist.
+    /// State: Relative WAV and MP4 paths, plus an opaque cache filename.
+    /// Concurrency: Path parsing is pure and performs no media conversion.
     #[test]
     fn avqi_source_pair_retains_container_names_before_conversion() {
-        let pair = match AvqiSourcePair::resolve(Path::new("recording.cs.mp4")) {
-            Ok(pair) => pair,
-            Err(_) => panic!("source pair should resolve"),
-        };
-        assert_eq!(pair.cs, PathBuf::from("recording.cs.mp4"));
-        assert_eq!(pair.sv, PathBuf::from("recording.sv.mp4"));
+        for (cs, sv) in [
+            ("sample.cs.wav", "sample.sv.wav"),
+            ("recording.cs.mp4", "recording.sv.mp4"),
+        ] {
+            let pair = AvqiSourcePair::resolve(Path::new(cs));
+            let Ok(pair) = pair else {
+                panic!("paired source should resolve: {cs}");
+            };
+            assert_eq!(pair.cs, Path::new(cs));
+            assert_eq!(pair.sv, Path::new(sv));
+        }
         assert!(AvqiSourcePair::resolve(Path::new("cache-fingerprint.wav")).is_err());
     }
 
     /// BA2's opensmile CSV (`batchalign/cli/cli.py:546`) writes the
-    /// post-transpose DataFrame with `header=['value']` and
+    /// post-transpose `DataFrame` with `header=['value']` and
     /// `index_label='feature'`. For the only mode BA2 exposes at the
     /// CLI (`feature_level='functionals'`), the source frame has shape
     /// `(N_features, 1)`, so the CSV is:
@@ -997,53 +1005,42 @@ mod tests {
     ///
     /// BA3 must emit the same shape so downstream BA2-era researcher
     /// scripts keep working.
+    /// Guards: BA2-compatible openSMILE output emits exact feature/value rows and preserves the empty header.
+    /// Kind: wire
+    /// Not a type: External CSV readers depend on byte spelling, order and header preservation after admitted results.
+    /// State: Two V2 response populations through the real formatter.
+    /// Concurrency: Fixtures are owned and formatting is pure.
     #[test]
     fn opensmile_csv_matches_ba2_feature_value_shape() {
-        let mut row = std::collections::BTreeMap::new();
-        row.insert("alphaFeature".to_string(), 1.5);
-        row.insert("betaFeature".to_string(), 2.5);
-        let result = OpenSmileResultV2 {
-            feature_set: "eGeMAPSv02".to_string(),
-            feature_level: "functionals".to_string(),
-            num_features: 2,
-            duration_segments: 1,
-            audio_file: "sample.mp3".to_string(),
-            rows: vec![row],
-            success: true,
-            error: None,
-        };
-        let response = ExecuteResponseV2::success(
-            "media-test".into(),
-            TaskResultV2::OpensmileResult(result),
-            crate::api::NonNegativeSeconds::ZERO,
-        );
-        let admitted = AdmittedOpenSmileResult::admit(&response).expect("successful response");
-        let csv = format_opensmile_csv(admitted);
-        assert_eq!(csv, "feature,value\nalphaFeature,1.5\nbetaFeature,2.5\n");
-    }
-
-    /// Empty result (no segments) should still emit the BA2 header so
-    /// downstream parsers don't trip on a zero-byte file.
-    #[test]
-    fn opensmile_csv_empty_result_emits_header_only() {
-        let result = OpenSmileResultV2 {
-            feature_set: "eGeMAPSv02".to_string(),
-            feature_level: "functionals".to_string(),
-            num_features: 0,
-            duration_segments: 0,
-            audio_file: "sample.mp3".to_string(),
-            rows: vec![],
-            success: true,
-            error: None,
-        };
-        let response = ExecuteResponseV2::success(
-            "media-test".into(),
-            TaskResultV2::OpensmileResult(result),
-            crate::api::NonNegativeSeconds::ZERO,
-        );
-        let admitted = AdmittedOpenSmileResult::admit(&response).expect("successful response");
-        let csv = format_opensmile_csv(admitted);
-        assert_eq!(csv, "feature,value\n");
+        let features = std::collections::BTreeMap::from([
+            ("alphaFeature".to_owned(), 1.5),
+            ("betaFeature".to_owned(), 2.5),
+        ]);
+        for (rows, expected) in [
+            (
+                vec![features],
+                "feature,value\nalphaFeature,1.5\nbetaFeature,2.5\n",
+            ),
+            (vec![], "feature,value\n"),
+        ] {
+            let result = OpenSmileResultV2 {
+                feature_set: "eGeMAPSv02".to_owned(),
+                feature_level: "functionals".to_owned(),
+                num_features: rows.first().map_or(0, |row| row.len() as _),
+                duration_segments: rows.len() as _,
+                audio_file: "sample.mp3".to_owned(),
+                rows,
+                success: true,
+                error: None,
+            };
+            let response = ExecuteResponseV2::success(
+                "media-test".into(),
+                TaskResultV2::OpensmileResult(result),
+                crate::api::NonNegativeSeconds::ZERO,
+            );
+            let admitted = AdmittedOpenSmileResult::admit(&response).expect("successful response");
+            assert_eq!(format_opensmile_csv(admitted), expected);
+        }
     }
 
     /// BA2's avqi text report (`batchalign/cli/cli.py:499-510`) writes
@@ -1065,6 +1062,11 @@ mod tests {
     ///
     /// BA3 must emit the same shape so BA2-era researcher scripts that
     /// parse `.avqi.txt` keep working.
+    /// Guards: AVQI reports the correct metrics and original role labels and refuses cross-task admission.
+    /// Kind: wire
+    /// Not a type: An admitted response can name temporary paths and its numeric rendering has external precision requirements.
+    /// State: A real-shaped V2 AVQI result and independently resolved source role filenames.
+    /// Concurrency: No worker calls, files or mutable state.
     #[test]
     fn avqi_report_matches_ba2_text_shape() {
         let result = AvqiResultV2 {

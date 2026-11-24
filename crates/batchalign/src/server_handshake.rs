@@ -79,7 +79,7 @@ impl HandshakeSlot {
     /// expects an integer, calls it a corrupt PID file and deletes it, which
     /// removes a live server's record. That is only reachable by running a
     /// stale binary against a current server.
-    fn filename(self) -> &'static str {
+    const fn filename(self) -> &'static str {
         match self {
             Self::Main => "server.pid",
             Self::Sidecar => "sidecar-server.pid",
@@ -88,7 +88,7 @@ impl HandshakeSlot {
 
     /// The lock file guarding this slot's handshake: see [`HandshakeLock`].
     /// Never deleted, so every holder locks the same file.
-    fn lock_filename(self) -> &'static str {
+    const fn lock_filename(self) -> &'static str {
         match self {
             Self::Main => "server.pid.lock",
             Self::Sidecar => "sidecar-server.pid.lock",
@@ -99,6 +99,7 @@ impl HandshakeSlot {
     ///
     /// `const` so it can be the clap `default_value` too, making that a third
     /// reference to this table rather than a third copy of the string.
+    #[must_use]
     pub const fn as_arg(self) -> &'static str {
         match self {
             Self::Main => "main",
@@ -142,12 +143,13 @@ impl BoundPort {
     /// Second-hand but not a guess: the only writer is a server that had
     /// already bound. Private to this module so the record is the only route
     /// in from disk.
-    fn reported(port: NonZeroU16) -> Self {
+    const fn reported(port: NonZeroU16) -> Self {
         Self(port)
     }
 
     /// The port number, for building an address.
-    pub fn get(self) -> u16 {
+    #[must_use]
+    pub const fn get(self) -> u16 {
         self.0.get()
     }
 }
@@ -248,6 +250,7 @@ impl PublishFailure {
     /// Operator-facing description, phrased to follow a process identifier.
     ///
     /// THE owner of this wording.
+    #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Exited => "exited before reporting a listening port",
@@ -292,12 +295,14 @@ pub enum HandshakeError {
 
 impl ServerHandshake {
     /// Path of the handshake file for a state directory and slot.
+    #[must_use]
     pub fn path_in(state_dir: &Path, slot: HandshakeSlot) -> PathBuf {
         state_dir.join(slot.filename())
     }
 
     /// The recorded process ID, whichever state the server is in.
-    pub fn pid(self) -> u32 {
+    #[must_use]
+    pub const fn pid(self) -> u32 {
         match self {
             Self::Starting { pid } | Self::Listening { pid, .. } => pid,
         }
@@ -308,7 +313,8 @@ impl ServerHandshake {
     /// `None` is [`Starting`](Self::Starting), which is a real state and not a
     /// missing value: the caller should wait, or fall back to the configured
     /// port for an older server, and either way should say which it did.
-    pub fn bound_port(self) -> Option<BoundPort> {
+    #[must_use]
+    pub const fn bound_port(self) -> Option<BoundPort> {
         match self {
             Self::Starting { .. } => None,
             Self::Listening { port, .. } => Some(port),
@@ -321,6 +327,7 @@ impl ServerHandshake {
     /// `read(..)` -> `Ok(Some(h))` -> `h.bound_port()`. An unreadable or
     /// absent record and a record without a port all mean the same thing to
     /// every one of them: no port to use.
+    #[must_use]
     pub fn published_port(state_dir: &Path, slot: HandshakeSlot) -> Option<BoundPort> {
         Self::read(state_dir, slot).ok().flatten()?.bound_port()
     }
@@ -410,8 +417,7 @@ impl ServerHandshake {
                 path: path.clone(),
                 source,
             })?;
-            // `geteuid` has no preconditions and cannot fail.
-            let owner = unsafe { libc::geteuid() };
+            let owner = nix::unistd::geteuid().as_raw();
             if metadata.uid() != owner || metadata.permissions().mode() & 0o077 != 0 {
                 return Err(HandshakeError::NotPrivate { path });
             }

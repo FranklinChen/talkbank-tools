@@ -5,18 +5,23 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use tracing::Instrument;
-
 use crate::api::{DisplayPath, NumWorkers, ReleasedCommand};
 use crate::error::ServerError;
 use crate::planning::PlannedArtifactSet;
-use crate::runner::util::{FileRunTracker, FileStage};
+use crate::runner::util::{
+    FileRunTracker, FileStage, FileTaskOutcome, SupervisedFileTasks, TerminalRecorded,
+    spawn_supervised_file_task,
+};
 use crate::runner::{ChatDispatchInputs, DispatchHostContext};
 use crate::scheduling::FailureCategory;
 use crate::store::{PendingJobFile, RunnerFilesystemConfig, RunnerJobSnapshot};
 use crate::text_batch::TextBatchFileInput;
 
 mod publication;
+mod submission;
+pub use submission::{
+    CorefSubmission, MorphotagSource, MorphotagSubmission, TranslateSubmission, UtsegSubmission,
+};
 
 /// Immutable run facts are shared. Preparation and publication authority move.
 struct TextRun {
@@ -24,14 +29,14 @@ struct TextRun {
     host: DispatchHostContext,
 }
 
-pub(crate) struct SegmentationText;
-pub(crate) struct CoreferenceText;
-pub(crate) struct TranslationText {
+pub struct SegmentationText;
+pub struct CoreferenceText;
+pub struct TranslationText {
     options: Arc<crate::options::TranslateOptions>,
 }
 
 /// Only this producer implements command admission and prior-reading policy.
-pub(crate) trait PreparationMode: Sized {
+pub trait PreparationMode: Sized {
     fn admit(job: &RunnerJobSnapshot) -> Result<Self, ServerError>;
     fn prior(_: &PendingJobFile) -> Option<batchalign_types::paths::ServerPath> {
         None
@@ -92,13 +97,13 @@ impl PreparationMode for super::super::worker_gateway::MorphotagRuntimeOptions {
 }
 
 /// File fanout belongs to the two commands that process independent sources.
-pub(crate) trait ConcurrentPreparation: PreparationMode {}
+pub trait ConcurrentPreparation: PreparationMode {}
 impl ConcurrentPreparation for SegmentationText {}
 impl ConcurrentPreparation for super::super::worker_gateway::MorphotagRuntimeOptions {}
 
 /// A queue can be scheduled or read as a batch exactly once.
-pub(crate) struct PreparedTextJob<Mode> {
-    mode: Mode,
+pub struct PreparedTextJob<Mode> {
+    mode: Arc<Mode>,
     run: Arc<TextRun>,
     files: VecDeque<PreparedTextFile>,
     parallelism: NonZeroUsize,
@@ -106,21 +111,22 @@ pub(crate) struct PreparedTextJob<Mode> {
 
 /// Source membership and catalog layout were established by the producer.
 /// This value is neither cloneable nor constructible by execution consumers.
-pub(crate) struct PreparedTextFile {
+pub struct PreparedTextFile {
     run: Arc<TextRun>,
     pending: PendingJobFile,
     artifacts: PlannedArtifactSet,
 }
 
 /// A successful read retains its source, prior content and publication owner.
-pub(crate) struct ReadTextFile {
+pub struct ReadTextFile<Mode> {
     owner: PreparedTextFile,
     input: TextBatchFileInput,
     before: Option<String>,
+    mode: Arc<Mode>,
 }
 
 /// Contiguous gateway inputs and their unique publication owners travel together.
-pub(crate) struct ReadTextBatch {
+pub struct ReadTextBatch {
     inputs: Vec<TextBatchFileInput>,
     owners: Vec<PreparedTextFile>,
     run: Arc<TextRun>,
@@ -158,7 +164,7 @@ impl<Mode: PreparationMode> PreparedTextJob<Mode> {
             run,
             files,
             parallelism,
-            mode,
+            mode: Arc::new(mode),
         })
     }
 
@@ -167,50 +173,42 @@ impl<Mode: PreparationMode> PreparedTextJob<Mode> {
     }
 
     /// Only active files are read. The runner retains its admitted job lease
-    /// for dispatch. Normal queue return drains every submitted task.
+    /// for dispatch. Each read file runs as a supervised file task, so a task
+    /// that panics or is stopped by the job's cancellation still settles its
+    /// own file; at most `parallelism` run at once.
     pub(crate) async fn run_files<F, Fut>(mut self, process: F)
     where
         Mode: ConcurrentPreparation,
-        F: Fn(ReadTextFile, &Mode) -> Fut,
-        Fut: Future<Output = ()> + Send + 'static,
+        F: Fn(ReadTextFile<Mode>) -> Fut,
+        Fut: Future<Output = FileTaskOutcome> + Send + 'static,
     {
-        let mut tasks = tokio::task::JoinSet::new();
-        while !self.run.job.cancel_token.is_cancelled() {
+        let sink = Arc::clone(self.run.host.sink());
+        let cancel_token = self.run.job.cancel_token.clone();
+        let role = self.run.job.dispatch.command.as_str();
+        let mut tasks = SupervisedFileTasks::new();
+        while !cancel_token.is_cancelled() {
             if tasks.len() == self.parallelism.get() {
-                Self::join_one(&mut tasks, &self.run).await;
+                tasks.settle_next(sink.as_ref(), &cancel_token).await;
             }
             // Cancellation may have arrived while waiting for an active file.
-            if self.run.job.cancel_token.is_cancelled() {
+            if cancel_token.is_cancelled() {
                 break;
             }
             let Some(file) = self.files.pop_front() else {
                 break;
             };
-            if let Some(file) = file.read::<Mode>().await {
-                let span = crate::runner::current_file_span(
-                    &file.input.filename,
-                    self.run.job.dispatch.command.as_str(),
-                );
-                tasks.spawn(crate::worker::pool::job_tracker::inherit_job(
-                    process(file, &self.mode).instrument(span),
-                ));
+            if let Some(file) = file.read(Arc::clone(&self.mode)).await {
+                let filename = file.filename().clone();
+                tasks.push(spawn_supervised_file_task(filename, role, process(file)));
             }
         }
-        while !tasks.is_empty() {
-            Self::join_one(&mut tasks, &self.run).await;
-        }
+        tasks.drain(sink.as_ref(), &cancel_token).await;
     }
 
-    async fn join_one(tasks: &mut tokio::task::JoinSet<()>, run: &TextRun) {
-        if let Some(Err(error)) = tasks.join_next().await {
-            tracing::warn!(job_id = %run.job.identity.job_id, %error, "Text file task failed");
-        }
-    }
-
-    pub(crate) async fn next_file(&mut self) -> Option<ReadTextFile> {
+    async fn read_next(&mut self) -> Option<ReadTextFile<Mode>> {
         while !self.run.job.cancel_token.is_cancelled() {
             let file = self.files.pop_front()?;
-            if let Some(file) = file.read::<Mode>().await {
+            if let Some(file) = file.read(Arc::clone(&self.mode)).await {
                 return Some(file);
             }
         }
@@ -234,50 +232,55 @@ impl<Mode: PreparationMode> PreparedTextJob<Mode> {
 }
 
 impl PreparedTextJob<TranslationText> {
-    pub(crate) fn translation_options(&self) -> &Arc<crate::options::TranslateOptions> {
-        &self.mode.options
+    pub(crate) async fn next_file(&mut self) -> Option<ReadTextFile<TranslationText>> {
+        self.read_next().await
+    }
+}
+
+#[cfg(test)]
+impl<Mode: ConcurrentPreparation> PreparedTextJob<Mode> {
+    pub(crate) async fn next_file_for_test(&mut self) -> Option<ReadTextFile<Mode>> {
+        self.read_next().await
     }
 }
 
 impl PreparedTextJob<CoreferenceText> {
-    pub(crate) async fn read_batch(mut self) -> ReadTextBatch {
-        let mut inputs = Vec::with_capacity(self.files.len());
-        let mut owners = Vec::with_capacity(self.files.len());
-        while let Some(ReadTextFile {
-            owner,
-            input,
-            before: _,
-        }) = self.next_file().await
-        {
-            inputs.push(input);
-            owners.push(owner);
+    pub(crate) async fn read_batch(mut self) -> Option<ReadTextBatch> {
+        let first = self.read_next().await?;
+        let mut inputs = Vec::with_capacity(self.files.len() + 1);
+        let mut owners = Vec::with_capacity(self.files.len() + 1);
+        inputs.push(first.input);
+        owners.push(first.owner);
+        while let Some(file) = self.read_next().await {
+            inputs.push(file.input);
+            owners.push(file.owner);
         }
-        ReadTextBatch {
+        Some(ReadTextBatch {
             inputs,
             owners,
             run: self.run,
-        }
+        })
     }
 }
 
 impl PreparedTextFile {
-    pub(crate) fn filename(&self) -> &DisplayPath {
+    pub(crate) const fn filename(&self) -> &DisplayPath {
         self.pending.filename()
     }
     pub(crate) fn filesystem(&self) -> &RunnerFilesystemConfig {
         &self.run.job.filesystem
     }
-    pub(crate) fn pending(&self) -> &PendingJobFile {
+    pub(crate) const fn pending(&self) -> &PendingJobFile {
         &self.pending
     }
-    pub(crate) fn artifacts(&self) -> &PlannedArtifactSet {
+    pub(crate) const fn artifacts(&self) -> &PlannedArtifactSet {
         &self.artifacts
     }
     pub(crate) fn host(&self) -> &DispatchHostContext {
         &self.run.host
     }
 
-    async fn read<Mode: PreparationMode>(self) -> Option<ReadTextFile> {
+    async fn read<Mode: PreparationMode>(self, mode: Arc<Mode>) -> Option<ReadTextFile<Mode>> {
         let lifecycle =
             FileRunTracker::new(self.run.host.sink().as_ref(), self.filename().as_ref());
         lifecycle.stage(FileStage::Reading).await;
@@ -316,39 +319,28 @@ impl PreparedTextFile {
             owner: self,
             input,
             before,
+            mode,
         })
     }
 
-    async fn fail(&self, error: &str) {
+    async fn fail(&self, error: &str) -> TerminalRecorded {
         FileRunTracker::new(self.host().sink().as_ref(), self.filename().as_ref())
             .fail(error, FailureCategory::System)
-            .await;
+            .await
     }
 }
 
-impl ReadTextFile {
-    pub(crate) fn input(&self) -> &TextBatchFileInput {
+impl<Mode> ReadTextFile<Mode> {
+    pub(crate) fn filename(&self) -> &DisplayPath {
+        self.owner.filename()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn input(&self) -> &TextBatchFileInput {
         &self.input
     }
+    #[cfg(test)]
     pub(crate) fn before(&self) -> Option<&str> {
         self.before.as_deref()
-    }
-    pub(crate) fn host(&self) -> &DispatchHostContext {
-        self.owner.host()
-    }
-    pub(crate) fn cancellation(&self) -> crate::infer_retry::Cancellation<'_> {
-        crate::infer_retry::Cancellation::Token(&self.owner.run.job.cancel_token)
-    }
-}
-
-impl ReadTextBatch {
-    pub(crate) fn inputs(&self) -> &[TextBatchFileInput] {
-        &self.inputs
-    }
-    pub(crate) fn host(&self) -> &DispatchHostContext {
-        &self.run.host
-    }
-    pub(crate) fn cancellation(&self) -> crate::infer_retry::Cancellation<'_> {
-        crate::infer_retry::Cancellation::Token(&self.run.job.cancel_token)
     }
 }

@@ -1,6 +1,6 @@
 //! Rust-owned worker-protocol V2 forced-alignment executor control plane.
 //!
-//! **See also:** [INTERFACE_MAP.md](../../../INTERFACE_MAP.md) section "3. Forced Alignment V2" for:
+//! **See also:** [`INTERFACE_MAP.md`](../../../INTERFACE_MAP.md) section "3. Forced Alignment V2" for:
 //! - Python caller: `batchalign/worker/_fa_v2.py::execute_forced_alignment_request_v2()`
 //! - Full Rust/Python responsibility split and input/output contracts.
 
@@ -50,7 +50,7 @@ impl<'a> FaOperation<'a> {
         }
     }
 
-    fn execution_id(&self) -> &batchalign_types::worker_v2::WorkerRequestIdV2 {
+    const fn execution_id(&self) -> &batchalign_types::worker_v2::WorkerRequestIdV2 {
         match self {
             Self::Prepare(request_id) | Self::Execute { request_id, .. } => request_id,
         }
@@ -123,7 +123,7 @@ fn parse_whisper_tokens(
 /// One row of an indexed-timing host's answer, as it arrives from Python.
 ///
 /// A tuple struct because the host returns a sequence of three-element rows
-/// (`Wave2VecWordAlignment` and `IndexedWordTimingRow` are both NamedTuples),
+/// (`Wave2VecWordAlignment` and `IndexedWordTimingRow` are both `NamedTuples`),
 /// so this is the wire's own shape given a name and a place to say what the
 /// slots mean.
 ///
@@ -239,7 +239,7 @@ fn run_whisper(
     Ok(TaskResultV2::WhisperTokenTimingResult(result))
 }
 
-/// Run a word-list aligner: Wave2Vec, Cantonese Wave2Vec or Qwen3.
+/// Run a word-list aligner: `Wave2Vec`, Cantonese `Wave2Vec` or Qwen3.
 ///
 /// All three take the requested words and answer one row per word, so they
 /// share one call shape. The Cantonese host used to take the serialized
@@ -343,7 +343,7 @@ fn run_fa(
 /// (`LoadedWhisperFa` or `LoadedWordFa` on the Python side): its `backend`
 /// and `runner` are read from it.
 #[pyfunction]
-pub(crate) fn execute_forced_alignment_request_v2(
+pub fn execute_forced_alignment_request_v2(
     py: Python<'_>,
     request: &Bound<'_, PyAny>,
     loaded: &Bound<'_, PyAny>,

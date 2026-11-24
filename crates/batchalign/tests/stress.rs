@@ -82,7 +82,7 @@ impl StressServer {
         self.session.base_url()
     }
 
-    fn client(&self) -> &reqwest::Client {
+    const fn client(&self) -> &reqwest::Client {
         self.session.client()
     }
 
@@ -242,7 +242,7 @@ fn multi_file_submission(count: usize) -> JobSubmission {
 // ===========================================================================
 
 /// Submit 10 jobs simultaneously. After all complete, verify the pool
-/// recovered all permits (workers_available == live_workers in health).
+/// recovered all permits (`workers_available` == `live_workers` in health).
 #[tokio::test]
 async fn pool_permits_match_idle_count_after_burst() {
     let server = start_stress_server().await;
@@ -395,7 +395,7 @@ async fn concurrent_cancels_on_same_job() {
 // Group B: Job concurrency limits
 // ===========================================================================
 
-/// Configure max_concurrent_jobs = 2, submit 3 jobs. All should eventually
+/// Configure `max_concurrent_jobs` = 2, submit 3 jobs. All should eventually
 /// complete: the third queues until a slot opens.
 #[tokio::test]
 async fn max_concurrent_jobs_enforced() {
@@ -595,7 +595,7 @@ async fn sse_stream_under_rapid_file_completions() {
 // ===========================================================================
 
 /// Submit 5 independent jobs simultaneously. All should complete without
-/// SQLITE_BUSY errors surfacing as 500 responses.
+/// `SQLITE_BUSY` errors surfacing as 500 responses.
 #[tokio::test]
 async fn concurrent_job_completions_no_sqlite_busy() {
     let server = start_stress_server().await;
@@ -616,7 +616,7 @@ async fn concurrent_job_completions_no_sqlite_busy() {
     }
 }
 
-/// Poll health 20 times rapidly while 5 jobs are running. active_jobs
+/// Poll health 20 times rapidly while 5 jobs are running. `active_jobs`
 /// should always be in [0, 5] and status should always be "ok".
 #[tokio::test]
 async fn health_endpoint_consistent_under_load() {

@@ -13,4 +13,4 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// A `Send` future owned on the heap, as wrappers receive the work they wrap.
-pub(crate) type OwnedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type OwnedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

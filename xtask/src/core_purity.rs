@@ -153,7 +153,7 @@ impl ForbiddenCapability {
     ///
     /// `tokio` and `mio` are deliberately absent: see the module doc on feature
     /// unification. The tokio scheduler is caught by [`SourceMarker`] instead.
-    fn packages(self) -> &'static [&'static str] {
+    const fn packages(self) -> &'static [&'static str] {
         match self {
             Self::ForeignExecutor => &["async-std", "smol", "async-global-executor"],
             Self::HttpServer => &["axum", "axum-core", "hyper", "tower-http"],
@@ -164,7 +164,7 @@ impl ForbiddenCapability {
     }
 
     /// What the reader loses if this capability lands in core.
-    fn consequence(self) -> &'static str {
+    const fn consequence(self) -> &'static str {
         match self {
             Self::ForeignExecutor => "core would carry a second executor alongside tokio",
             Self::HttpServer => "the typed model would depend on the server that serves it",
@@ -205,7 +205,7 @@ impl SourceMarker {
     /// capability. Chosen to be unambiguous rather than exhaustive: a false
     /// positive on a pure file wastes an afternoon and teaches the next person
     /// to distrust the gate, which costs more than a gap does.
-    fn patterns(self) -> &'static [&'static str] {
+    const fn patterns(self) -> &'static [&'static str] {
         match self {
             Self::AsyncRuntime => &[
                 "tokio::spawn",
@@ -245,7 +245,7 @@ impl SourceMarker {
         }
     }
 
-    fn consequence(self) -> &'static str {
+    const fn consequence(self) -> &'static str {
         match self {
             Self::AsyncRuntime => "a task runner could no longer be tested without a runtime",
             Self::Filesystem => "pure logic would need a real file laid out on disk to test",

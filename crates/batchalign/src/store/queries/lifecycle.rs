@@ -1,4 +1,4 @@
-//! Job lifecycle mutations: submit, restart, cancel, interrupt_all_for_shutdown.
+//! Job lifecycle mutations: submit, restart, cancel, `interrupt_all_for_shutdown`.
 
 use crate::api::{CancellationRequest, JobId, JobInfo};
 use crate::db::NewJobRecord;

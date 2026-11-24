@@ -23,7 +23,7 @@ impl<'g, 's> SurveyedLiteralSearch<'g, 's> {
         )
     }
 
-    pub(super) fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
+    pub(super) const fn prepared(&self) -> &PreparedLiteralSearch<'g, 's> {
         &self.prepared
     }
 
@@ -69,7 +69,7 @@ pub(super) struct Geometry {
     pub(super) cells: usize,
 }
 
-pub(super) fn work_refusal(required_at_least: usize) -> LocalInterleavingBudget {
+pub(super) const fn work_refusal(required_at_least: usize) -> LocalInterleavingBudget {
     LocalInterleavingBudget::WorkBudgetExceeded {
         phase: LocalInterleavingWorkPhase::PackedSearch,
         required_at_least,

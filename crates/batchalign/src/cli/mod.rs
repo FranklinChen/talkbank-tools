@@ -149,7 +149,7 @@
 //! | [`bench_cmd`] | `batchalign3 bench` -- repeated performance runs                   |
 //!
 //! Binary-only concerns such as OTLP export are kept behind the
-//! `binary-entry` feature. The embedded PyO3 CLI bridge depends on
+//! `binary-entry` feature. The embedded `PyO3` CLI bridge depends on
 //! this crate with `default-features = false`, so the native extension no
 //! longer pulls the standalone binary's telemetry stack into its dependency
 //! graph.
@@ -185,7 +185,7 @@ pub mod worker_cmd;
 
 /// Run the embedded CLI entry path from an explicit `argv` vector.
 ///
-/// This is used by the PyO3 console-script bridge. Unlike the standalone
+/// This is used by the `PyO3` console-script bridge. Unlike the standalone
 /// binary entry, it does not initialize OTLP tracing; it only sets up basic
 /// stderr logging and then delegates to [`run_command`].
 pub fn run_embedded_cli_from_argv(argv: Vec<String>) -> Result<(), i32> {
@@ -231,7 +231,7 @@ fn init_embedded_cli_tracing(verbose: u8) {
 
 /// Shared CLI dispatch: the canonical command router.
 ///
-/// Both the standalone binary (`main.rs`) and the PyO3 console_scripts entry
+/// Both the standalone binary (`main.rs`) and the `PyO3` `console_scripts` entry
 /// point (`cli_entry.rs`) delegate here. This is the single source of truth
 /// for subcommand dispatch, eliminating the duplication that previously caused
 /// the two entry points to drift out of sync.

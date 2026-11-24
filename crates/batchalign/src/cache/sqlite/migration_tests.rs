@@ -8,11 +8,16 @@ use super::*;
 /// Regression for the v0.3.0 FA cache-namespace defect.
 ///
 /// A pool-wide first-worker capability once labelled Whisper raw evidence
-/// with the Wave2Vec model version. Schema 1 did not embed the producer
+/// with the `Wave2Vec` model version. Schema 1 did not embed the producer
 /// version, so relabelling it would invent provenance and it must be
 /// quarantined outside live lookup. Schema 2 does embed the exact
 /// selected-worker version, so a mismatched database label can be repaired
 /// from the payload. Correctly labelled and unrelated rows must survive.
+/// Guards: Opening legacy FA data repairs supported namespaces and quarantines contradictory evidence with its reason.
+/// Kind: journey
+/// Not a type: Old SQLite rows are external bytes that can claim conflicting producer and envelope versions.
+/// State: Private database seeded in the historical shape witnesses migration, quarantine and resulting queries.
+/// Concurrency: Private database with opens and queries ordered by awaits.
 #[tokio::test]
 async fn opening_cache_repairs_or_quarantines_fa_raw_evidence_namespaces() {
     let dir = TempDir::new().expect("temp cache directory");

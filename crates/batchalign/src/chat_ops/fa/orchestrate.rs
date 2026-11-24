@@ -42,7 +42,7 @@ use start_order::enforce_start_order;
 /// admitted a state nothing ever read: a non-empty `touched` with
 /// `write_wor` false. That state was never CONSTRUCTED wrongly by the one
 /// call site that built both fields together, but every reader still had to
-/// know "touched only matters when write_wor is true" from a comment; here
+/// know "touched only matters when `write_wor` is true" from a comment; here
 /// there is only one thing to read, and its shape says what it means.
 ///
 /// `%wor` generation used to happen inline, per utterance, in the same loop
@@ -71,9 +71,10 @@ pub(super) enum WorPlan {
 
 impl WorPlan {
     fn new(write_wor: bool, touched: Vec<UtteranceIdx>) -> Self {
-        match write_wor {
-            true => Self::Pending(touched),
-            false => Self::Suppressed,
+        if write_wor {
+            Self::Pending(touched)
+        } else {
+            Self::Suppressed
         }
     }
 
@@ -484,7 +485,7 @@ impl MonotonicityEffect {
     /// utterance a human (or an earlier run) edited and this run left
     /// alone; there is no scan of "every utterance in the file" for such a
     /// value to leak through.
-    fn word_mutated_utterance(&self) -> Option<UtteranceIdx> {
+    const fn word_mutated_utterance(&self) -> Option<UtteranceIdx> {
         match self {
             Self::EndClampedInterleavedWords { edge, .. } => Some(edge.utterance_idx),
             Self::YieldedToKeptBullet {
@@ -496,10 +497,13 @@ impl MonotonicityEffect {
                         ..
                     },
                 ..
-            } => match !words_trimmed.is_empty() || !words_dropped.is_empty() {
-                true => Some(*utterance_idx),
-                false => None,
-            },
+            } => {
+                if !words_trimmed.is_empty() || !words_dropped.is_empty() {
+                    Some(*utterance_idx)
+                } else {
+                    None
+                }
+            }
             // A raise moves the bullet, which `%wor` does not encode; it
             // touches words only when one straddled or preceded the new start.
             Self::StartRegressionRaised {
@@ -507,10 +511,13 @@ impl MonotonicityEffect {
                 words_dropped,
                 words_trimmed,
                 ..
-            } => match !words_trimmed.is_empty() || !words_dropped.is_empty() {
-                true => Some(*utterance_idx),
-                false => None,
-            },
+            } => {
+                if !words_trimmed.is_empty() || !words_dropped.is_empty() {
+                    Some(*utterance_idx)
+                } else {
+                    None
+                }
+            }
             Self::YieldedToKeptBullet {
                 outcome: KeptBulletYield::Stripped { .. },
                 ..
@@ -562,11 +569,13 @@ pub struct MonotonicityResult {
 
 impl MonotonicityResult {
     /// Generic records retained in structured evidence.
+    #[must_use]
     pub fn records(&self) -> &[batchalign_transform::decisions::DecisionRecord] {
         &self.records
     }
 
     /// Numeric timing effects paired with the generic records.
+    #[must_use]
     pub fn effects(&self) -> &[MonotonicityEffect] {
         &self.effects
     }
@@ -640,7 +649,7 @@ impl FaApplied {
 
 /// Kept source fit has run exactly once; source retries precede repair/order.
 #[must_use]
-pub(crate) struct FaImposed {
+pub struct FaImposed {
     pub(super) postprocess: Vec<batchalign_transform::decisions::DecisionRecord>,
     end_overlap_policy: EndOverlapPolicy,
     main_bullets: OwnedImposedBullets,
@@ -747,24 +756,27 @@ fn enforce_monotonicity_then_write_wor(
 
 impl FaOrdered {
     /// Monotonicity effects proved to have run in this ordered phase.
-    pub fn monotonicity(&self) -> &MonotonicityResult {
+    pub const fn monotonicity(&self) -> &MonotonicityResult {
         &self.monotonicity
     }
 }
 
 impl FaFinalized {
     /// Monotonicity effects proved to have run after optional repair.
-    pub fn monotonicity(&self) -> &MonotonicityResult {
+    #[must_use]
+    pub const fn monotonicity(&self) -> &MonotonicityResult {
         self.ordered.monotonicity()
     }
 
     /// Aggregate observations from the optional repair phase.
-    pub fn repair_stats(&self) -> &RepairStats {
+    #[must_use]
+    pub const fn repair_stats(&self) -> &RepairStats {
         &self.repair_stats
     }
 
     /// The proof that every kept bullet held.
-    pub fn kept_bullets(&self) -> KeptBulletsHeld {
+    #[must_use]
+    pub const fn kept_bullets(&self) -> KeptBulletsHeld {
         self.kept_bullets
     }
 }
@@ -1106,6 +1118,7 @@ pub fn refresh_reusable_alignment(
 /// This is the per-utterance form of the cheap rerun check. It is useful for
 /// selective reuse in incremental align workflows where only some utterances
 /// remain trustworthy after manual edits.
+#[must_use]
 pub fn has_reusable_wor_timing_for_utterance(utterance: &Utterance) -> bool {
     collect_wor_backed_timings(utterance).is_some()
 }
@@ -1538,7 +1551,7 @@ pub(super) enum EndOverlapResolution {
 /// last measured word end and the next utterance's first measured word
 /// start (each `None` when that utterance has no measured word), and
 /// `next_start_ms` is the bullet-level boundary that triggered the pass.
-pub(super) fn classify_end_overlap(
+pub(super) const fn classify_end_overlap(
     prev_hull_end_ms: Option<u64>,
     next_start_ms: u64,
     next_hull_start_ms: Option<u64>,
@@ -1584,7 +1597,7 @@ impl EndOverlapResolution {
     /// way `classify_end_overlap` already resolves a pair whose next start may
     /// not move (its successor guard): `InterleavedWords`, which clamps only
     /// the previous utterance, bullet and words, to the next start.
-    fn keeping_next_start(self) -> Self {
+    const fn keeping_next_start(self) -> Self {
         match self {
             Self::CoverageOnly { .. } | Self::InterleavedWords => self,
             Self::BoundaryFromWords { .. } => Self::InterleavedWords,
@@ -1595,7 +1608,7 @@ impl EndOverlapResolution {
     /// conflict does. Derived from the variant, not carried beside it (see
     /// this type's own doc for why a former `cuts_word_timing` boolean was
     /// exactly the affordance a type here replaces).
-    fn needs_review(&self) -> bool {
+    const fn needs_review(&self) -> bool {
         matches!(self, Self::InterleavedWords)
     }
 
@@ -1603,7 +1616,7 @@ impl EndOverlapResolution {
     /// review, item 4): `MonotonicityStrategy`'s three `EndClamped*`
     /// variants exist one-for-one with this type's, so a consumer filtering
     /// on the wire label sees the same three cases this type does.
-    fn strategy(&self) -> batchalign_transform::decisions::MonotonicityStrategy {
+    const fn strategy(&self) -> batchalign_transform::decisions::MonotonicityStrategy {
         use batchalign_transform::decisions::MonotonicityStrategy;
         match self {
             Self::CoverageOnly { .. } => MonotonicityStrategy::EndClampedCoverageOnly,
@@ -1663,7 +1676,7 @@ impl EndOverlapResolution {
 /// not.
 ///
 /// Special case: if the clamped end would equal or precede the utterance's
-/// own start (possible when two adjacent utterances share the same start_ms
+/// own start (possible when two adjacent utterances share the same `start_ms`
 /// from overlapping UTR token ranges), the bullet is stripped entirely rather
 ///
 /// `#[must_use]` because these records must reach durable evidence rather than
@@ -1879,7 +1892,7 @@ struct KeptOverlapLedger<'a> {
 }
 
 impl<'a> KeptOverlapLedger<'a> {
-    fn new(imposed: ImposedBullets<'a>) -> Self {
+    const fn new(imposed: ImposedBullets<'a>) -> Self {
         Self {
             imposed,
             reported: std::collections::BTreeSet::new(),
@@ -2076,7 +2089,7 @@ struct OverlapFacts {
 }
 
 impl OverlapFacts {
-    fn overlap_ms(&self) -> u64 {
+    const fn overlap_ms(&self) -> u64 {
         self.edge.original_end_ms - self.next_start_ms
     }
 }
@@ -2301,7 +2314,7 @@ enum KeptEndYield {
 impl KeptEndYield {
     /// Classify from the kept end, `next`'s end, `next`'s measured first word
     /// start, and `next`'s file-order successor's live start.
-    fn keeping_prev_end(
+    const fn keeping_prev_end(
         kept_end_ms: u64,
         next_end_ms: u64,
         next_hull_start_ms: Option<u64>,
@@ -2778,7 +2791,8 @@ impl FaDecisions {
     /// typestate as a full run; this constructor is the only way to create the
     /// otherwise-private empty [`FaFinalized`] postprocess state. Callers must
     /// obtain that state through [`finalize_without_injection`].
-    pub fn without_injection(
+    #[must_use]
+    pub const fn without_injection(
         rescue: Vec<batchalign_transform::decisions::DecisionRecord>,
         grouping: Vec<batchalign_transform::decisions::DecisionRecord>,
         finalized: FaFinalized,

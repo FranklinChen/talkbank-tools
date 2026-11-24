@@ -8,11 +8,11 @@
 //! `catalog.rs` holds the one declaration table for released commands;
 //! `recipes.rs` holds the stage recipes it points at.
 
-pub(crate) mod catalog;
-pub(crate) mod command_spec;
-pub(crate) mod materialize;
-pub(crate) mod planner;
-pub(crate) mod recipe;
-pub(crate) mod recipes;
-pub(crate) mod runtime;
-pub(crate) mod work_unit;
+pub mod catalog;
+pub mod command_spec;
+pub mod materialize;
+pub mod planner;
+pub mod recipe;
+pub mod recipes;
+pub mod runtime;
+pub mod work_unit;

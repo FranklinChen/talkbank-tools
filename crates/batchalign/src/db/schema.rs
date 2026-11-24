@@ -234,7 +234,7 @@ pub struct AttemptRow {
     /// Opaque work-unit identifier within the job. Column
     /// `work_unit_id TEXT NOT NULL`.
     pub work_unit_id: String,
-    /// Work-unit kind string (snake_case). Column
+    /// Work-unit kind string (`snake_case`). Column
     /// `work_unit_kind TEXT NOT NULL`.
     pub work_unit_kind: String,
     /// 1-based attempt number for this work unit. Column
@@ -246,12 +246,12 @@ pub struct AttemptRow {
     /// Finish timestamp, unix seconds with fractional precision. Column
     /// `finished_at REAL`.
     pub finished_at: Option<MachineTime>,
-    /// Final outcome string (snake_case). Column `outcome TEXT NOT NULL`.
+    /// Final outcome string (`snake_case`). Column `outcome TEXT NOT NULL`.
     pub outcome: String,
-    /// Broad failure category string (snake_case). Column
+    /// Broad failure category string (`snake_case`). Column
     /// `failure_category TEXT`.
     pub failure_category: Option<String>,
-    /// Scheduler disposition string (snake_case). Column
+    /// Scheduler disposition string (`snake_case`). Column
     /// `disposition TEXT NOT NULL`.
     pub disposition: String,
     /// Future fleet node identifier. Column `worker_node_id TEXT`.

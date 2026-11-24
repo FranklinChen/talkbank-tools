@@ -86,14 +86,10 @@ impl WorkerPool {
     /// pool, whose workers build nothing), retiring this pool's idle workers
     /// when a load has to queue, and the configured stall window.
     pub(crate) fn load_preparation(&self) -> super::LoadPreparation {
-        let hosting = match self.config.test_echo {
-            true => super::ModelHosting::TestEcho,
-            false => super::ModelHosting::Models,
-        };
         super::LoadPreparation {
             admission: super::LoadAdmission::new(
                 self.memory_coordinator(),
-                hosting,
+                self.config.model_hosting(),
                 std::sync::Arc::new(super::idle_eviction::IdleWorkers(self.groups.clone())),
             ),
             stall: self.config.ensure_task_stall,
@@ -314,7 +310,8 @@ impl WorkerTransport {
 
     /// Wire-format token for the transport, matching the format
     /// the older `Vec<String>` summary embedded as `transport=...`.
-    pub fn as_wire(&self) -> &'static str {
+    #[must_use]
+    pub const fn as_wire(&self) -> &'static str {
         match self {
             Self::Stdio => "stdio",
             Self::Tcp => "tcp",

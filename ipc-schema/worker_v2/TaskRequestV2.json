@@ -130,7 +130,7 @@
       ]
     },
     {
-      "description": "OpenSMILE request.",
+      "description": "`OpenSMILE` request.",
       "type": "object",
       "properties": {
         "kind": {
@@ -168,7 +168,7 @@
           "const": "local_whisper"
         },
         {
-          "description": "HuggingFace Whisper community fine-tune, resolved per-language.\nThe same worker-side ``WhisperASRHandle`` hosts the model; this\nenum variant exists so the control-plane pool key and the worker\nbootstrap can select the fine-tune loader over the stock loader.",
+          "description": "`HuggingFace` Whisper community fine-tune, resolved per-language.\nThe same worker-side ``WhisperASRHandle`` hosts the model; this\nenum variant exists so the control-plane pool key and the worker\nbootstrap can select the fine-tune loader over the stock loader.",
           "type": "string",
           "const": "whisper_hub"
         },
@@ -183,7 +183,7 @@
           "const": "hk_aliyun"
         },
         {
-          "description": "FunASR Cantonese provider.",
+          "description": "`FunASR` Cantonese provider.",
           "type": "string",
           "const": "hk_funaudio"
         },
@@ -337,7 +337,7 @@
           ]
         },
         {
-          "description": "FunASR Paraformer, with its voice-activity and punctuation models.",
+          "description": "`FunASR` Paraformer, with its voice-activity and punctuation models.",
           "type": "object",
           "properties": {
             "asr": {
@@ -365,11 +365,11 @@
           ]
         },
         {
-          "description": "FunASR SenseVoice, with its voice-activity model.",
+          "description": "`FunASR` `SenseVoice`, with its voice-activity model.",
           "type": "object",
           "properties": {
             "asr": {
-              "description": "The SenseVoice checkpoint.",
+              "description": "The `SenseVoice` checkpoint.",
               "$ref": "#/$defs/RequestedModelV2"
             },
             "engine": {
@@ -492,7 +492,7 @@
       ]
     },
     "DecodeBudgetSeconds": {
-      "description": "Wall-clock decode budget for one ASR request, in seconds.\n\nNamed apart from a bare `NonNegativeSeconds` length because this quantity\ncarries a specific provenance contract: it is derived once, at\nrequest-build time, from the audio's own duration and\n[`DEADLINE_REALTIME_FACTOR`], and it is the value both the Python\ndecode loop (`_qwen_chunking.DecodeBudget`) and the Rust transport\nceiling (`TaskRequestV2::transport_timeout`) are computed\nFROM. A generic duration carries no such contract, so reusing one\nhere would let a caller pass an unrelated seconds value where this\none is required.\n\nHAND-WRITTEN rather than built with `numeric_id!`: that macro gives its\ntype a PUBLIC inner field plus `From<f64>` and `Default` (a zero budget\nany caller could construct from nothing), which would make the \"only\nsanctioned constructor\" claim on [`Self::for_audio`] false -- a\n`DecodeBudgetSeconds(1.0)` or `DecodeBudgetSeconds::default()` written\nanywhere in the crate would compile and produce a budget with no\naudio duration behind it. The field here is private; [`Self::for_audio`]\nand [`Self::for_duration_ms`] are the only ways to construct one, and\n[`Self::as_seconds`] is the only way to read one back out.\n\nThe tuple constructor is unreachable from outside this module (proved\nby the compile_fail doctest below); `Default` and `From<f64>` are\nproved absent crate-wide by a `static_assertions::assert_not_impl_any!`\nbeneath this type, which runs on every `cargo test --lib`.\n\n```compile_fail\nuse batchalign_types::worker_v2::DecodeBudgetSeconds;\n// The inner field is private: this must not compile from outside\n// `batchalign_types::worker_v2::requests`.\nlet _ = DecodeBudgetSeconds(1.0);\n```",
+      "description": "Wall-clock decode budget for one ASR request, in seconds.\n\nNamed apart from a bare `NonNegativeSeconds` length because this quantity\ncarries a specific provenance contract: it is derived once, at\nrequest-build time, from the audio's own duration and\n[`DEADLINE_REALTIME_FACTOR`], and it is the value both the Python\ndecode loop (`_qwen_chunking.DecodeBudget`) and the Rust transport\nceiling (`TaskRequestV2::transport_timeout`) are computed\nFROM. A generic duration carries no such contract, so reusing one\nhere would let a caller pass an unrelated seconds value where this\none is required.\n\nHAND-WRITTEN rather than built with `numeric_id!`: that macro gives its\ntype a PUBLIC inner field plus `From<f64>` and `Default` (a zero budget\nany caller could construct from nothing), which would make the \"only\nsanctioned constructor\" claim on [`Self::for_audio`] false -- a\n`DecodeBudgetSeconds(1.0)` or `DecodeBudgetSeconds::default()` written\nanywhere in the crate would compile and produce a budget with no\naudio duration behind it. The field here is private; [`Self::for_audio`]\nand [`Self::for_duration_ms`] are the only ways to construct one, and\n[`Self::as_seconds`] is the only way to read one back out.\n\nThe tuple constructor is unreachable from outside this module (proved\nby the `compile_fail` doctest below); `Default` and `From<f64>` are\nproved absent crate-wide by a `static_assertions::assert_not_impl_any!`\nbeneath this type, which runs on every `cargo test --lib`.\n\n```compile_fail\nuse batchalign_types::worker_v2::DecodeBudgetSeconds;\n// The inner field is private: this must not compile from outside\n// `batchalign_types::worker_v2::requests`.\nlet _ = DecodeBudgetSeconds(1.0);\n```",
       "type": "number",
       "format": "double"
     },
@@ -508,7 +508,7 @@
               "const": "mms_cpu"
             },
             "torch_version": {
-              "description": "PyTorch that performed the virtual projection.",
+              "description": "`PyTorch` that performed the virtual projection.",
               "type": "string"
             },
             "torchaudio_revision": {
@@ -532,7 +532,7 @@
               "const": "whisper"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -560,7 +560,7 @@
               "const": "qwen"
             },
             "torch_version": {
-              "description": "PyTorch that performed the projection.",
+              "description": "`PyTorch` that performed the projection.",
               "type": "string"
             },
             "transformers_version": {
@@ -587,12 +587,12 @@
           "const": "whisper"
         },
         {
-          "description": "MMS Wave2Vec forced alignment.",
+          "description": "MMS `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wave2vec"
         },
         {
-          "description": "Cantonese Wave2Vec forced alignment.",
+          "description": "Cantonese `Wave2Vec` forced alignment.",
           "type": "string",
           "const": "wav2vec_canto"
         },
@@ -908,7 +908,7 @@
           "$ref": "#/$defs/WorkerArtifactIdV2"
         },
         "retokenize": {
-          "description": "Whether Stanza/PyCantonese should re-tokenize the input.\n\nWhen `true`, CJK word segmentation is applied before POS tagging:\n- Cantonese (`yue`): PyCantonese `segment()` groups characters into words\n- Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text\n\nDefaults to `false` for backward compatibility with workers that do not\nyet understand this field.",
+          "description": "Whether Stanza/PyCantonese should re-tokenize the input.\n\nWhen `true`, CJK word segmentation is applied before POS tagging:\n- Cantonese (`yue`): `PyCantonese` `segment()` groups characters into words\n- Mandarin (`cmn`/`zho`): Stanza neural tokenizer segments the text\n\nDefaults to `false` for backward compatibility with workers that do not\nyet understand this field.",
           "type": "boolean",
           "default": false
         }
@@ -1311,7 +1311,7 @@
           "const": "google"
         },
         {
-          "description": "Local Meta SeamlessM4T.",
+          "description": "Local Meta `SeamlessM4T`.",
           "type": "string",
           "const": "seamless"
         },
@@ -1401,7 +1401,7 @@
       "description": "The utterance segmenter a request names, decided by the Rust control\nplane from the language and the operator's fallback policy, and admitted\nagainst the worker's Stanza catalog when it runs Stanza.",
       "oneOf": [
         {
-          "description": "The language's pinned TalkBank boundary model, which the worker loaded\nat startup from the pin the control plane sent it.",
+          "description": "The language's pinned `TalkBank` boundary model, which the worker loaded\nat startup from the pin the control plane sent it.",
           "type": "string",
           "const": "boundary_model"
         },
@@ -1457,7 +1457,7 @@
       "description": "The word segmenter a request names, decided by the Rust control plane.\n\nA closed set: each variant is one segmenter and one lexicon, so a request\ncannot reach a worker that would segment with something else.",
       "oneOf": [
         {
-          "description": "Taiwanese: taibun's dictionary tokeniser, whose lexicon comes from the\nTaiwanese-Chinese Online Dictionary and iTaigi (via ChhoeTaigi).",
+          "description": "Taiwanese: taibun's dictionary tokeniser, whose lexicon comes from the\nTaiwanese-Chinese Online Dictionary and iTaigi (via `ChhoeTaigi`).",
           "type": "string",
           "const": "taibun_taiwanese"
         }

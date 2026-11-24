@@ -9,7 +9,7 @@ use crate::error::ServerError;
 
 /// Identifiers for internal pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum StageId {
+pub enum StageId {
     /// Parse input content.
     Parse,
     /// Extract worker payloads.
@@ -37,7 +37,7 @@ pub(crate) enum StageId {
 }
 
 impl StageId {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Parse => "parse",
             Self::CollectPayloads => "collect_payloads",
@@ -73,10 +73,10 @@ impl fmt::Display for StageId {
 /// this type makes a stage cost one pointer in its caller, and no caller can
 /// pass an inline future again: the compiler refuses it. The general rule
 /// lives in [`crate::owned_future`].
-pub(crate) type StageFuture<'a, T> = crate::owned_future::OwnedFuture<'a, Result<T, ServerError>>;
+pub type StageFuture<'a, T> = crate::owned_future::OwnedFuture<'a, Result<T, ServerError>>;
 
 /// Observe a consuming transition without erasing its output type.
-pub(crate) async fn observe_stage<T>(
+pub async fn observe_stage<T>(
     command: &'static str,
     stage: StageId,
     transition: StageFuture<'_, T>,

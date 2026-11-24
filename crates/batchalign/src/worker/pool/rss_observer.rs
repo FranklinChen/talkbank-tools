@@ -70,7 +70,7 @@ pub(super) struct IdleMember {
     source: super::capacity::ObservedIdleWorker,
 }
 impl IdleMember {
-    pub(super) fn pid(&self) -> WorkerPid {
+    pub(super) const fn pid(&self) -> WorkerPid {
         self.source.pid()
     }
     pub(super) fn take(
@@ -133,10 +133,10 @@ pub(super) struct Measured<T> {
     rss_mb: u64,
 }
 impl<T> Measured<T> {
-    pub(super) fn rss_mb(&self) -> u64 {
+    pub(super) const fn rss_mb(&self) -> u64 {
         self.rss_mb
     }
-    pub(super) fn item(&self) -> &T {
+    pub(super) const fn item(&self) -> &T {
         &self.item
     }
     pub(super) fn into_item(self) -> T {
@@ -144,7 +144,7 @@ impl<T> Measured<T> {
     }
     /// Pure policy observations claim no native worker or process identity.
     #[cfg(test)]
-    pub(super) fn declared(item: T, rss_mb: u64) -> Self {
+    pub(super) const fn declared(item: T, rss_mb: u64) -> Self {
         Self { item, rss_mb }
     }
 }
@@ -179,8 +179,8 @@ fn average_rss<T>(samples: &[Measured<T>]) -> Option<u64> {
 /// (joins with caller-provided metadata). Both sites previously
 /// hand-rolled the same `Pid::from_u32 + System::new + refresh +
 /// per-PID process lookup` triple; consolidating here keeps the
-/// sysinfo refresh shape (use_kind = `with_memory()`,
-/// remove_dead = `true`) in one place.
+/// sysinfo refresh shape (`use_kind` = `with_memory()`,
+/// `remove_dead` = `true`) in one place.
 pub(super) fn refresh_rss_mb_for_pids(
     pids: &[WorkerPid],
 ) -> Result<HashMap<WorkerPid, u64>, crate::host_memory::HostUnreadable> {

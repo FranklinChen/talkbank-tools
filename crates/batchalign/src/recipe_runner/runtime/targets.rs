@@ -36,18 +36,18 @@ struct OutputSource<'a> {
 
 /// The admitted input identity carried by a successful writer's receipt.
 #[derive(Debug)]
-pub(crate) struct OutputSourceIdentity<'a> {
+pub struct OutputSourceIdentity<'a> {
     file: &'a PendingJobFile,
 }
 
 impl<'a> OutputSourceIdentity<'a> {
-    pub(crate) fn filename(&self) -> &'a DisplayPath {
+    pub(crate) const fn filename(&self) -> &'a DisplayPath {
         self.file.filename()
     }
 }
 
 impl<'a> OutputSource<'a> {
-    fn identity(&self) -> OutputSourceIdentity<'a> {
+    const fn identity(&self) -> OutputSourceIdentity<'a> {
         OutputSourceIdentity { file: self.file }
     }
     fn admit(
@@ -95,7 +95,7 @@ impl<'a> OutputSource<'a> {
 
 /// A catalog layout associated with its declared input and filesystem.
 /// Borrowed plans retain their completed naming computation without cloning it.
-pub(crate) struct SourceOutputs<'a> {
+pub struct SourceOutputs<'a> {
     source: OutputSource<'a>,
     artifacts: Cow<'a, PlannedArtifactSet>,
 }
@@ -145,7 +145,7 @@ impl<'a> SourceOutputs<'a> {
         self.artifacts.primary()
     }
 
-    pub(crate) fn source_identity(&self) -> OutputSourceIdentity<'a> {
+    pub(crate) const fn source_identity(&self) -> OutputSourceIdentity<'a> {
         self.source.identity()
     }
 
@@ -193,13 +193,13 @@ impl<'a> SourceOutputs<'a> {
 }
 
 /// The named CHAT/CSV layout retains its admitted source through persistence.
-pub(crate) struct ChatMetricsOutputs<'a> {
+pub struct ChatMetricsOutputs<'a> {
     source: OutputSource<'a>,
     artifacts: Cow<'a, ChatMetricsArtifacts>,
 }
 
 impl<'a> ChatMetricsOutputs<'a> {
-    pub(crate) fn source_identity(&self) -> OutputSourceIdentity<'a> {
+    pub(crate) const fn source_identity(&self) -> OutputSourceIdentity<'a> {
         self.source.identity()
     }
     pub(crate) fn artifacts(&self) -> &ChatMetricsArtifacts {
@@ -223,19 +223,19 @@ impl<'a> ChatMetricsOutputs<'a> {
 }
 
 /// Distinct artifact types keep the destination roles distinguishable.
-pub(crate) struct ChatMetricsTargets<'a> {
+pub struct ChatMetricsTargets<'a> {
     pub(crate) primary: OutputTarget<'a, PrimaryArtifact>,
     pub(crate) metrics: OutputTarget<'a, MetricsArtifact>,
 }
 
 /// One write capability. Writers consume it and cannot select another path.
-pub(crate) struct OutputTarget<'a, A> {
+pub struct OutputTarget<'a, A> {
     artifact: &'a A,
     destinations: OutputDestinations,
 }
 
 impl<A> OutputTarget<'_, A> {
-    pub(crate) fn artifact(&self) -> &A {
+    pub(crate) const fn artifact(&self) -> &A {
         self.artifact
     }
 

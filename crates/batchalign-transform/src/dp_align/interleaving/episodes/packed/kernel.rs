@@ -32,7 +32,7 @@ impl<'g, 's> Plan<'g, 's> {
     fn reference_slack(&self) -> usize {
         self.admitted.reference_slack()
     }
-    fn geometry(&self) -> &Geometry {
+    const fn geometry(&self) -> &Geometry {
         self.admitted.geometry()
     }
     fn admit<C: WorkControl + ?Sized>(
@@ -217,7 +217,7 @@ impl TerminalScore {
         }
     }
 
-    fn get(self) -> usize {
+    const fn get(self) -> usize {
         self.0
     }
 }

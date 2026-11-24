@@ -52,11 +52,13 @@ pub struct CompareTierLabel(NonEmptyString);
 
 impl CompareTierLabel {
     /// `%xsrep`
+    #[must_use]
     pub fn xsrep() -> Self {
         Self(talkbank_model::non_empty_literal!("xsrep"))
     }
 
     /// `%xsmor`
+    #[must_use]
     pub fn xsmor() -> Self {
         Self(talkbank_model::non_empty_literal!("xsmor"))
     }

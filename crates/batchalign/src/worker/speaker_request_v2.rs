@@ -137,23 +137,30 @@ mod tests {
     use crate::media::tools::MediaTool;
     use crate::types::worker_v2::{SpeakerInputV2, TaskRequestV2};
 
+    /// Two calls to `fresh()` must produce distinct request and artifact ids,
+    /// matching the ASR regression fix.
+    /// Guards: Explicit request IDs are preserved and fresh IDs distinguish two independent speaker attachments.
+    /// Kind: wire
+    /// Not a type: Copying identifiers or allocating fresh ones depends on runtime values and generator behavior.
+    /// State: Constructs explicit IDs and obtains two fresh values from the runtime ID allocator.
+    /// Concurrency: Sequential allocator calls inside one test.
     #[test]
-    fn builds_stable_speaker_request_ids() {
+    fn fresh_produces_distinct_ids_across_calls() {
         let ids = PreparedSpeakerRequestIdsV2::new("req-speaker-v2-1", "audio-speaker-v2-1");
         assert_eq!(&*ids.request_id, "req-speaker-v2-1");
         assert_eq!(&*ids.audio_ref_id, "audio-speaker-v2-1");
-    }
 
-    /// Two calls to `fresh()` must produce distinct request and artifact ids,
-    /// matching the ASR regression fix.
-    #[test]
-    fn fresh_produces_distinct_ids_across_calls() {
         let a = PreparedSpeakerRequestIdsV2::fresh();
         let b = PreparedSpeakerRequestIdsV2::fresh();
         assert_ne!(a.request_id, b.request_id);
         assert_ne!(a.audio_ref_id, b.audio_ref_id);
     }
 
+    /// Guards: Speaker request attaches the PCM produced from verified source bytes under the paired request IDs.
+    /// Kind: contract
+    /// Not a type: Media conversion and durable attachment metadata depend on actual audio and generated files.
+    /// State: Private audio and artifact store invoke the real `FFmpeg` preparation and request builder.
+    /// Concurrency: Private directory and awaits conversion before checking attachment.
     #[tokio::test]
     async fn builds_speaker_request_from_verified_source_bytes() {
         use std::path::Path;

@@ -104,7 +104,7 @@ impl<R: RelationStage> L2Attachment<R> {
     }
 
     /// Whether the span root attaches to the host utterance.
-    pub fn is_external_root(&self) -> bool {
+    pub const fn is_external_root(&self) -> bool {
         match self {
             Self::InternalRoot => false,
             Self::HostGovernor { .. } | Self::UtteranceRoot { .. } => true,
@@ -112,7 +112,7 @@ impl<R: RelationStage> L2Attachment<R> {
     }
 
     /// The span word that decided the attachment.
-    pub fn source_word(&self) -> Option<MorItemIndex> {
+    pub const fn source_word(&self) -> Option<MorItemIndex> {
         match self {
             Self::InternalRoot => None,
             Self::HostGovernor { source_word, .. } | Self::UtteranceRoot { source_word } => {
@@ -124,7 +124,8 @@ impl<R: RelationStage> L2Attachment<R> {
 
 impl L2Attachment<ExternalRelation> {
     /// The merge's correction of the external relation, if it made one.
-    pub fn corrected_deprel(&self) -> Option<&UdDeprel> {
+    #[must_use]
+    pub const fn corrected_deprel(&self) -> Option<&UdDeprel> {
         match self {
             Self::HostGovernor {
                 relation: ExternalRelation::Corrected(deprel),
@@ -159,17 +160,20 @@ pub struct L2SpanPlan {
 
 impl L2SpanPlan {
     /// Owning line in the `ChatFile`.
-    pub fn line_idx(&self) -> usize {
+    #[must_use]
+    pub const fn line_idx(&self) -> usize {
         self.address.line().raw()
     }
 
     /// Where the span's utterance is.
-    pub fn address(&self) -> UtteranceAddress {
+    #[must_use]
+    pub const fn address(&self) -> UtteranceAddress {
         self.address
     }
 
     /// Target language to dispatch this span to.
-    pub fn target_lang(&self) -> &LanguageCode {
+    #[must_use]
+    pub const fn target_lang(&self) -> &LanguageCode {
         &self.target_lang
     }
 
@@ -177,11 +181,13 @@ impl L2SpanPlan {
     ///
     /// An INPUT to the secondary Stanza model, which changes its analysis
     /// when sentence-final punctuation is absent or wrong.
-    pub fn terminator(&self) -> &talkbank_model::Terminator {
+    #[must_use]
+    pub const fn terminator(&self) -> &talkbank_model::Terminator {
         &self.terminator
     }
 
     /// The span's deferred positions, in host order.
+    #[must_use]
     pub fn positions(&self) -> &[L2DeferredPosition] {
         &self.positions
     }
@@ -192,22 +198,26 @@ impl L2SpanPlan {
     }
 
     /// Number of words in the span (at least one).
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.positions.len()
     }
 
     /// Whether the span has no words; producer-admitted plans are nonempty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
 
     /// The host word the span starts at.
-    pub fn first_word(&self) -> MorItemIndex {
+    #[must_use]
+    pub const fn first_word(&self) -> MorItemIndex {
         self.first_word
     }
 
     /// Explicit host-attachment plan for the span's secondary root.
-    pub fn attachment(&self) -> &L2Attachment {
+    #[must_use]
+    pub const fn attachment(&self) -> &L2Attachment {
         &self.attachment
     }
 }
@@ -252,7 +262,7 @@ fn planned_attachment(positions: &[L2DeferredPosition]) -> L2Attachment {
 }
 
 /// Whether host word `next` immediately follows host word `previous`.
-pub(super) fn follows(previous: MorItemIndex, next: MorItemIndex) -> bool {
+pub(super) const fn follows(previous: MorItemIndex, next: MorItemIndex) -> bool {
     previous.as_usize() + 1 == next.as_usize()
 }
 
@@ -261,6 +271,7 @@ pub(super) fn follows(previous: MorItemIndex, next: MorItemIndex) -> bool {
 ///
 /// A span is a run of positions on one line, in one target language, at
 /// consecutive host words.
+#[must_use]
 pub fn plan_dispatch_spans(deferred: Vec<L2DeferredPosition>) -> L2DispatchPlan {
     let mut runs: Vec<Vec<L2DeferredPosition>> = Vec::new();
     for position in deferred {

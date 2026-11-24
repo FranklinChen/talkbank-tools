@@ -131,10 +131,10 @@ impl NonEmptyWords {
         }
     }
 
-    pub(super) fn first_word(&self) -> WordIdx {
+    pub(super) const fn first_word(&self) -> WordIdx {
         self.first
     }
-    pub(super) fn last_word(&self) -> WordIdx {
+    pub(super) const fn last_word(&self) -> WordIdx {
         self.last
     }
     /// The list, when it holds at least one word.
@@ -248,11 +248,13 @@ impl AnchoredPiece {
     }
 
     /// The piece's owned words, not its borrowed model context.
+    #[must_use]
     pub fn words(&self) -> &[FaWord] {
         &self.words.as_slice()[self.owned.clone()]
     }
 
     /// The complete lexical context supplied to the model and cache key.
+    #[must_use]
     pub fn request_words(&self) -> &[FaWord] {
         self.words.as_slice()
     }
@@ -263,23 +265,27 @@ impl AnchoredPiece {
     }
 
     /// The original partition's nominal span; not a hard acoustic boundary.
-    pub fn ownership_window(&self) -> FaWindow {
+    #[must_use]
+    pub const fn ownership_window(&self) -> FaWindow {
         self.ownership_window
     }
 
     /// The piece's first word, as its index among the utterance's words.
+    #[must_use]
     pub fn first_word(&self) -> WordIdx {
         WordIdx::new(self.words.first.raw() + self.owned.start)
     }
 
     /// The piece's last word, likewise.
+    #[must_use]
     pub fn last_word(&self) -> WordIdx {
         WordIdx::new(self.words.first.raw() + self.owned.end - 1)
     }
 
     /// The piece's audio window: within the engine budget, inside the
     /// utterance's window and so inside the recording.
-    pub fn window(&self) -> FaWindow {
+    #[must_use]
+    pub const fn window(&self) -> FaWindow {
         self.window
     }
 }
@@ -463,12 +469,14 @@ impl AnchoredSplit {
     }
 
     /// The utterance the pieces belong to.
-    pub fn utterance(&self) -> &UtteranceIdx {
+    #[must_use]
+    pub const fn utterance(&self) -> &UtteranceIdx {
         &self.utterance
     }
 
     /// The whole utterance window the pieces partition.
-    pub fn window(&self) -> FaWindow {
+    #[must_use]
+    pub const fn window(&self) -> FaWindow {
         self.window
     }
 
@@ -478,7 +486,8 @@ impl AnchoredSplit {
     }
 
     /// How many pieces: at least two.
-    pub fn piece_count(&self) -> usize {
+    #[must_use]
+    pub const fn piece_count(&self) -> usize {
         self.earlier.len() + 1
     }
 
@@ -501,7 +510,7 @@ impl AnchoredSplit {
 
     /// The decision recording that this window was aligned in pieces.
     #[cfg(test)]
-    pub(super) fn decision(&self) -> SplitWindow {
+    pub(super) const fn decision(&self) -> SplitWindow {
         SplitWindow {
             start_ms: self.window.audio_start().get(),
             end_ms: self.window.end().get(),

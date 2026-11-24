@@ -38,7 +38,7 @@
       "description": "The utterance segmenter a request names, decided by the Rust control\nplane from the language and the operator's fallback policy, and admitted\nagainst the worker's Stanza catalog when it runs Stanza.",
       "oneOf": [
         {
-          "description": "The language's pinned TalkBank boundary model, which the worker loaded\nat startup from the pin the control plane sent it.",
+          "description": "The language's pinned `TalkBank` boundary model, which the worker loaded\nat startup from the pin the control plane sent it.",
           "type": "string",
           "const": "boundary_model"
         },

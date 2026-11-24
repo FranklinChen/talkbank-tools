@@ -578,7 +578,7 @@ fn drift_mixed_conventions() {
 /// `cargo test -p batchalign-chat-ops --lib drift_margin_sweep_diagnostic -- --ignored --nocapture`.
 ///
 /// Purpose: prove the drift RED-gate isn't knife-edge. If all grid cells
-/// produce >= 20 violations on GlobalUtr, the gate is robust. If some produce
+/// produce >= 20 violations on `GlobalUtr`, the gate is robust. If some produce
 /// 1-2 violations, retune constants.
 #[test]
 #[ignore]

@@ -2,7 +2,7 @@
 //!
 //! A segmenter that sees an utterance as one string merges across whatever
 //! the string hides. Cantonese child speech is full of retraces
-//! (`a b [/] b c`) and untranscribed material (`a xxx b`); PyCantonese given
+//! (`a b [/] b c`) and untranscribed material (`a xxx b`); `PyCantonese` given
 //! the joined words merged characters on either side of them, and the
 //! rebuild, which cannot write one word over two places, had to refuse the
 //! whole utterance. The cure is at the producer: the request says where the
@@ -46,6 +46,7 @@ impl WordRuns {
     /// `words` words of which none may merge with another: the honest runs
     /// of an item that has no authority to retokenize (a secondary-language
     /// span keeps its CHAT words as written).
+    #[must_use]
     pub fn unmergeable(words: usize) -> Self {
         Self(std::iter::repeat_n(NonZeroUsize::MIN, words).collect())
     }

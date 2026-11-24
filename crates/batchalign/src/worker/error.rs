@@ -466,7 +466,7 @@ impl WorkerError {
     /// Matched on every variant, so a new error kind must decide. Kinds that
     /// cannot arise from an exchange on a live worker (spawn, ready and
     /// admission failures) answer `Retire`, the conservative choice.
-    pub(crate) fn worker_after_failure(&self) -> WorkerAfterFailure {
+    pub(crate) const fn worker_after_failure(&self) -> WorkerAfterFailure {
         match self {
             // A report the worker answered and went on from, or one after
             // which it stopped serving: the kind decided which.

@@ -48,7 +48,7 @@
           "const": "google"
         },
         {
-          "description": "Local Meta SeamlessM4T.",
+          "description": "Local Meta `SeamlessM4T`.",
           "type": "string",
           "const": "seamless"
         },

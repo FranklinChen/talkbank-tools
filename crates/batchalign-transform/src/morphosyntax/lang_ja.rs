@@ -11,6 +11,7 @@ pub struct JaOverride {
 }
 
 /// Apply Japanese verb-form overrides for one UD token.
+#[must_use]
 pub fn japanese_verbform(upos: UniversalPos, target: &str, text: &str) -> Option<JaOverride> {
     if text.contains("ちゃ") {
         return Some(JaOverride {

@@ -174,7 +174,7 @@ impl<'relation, 'source> KernelProjection<'relation, 'source> {
         })
     }
 
-    fn admit(
+    const fn admit(
         self,
         matched_edges: usize,
     ) -> Result<AdmittedKernel<'relation, 'source>, LocalInterleavingRefusal> {
@@ -234,7 +234,7 @@ impl ScalarInterior<'_, '_> {
     }
 }
 
-fn refusal(required_at_least: usize) -> LocalInterleavingRefusal {
+const fn refusal(required_at_least: usize) -> LocalInterleavingRefusal {
     LocalInterleavingRefusal::Budget(LocalInterleavingBudget::WorkBudgetExceeded {
         phase: LocalInterleavingWorkPhase::FeasibleWitness,
         required_at_least,

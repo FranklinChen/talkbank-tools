@@ -11,7 +11,7 @@
 //!
 //! Tier semantics (human-calibrated against blind listening verdicts;
 //! measured 97.5% precision on the auto-trust tier):
-//! - AUTO_TRUST (category in {other, medium, approx} AND ear YES AND
+//! - `AUTO_TRUST` (category in {other, medium, approx} AND ear YES AND
 //!   pitch CHILD): the verify %com is REWRITTEN to a machine-verified
 //!   provenance note (never deleted: maintainer ruling, provenance
 //!   must survive in the transcript).
@@ -138,7 +138,7 @@ fn merge_verify_runs_and_writes_outputs() {
     );
 }
 
-/// AUTO_TRUST: the verify flag is rewritten to a machine-verified
+/// `AUTO_TRUST`: the verify flag is rewritten to a machine-verified
 /// provenance note carrying the three signals; never deleted.
 #[test]
 fn auto_trust_rewrites_flag_to_provenance_note() {
@@ -168,7 +168,7 @@ fn auto_trust_rewrites_flag_to_provenance_note() {
 /// A %com tier carrying a human transcriber note BEFORE the flag (the
 /// merge writer appends its flag to an existing comment as
 /// "<human> ; <prefix>: <flag>") still gets its flag rewritten on
-/// AUTO_TRUST, and the human note survives verbatim. Regression: four
+/// `AUTO_TRUST`, and the human note survives verbatim. Regression: four
 /// bundle utterances with exactly this shape were silently skipped by
 /// a starts-with predicate (found 2026-07-17).
 #[test]
@@ -190,7 +190,7 @@ fn human_prefixed_flag_rewritten_and_note_preserved() {
     );
 }
 
-/// An UNSCORABLE line (FA could not align: fa_mean_score is null in
+/// An UNSCORABLE line (FA could not align: `fa_mean_score` is null in
 /// the verdicts) still promotes on the composed rule (FA is
 /// ordering-only, never a gate) and its provenance note says fa=n/a
 /// rather than fabricating a number.

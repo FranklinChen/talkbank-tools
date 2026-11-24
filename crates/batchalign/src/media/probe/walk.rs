@@ -227,12 +227,17 @@ mod tests {
     /// header: 1429 frames of 1152 samples, less LAME's 1105-sample delay and
     /// 173 samples of padding, is 1,644,930 samples, which is what a decode of
     /// that file produced (37.300 s).
+    /// Guards: Packet totals subtract real trim fields and ignore side data with no trim values.
+    /// Kind: wire
+    /// Not a type: The external packet JSON can mix trim-bearing and unrelated side data entries.
+    /// State: A synthetic MP3 packet answer with beginning delay, ending padding and empty side data.
+    /// Concurrency: One owned fixture is decoded and reduced in memory.
     #[test]
     fn trims_are_subtracted_from_the_packet_sum() {
         let middle = r#"{ "duration": 368640 },"#.repeat(1427);
         let json = format!(
             r#"{{ "packets": [
-                {{ "duration": 368640, "side_data_list": [ {{ "skip_samples": 1105, "discard_padding": 0 }} ] }},
+                {{ "duration": 368640, "side_data_list": [ {{ "skip_samples": 1105, "discard_padding": 0 }}, {{}} ] }},
                 {middle}
                 {{ "duration": 368640, "side_data_list": [ {{ "skip_samples": 0, "discard_padding": 173 }} ] }}
               ],
@@ -246,15 +251,12 @@ mod tests {
         );
     }
 
-    /// Side data of another kind prints as an empty entry and is not a trim.
-    #[test]
-    fn side_data_that_is_not_a_trim_contributes_nothing() {
-        let json = r#"{ "packets": [ { "duration": 1000, "side_data_list": [ { } ] } ],
-                        "streams": [ { "sample_rate": "1000", "time_base": "1/1000" } ] }"#;
-        assert_eq!(walked(json).expect("walks").length(), DurationMs(1_000));
-    }
-
     /// A fractional final millisecond rounds up, so the bound covers it.
+    /// Guards: A fractional duration computed from packet ticks rounds up to cover all audio.
+    /// Kind: wire
+    /// Not a type: The external time base and packet durations can encode fractional output milliseconds.
+    /// State: Three actual wire-shaped MPEG packet durations and a declared stream clock.
+    /// Concurrency: No external process or mutable state.
     #[test]
     fn a_fractional_length_rounds_up() {
         // 3 packets of 1152 samples at 44.1 kHz: 78.367 ms.
@@ -265,6 +267,11 @@ mod tests {
 
     /// A packet whose duration nobody knows makes the sum a lower bound, which
     /// is exactly the defect this module exists to remove, so it is refused.
+    /// Guards: A missing packet duration refuses what would otherwise be a lower bound.
+    /// Kind: wire
+    /// Not a type: Packet JSON can omit a required measurement without any Rust producer involvement.
+    /// State: Two synthetic packets, one without duration, and a stream clock.
+    /// Concurrency: Packet aggregation owns its immutable input.
     #[test]
     fn a_packet_without_a_duration_is_refused() {
         let json = r#"{ "packets": [ { "duration": 1000 }, { } ],
@@ -276,6 +283,11 @@ mod tests {
     }
 
     /// A stream with no packets holds no audio, refused where it is born.
+    /// Guards: An empty packet population cannot produce positive duration.
+    /// Kind: wire
+    /// Not a type: A native demuxer can return zero packets in an otherwise parseable response.
+    /// State: An empty packet array and explicit stream clock.
+    /// Concurrency: The test owns the raw answer.
     #[test]
     fn a_walk_of_no_packets_is_empty_audio() {
         let json =
@@ -283,6 +295,11 @@ mod tests {
         assert!(matches!(walked(json), Err(ProbeError::EmptyAudio { .. })));
     }
 
+    /// Guards: Trim values longer than the packet sum are a named unreadable answer.
+    /// Kind: wire
+    /// Not a type: External trim values and packet durations are independently supplied and can disagree.
+    /// State: One synthetic packet with a trim beyond its duration.
+    /// Concurrency: A single pure fixture crosses the parser.
     #[test]
     fn trims_longer_than_the_stream_are_unreadable() {
         let json = r#"{ "packets": [ { "duration": 10, "side_data_list": [ { "skip_samples": 11, "discard_padding": 0 } ] } ],

@@ -10,7 +10,7 @@
 use super::error::WhisperNativeError;
 use crate::api::LanguageCode3;
 
-/// One table, both directions: canonical ISO 639-3 (TalkBank internal)
+/// One table, both directions: canonical ISO 639-3 (`TalkBank` internal)
 /// paired with whisper.cpp's language token, which is stock Whisper's token
 /// (a test below proves each one is). Restricted to the languages
 /// whisper.cpp's large models genuinely support well; a silent
@@ -67,7 +67,7 @@ pub(super) fn lang_to_iso2(lang: &LanguageCode3) -> Result<&'static str, Whisper
         .ok_or_else(|| WhisperNativeError::UnsupportedLanguage((**lang).to_owned()))
 }
 
-/// Map whisper.cpp's detected ISO 639-1 token back to TalkBank's ISO
+/// Map whisper.cpp's detected ISO 639-1 token back to `TalkBank`'s ISO
 /// 639-3 canonical code: the reverse direction of `LANG_TABLE`,
 /// restricted to the same supported set so detection cannot smuggle in
 /// a language the rest of the pipeline has no support for. Only the
@@ -86,7 +86,7 @@ pub(super) fn iso2_to_lang(iso2: &str) -> Result<LanguageCode3, WhisperNativeErr
 
 /// Whether `whisper_rs` can be asked for `lang`: the check its runtime makes,
 /// asked at admission.
-pub(crate) fn supports_language(lang: &LanguageCode3) -> bool {
+pub fn supports_language(lang: &LanguageCode3) -> bool {
     lang_to_iso2(lang).is_ok()
 }
 

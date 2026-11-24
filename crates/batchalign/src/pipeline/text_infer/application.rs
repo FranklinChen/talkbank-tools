@@ -170,7 +170,7 @@ where
 /// a different type and has no route in), and the strict gate this ends with
 /// is the postcondition, so the result can continue into another stage that
 /// requires admission.
-pub(crate) async fn run_admitted_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
+pub async fn run_admitted_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
     admitted: PostValidated,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,
@@ -231,7 +231,7 @@ where
 /// them (or admitted, if the edit happened to remove the finding's cause).
 /// Unlike the admitted pipeline, an empty collection still re-judges the
 /// model, because the input carried no proof to hand back.
-pub(crate) async fn run_localized_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
+pub async fn run_localized_text_pipeline<Item, State, Response, Failure, Infer, Observe>(
     localized: crate::pipeline::post_validate::LocalizedDiagnosis,
     lang: &LanguageCode3,
     services: PipelineServices<'_>,

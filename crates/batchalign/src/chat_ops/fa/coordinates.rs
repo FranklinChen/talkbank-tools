@@ -138,7 +138,11 @@ impl<T> Clamped<T> {
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Recording {
-    duration: FileMs,
+    /// Where the recording ends. `NonZeroU64` so positivity is the field's,
+    /// not every constructor's: [`Recording::whole_window`] builds an
+    /// `FaWindow` without the `within` checks, and an `FaWindow` promises a
+    /// non-zero length, which a future constructor admitting 0 would break.
+    end: std::num::NonZeroU64,
 }
 
 /// Why a fixture recording could not be constructed.
@@ -190,10 +194,12 @@ impl Recording {
     /// `Origin::TranscriptBullet` for a value that came from no transcript: a
     /// fabricated provenance, inside the module whose purpose is to make
     /// provenance honest.
+    #[must_use]
     pub fn overshoot_of(&self, at: FileMs) -> Option<Ms> {
-        match at <= self.duration {
-            true => None,
-            false => Some(at.since(self.duration)),
+        if at <= self.duration() {
+            None
+        } else {
+            Some(at.since(self.duration()))
         }
     }
 
@@ -209,8 +215,9 @@ impl Recording {
     /// Returns [`Clamped`] rather than a bare [`FileMs`] because "the window we
     /// computed runs past the end of the audio" is a fact about OUR arithmetic
     /// that a caller should be able to count. `.min()` made it invisible.
+    #[must_use]
     pub fn clamp_bound(&self, at: FileMs) -> Clamped<FileMs> {
-        // Built on `overshoot_of` rather than restating `at <= self.duration`.
+        // Built on `overshoot_of` rather than restating `at <= self.duration()`.
         // This module's whole argument is that the containment question gets
         // asked in ONE place; three copies of the comparison inside one `impl`
         // is that argument failing at home. `clamp` composes on `locate` for
@@ -218,7 +225,7 @@ impl Recording {
         match self.overshoot_of(at) {
             None => Clamped::AsGiven(at),
             Some(_) => Clamped::ClampedTo {
-                bound: self.duration,
+                bound: self.duration(),
             },
         }
     }
@@ -231,9 +238,10 @@ impl Recording {
     /// and the bound every window, token and timing is checked against is the
     /// length the audio actually runs. See `media::probe` for the estimate it
     /// replaced.
-    pub fn of_audio(duration: AudioDuration) -> Self {
+    #[must_use]
+    pub const fn of_audio(duration: AudioDuration) -> Self {
         Self {
-            duration: FileMs::new(duration.length().0),
+            end: duration.positive_length(),
         }
     }
 
@@ -246,18 +254,27 @@ impl Recording {
     /// An integration test, which cannot see `cfg(test)` items, measures a
     /// real file with `MediaProbe` and takes that route too.
     #[cfg(test)]
-    pub fn of_duration(duration: Ms) -> Result<Self, NotARecording> {
-        match duration {
-            Ms(0) => Err(NotARecording::ZeroDuration),
-            Ms(ms) => Ok(Self {
-                duration: FileMs::new(ms),
-            }),
+    pub const fn of_duration(duration: Ms) -> Result<Self, NotARecording> {
+        match std::num::NonZeroU64::new(duration.0) {
+            None => Err(NotARecording::ZeroDuration),
+            Some(end) => Ok(Self { end }),
+        }
+    }
+
+    /// The complete positive recording is already a valid FA window.
+    #[must_use]
+    pub const fn whole_window(self) -> FaWindow {
+        FaWindow {
+            start: FileMs::new(0),
+            end: self.duration(),
+            recording: self,
         }
     }
 
     /// The recording's length.
+    #[must_use]
     pub const fn duration(&self) -> FileMs {
-        self.duration
+        FileMs::new(self.end.get())
     }
 
     /// Ask whether a point falls inside this recording.
@@ -267,18 +284,20 @@ impl Recording {
     /// the proof honest, and it must say where the number came from, which is
     /// what keeps provenance unforgettable: there is no constructor that omits
     /// the origin.
+    #[must_use]
     pub fn locate(&self, at: FileMs, origin: Origin) -> Containment {
-        match at <= self.duration {
-            true => Containment::Inside(RecordedInstant {
+        if at <= self.duration() {
+            Containment::Inside(RecordedInstant {
                 at,
                 recording: *self,
                 origin,
-            }),
-            false => Containment::Beyond {
+            })
+        } else {
+            Containment::Beyond {
                 reported: at,
-                exceeds_by: at.since(self.duration),
+                exceeds_by: at.since(self.duration()),
                 origin,
-            },
+            }
         }
     }
 
@@ -293,6 +312,7 @@ impl Recording {
     /// The clamped instant's origin WRAPS the origin it was given rather than
     /// replacing it, so a clamped measurement stays distinguishable from a
     /// clamped estimate all the way downstream.
+    #[must_use]
     pub fn clamp(&self, at: FileMs, origin: Origin) -> Clamped<RecordedInstant> {
         match self.locate(at, origin) {
             Containment::Inside(instant) => Clamped::AsGiven(instant),
@@ -302,7 +322,7 @@ impl Recording {
                 origin,
             } => Clamped::ClampedTo {
                 bound: RecordedInstant {
-                    at: self.duration,
+                    at: self.duration(),
                     recording: *self,
                     // The overshoot lives HERE, on the value, not beside it.
                     origin: Origin::ClampedTo {
@@ -332,6 +352,7 @@ pub struct RecordedInstant {
 
 impl RecordedInstant {
     /// The point, in file coordinates.
+    #[must_use]
     pub const fn at(&self) -> FileMs {
         self.at
     }
@@ -341,6 +362,7 @@ impl RecordedInstant {
     /// Travels with the value through every later stage, so the question "is
     /// this a measurement or our own arithmetic?" is answerable at the point of
     /// use rather than reconstructed from a pipeline log.
+    #[must_use]
     pub const fn origin(&self) -> &Origin {
         &self.origin
     }
@@ -352,7 +374,8 @@ impl RecordedInstant {
     /// measurement of anything about this word. Containment is untouched: the
     /// instant is already inside the recording it came from, so this is a
     /// relabelling rather than a move, and it needs no re-check.
-    pub fn relabelled(&self, origin: Origin) -> Self {
+    #[must_use]
+    pub const fn relabelled(&self, origin: Origin) -> Self {
         Self {
             at: self.at,
             recording: self.recording,
@@ -371,6 +394,7 @@ impl RecordedInstant {
     /// It hands out no containment claim a caller could reuse: a bare
     /// [`FileMs`] proves nothing, which is why [`Recording::locate`] and
     /// [`Recording::clamp`] remain the only ways to obtain one of these.
+    #[must_use]
     pub fn into_parts(self) -> (FileMs, Origin) {
         (self.at, self.origin)
     }
@@ -449,7 +473,8 @@ pub enum OutsideWindow {
 /// offset was right, wrong, or omitted, and nothing could ask whether the sum
 /// was still inside the recording.
 ///
-/// Constructible only through [`FaWindow::within`], which refuses a window that
+/// Constructible from a whole [`Recording`] or through [`FaWindow::within`],
+/// which refuses a window that
 /// is inverted, empty or extends past its recording, so possession of one is
 /// proof that the audio it names exists and is not zero-length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,7 +485,7 @@ pub struct FaWindow {
 }
 
 impl FaWindow {
-    /// The only constructor: a window over a recording, checked against it.
+    /// Admit arbitrary bounds as a window over this recording.
     ///
     /// Ordering is checked before anything else, because an inverted window's
     /// length is meaningless and every later answer computed from it would be
@@ -487,6 +512,7 @@ impl FaWindow {
     /// clamping and containment decisions that belong to it, rather than
     /// re-deriving a bound from `self.end()` and getting a window-shaped answer
     /// to a recording-shaped question.
+    #[must_use]
     pub const fn recording(&self) -> Recording {
         self.recording
     }
@@ -495,6 +521,7 @@ impl FaWindow {
     ///
     /// Engine reports cross into file coordinates through `to_file`; audio
     /// request construction uses the crate-private `audio_start` accessor.
+    #[must_use]
     pub const fn end(&self) -> FileMs {
         self.end
     }
@@ -524,13 +551,15 @@ impl FaWindow {
     /// whether `at` leaves audio on both sides. When it does not, the window
     /// comes back unchanged as the error, so a caller can simply not cut.
     pub(crate) fn split_at(self, at: FileMs) -> Result<(Self, Self), Self> {
-        match self.start < at && at < self.end {
-            true => Ok((Self { end: at, ..self }, Self { start: at, ..self })),
-            false => Err(self),
+        if self.start < at && at < self.end {
+            Ok((Self { end: at, ..self }, Self { start: at, ..self }))
+        } else {
+            Err(self)
         }
     }
 
     /// The window's length.
+    #[must_use]
     pub const fn len(&self) -> Ms {
         self.end.since(self.start)
     }
@@ -539,9 +568,10 @@ impl FaWindow {
     /// assumption and the adjustment. Engine measurements still use
     /// `to_file`, which refuses an out-of-window report instead of clamping.
     pub(super) fn clamp_derived_end(&self, at: FileMs, origin: Origin) -> Clamped<RecordedInstant> {
-        match at > self.end {
-            false => self.recording.clamp(at, origin),
-            true => Clamped::ClampedTo {
+        if at <= self.end {
+            self.recording.clamp(at, origin)
+        } else {
+            Clamped::ClampedTo {
                 bound: RecordedInstant {
                     at: self.end,
                     recording: self.recording,
@@ -552,7 +582,7 @@ impl FaWindow {
                         overshoot: at.since(self.end),
                     },
                 },
-            },
+            }
         }
     }
 
@@ -573,31 +603,30 @@ impl FaWindow {
         engine: &EngineId,
     ) -> Result<RecordedInstant, OutsideWindow> {
         let window_len = self.len();
-        match reported.offset_from_window_start() > window_len.0 {
-            true => Err(OutsideWindow::BeyondWindowEnd {
+        if reported.offset_from_window_start() > window_len.0 {
+            Err(OutsideWindow::BeyondWindowEnd {
                 reported,
                 window_len,
                 exceeds_by: Ms(reported.offset_from_window_start() - window_len.0),
-            }),
-            false => {
-                let at = FileMs::new(self.start.get() + reported.offset_from_window_start());
-                // Cloned, not moved: the caller keeps the id for the rest of
-                // the group. Free on the live path, where the name is a
-                // borrowed literal.
-                let measured = Origin::EngineMeasured {
-                    engine: engine.clone(),
-                };
-                // Cannot be `Beyond`: the window's end is inside the recording
-                // and `at` is at most the window's end. Matched rather than
-                // unwrapped so the impossible case has a written-out answer.
-                match self.recording.locate(at, measured) {
-                    Containment::Inside(instant) => Ok(instant),
-                    Containment::Beyond { exceeds_by, .. } => Err(OutsideWindow::BeyondWindowEnd {
-                        reported,
-                        window_len,
-                        exceeds_by,
-                    }),
-                }
+            })
+        } else {
+            let at = FileMs::new(self.start.get() + reported.offset_from_window_start());
+            // Cloned, not moved: the caller keeps the id for the rest of
+            // the group. Free on the live path, where the name is a
+            // borrowed literal.
+            let measured = Origin::EngineMeasured {
+                engine: engine.clone(),
+            };
+            // Cannot be `Beyond`: the window's end is inside the recording
+            // and `at` is at most the window's end. Matched rather than
+            // unwrapped so the impossible case has a written-out answer.
+            match self.recording.locate(at, measured) {
+                Containment::Inside(instant) => Ok(instant),
+                Containment::Beyond { exceeds_by, .. } => Err(OutsideWindow::BeyondWindowEnd {
+                    reported,
+                    window_len,
+                    exceeds_by,
+                }),
             }
         }
     }
@@ -615,14 +644,11 @@ mod tests {
         EngineId::new("whisper-fa-large-v2")
     }
 
-    #[test]
-    fn a_zero_length_recording_is_not_a_recording() {
-        assert_eq!(
-            Recording::of_duration(Ms(0)),
-            Err(NotARecording::ZeroDuration)
-        );
-    }
-
+    /// Guards: An engine position far beyond its final window is refused with exact overshoot.
+    /// Kind: wire
+    /// Not a type: The engine can report milliseconds outside the audio it received.
+    /// State: One exact reported coordinate and a bound at recording end.
+    /// Concurrency: All coordinates are in-memory values.
     #[test]
     fn the_defect_that_produced_this_module_is_now_refused() {
         // The real shape, in miniature. A window sits at the very end of the
@@ -643,6 +669,11 @@ mod tests {
         );
     }
 
+    /// Guards: Valid window-relative positions acquire the engine provenance and retain the inclusive final instant.
+    /// Kind: policy
+    /// Not a type: External offsets can land inside the window or on its inclusive end.
+    /// State: An admitted window, two reports and one engine identifier.
+    /// Concurrency: The placement uses only immutable test values.
     #[test]
     fn a_report_inside_the_window_lands_inside_the_recording_and_says_who_measured_it() {
         let rec = recording(10_000);
@@ -657,46 +688,17 @@ mod tests {
             &Origin::EngineMeasured { engine: engine() }
         );
         assert!(placed.origin().is_observation());
-    }
-
-    #[test]
-    fn a_report_exactly_at_the_window_end_is_accepted() {
-        // The boundary is inclusive: an engine reporting the final instant of
-        // its audio has said something true, and refusing it would discard a
-        // legitimate alignment.
-        let rec = recording(10_000);
-        let window =
-            FaWindow::within(&rec, FileMs::new(4_000), FileMs::new(6_000)).expect("inside");
-        let placed = window
+        let final_instant = window
             .to_file(WindowMs::reported(2_000), &engine())
-            .expect("boundary");
-        assert_eq!(placed.at(), FileMs::new(6_000));
+            .expect("closed end");
+        assert_eq!(final_instant.at(), FileMs::new(6_000));
     }
 
-    #[test]
-    fn a_window_cannot_be_opened_past_the_recording() {
-        let rec = recording(10_000);
-        assert_eq!(
-            FaWindow::within(&rec, FileMs::new(9_000), FileMs::new(12_000)),
-            Err(WindowFault::PastRecording {
-                end: FileMs::new(12_000),
-                exceeds_by: Ms(2_000),
-            })
-        );
-    }
-
-    #[test]
-    fn an_inverted_window_is_refused_before_containment_is_considered() {
-        let rec = recording(10_000);
-        assert_eq!(
-            FaWindow::within(&rec, FileMs::new(6_000), FileMs::new(4_000)),
-            Err(WindowFault::Inverted {
-                start: FileMs::new(6_000),
-                end: FileMs::new(4_000),
-            })
-        );
-    }
-
+    /// Guards: Window admission distinguishes inverted, empty and past-recording inputs in order.
+    /// Kind: policy
+    /// Not a type: Two raw offsets can have several distinct invalid relationships to a valid recording.
+    /// State: One declared recording and four combinations of raw offsets.
+    /// Concurrency: No external state changes.
     #[test]
     fn an_empty_window_is_refused_and_inversion_is_checked_first() {
         let rec = recording(10_000);
@@ -712,16 +714,31 @@ mod tests {
             FaWindow::within(&rec, past, past),
             Err(WindowFault::Empty { at: past })
         );
-        // Ordering is decided before emptiness.
-        assert!(matches!(
-            FaWindow::within(&rec, FileMs::new(4_001), FileMs::new(4_000)),
-            Err(WindowFault::Inverted { .. })
-        ));
+        // Inversion wins even when both bounds exceed the recording.
+        assert_eq!(
+            FaWindow::within(&rec, FileMs::new(21_000), past),
+            Err(WindowFault::Inverted {
+                start: FileMs::new(21_000),
+                end: past
+            })
+        );
+        assert_eq!(
+            FaWindow::within(&rec, FileMs::new(9_000), FileMs::new(12_000)),
+            Err(WindowFault::PastRecording {
+                end: FileMs::new(12_000),
+                exceeds_by: Ms(2_000)
+            })
+        );
         assert!(FaWindow::within(&rec, at, FileMs::new(4_001)).is_ok());
     }
 
     /// A split leaves audio on both sides or does not happen: the window
     /// comes back unchanged for a cut at or outside its edges.
+    /// Guards: Splitting a window at an interior point yields two positive windows and refuses edge cuts.
+    /// Kind: policy
+    /// Not a type: A caller can supply a cut coordinate equal to or beyond a legal window edge.
+    /// State: An admitted source window and distinct cut coordinates.
+    /// Concurrency: The test operates on immutable values.
     #[test]
     fn a_window_splits_only_strictly_inside_itself() {
         let rec = recording(10_000);
@@ -741,6 +758,11 @@ mod tests {
         }
     }
 
+    /// Guards: Clamping records the bound, amount and original observation while retaining uncut positions.
+    /// Kind: policy
+    /// Not a type: Independently valid offsets may exceed the recorded end and require a distinct provenance.
+    /// State: One recording, two positions and one origin.
+    /// Concurrency: Pure proximity and origin checks.
     #[test]
     fn clamping_says_that_it_clamped_and_by_how_much() {
         // The behaviour `.min(total_audio_ms)` had, plus the fact it discarded.

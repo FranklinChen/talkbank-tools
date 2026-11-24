@@ -220,7 +220,6 @@ def test_the_loaded_host_names_the_shared_admission_revision_for_cache_replay(
     assert _reported_engine(InferTask.FA) is None
     loaded = load_fa_engine(
         WorkerBootstrapRuntime(
-            task=InferTask.FA,
             lang="yue",
             num_speakers=NumSpeakers(2),
             engine_overrides={"fa": "qwen3_fa"},

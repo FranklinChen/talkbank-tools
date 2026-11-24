@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 /// One scripted answer.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ScriptedReply {
+pub enum ScriptedReply {
     /// HTTP 200 with this JSON body.
     Json(&'static str),
     /// This HTTP status with a short plain body.
@@ -33,13 +33,13 @@ pub(crate) enum ScriptedReply {
 /// A request the server saw: its method and path, as the request line spelled
 /// them, so a test can assert what the client did (and did not) ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SeenRequest {
+pub struct SeenRequest {
     pub(crate) method: String,
     pub(crate) path: String,
 }
 
 /// The running server: where to point the client, and what it has been asked.
-pub(crate) struct ScriptedRevServer {
+pub struct ScriptedRevServer {
     /// The speech-to-text root to build a test client on.
     pub(crate) speech_to_text_base: String,
     seen: Arc<Mutex<Vec<SeenRequest>>>,

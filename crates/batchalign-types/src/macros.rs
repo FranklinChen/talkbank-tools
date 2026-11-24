@@ -183,9 +183,9 @@ macro_rules! validated_string_id {
 /// the boundary rather than checked downstream. The schemas are written from
 /// the `schema(..)` clause because the derives read the schema off the
 /// `try_from` type and drop the range, which would leave the Python
-/// conformance check and the OpenAPI document blind to the bound the
+/// conformance check and the `OpenAPI` document blind to the bound the
 /// constructor enforces. One clause feeds both the JSON Schema (schemars, for
-/// the worker IPC schema) and the OpenAPI schema (utoipa), so the two cannot
+/// the worker IPC schema) and the `OpenAPI` schema (utoipa), so the two cannot
 /// disagree; `NonNegativeSeconds` used to restate its schema by hand for
 /// utoipa.
 ///

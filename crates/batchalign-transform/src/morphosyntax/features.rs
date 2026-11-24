@@ -81,7 +81,7 @@ pub(super) struct UdFeats<'a> {
 
 impl<'a> UdFeats<'a> {
     /// One word's features.
-    pub(super) fn of_word(ud: &'a UdWord) -> Self {
+    pub(super) const fn of_word(ud: &'a UdWord) -> Self {
         Self {
             features: ud.features(),
         }

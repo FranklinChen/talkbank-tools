@@ -80,7 +80,7 @@ fn remove_dead_registry_entry(cache_key: &str, cell: &Arc<InferenceLeaseCell>) {
 /// inference either commits or fails. A concurrent identical request then
 /// waits and re-checks the durable cache instead of issuing duplicate work.
 #[derive(Debug)]
-pub(crate) struct InferenceLease {
+pub struct InferenceLease {
     cache_key: String,
     cell: Arc<InferenceLeaseCell>,
     guard: Option<OwnedMutexGuard<()>>,
@@ -167,6 +167,11 @@ impl Drop for InferenceLease {
 mod tests {
     use super::*;
 
+    /// Guards: A commit marks waiting followers only in its own cache instance.
+    /// Kind: contract
+    /// Not a type: Two live registries with equal keys must still remain independent under scheduling.
+    /// State: Separate in-memory cache registries and owned leases witness commit isolation.
+    /// Concurrency: Test holds both leases and releases them in chosen order.
     #[tokio::test]
     async fn a_commit_does_not_coalesce_a_waiter_using_another_cache_instance() {
         let key = CacheKey::from_content("cache-scoped-inference-lease-commit");
@@ -187,6 +192,11 @@ mod tests {
         assert!(!follower.observed_commit_while_waiting());
     }
 
+    /// Guards: Dropping a ready waiter removes its entry when no owners remain.
+    /// Kind: contract
+    /// Not a type: Future cancellation and registry cleanup depend on actual wake and drop order.
+    /// State: An isolated in-memory registry and waiting lease observe reclamation.
+    /// Concurrency: Explicit polling and dropping choose the cancellation point.
     #[tokio::test]
     async fn canceling_a_ready_waiter_does_not_leave_a_dead_registry_entry() {
         let key = CacheKey::from_content("canceled-inference-lease-waiter");

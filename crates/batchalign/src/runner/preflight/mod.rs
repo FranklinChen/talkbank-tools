@@ -14,38 +14,58 @@ use crate::store::{InPlaceMedia, PendingJobFile, PreflightInput};
 pub(super) struct PreflightedJob(DispatchInputs);
 
 /// The kernel consumes both carried values together after preflight admission.
-pub(crate) struct DispatchInputs {
+///
+/// `job` is the ADMITTED snapshot: its `pending_files` is exactly the accepted
+/// partition, because [`AdmittedJob::narrow`] replaced the claimed list before
+/// this value could exist. Every dispatcher, planner and worker-count rule
+/// reads `job.pending_files`, so none of them can reach a file preflight
+/// rejected. (Before, the snapshot kept every claimed file beside a separate
+/// accepted list, and the audio dispatchers walked the claimed one, so a
+/// rejected recording could still be sent to ASR.)
+pub struct DispatchInputs {
     job: std::sync::Arc<crate::store::RunnerJobSnapshot>,
     host: DispatchHostContext,
-    files: AcceptedFiles,
+    population: Population,
 }
 
-enum AcceptedFiles {
-    ChatOnly(Vec<PendingJobFile>),
-    WithMedia(Vec<PendingJobFile>),
+/// Whether every admitted file is CHAT, decided once from the admitted list.
+#[derive(Clone, Copy)]
+enum Population {
+    ChatOnly,
+    WithMedia,
 }
 
-impl AcceptedFiles {
-    fn classify(files: Vec<PendingJobFile>) -> Self {
+impl Population {
+    fn of(files: &[PendingJobFile]) -> Self {
         let contains_media = files.iter().any(|file| match file.kind() {
             crate::store::InputKind::Chat => false,
             crate::store::InputKind::Media => true,
         });
         if contains_media {
-            Self::WithMedia(files)
+            Self::WithMedia
         } else {
-            Self::ChatOnly(files)
-        }
-    }
-    fn files(&self) -> &[PendingJobFile] {
-        match self {
-            Self::ChatOnly(files) | Self::WithMedia(files) => files,
+            Self::ChatOnly
         }
     }
 }
 
+/// The claimed snapshot with its pending list replaced by the accepted files.
+/// The only route from a claimed job to [`DispatchInputs`].
+struct AdmittedJob;
+
+impl AdmittedJob {
+    fn narrow(
+        job: std::sync::Arc<crate::store::RunnerJobSnapshot>,
+        accepted: Vec<PendingJobFile>,
+    ) -> std::sync::Arc<crate::store::RunnerJobSnapshot> {
+        let mut job = std::sync::Arc::unwrap_or_clone(job);
+        job.pending_files = accepted;
+        std::sync::Arc::new(job)
+    }
+}
+
 /// Recorded preflight restricted to its CHAT-only source population.
-pub(crate) struct ChatDispatchInputs(DispatchInputParts);
+pub struct ChatDispatchInputs(DispatchInputParts);
 
 impl ChatDispatchInputs {
     pub(crate) fn job(&self) -> &crate::store::RunnerJobSnapshot {
@@ -56,35 +76,35 @@ impl ChatDispatchInputs {
     }
 }
 
-pub(crate) struct DispatchInputParts {
+pub struct DispatchInputParts {
     pub(crate) job: std::sync::Arc<crate::store::RunnerJobSnapshot>,
     pub(crate) host: DispatchHostContext,
     pub(crate) files: Vec<PendingJobFile>,
 }
 
 impl DispatchInputs {
-    pub(crate) fn job(&self) -> &std::sync::Arc<crate::store::RunnerJobSnapshot> {
+    pub(crate) const fn job(&self) -> &std::sync::Arc<crate::store::RunnerJobSnapshot> {
         &self.job
     }
-    pub(crate) fn host(&self) -> &DispatchHostContext {
+    pub(crate) const fn host(&self) -> &DispatchHostContext {
         &self.host
     }
     pub(crate) fn files(&self) -> &[PendingJobFile] {
-        self.files.files()
+        &self.job.pending_files
     }
 
-    pub(crate) fn all_chat(&self) -> bool {
-        matches!(self.files, AcceptedFiles::ChatOnly(_))
+    pub(crate) const fn all_chat(&self) -> bool {
+        matches!(self.population, Population::ChatOnly)
     }
 
     pub(crate) fn into_chat(self) -> Result<ChatDispatchInputs, crate::error::ServerError> {
-        match self.files {
-            AcceptedFiles::ChatOnly(files) => Ok(ChatDispatchInputs(DispatchInputParts {
+        match self.population {
+            Population::ChatOnly => Ok(ChatDispatchInputs(DispatchInputParts {
+                files: self.job.pending_files.clone(),
                 job: self.job,
                 host: self.host,
-                files,
             })),
-            AcceptedFiles::WithMedia(_) => Err(crate::error::ServerError::Validation(
+            Population::WithMedia => Err(crate::error::ServerError::Validation(
                 "text preparation requires CHAT input for every file".into(),
             )),
         }
@@ -102,7 +122,7 @@ impl DispatchInputs {
                 .all(|file| file.belongs_to(&job.filesystem.inputs))
         );
         Self {
-            files: AcceptedFiles::classify(job.pending_files.clone()),
+            population: Population::of(&job.pending_files),
             job: std::sync::Arc::new(job),
             host,
         }
@@ -134,10 +154,11 @@ impl ObservedPreflight {
     pub(super) async fn record(self) -> PreflightedJob {
         let files = self.files.record(self.run.host().sink().as_ref()).await;
         let super::context::ClaimedDispatchParts { job, host } = self.run.into_parts();
+        let job = AdmittedJob::narrow(job, files);
         PreflightedJob(DispatchInputs {
+            population: Population::of(&job.pending_files),
             job,
             host,
-            files: AcceptedFiles::classify(files),
         })
     }
 }

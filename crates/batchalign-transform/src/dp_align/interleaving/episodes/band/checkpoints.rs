@@ -99,7 +99,7 @@ pub(in super::super) struct ScoreBlock {
 }
 
 impl ScoreBlock {
-    pub(in super::super) fn start(&self) -> usize {
+    pub(in super::super) const fn start(&self) -> usize {
         self.start
     }
 
@@ -144,7 +144,7 @@ impl<'band, 'graph, 'source> ForwardScores<'band, 'graph, 'source> {
         }))
     }
 
-    pub(in super::super) fn last(&self) -> &Row {
+    pub(in super::super) const fn last(&self) -> &Row {
         &self.last
     }
 

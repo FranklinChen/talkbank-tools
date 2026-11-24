@@ -72,48 +72,59 @@ pub struct MorphotagTokenDifference {
 
 impl MorphotagTokenDifference {
     /// Left speaker code.
+    #[must_use]
     pub fn left_speaker(&self) -> &str {
         &self.left_speaker
     }
     /// Right speaker code.
+    #[must_use]
     pub fn right_speaker(&self) -> &str {
         &self.right_speaker
     }
     /// Utterance ordinal within the paired speaker.
-    pub fn utterance(&self) -> usize {
+    #[must_use]
+    pub const fn utterance(&self) -> usize {
         self.utterance
     }
     /// Main-tier position within the utterance.
-    pub fn token(&self) -> usize {
+    #[must_use]
+    pub const fn token(&self) -> usize {
         self.token
     }
     /// Normalized left token text.
+    #[must_use]
     pub fn left_text(&self) -> Option<&str> {
         self.left_text.as_deref()
     }
     /// Normalized right token text.
+    #[must_use]
     pub fn right_text(&self) -> Option<&str> {
         self.right_text.as_deref()
     }
     /// Actual left annotation presence.
-    pub fn left_annotation(&self) -> AnnotationPresence {
+    #[must_use]
+    pub const fn left_annotation(&self) -> AnnotationPresence {
         self.left_annotation
     }
     /// Actual right annotation presence.
-    pub fn right_annotation(&self) -> AnnotationPresence {
+    #[must_use]
+    pub const fn right_annotation(&self) -> AnnotationPresence {
         self.right_annotation
     }
     /// Observed difference axes.
-    pub fn differences(&self) -> &BTreeSet<MorphotagDifference> {
+    #[must_use]
+    pub const fn differences(&self) -> &BTreeSet<MorphotagDifference> {
         &self.differences
     }
     /// Whether any observed axis differs.
+    #[must_use]
     pub fn differs(&self) -> bool {
         !self.differences.is_empty()
     }
 
     /// Agreement is unknown, not true, when complete analysis is unavailable.
-    pub fn analysis_agreement(&self) -> Option<bool> {
+    #[must_use]
+    pub const fn analysis_agreement(&self) -> Option<bool> {
         self.analysis_agreement
     }
 }
@@ -126,6 +137,7 @@ pub struct MorphotagPairResult {
 
 impl MorphotagPairResult {
     /// Every examined position, including unannotated positions.
+    #[must_use]
     pub fn tokens(&self) -> &[MorphotagTokenDifference] {
         &self.tokens
     }
@@ -136,11 +148,13 @@ impl MorphotagPairResult {
     }
 
     /// Number of examined positions; not a count of successful analyses.
-    pub fn compared_tokens(&self) -> usize {
+    #[must_use]
+    pub const fn compared_tokens(&self) -> usize {
         self.tokens.len()
     }
 
     /// Positions at which both sides have complete annotation.
+    #[must_use]
     pub fn fully_annotated_tokens(&self) -> usize {
         self.tokens
             .iter()
@@ -210,7 +224,7 @@ enum TokenAnnotation {
 }
 
 impl TokenAnnotation {
-    fn presence(&self) -> AnnotationPresence {
+    const fn presence(&self) -> AnnotationPresence {
         match self {
             Self::Absent => AnnotationPresence::Absent,
             Self::MorphologyOnly(_) => AnnotationPresence::MorphologyOnly,

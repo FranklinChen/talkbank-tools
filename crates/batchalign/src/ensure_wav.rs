@@ -24,12 +24,15 @@
 //! Matroska and ASF use the PCM cache regardless of their filename suffix.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::chat_ops::fa::coordinates::FaWindow;
-use crate::media::probe::{MediaContainer, MediaProbe, ProbeError};
+use crate::media::probe::{
+    AudioDuration, MediaContainer, MediaProbe, ObservedMediaHeader, ProbeError,
+};
 use crate::media::transcode::{PcmEncoding, Transcode, TranscodeError};
 
 // ---------------------------------------------------------------------------
@@ -44,29 +47,135 @@ enum MediaPreparation {
 }
 
 /// Only native-container admission can produce a source for passthrough.
-struct NativeContainerSource(PathBuf);
+struct NativeContainerSource(ObservedMediaHeader);
 
 /// Only conversion admission can produce a source for the PCM cache.
-struct ConversionSource(PathBuf);
+struct ConversionSource(ObservedMediaHeader);
 
 impl MediaPreparation {
     async fn inspect(source: PathBuf) -> Result<Self, ProbeError> {
-        match MediaProbe::new(&source).container().await? {
+        let header = MediaProbe::new(source).observe().await?;
+        match header.container() {
             MediaContainer::MpegAudio
             | MediaContainer::Wav
             | MediaContainer::Flac
-            | MediaContainer::Ogg => Ok(Self::Native(NativeContainerSource(source))),
+            | MediaContainer::Ogg => Ok(Self::Native(NativeContainerSource(header))),
             MediaContainer::Adts
             | MediaContainer::IsoMedia
             | MediaContainer::Matroska
-            | MediaContainer::Asf => Ok(Self::Convert(ConversionSource(source))),
+            | MediaContainer::Asf => Ok(Self::Convert(ConversionSource(header))),
         }
+    }
+
+    async fn prepare(self, cache_dir: Option<&Path>) -> Result<PreparedMedia, EnsureWavError> {
+        Ok(match self {
+            Self::Native(source) => PreparedMedia::Native(source),
+            Self::Convert(source) => PreparedMedia::Converted(source.convert(cache_dir).await?),
+        })
     }
 }
 
 impl NativeContainerSource {
     fn into_path(self) -> PathBuf {
-        self.0
+        self.0.into_path()
+    }
+
+    async fn measure(self) -> MeasuredAudio {
+        let (path, outcome) = self.0.measure().await;
+        MeasuredAudio::new(path, outcome)
+    }
+}
+
+/// A WAV in the conversion cache.
+enum ConvertedMedia {
+    /// Converted by this call: its length was read right after conversion.
+    Fresh {
+        path: PathBuf,
+        duration: Result<AudioDuration, ProbeError>,
+    },
+    /// Already published by an earlier conversion; measured when asked.
+    Published(PathBuf),
+}
+
+enum PreparedMedia {
+    Native(NativeContainerSource),
+    Converted(ConvertedMedia),
+}
+
+impl PreparedMedia {
+    fn into_path(self) -> PathBuf {
+        match self {
+            Self::Native(native) => native.into_path(),
+            Self::Converted(ConvertedMedia::Fresh { path, .. })
+            | Self::Converted(ConvertedMedia::Published(path)) => path,
+        }
+    }
+
+    async fn measure(self) -> MeasuredAudio {
+        match self {
+            Self::Native(native) => native.measure().await,
+            Self::Converted(ConvertedMedia::Fresh { path, duration }) => {
+                MeasuredAudio::new(path, duration)
+            }
+            Self::Converted(ConvertedMedia::Published(path)) => MeasuredAudio::probe(path).await,
+        }
+    }
+}
+
+/// The prepared path and its completed measurement attempt. Refusal is a
+/// terminal observation for this owner and can be shared across FA and UTR.
+pub struct MeasuredAudio {
+    path: PathBuf,
+    outcome: Result<AudioDuration, Arc<ProbeError>>,
+}
+
+impl MeasuredAudio {
+    fn new(path: PathBuf, outcome: Result<AudioDuration, ProbeError>) -> Self {
+        Self {
+            path,
+            outcome: outcome.map_err(Arc::new),
+        }
+    }
+
+    /// Measure a path preparation produced but did not measure. Private:
+    /// a public constructor let any caller hand the FA worker a path that
+    /// never passed container admission (an mp4 soundfile cannot read), and
+    /// the failure surfaced inside the worker instead of at admission.
+    /// Production reaches it only through [`prepare_measured_audio`].
+    async fn probe(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let outcome = MediaProbe::new(&path).duration().await;
+        Self::new(path, outcome)
+    }
+
+    /// A real measurement of a native fixture, for tests that build an FA
+    /// context around a recording they wrote themselves.
+    #[cfg(test)]
+    pub(crate) async fn probe_fixture(path: impl Into<PathBuf>) -> Self {
+        Self::probe(path).await
+    }
+
+    /// Pure fixture for a downstream check that owns its window separately.
+    /// Deliberately refuses if the check tries to acquire a recording here.
+    #[cfg(test)]
+    pub(crate) fn unmeasurable_fixture(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let error = ProbeError::Refused {
+            input: path.display().to_string(),
+            diagnostics: "the fixture supplies its own window".to_owned(),
+        };
+        Self::new(path, Err(error))
+    }
+
+    /// The audio whose timeline was observed.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Read the same admitted duration or refusal without another probe.
+    pub const fn duration(&self) -> Result<AudioDuration, &Arc<ProbeError>> {
+        self.outcome.as_ref().copied()
     }
 }
 
@@ -153,20 +262,29 @@ impl LockedCacheSlot {
     }
 
     /// Convert into this exact slot, retaining its lock across the transition.
-    fn produce(self, transcode: Transcode) -> Result<ProducedCacheSlot, TranscodeError> {
-        transcode.produce(&self.tmp_path)?;
-        Ok(ProducedCacheSlot { slot: self })
+    fn produce<T>(
+        self,
+        write: impl FnOnce(&Path) -> Result<T, TranscodeError>,
+    ) -> Result<ProducedCacheSlot<T>, TranscodeError> {
+        let produced = write(&self.tmp_path)?;
+        Ok(ProducedCacheSlot {
+            slot: self,
+            produced,
+        })
     }
 }
 
-/// A locked slot whose own temporary destination passed strict conversion.
-struct ProducedCacheSlot {
+/// A locked slot whose own temporary destination passed strict conversion,
+/// with what the conversion reported.
+struct ProducedCacheSlot<T> {
     slot: LockedCacheSlot,
+    produced: T,
 }
 
-impl ProducedCacheSlot {
-    /// Publish atomically before releasing the lock.
-    fn commit(self) -> Result<PathBuf, std::io::Error> {
+impl<T> ProducedCacheSlot<T> {
+    /// Publish atomically before releasing the lock; hand back the published
+    /// path and the conversion's report.
+    fn commit(self) -> Result<(PathBuf, T), std::io::Error> {
         let LockedCacheSlot {
             lock,
             tmp_path,
@@ -176,7 +294,7 @@ impl ProducedCacheSlot {
         // Explicit, and AFTER the rename: this order is the entire point of the
         // type, so it is stated rather than left to end-of-scope drop order.
         drop(lock);
-        Ok(cached_path)
+        Ok((cached_path, self.produced))
     }
 }
 
@@ -194,27 +312,38 @@ pub async fn ensure_wav(
     source_path: &Path,
     cache_dir: Option<&Path>,
 ) -> Result<PathBuf, EnsureWavError> {
-    match MediaPreparation::inspect(source_path.to_path_buf()).await? {
-        MediaPreparation::Native(source) => Ok(source.into_path()),
-        MediaPreparation::Convert(source) => source.convert(cache_dir).await,
-    }
+    Ok(prepare_media(source_path, cache_dir).await?.into_path())
+}
+
+/// Prepare the path used by FA and settle its duration attempt exactly once.
+pub(crate) async fn prepare_measured_audio(source: &Path) -> Result<MeasuredAudio, EnsureWavError> {
+    Ok(prepare_media(source, None).await?.measure().await)
+}
+
+async fn prepare_media(
+    source: &Path,
+    cache_dir: Option<&Path>,
+) -> Result<PreparedMedia, EnsureWavError> {
+    MediaPreparation::inspect(source.to_path_buf())
+        .await?
+        .prepare(cache_dir)
+        .await
 }
 
 impl ConversionSource {
-    async fn convert(self, cache_dir: Option<&Path>) -> Result<PathBuf, EnsureWavError> {
-        // Move all blocking I/O (fingerprint, file lock, ffmpeg subprocess,
-        // rename) onto a dedicated thread so we don't starve the tokio executor.
-        let source_path = self.0;
+    async fn convert(self, cache_dir: Option<&Path>) -> Result<ConvertedMedia, EnsureWavError> {
+        let source = self.0;
         let cache_dir = cache_dir.map(Path::to_path_buf);
 
-        crate::blocking::spawn_in_span(move || -> Result<PathBuf, EnsureWavError> {
+        crate::blocking::spawn_in_span(move || -> Result<ConvertedMedia, EnsureWavError> {
+            let source_path = source.path();
             let effective_cache_dir = match cache_dir {
                 Some(p) => p,
                 None => default_cache_dir(),
             };
             std::fs::create_dir_all(&effective_cache_dir)?;
 
-            let fp = media_fingerprint(&source_path)?;
+            let fp = media_fingerprint(source_path)?;
             let cached_wav = effective_cache_dir.join(format!("{fp}.wav"));
 
             // Fast path: already converted
@@ -224,13 +353,15 @@ impl ConversionSource {
                     source_path.display(),
                     cached_wav.display()
                 );
-                return Ok(cached_wav);
+                return Ok(ConvertedMedia::Published(cached_wav));
             }
 
             // Convert under a per-fingerprint exclusive lock, held until the result
             // is published, which `LockedCacheSlot` is what guarantees.
             let slot = match LockedCacheSlot::acquire(&effective_cache_dir, &fp)? {
-                CacheSlot::AlreadyPublished(path) => return Ok(path),
+                CacheSlot::AlreadyPublished(path) => {
+                    return Ok(ConvertedMedia::Published(path));
+                }
                 CacheSlot::Ours(slot) => slot,
             };
 
@@ -242,8 +373,13 @@ impl ConversionSource {
 
             // The status check, the partial-file cleanup and the stderr reading all
             // live in `produce`; this call site keeps only what is its own.
-            let produced = slot.produce(Transcode::whole(&source_path, PcmEncoding::S16LeWav))?;
-            Ok(produced.commit()?)
+            let (path, wav) = slot
+                .produce(|destination| Transcode::produce_observed_wav(source, destination))?
+                .commit()?;
+            Ok(ConvertedMedia::Fresh {
+                path,
+                duration: wav.into_duration(),
+            })
         })
         .await
         .map_err(std::io::Error::other)?
@@ -252,8 +388,8 @@ impl ConversionSource {
 
 /// Extract a time-windowed audio segment to a cached WAV file.
 ///
-/// Uses ffmpeg `-ss {start} -to {end}` with pcm_s16le 16kHz mono.
-/// Result is cached in media_cache keyed by source fingerprint + time window.
+/// Uses ffmpeg `-ss {start} -to {end}` with `pcm_s16le` 16kHz mono.
+/// Result is cached in `media_cache` keyed by source fingerprint + time window.
 ///
 /// Takes the recording-bound [`FaWindow`], so a damaged decode is judged
 /// against the window's own length instead of a probe of the whole source. See
@@ -311,8 +447,9 @@ pub async fn extract_audio_segment(
             cached_wav.display()
         );
 
-        let produced = slot.produce(Transcode::window(&source, window, PcmEncoding::S16LeWav))?;
-        Ok(produced.commit()?)
+        let transcode = Transcode::window(&source, window, PcmEncoding::S16LeWav);
+        let produced = slot.produce(|destination| transcode.produce(destination))?;
+        Ok(produced.commit()?.0)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -340,6 +477,7 @@ pub fn clear_cache(cache_dir: Option<&Path>) -> std::io::Result<u64> {
 }
 
 /// Return `(cache_dir, total_size_bytes, file_count)`.
+#[must_use]
 pub fn cache_stats(cache_dir: Option<&Path>) -> (PathBuf, u64, usize) {
     let dir = match cache_dir {
         Some(p) => p.to_path_buf(),
@@ -411,89 +549,60 @@ mod tests {
     use super::*;
     use crate::media::tools::MediaTool;
 
-    #[test]
-    fn fingerprint_deterministic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.mp4");
-        std::fs::write(&path, b"fake mp4 content for fingerprinting").unwrap();
-
-        let fp1 = media_fingerprint(&path).unwrap();
-        let fp2 = media_fingerprint(&path).unwrap();
-        assert_eq!(fp1, fp2, "fingerprint should be deterministic");
-        assert_eq!(
-            fp1,
-            format!(
-                "whole-pcm16-mono16k-strict-v3-{}",
-                blake3::hash(b"fake mp4 content for fingerprinting").to_hex()
-            )
-        );
-    }
-
-    #[test]
-    fn fingerprint_differs_for_different_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let path_a = dir.path().join("a.mp4");
-        let path_b = dir.path().join("b.mp4");
-        std::fs::write(&path_a, b"content A").unwrap();
-        std::fs::write(&path_b, b"content B").unwrap();
-
-        let fp_a = media_fingerprint(&path_a).unwrap();
-        let fp_b = media_fingerprint(&path_b).unwrap();
-        assert_ne!(fp_a, fp_b);
-    }
-
+    /// Guards: The versioned cache key covers the complete file, independent
+    /// of path, including same-size changes between earlier sampled blocks.
+    /// Kind: contract
+    /// Not a type: Different native files can contain identical bytes, and
+    /// file content can change while keeping exactly the same length.
+    /// State: Two paths own one three-block source and a same-size mutation.
+    /// Concurrency: The fixture is the only producer of both files.
     #[test]
     fn fingerprint_detects_same_size_middle_edits() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("source.mp4");
-        let mut bytes = vec![0u8; 3 * 65536];
-        std::fs::write(&path, &bytes).unwrap();
-        let before = media_fingerprint(&path).unwrap();
-        bytes[65536 + 1] = 1;
-        std::fs::write(&path, &bytes).unwrap();
-        assert_ne!(before, media_fingerprint(&path).unwrap());
-    }
-
-    #[test]
-    fn fingerprint_large_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("large.mp4");
-        // Exercise streaming beyond the former sampled blocks.
-        let data = vec![0xABu8; 65536 * 3];
-        std::fs::write(&path, &data).unwrap();
-
-        let fp = media_fingerprint(&path).unwrap();
+        let source = dir.path().join("source.mp4");
+        let renamed = dir.path().join("alias.mp4");
+        let mut bytes = vec![0xAB; 3 * 65_536];
+        std::fs::write(&source, &bytes).unwrap();
+        std::fs::write(&renamed, &bytes).unwrap();
+        let original = media_fingerprint(&source).unwrap();
+        assert_eq!(original, media_fingerprint(&renamed).unwrap());
         assert_eq!(
-            fp,
+            original,
             format!(
                 "whole-pcm16-mono16k-strict-v3-{}",
-                blake3::hash(&data).to_hex()
+                blake3::hash(&bytes).to_hex()
             )
         );
+        bytes[65_537] = 1;
+        std::fs::write(&source, &bytes).unwrap();
+        assert_ne!(original, media_fingerprint(&source).unwrap());
     }
 
+    /// Guards: Explicit cache location takes precedence over the platform directory.
+    /// Kind: policy
+    /// Not a type: Two valid path sources can disagree and still require a
+    /// deliberate choice about precedence and the platform directory suffix.
+    /// State: Two in-memory path sources with and without an override.
+    /// Concurrency: No environment or files are modified.
     #[test]
     fn default_cache_dir_prefers_explicit_override() {
-        let resolved = default_cache_dir_from(
-            Some(PathBuf::from("/tmp/media-cache")),
-            Some(PathBuf::from("/tmp/platform-data")),
-        );
-
-        assert_eq!(resolved, PathBuf::from("/tmp/media-cache"));
-    }
-
-    #[test]
-    fn default_cache_dir_uses_platform_data_dir_when_no_override() {
-        let resolved = default_cache_dir_from(None, Some(PathBuf::from("/tmp/platform-data")));
-
+        let platform = PathBuf::from("/tmp/platform-data");
+        let override_path = PathBuf::from("/tmp/media-cache");
         assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/platform-data")
-                .join("batchalign3")
-                .join(CACHE_SUBDIR)
+            default_cache_dir_from(Some(override_path.clone()), Some(platform.clone())),
+            override_path
+        );
+        assert_eq!(
+            default_cache_dir_from(None, Some(platform.clone())),
+            platform.join("batchalign3").join(CACHE_SUBDIR)
         );
     }
 
+    /// Guards: An absent source refuses segment preparation before the cache substitutes a result.
+    /// Kind: contract
+    /// Not a type: A valid bound and path can outlive the actual file they describe.
+    /// State: An absent path in a temporary directory and one proven test window.
+    /// Concurrency: The test owns the directory and awaits the real read failure.
     #[tokio::test]
     async fn segment_refuses_unreadable_source_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -512,8 +621,30 @@ mod tests {
             Err(EnsureWavError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound));
     }
 
+    /// Guards: Native preparation carries its original header into measurement.
+    /// Kind: contract
+    /// Not a type: The native probe can be invoked twice against the same
+    /// path unless the first observation survives preparation.
+    /// State: A real PCM source is removed after successful container admission.
+    /// Concurrency: This test controls the file and both transitions.
+    #[tokio::test]
+    async fn native_preparation_measures_the_header_it_already_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("recording.wav");
+        crate::media::probe::fixtures::write_pcm_wav(&source, 1);
+        let prepared = MediaPreparation::inspect(source.clone()).await.unwrap();
+        let MediaPreparation::Native(native) = prepared else {
+            panic!("PCM must be admitted for passthrough");
+        };
+        std::fs::remove_file(&source).unwrap();
+        let measured = native.measure().await;
+        assert_eq!(measured.path(), source);
+        let duration = measured.duration().unwrap();
+        assert_eq!(duration.length().0, 100);
+    }
+
     /// Guards: Actual containers select native passthrough or one shared PCM conversion,
-    /// and cache accounting and clearing observe only the published artifact.
+    /// FA measures the prepared PCM timeline, and cache operations see only the published artifact.
     /// Kind: contract.
     /// Not a type: External container bytes and the real ffprobe/ffmpeg adapters
     /// determine whether a file can enter the admitted conversion path.
@@ -524,6 +655,8 @@ mod tests {
     /// the production cache-slot owner serializes publication for identical content.
     #[tokio::test]
     async fn container_admission_converts_quicktime_under_native_suffixes() {
+        use crate::media::probe::{DurationBasis, StatingContainer};
+
         let dir = tempfile::tempdir().expect("fixture directory");
         let source = dir.path().join("recording.mov");
         let encoded = MediaTool::Ffmpeg
@@ -553,18 +686,34 @@ mod tests {
         let original = std::fs::read(&source).expect("read encoded source");
         let cache = dir.path().join("cache");
         let mut published = std::collections::BTreeSet::new();
-        for name in [
+        for (index, name) in [
             "recording.m4a",
             "recording.mp4",
             "recording.mp3",
             "recording.wav",
             "recording",
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let alias = dir.path().join(name);
             std::fs::write(&alias, &original).expect("write identical source alias");
-            let prepared = ensure_wav(&alias, Some(&cache))
-                .await
-                .expect("prepare actual container");
+            let prepared = if index == 0 {
+                let measured = prepare_media(&alias, Some(&cache))
+                    .await
+                    .expect("prepare actual container")
+                    .measure()
+                    .await;
+                assert_eq!(
+                    measured.duration().expect("measure prepared WAV").basis(),
+                    DurationBasis::Stated(StatingContainer::PcmWav)
+                );
+                measured.path().to_owned()
+            } else {
+                ensure_wav(&alias, Some(&cache))
+                    .await
+                    .expect("prepare identical source alias")
+            };
             assert!(
                 prepared.starts_with(&cache),
                 "container requires decoded WAV for {name}"

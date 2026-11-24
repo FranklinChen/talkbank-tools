@@ -1,5 +1,5 @@
 //! Admission controls use placeholder bytes: they do not certify audio.
-//! Actual encoding and dual publication are covered by media::export controls.
+//! Actual encoding and dual publication are covered by `media::export` controls.
 
 use super::*;
 use crate::api::{ContentType, JobId, LanguageSpec, NumSpeakers, ReleasedCommand};

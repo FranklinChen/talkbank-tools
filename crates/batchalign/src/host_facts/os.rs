@@ -43,13 +43,15 @@ pub enum CpuArch {
 
 impl OperatingSystem {
     /// True for macOS: Apple Silicon detection requires the OS check too.
-    pub fn is_macos(&self) -> bool {
+    #[must_use]
+    pub const fn is_macos(&self) -> bool {
         matches!(self, OperatingSystem::MacOs)
     }
 
     /// Map a `std::env::consts::OS`-shaped string to a typed variant.
     /// Unrecognized values fall through to `Other` carrying the
     /// `&'static str` directly (no allocation).
+    #[must_use]
     pub fn from_consts(os: &'static str) -> Self {
         match os {
             "macos" => Self::MacOs,
@@ -62,11 +64,13 @@ impl OperatingSystem {
 
 impl CpuArch {
     /// True for arm64.
-    pub fn is_arm64(&self) -> bool {
+    #[must_use]
+    pub const fn is_arm64(&self) -> bool {
         matches!(self, CpuArch::Arm64)
     }
 
     /// Map a `std::env::consts::ARCH`-shaped string to a typed variant.
+    #[must_use]
     pub fn from_consts(arch: &'static str) -> Self {
         match arch {
             "aarch64" => Self::Arm64,

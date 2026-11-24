@@ -11,11 +11,11 @@ import json
 import logging
 import os
 import time
+from dataclasses import replace
 from typing import Literal, assert_never
 
 from pydantic import BaseModel
 
-from batchalign.inference._domain_types import LanguageCode
 from batchalign.worker._avqi_v2 import avqi_task
 from batchalign.worker._infer_hosts import (
     build_morphosyntax_runner,
@@ -54,12 +54,13 @@ from batchalign.worker._opensmile_v2 import opensmile_task
 from batchalign.worker._progress import LoadingTask, emit_phase_event
 from batchalign.worker._stanza_loading import load_stanza_models, prepare_utseg_stanza
 from batchalign.worker._types import (
+    EchoStartup,
     FiniteNonNegativeFloat,
     InferTask,
     TaskLoad,
     TaskLoadRegistry,
     WorkerBootstrapRuntime,
-    WorkerProfile,
+    WorkerStartup,
     _state,
     task_load,
 )
@@ -68,32 +69,24 @@ from batchalign.worker._types_v2 import PhaseEdgeV2
 L = logging.getLogger("batchalign.worker")
 
 
-def start_worker(bootstrap: WorkerBootstrapRuntime) -> None:
-    """Start a worker with no models loaded.
+def start_worker(startup: WorkerStartup) -> None:
+    """Publish the admitted launch with no models loaded.
 
-    No task loads a model at startup, in any bootstrap mode: each model loads
-    in its task's ``ensure_task``, which the Rust pool sends before the
-    worker's first request for that task (the prepare step), under the
-    loading stall window that download growth re-arms.
+    Model workers load only when the Rust pool sends the corresponding
+    ensure_task request. Echo workers answer it without loading anything.
     """
-    match (bootstrap.profile, bootstrap.task):
-        case (WorkerProfile() as profile, None):
-            label = f"profile:{profile.value}"
-        case (None, InferTask() as task):
-            label = f"infer:{task.value}"
-        case _:
-            raise ValueError(
-                "a worker starts for one profile or one task, got "
-                f"profile={bootstrap.profile!r} task={bootstrap.task!r}"
-            )
-    _state.bootstrap = bootstrap
+    label = startup.target.label
+    _state.bootstrap = startup.bootstrap
     _state.command = label
-    _state.lang = bootstrap.lang
+    _state.lang = startup.bootstrap.lang
+    _state.test_echo = isinstance(startup, EchoStartup)
+    if isinstance(startup, EchoStartup):
+        _state.test_delay_ms = startup.delay_ms
     _state.ready = True
     L.info(
         "Worker ready, no models loaded: target=%s lang=%s pid=%d",
         label,
-        bootstrap.lang,
+        startup.bootstrap.lang,
         os.getpid(),
     )
 
@@ -157,9 +150,11 @@ def ensure_task_loaded(
     bootstrap = _state.bootstrap
     if bootstrap is None:
         raise RuntimeError("ensure_task_loaded called before worker bootstrap")
-    merged_overrides = dict(bootstrap.engine_overrides)
-    if engine_overrides:
-        merged_overrides.update(engine_overrides)
+    merged_overrides = (
+        bootstrap.engine_overrides | engine_overrides
+        if engine_overrides
+        else bootstrap.engine_overrides
+    )
     load = task_load(infer_task, merged_overrides)
 
     if _state.loads.has(load):
@@ -178,14 +173,10 @@ def ensure_task_loaded(
                 elapsed_s=time.monotonic() - started_at,
             )
 
-        task_bootstrap = WorkerBootstrapRuntime(
-            task=bootstrap.task,
-            profile=bootstrap.profile,
-            lang=bootstrap.lang,
-            num_speakers=bootstrap.num_speakers,
-            engine_overrides=merged_overrides,
-            device_policy=bootstrap.device_policy,
-            revai_api_key=bootstrap.revai_api_key,
+        task_bootstrap = (
+            replace(bootstrap, engine_overrides=merged_overrides)
+            if engine_overrides
+            else bootstrap
         )
 
         t0 = time.monotonic()
@@ -311,22 +302,14 @@ def _load_utseg(bootstrap: WorkerBootstrapRuntime) -> LoadedUtseg:
     return LoadedUtseg(runner=build_utseg_runner(boundary_model))
 
 
-def enable_test_echo(target_label: str, lang: LanguageCode) -> None:
-    """Configure the worker to echo requests without loading models."""
-    _state.test_echo = True
-    _state.command = target_label or "test-echo"
-    _state.lang = lang
-    _state.ready = True
-
-
-def parse_engine_overrides(raw: str) -> dict[str, str] | None:
+def parse_engine_overrides(raw: str) -> dict[str, str]:
     """Parse the engine-override JSON payload from CLI args.
 
     The Rust caller serializes a ``BTreeMap<String, String>``; we validate
     the shape here at the IPC boundary.
     """
     if not raw:
-        return None
+        return {}
     parsed: object = json.loads(raw)
     if not isinstance(parsed, dict) or not all(
         isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()

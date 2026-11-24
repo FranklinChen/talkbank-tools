@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api::NumWorkers;
-use crate::media::export::{AudioExportError, AudioExportFormat, AudioExportPlan};
+use crate::media::export::{AudioExportError, AudioExportFormat, PrimaryAudioExport};
 use crate::options::CommandOptions;
 use crate::planning::{artifact_set_for_source, build_job_plan};
 use crate::recipe_runner::materialize::PlannedMaterializedFile;
@@ -107,7 +107,7 @@ fn admit_work(
 
 /// The managed runner has already reserved job capacity and memory. Native
 /// file concurrency consumes that granted bound, never speculative ML workers.
-pub(crate) async fn dispatch_audio_export(
+pub async fn dispatch_audio_export(
     job: &RunnerJobSnapshot,
     host: &DispatchHostContext,
     files: &[PendingJobFile],
@@ -176,10 +176,12 @@ impl NativeExportWork {
             })?;
             tokio::fs::create_dir_all(parent).await?;
         }
-        let mut plan = AudioExportPlan::admit(&self.source, &self.primary, self.format)?;
-        if self.staged != self.primary {
-            plan = plan.with_staged_copy(&self.staged)?;
-        }
+        let primary = PrimaryAudioExport::admit(&self.source, &self.primary, self.format)?;
+        let plan = if self.staged == self.primary {
+            primary.primary_only()
+        } else {
+            primary.with_staged_copy(&self.staged)?
+        };
         let verified = plan.encode().await?;
         lifecycle.stage(FileStage::Writing).await;
         verified.publish()?;

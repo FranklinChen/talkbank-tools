@@ -98,9 +98,10 @@ pub struct CancellationRecord {
 impl CancellationRecord {
     /// Construct a minimal `CancellationRecord` for use in unit tests.
     ///
-    /// All fields that tests typically vary (source, reason, requested_at)
+    /// All fields that tests typically vary (source, reason, `requested_at`)
     /// are left at stub values so individual tests can override them via
     /// struct-update syntax (`..CancellationRecord::test_default()`).
+    #[must_use]
     pub fn test_default() -> Self {
         Self {
             id: 0,

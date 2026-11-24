@@ -52,7 +52,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::probe::{MediaProbe, ProbeError};
+use super::probe::{AudioDuration, MediaProbe, ObservedMediaHeader, ProbeError};
 use super::tools::{MediaTool, MediaToolError};
 pub use super::window::MediaWindow;
 use super::window::{DecodedFrames, seek_args};
@@ -117,36 +117,40 @@ impl ConcealedDamage {
     /// The one statement of the admission rule. A decode LONGER than the
     /// source's probed length is not a loss; only a shortfall beyond the
     /// tolerance is.
-    fn admit(
+    const fn admit(
         diagnostics: String,
         expected: DurationMs,
         decoded: DurationMs,
     ) -> Result<Self, LostAudio> {
-        match expected.0.saturating_sub(decoded.0) <= DAMAGE_SHORTFALL_TOLERANCE_MS {
-            true => Ok(Self {
+        if expected.0.saturating_sub(decoded.0) <= DAMAGE_SHORTFALL_TOLERANCE_MS {
+            Ok(Self {
                 diagnostics,
                 expected,
                 decoded,
-            }),
-            false => Err(LostAudio {
+            })
+        } else {
+            Err(LostAudio {
                 diagnostics,
                 expected,
                 decoded,
-            }),
+            })
         }
     }
 
     /// ffmpeg's diagnostics, verbatim.
+    #[must_use]
     pub fn diagnostics(&self) -> &str {
         &self.diagnostics
     }
 
     /// The source's declared length for the requested span.
+    #[must_use]
     pub const fn expected(&self) -> DurationMs {
         self.expected
     }
 
     /// What was decoded.
+    #[must_use]
     pub const fn decoded(&self) -> DurationMs {
         self.decoded
     }
@@ -194,7 +198,7 @@ impl PcmEncoding {
 /// Which part of the source a transcode reads.
 ///
 /// A closed sum rather than `Option<MediaWindow>`: the two cases need different
-/// facts when a decode reports damage (see [`Transcode::admit_damaged`]), and
+/// facts when a decode reports damage (see [`Transcode::admit_damage_using`]), and
 /// `None` said only "no window" without saying what that obliges.
 #[derive(Clone, Copy, Debug)]
 enum Span {
@@ -246,23 +250,45 @@ pub struct ProducedMedia {
     integrity: DecodeIntegrity,
 }
 
+/// A whole-recording WAV for the model, with its length read from the WAV
+/// itself right after conversion.
+///
+/// Read on every conversion, clean or damaged, so whoever publishes the WAV
+/// holds its measurement and never probes the published file again. A
+/// refusal is kept as the measurement's outcome, as a probe of the published
+/// file would have kept it.
+pub(crate) struct ProducedWav {
+    duration: Result<AudioDuration, ProbeError>,
+}
+
+impl ProducedWav {
+    /// The produced WAV's length, or why it could not be read.
+    pub(crate) fn into_duration(self) -> Result<AudioDuration, ProbeError> {
+        self.duration
+    }
+}
+
 impl ProducedMedia {
     /// Byte length observed after strict conversion.
+    #[must_use]
     pub const fn byte_len(&self) -> u64 {
         self.byte_len
     }
 
     /// Sample rate requested by the checked conversion.
+    #[must_use]
     pub const fn sample_rate_hz(&self) -> u32 {
         self.sample_rate_hz
     }
 
     /// Channel count requested by the checked conversion.
+    #[must_use]
     pub const fn channels(&self) -> u16 {
         self.channels
     }
 
     /// Whether the decode was clean or concealed reported damage.
+    #[must_use]
     pub const fn integrity(&self) -> &DecodeIntegrity {
         &self.integrity
     }
@@ -380,6 +406,30 @@ impl Transcode {
     /// thread because a transcode is long work, and two of them hold a file
     /// lock across it.
     pub fn produce(&self, destination: &Path) -> Result<ProducedMedia, TranscodeError> {
+        self.produce_using(destination, || {
+            MediaProbe::new(&self.source).duration_blocking()
+        })
+    }
+
+    /// Convert a source whose FA preparation already observed its header.
+    /// Only damage needs the source duration; that can use the original answer.
+    /// The produced WAV's own length is then read from its header.
+    pub(crate) fn produce_observed_wav(
+        source: ObservedMediaHeader,
+        destination: &Path,
+    ) -> Result<ProducedWav, TranscodeError> {
+        Self::whole(source.path(), PcmEncoding::S16LeWav)
+            .produce_using(destination, move || source.duration_blocking())?;
+        Ok(ProducedWav {
+            duration: MediaProbe::new(destination).duration_blocking(),
+        })
+    }
+
+    fn produce_using(
+        &self,
+        destination: &Path,
+        measure_source: impl FnOnce() -> Result<AudioDuration, ProbeError>,
+    ) -> Result<ProducedMedia, TranscodeError> {
         let input = self.source.display().to_string();
         let output =
             MediaTool::Ffmpeg
@@ -410,16 +460,15 @@ impl Transcode {
         // `-v error` makes any decoder diagnostic visible on stderr. A clean
         // decode says nothing; one that said something is admitted only when
         // it lost no audio, and then with a warning.
-        let integrity = match output.stderr.is_empty() {
-            true => DecodeIntegrity::Clean,
-            false => {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                match self.admit_damaged(destination, byte_len, &input, stderr) {
-                    Ok(concealed) => DecodeIntegrity::ConcealedDamage(concealed),
-                    Err(error) => {
-                        discard_partial(destination);
-                        return Err(error);
-                    }
+        let integrity = if output.stderr.is_empty() {
+            DecodeIntegrity::Clean
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            match self.admit_damage_using(destination, byte_len, &input, stderr, measure_source) {
+                Ok(concealed) => DecodeIntegrity::ConcealedDamage(concealed),
+                Err(error) => {
+                    discard_partial(destination);
+                    return Err(error);
                 }
             }
         };
@@ -448,6 +497,7 @@ impl Transcode {
     /// case still probes once, as before.
     ///
     /// See [`Transcode::window`] for the one assumption the types do not carry.
+    #[cfg(test)]
     fn admit_damaged(
         &self,
         destination: &Path,
@@ -455,26 +505,37 @@ impl Transcode {
         input: &str,
         stderr: String,
     ) -> Result<ConcealedDamage, TranscodeError> {
+        self.admit_damage_using(destination, byte_len, input, stderr, || {
+            MediaProbe::new(&self.source).duration_blocking()
+        })
+    }
+
+    fn admit_damage_using(
+        &self,
+        destination: &Path,
+        byte_len: u64,
+        input: &str,
+        stderr: String,
+        measure_source: impl FnOnce() -> Result<AudioDuration, ProbeError>,
+    ) -> Result<ConcealedDamage, TranscodeError> {
         let unmeasured = |source| TranscodeError::DamageUnmeasured {
             input: input.to_owned(),
             source,
         };
         let expected = match self.span {
             Span::Window(window) => DurationMs(window.len().0),
-            Span::Whole => MediaProbe::new(&self.source)
-                .duration_blocking()
-                .map_err(unmeasured)?
-                .length(),
+            Span::Whole => measure_source().map_err(unmeasured)?.length(),
         };
         let decoded = match self.encoding {
-            // Raw float PCM: the length follows from the frame count.
-            PcmEncoding::F32LeRaw => DurationMs(match DecodedFrames::measure_f32le(byte_len) {
-                DecodedFrames::Frames(frames) => {
-                    frames.get() * 1000 / u64::from(MODEL_SAMPLE_RATE_HZ)
-                }
-                DecodedFrames::None(_) => 0,
-            }),
-            // A WAV's header size varies, so its length is read, not computed.
+            PcmEncoding::F32LeRaw => {
+                let len = match DecodedFrames::measure_f32le(byte_len) {
+                    DecodedFrames::Frames(frames) => {
+                        frames.get() * 1000 / u64::from(MODEL_SAMPLE_RATE_HZ)
+                    }
+                    DecodedFrames::None(_) => 0,
+                };
+                DurationMs(len)
+            }
             PcmEncoding::S16LeWav => MediaProbe::new(destination)
                 .duration_blocking()
                 .map_err(unmeasured)?
@@ -554,6 +615,11 @@ mod tests {
     /// A truncated PCM sample is a real decoder error that ffmpeg tolerates
     /// with exit zero and all but one sample still emitted: the damage lost
     /// no audio, so the decode is admitted, its diagnostics kept.
+    /// Guards: A native decode that preserves audio despite diagnostics retains both concealed damage and the observed WAV duration.
+    /// Kind: contract
+    /// Not a type: An actual decoder can report damage while continuing to write the complete audio span.
+    /// State: The known damaged fixture, a native transcode and its measured output.
+    /// Concurrency: The destination and reported diagnostic are inspected after the process exits.
     #[test]
     fn decoder_errors_that_lose_no_audio_are_admitted_with_their_diagnostics() {
         let dir = tempfile::tempdir().unwrap();
@@ -608,6 +674,11 @@ mod tests {
     /// The admission rule itself: a shortfall up to the tolerance is concealed
     /// damage, one past it is lost audio, and a decode longer than the
     /// container declares is never a loss.
+    /// Guards: Damage within the admitted duration shortfall is concealed and additional loss is refused.
+    /// Kind: policy
+    /// Not a type: Two valid durations can disagree by an amount that crosses the chosen loss threshold.
+    /// State: Synthetic expected and decoded durations and a retained diagnostic string.
+    /// Concurrency: The comparison is pure.
     #[test]
     fn damage_is_admitted_only_when_no_audio_was_lost() {
         let admit = |expected: u64, decoded: u64| {
@@ -637,26 +708,14 @@ mod tests {
         );
     }
 
-    fn ms(value: u64) -> FileMs {
-        FileMs::new(value)
-    }
-
-    /// An empty window cannot be built, so no call site can forget to check.
-    ///
-    /// POLICY: a zero-length window is refused rather than transcoded to
-    /// nothing, because every consumer treats empty audio as a failure and one
-    /// of them used to report this as `io::ErrorKind::InvalidInput`, i.e. as a
-    /// filesystem problem.
-    #[test]
-    fn a_window_that_holds_nothing_cannot_be_constructed() {
-        assert!(MediaWindow::new(ms(500), ms(500)).is_err());
-        assert!(MediaWindow::new(ms(500), ms(499)).is_err());
-        assert!(MediaWindow::new(ms(500), ms(501)).is_ok());
-    }
-
     /// The argv, pinned. This is the closest thing to a wire format the crate
     /// has: it is what reaches `execvp`, and no type can describe what ffmpeg
     /// will accept.
+    /// Guards: The whole-file WAV recipe requests the exact decoder argv for the agreed output format.
+    /// Kind: wire
+    /// Not a type: The external program interprets argument spelling and ordering outside Rust types.
+    /// State: An owned whole-source recipe and literal output path, without spawning tools.
+    /// Concurrency: Only immutable argument values are used.
     #[test]
     fn a_whole_file_wav_transcode_reports_decoder_errors_without_stopping() {
         let args = Transcode::whole("/in.mp4", PcmEncoding::S16LeWav).args(Path::new("/out.wav"));
@@ -683,6 +742,11 @@ mod tests {
 
     /// The windowed raw-PCM form: seek args before `-i`, and an explicit `-f`
     /// because raw PCM has no container for the extension to imply.
+    /// Guards: Windowed raw PCM places the exact seek before input and declares raw format.
+    /// Kind: wire
+    /// Not a type: A valid interval and encoding can still be serialized into rejected command arguments.
+    /// State: A recording-bound window, typed raw encoding and literal argv expectation.
+    /// Concurrency: No ffmpeg process or mutable state.
     #[test]
     fn a_windowed_raw_transcode_seeks_before_input_and_states_its_format() {
         let window = fa_window(10_000, 1_500, 2_250);
@@ -721,6 +785,11 @@ mod tests {
     /// damage on a whole-file transcode of the same missing source cannot be
     /// judged, because the whole file's length is the one thing that must be
     /// measured.
+    /// Guards: A damaged window uses its carried duration while the same missing whole source cannot be measured.
+    /// Kind: contract
+    /// Not a type: The comparison must select an independent real probe only for the whole-source branch.
+    /// State: A nonexistent input and synthetic decoded byte counts test native probe reachability.
+    /// Concurrency: The test owns the recipes and does not create the source path.
     #[test]
     fn a_damaged_windowed_decode_is_judged_against_the_window_with_no_probe() {
         let source = Path::new("/nonexistent/never-probed.mp3");

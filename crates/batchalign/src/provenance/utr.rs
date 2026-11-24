@@ -26,7 +26,7 @@ use crate::types::worker_v2::AsrModelIdentityV2;
 /// over the result's evidence, and the models are present exactly when there
 /// were responses to report them.
 #[derive(Debug)]
-pub(crate) enum UtrPassOutcome {
+pub enum UtrPassOutcome {
     /// No utterance lacked timing, so no recognition was asked for.
     NothingUntimed(UtrResult),
     /// Recognition ran and its tokens were matched to the transcript.
@@ -35,14 +35,14 @@ pub(crate) enum UtrPassOutcome {
 
 /// One refused response token, addressed within its own retained response.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
-pub(crate) struct UtrTokenRejection {
+pub struct UtrTokenRejection {
     pub(crate) index: usize,
     pub(crate) reason: UtrTokenRejectionReason,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum UtrTokenRejectionReason {
+pub enum UtrTokenRejectionReason {
     Untimed,
     NoExtent,
     InvertedInterval,
@@ -56,7 +56,7 @@ pub(crate) enum UtrTokenRejectionReason {
 
 /// A response and the admitted audio window it described.
 #[derive(Debug)]
-pub(crate) struct UtrRecognitionWindow {
+pub struct UtrRecognitionWindow {
     window: crate::chat_ops::fa::coordinates::FaWindow,
     response: crate::transcribe::AsrResponse,
     rejections: Vec<UtrTokenRejection>,
@@ -77,7 +77,7 @@ impl UtrRecognitionWindow {
         )
     }
 
-    pub(crate) fn response(&self) -> &crate::transcribe::AsrResponse {
+    pub(crate) const fn response(&self) -> &crate::transcribe::AsrResponse {
         &self.response
     }
 }
@@ -97,7 +97,7 @@ impl serde::Serialize for UtrRecognitionWindow {
 /// A completed recognizer pass always has at least one source response.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum UtrRecognitionEvidence {
+pub enum UtrRecognitionEvidence {
     Observed {
         first: Box<UtrRecognitionWindow>,
         remaining: Vec<UtrRecognitionWindow>,
@@ -109,7 +109,7 @@ pub(crate) enum UtrRecognitionEvidence {
 
 /// The accounting projection of an outcome retained by its source owner.
 #[derive(Debug)]
-pub(crate) enum UtrPassReport {
+pub enum UtrPassReport {
     NothingUntimed,
     Recovered {
         unmatched: usize,
@@ -120,7 +120,7 @@ pub(crate) enum UtrPassReport {
 /// The models the ASR responses of one recovery pass reported.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", content = "identity", rename_all = "snake_case")]
-pub(crate) enum UtrModels {
+pub enum UtrModels {
     /// Every response reported these models. Boxed: an identity is large and
     /// the other states carry nothing.
     Reported(Box<AsrModelIdentityV2>),
@@ -164,7 +164,7 @@ impl UtrModels {
 
 /// The engine that recovered a file's timing and the models it reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UtrProducer {
+pub struct UtrProducer {
     engine: UtrEngine,
     models: UtrModels,
 }
@@ -178,11 +178,11 @@ impl UtrProducer {
     }
 
     /// The engine, written as `utr=`.
-    pub(crate) fn engine(&self) -> &UtrEngine {
+    pub(crate) const fn engine(&self) -> &UtrEngine {
         &self.engine
     }
 
-    pub(crate) fn models(&self) -> &UtrModels {
+    pub(crate) const fn models(&self) -> &UtrModels {
         &self.models
     }
 
@@ -193,7 +193,7 @@ impl UtrProducer {
 
     /// A producer as a recorded pass would leave it, for tests of the stamp.
     #[cfg(test)]
-    pub(crate) fn for_test(engine: UtrEngine, models: UtrModels) -> Self {
+    pub(crate) const fn for_test(engine: UtrEngine, models: UtrModels) -> Self {
         Self { engine, models }
     }
 }
@@ -201,18 +201,18 @@ impl UtrProducer {
 /// One file's report and its fallback permission have one owner. A pending
 /// fallback borrows this report, so it cannot be recorded on another file's
 /// report or race a second recovery transition.
-pub(crate) struct UtrRecovery {
+pub struct UtrRecovery {
     contribution: UtrContribution,
     fallback: UtrFallback,
 }
 
-pub(crate) struct PendingUtrFallback<'a> {
+pub struct PendingUtrFallback<'a> {
     contribution: &'a mut UtrContribution,
     permit: UtrFallbackPermit,
 }
 
 #[derive(Debug)]
-pub(crate) enum UtrRecoveryStop {
+pub enum UtrRecoveryStop {
     Cancelled,
     Failed(UtrRecoveryFailure),
 }
@@ -220,7 +220,7 @@ pub(crate) enum UtrRecoveryStop {
 /// Internal recovery faults cannot become provider shortfalls. Callers handle
 /// this family as one terminal system failure, preserving its typed cause.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum UtrRecoveryFailure {
+pub enum UtrRecoveryFailure {
     #[error(transparent)]
     EvidenceRetention(crate::error::UtrEvidenceRetentionFailure),
     #[error(transparent)]
@@ -228,7 +228,7 @@ pub(crate) enum UtrRecoveryFailure {
 }
 
 impl UtrRecovery {
-    pub(crate) fn not_run() -> Self {
+    pub(crate) const fn not_run() -> Self {
         Self {
             contribution: UtrContribution::NotRun,
             fallback: UtrFallback::Unavailable,
@@ -247,7 +247,7 @@ impl UtrRecovery {
         })
     }
 
-    pub(crate) fn contribution(&self) -> &UtrContribution {
+    pub(crate) const fn contribution(&self) -> &UtrContribution {
         &self.contribution
     }
 
@@ -260,7 +260,7 @@ impl UtrRecovery {
 }
 
 impl PendingUtrFallback<'_> {
-    pub(crate) fn engine(&self) -> &UtrEngine {
+    pub(crate) const fn engine(&self) -> &UtrEngine {
         self.permit.engine()
     }
 
@@ -273,7 +273,7 @@ impl PendingUtrFallback<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UtrContribution {
+pub enum UtrContribution {
     NotRun,
     Ran(UtrProducer),
     Unavailable(UtrFailures),
@@ -281,7 +281,7 @@ pub(crate) enum UtrContribution {
 
 /// Non-empty failure history; construction belongs to the observation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UtrFailures {
+pub struct UtrFailures {
     completed: Option<UtrProducer>,
     first: UtrFailure,
     later: Vec<UtrFailure>,
@@ -322,7 +322,7 @@ struct UtrFallbackPermit {
 }
 
 impl UtrFallback {
-    fn take(&mut self) -> Option<UtrFallbackPermit> {
+    const fn take(&mut self) -> Option<UtrFallbackPermit> {
         match std::mem::replace(self, Self::Unavailable) {
             Self::Unavailable => None,
             Self::Available(permit) => Some(permit),
@@ -331,7 +331,7 @@ impl UtrFallback {
 }
 
 impl UtrFallbackPermit {
-    fn engine(&self) -> &UtrEngine {
+    const fn engine(&self) -> &UtrEngine {
         &self.engine
     }
 }
@@ -383,7 +383,7 @@ impl std::fmt::Display for FallbackWithheld {
 /// The fallback policy, stated once as one exhaustive match over the
 /// failure's category, so a new category must decide here whether it
 /// belongs to the request (fallback permitted) or to the engine (withheld).
-fn fallback_after(category: FailureCategory) -> RecoveryNeed {
+const fn fallback_after(category: FailureCategory) -> RecoveryNeed {
     match category {
         FailureCategory::ProviderQuotaExhausted => {
             RecoveryNeed::Withheld(FallbackWithheld::QuotaExhausted)
@@ -422,7 +422,7 @@ fn fallback_after(category: FailureCategory) -> RecoveryNeed {
 
 impl UtrContribution {
     /// The pass that recovered timing, when one did.
-    pub(crate) fn completed(&self) -> Option<&UtrProducer> {
+    pub(crate) const fn completed(&self) -> Option<&UtrProducer> {
         match self {
             Self::NotRun => None,
             Self::Ran(producer) => Some(producer),

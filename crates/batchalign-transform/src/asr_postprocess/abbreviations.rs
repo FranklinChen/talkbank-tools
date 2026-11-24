@@ -84,12 +84,14 @@ pub struct AbbreviationMergeReport {
 
 impl AbbreviationMergeReport {
     /// How many letter spans were merged into one word.
+    #[must_use]
     pub const fn merged(self) -> usize {
         self.merged
     }
 
     /// How many letter spans spelled a known abbreviation but were kept as
     /// letters because at least one letter had no timing.
+    #[must_use]
     pub const fn left_untimed(self) -> usize {
         self.left_untimed
     }
@@ -100,6 +102,7 @@ impl AbbreviationMergeReport {
 ///
 /// Total: a chunk with nothing to merge comes back unchanged, and no chunk is
 /// added, removed or reordered. See the module documentation for the rules.
+#[must_use]
 pub fn merge_abbreviations(
     chunks: Vec<PreparedMonologueChunk>,
 ) -> (Vec<PreparedMonologueChunk>, AbbreviationMergeReport) {
